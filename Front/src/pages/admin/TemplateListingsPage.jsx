@@ -85,7 +85,7 @@ export default function TemplateListingsPage() {
   const [autoFilledFields, setAutoFilledFields] = useState(new Set());
 
   // Bulk mode state
-  const [bulkMode, setBulkMode] = useState(true);
+  const [bulkMode, setBulkMode] = useState(false);
   const [bulkResults, setBulkResults] = useState([]);
   const [loadingBulk, setLoadingBulk] = useState(false);
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
@@ -358,6 +358,8 @@ export default function TemplateListingsPage() {
     setAsinError('');
     setAsinSuccess('');
     setAutoFilledFields(new Set());
+    // Only enable bulk mode by default when ASIN automation exists for this template.
+    setBulkMode(Boolean(template?.asinAutomation?.enabled));
     
     // Apply template's core field defaults (if any)
     const defaults = template?.coreFieldDefaults || {};
@@ -1752,8 +1754,15 @@ export default function TemplateListingsPage() {
             </Paper>
           )}
 
+          {!editingListing && !template?.asinAutomation?.enabled && (
+            <Alert severity="info" sx={{ mb: 2, mt: 1 }}>
+              ASIN Auto-Fill (including Bulk Add mode) is disabled for this template.
+              Enable it from <strong>Customize Template → ASIN Auto-Fill</strong> to use bulk ASIN generation.
+            </Alert>
+          )}
+
           {/* Show form tabs only in single mode */}
-          {!bulkMode && (
+          {(!bulkMode || !template?.asinAutomation?.enabled) && (
             <>
               <Tabs value={currentTab} onChange={(e, v) => setCurrentTab(v)} sx={{ mb: 2, mt: 1 }} variant="scrollable" scrollButtons="auto">
             <Tab label="Basic Info" />
@@ -2191,7 +2200,7 @@ export default function TemplateListingsPage() {
             <>
               <Button onClick={() => {
                 setAddEditDialog(false);
-                setBulkMode(true);
+                setBulkMode(false);
                 setBulkResults([]);
                 setAsinInput('');
               }}>
