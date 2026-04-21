@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grow Mentality • EMS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+    <style>
+      #root:empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        background: #f0f2f5;
+        font-family: 'Inter', sans-serif;
+      }
+
+      #root:empty::before {
+        content: '';
+        width: 52px;
+        height: 52px;
+        border: 5px solid #e0c84a;
+        border-top-color: #1a1a2e;
+        border-radius: 50%;
+        animation: gm-spin 0.75s linear infinite;
+        margin-bottom: 20px;
+      }
+
+      #root:empty::after {
+        content: 'Grow Mentality';
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #1a1a2e;
+        letter-spacing: 0.04em;
+      }
+
+      @keyframes gm-spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+

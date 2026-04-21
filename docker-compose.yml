@@ -1,0 +1,32 @@
+# Local / VM trial: API + Mongo on one host. For production DB, point MONGODB_URI at Atlas instead of `mongo`.
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      SERVE_FRONTEND: "true"
+      FRONTEND_DIST_PATH: public/app
+      MONGODB_URI: mongodb://mongo:27017/grow_prod
+      JWT_SECRET: ${JWT_SECRET:-replace_with_long_random_secret_in_production}
+      CLIENT_ORIGIN: http://localhost:8080
+      RUNNER_ID: docker
+      EBAY_CLIENT_ID: ${EBAY_CLIENT_ID:-}
+      EBAY_CLIENT_SECRET: ${EBAY_CLIENT_SECRET:-}
+      EBAY_RU_NAME: ${EBAY_RU_NAME:-}
+    depends_on:
+      - mongo
+
+volumes:
+  mongo_data:

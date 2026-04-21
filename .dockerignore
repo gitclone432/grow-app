@@ -1,0 +1,9 @@
+**/node_modules
+**/.git
+**/.env
+**/.env.*
+!**/.env.example
+**/dist
+**/.vite
+**/*.log
+.DS_Store

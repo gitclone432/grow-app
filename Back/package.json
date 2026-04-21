@@ -1,0 +1,42 @@
+{
+  "name": "dropship-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "dev:test": "node --env-file=.env.test --watch src/index.js",
+    "start": "node src/index.js",
+    "start:test": "node --env-file=.env.test src/index.js",
+    "clone": "node copy-prod-to-test.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.13.4",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-mongo-sanitize": "^2.2.0",
+    "express-rate-limit": "^8.3.1",
+    "form-data": "^4.0.5",
+    "groq-sdk": "^0.37.0",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "moment-timezone": "^0.6.0",
+    "mongoose": "^8.6.0",
+    "morgan": "^1.10.0",
+    "multer": "^2.0.2",
+    "node-cache": "^5.1.2",
+    "node-cron": "^4.2.1",
+    "openai": "^6.15.0",
+    "p-limit": "^7.3.0",
+    "qs": "^6.15.1",
+    "scraperapi-sdk": "^2.0.1",
+    "sharp": "^0.34.5",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1",
+    "xml2js": "^0.6.2",
+    "zod": "^4.3.6"
+  }
+}

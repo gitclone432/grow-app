@@ -1,0 +1,18 @@
+# Optional: deploy the Express API to Render (free tier) from this repo.
+# In the Render dashboard, add env vars (secrets) after the service is created — do not commit secrets here.
+# See DEPLOY.md for the full checklist.
+services:
+  - type: web
+    name: grow-api
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: Back
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: RUNNER_ID
+        value: render
