@@ -101,6 +101,16 @@ function mergeTemplateCoreFields(coreFieldDefaults = {}, autoCoreFields = {}, am
   return merged;
 }
 
+function getImageCount(images) {
+  if (Array.isArray(images)) {
+    return images.filter(url => String(url || '').trim()).length;
+  }
+  if (typeof images === 'string') {
+    return images.split(' | ').filter(url => url.trim()).length;
+  }
+  return 0;
+}
+
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
   try {
@@ -1423,7 +1433,7 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
         title: amazonData.title,
         brand: amazonData.brand,
         price: amazonData.price,
-        imageCount: amazonData.images ? amazonData.images.split(' | ').filter(url => url.trim()).length : 0
+        imageCount: getImageCount(amazonData.images)
       },
       pricingCalculation: pricingCalculation || null
     });
@@ -1646,7 +1656,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
               title: amazonData.title,
               brand: amazonData.brand,
               price: amazonData.price,
-              imageCount: amazonData.images ? amazonData.images.split(' | ').filter(url => url.trim()).length : 0
+              imageCount: getImageCount(amazonData.images)
             },
             pricingCalculation: pricingCalculation || null
           };
