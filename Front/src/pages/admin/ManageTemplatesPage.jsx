@@ -19,6 +19,7 @@ import api from '../../lib/api.js';
 import FieldConfigList from '../../components/FieldConfigList.jsx';
 import CoreFieldDefaultsForm from '../../components/CoreFieldDefaultsForm.jsx';
 import PricingConfigSection from '../../components/PricingConfigSection.jsx';
+import { createDefaultCoreFieldDefaults } from '../../constants/defaultDescriptionTemplate.js';
 
 // ── Marketplace helpers (derived from customActionField) ─────────────────
 function extractMarketplace(customActionField) {
@@ -52,7 +53,7 @@ export default function ManageTemplatesPage() {
       enabled: false,
       fieldConfigs: []
     },
-    coreFieldDefaults: {},
+    coreFieldDefaults: createDefaultCoreFieldDefaults(),
     customActionField: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
     rangeId: null,
     listProductId: null,
@@ -213,7 +214,7 @@ export default function ManageTemplatesPage() {
           enabled: false,
           fieldConfigs: []
         },
-        coreFieldDefaults: {},
+        coreFieldDefaults: createDefaultCoreFieldDefaults(),
         pricingConfig: {
           enabled: false,
           spentRate: null,
@@ -261,7 +262,10 @@ export default function ManageTemplatesPage() {
         enabled: false,
         fieldConfigs: []
       },
-      coreFieldDefaults: template.coreFieldDefaults || {},
+      coreFieldDefaults: {
+        ...createDefaultCoreFieldDefaults(),
+        ...(template.coreFieldDefaults || {})
+      },
       customActionField: template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
       rangeId: template.rangeId || null,
       listProductId: template.listProductId || null,
@@ -296,7 +300,7 @@ export default function ManageTemplatesPage() {
         enabled: false,
         fieldConfigs: []
       },
-      coreFieldDefaults: {},
+      coreFieldDefaults: createDefaultCoreFieldDefaults(),
       customActionField: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
       rangeId: null,
       listProductId: null,
@@ -336,7 +340,7 @@ export default function ManageTemplatesPage() {
           enabled: false,
           fieldConfigs: []
         },
-        coreFieldDefaults: {},
+        coreFieldDefaults: createDefaultCoreFieldDefaults(),
         customActionField: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
         rangeId: null,
         listProductId: null,

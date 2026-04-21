@@ -270,8 +270,16 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
                         value={config.promptTemplate || ''}
                         onChange={(e) => handleUpdate(index, 'promptTemplate', e.target.value)}
                         fullWidth
-                        helperText="Available placeholders: {title}, {brand}, {description}, {price}, {asin}"
-                        placeholder="Example: Generate an 80-character eBay title for {title} by {brand}..."
+                        helperText={
+                          config.ebayField === 'description'
+                            ? 'Use this prompt to generate ONLY feature bullets/HTML snippet. Insert it into Core Defaults > Description with {{AI_FEATURE_BULLETS}}.'
+                            : 'Available placeholders: {title}, {brand}, {description}, {price}, {asin}'
+                        }
+                        placeholder={
+                          config.ebayField === 'description'
+                            ? "Example: Rephrase {description} into 5 concise HTML <li> bullets for eBay. Exclude Amazon/returns/warranty claims."
+                            : "Example: Generate an 80-character eBay title for {title} by {brand}..."
+                        }
                       />
                     </>
                   ) : (

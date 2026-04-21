@@ -7,11 +7,99 @@ import SellerPricingConfig from '../models/SellerPricingConfig.js';
 import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
 import { generateSKUFromASIN, generateSKUWithCount } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
+import { processImagePlaceholders } from '../utils/imageReplacer.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
 import { getAsinCacheStats, clearAsinCache, invalidateAsinCache } from '../utils/asinCache.js';
 import AsinDirectory from '../models/AsinDirectory.js';
 
 const router = express.Router();
+
+function formatBulletLi(text, isLast = false) {
+  const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+  const words = cleaned.split(' ');
+  const firstThree = words.slice(0, 3).join(' ');
+  const rest = words.slice(3).join(' ');
+  const borderCss = isLast ? '' : 'border-bottom:1px solid #e8d88a;';
+  return `<li style='padding:10px 14px;${borderCss}font-size:16px;color:#1a1a1a;'><span style='color:#b8960c;margin-right:8px;'>&#9658;</span><strong>${firstThree}</strong>${rest ? ` ${rest}` : ''}</li>`;
+}
+
+function buildFallbackFeatureBullets(rawDescription = '') {
+  const source = String(rawDescription || '').trim();
+  if (!source) return '';
+  const lines = source
+    .split(/\r?\n|[•●▪‣]/g)
+    .map(s => s.replace(/^[\-\*\d\.\)\s]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  if (lines.length === 0) return '';
+  return lines.map((line, idx) => formatBulletLi(line, idx === lines.length - 1)).join('');
+}
+
+function normalizeAiFeatureBullets(aiDescription = '') {
+  const text = String(aiDescription || '').trim();
+  if (!text) return '';
+  // If AI returned full HTML with <li> tags, keep only those.
+  const liMatches = text.match(/<li[\s\S]*?<\/li>/gi);
+  if (liMatches?.length) return liMatches.join('');
+  // If plain text came back, convert line-by-line to expected list items.
+  const lines = text
+    .split(/\r?\n|[•●▪‣]/g)
+    .map(s => s.replace(/^[\-\*\d\.\)\s]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  return lines.map((line, idx) => formatBulletLi(line, idx === lines.length - 1)).join('');
+}
+
+function mergeTemplateCoreFields(coreFieldDefaults = {}, autoCoreFields = {}, amazonData = {}) {
+  const merged = {
+    ...(coreFieldDefaults || {}),
+    ...(autoCoreFields || {})
+  };
+
+  const templateDescription = coreFieldDefaults?.description;
+  if (typeof templateDescription !== 'string' || !templateDescription) {
+    return merged;
+  }
+
+  const aiDescription = typeof autoCoreFields?.description === 'string'
+    ? autoCoreFields.description
+    : '';
+  const normalizedAiBullets = normalizeAiFeatureBullets(aiDescription);
+  const fallbackBullets = buildFallbackFeatureBullets(amazonData?.description || '');
+  const resolvedBullets = normalizedAiBullets || fallbackBullets;
+  const titleClean = typeof merged?.title === 'string' ? merged.title : '';
+  const imageUrls = Array.isArray(amazonData?.images) ? amazonData.images : [];
+
+  let composedDescription = templateDescription;
+  const placeholderMap = {
+    '{{AI_FEATURE_BULLETS}}': resolvedBullets,
+    '{{AI_DESCRIPTION}}': resolvedBullets || aiDescription,
+    '{{TITLE_CLEAN}}': titleClean,
+    '{{MAIN_IMAGE}}': '{image_main}',
+    '{{SUB1}}': '{image_sub1}',
+    '{{SUB2}}': '{image_sub2}',
+    '{{SUB3}}': '{image_sub3}',
+    '{{SUB4}}': '{image_sub4}',
+    '{{SUB5}}': '{image_sub5}',
+    '{{SUB6}}': '{image_sub6}',
+    '{{SUB7}}': '{image_sub7}',
+  };
+  let usedPlaceholder = false;
+  for (const [token, replacement] of Object.entries(placeholderMap)) {
+    if (composedDescription.includes(token)) {
+      composedDescription = composedDescription.split(token).join(replacement || '');
+      usedPlaceholder = true;
+    }
+  }
+
+  if (usedPlaceholder) {
+    composedDescription = processImagePlaceholders(composedDescription, imageUrls);
+    merged.description = composedDescription;
+  }
+
+  return merged;
+}
 
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
@@ -577,10 +665,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         const { coreFields, customFields, pricingCalculation } = 
           await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
         
-        const mergedCoreFields = {
-          ...(template.coreFieldDefaults || {}),
-          ...coreFields
-        };
+        const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
         
         if (template?.customColumns && template.customColumns.length > 0) {
           template.customColumns.forEach(col => {
@@ -840,10 +925,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         const { coreFields, customFields, pricingCalculation } =
           await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
 
-        const mergedCoreFields = {
-          ...(template.coreFieldDefaults || {}),
-          ...coreFields
-        };
+        const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
 
         if (template?.customColumns && template.customColumns.length > 0) {
           template.customColumns.forEach(col => {
@@ -1327,13 +1409,14 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
       template.asinAutomation.fieldConfigs,
       pricingConfig  // Use seller-specific or template default pricing config
     );
+    const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
     
     // 4. Return auto-filled data (separated by type)
     res.json({
       success: true,
       asin,
       autoFilledData: {
-        coreFields,
+        coreFields: mergedCoreFields,
         customFields
       },
       amazonSource: {
@@ -1550,12 +1633,13 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
             template.asinAutomation.fieldConfigs,
             pricingConfig  // Use seller-specific or template default pricing config
           );
+          const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
           
           return {
             asin,
             status: 'success',
             autoFilledData: {
-              coreFields,
+              coreFields: mergedCoreFields,
               customFields
             },
             amazonSource: {
@@ -2179,10 +2263,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
           await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
         
         // Apply template core field defaults as base layer (autofilled fields override these)
-        const mergedCoreFields = {
-          ...(template.coreFieldDefaults || {}),
-          ...coreFields
-        };
+        const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
         
         // Apply custom column default values for missing fields
         if (template?.customColumns && template.customColumns.length > 0) {

@@ -2,6 +2,7 @@ import express from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import ListingTemplate from '../models/ListingTemplate.js';
 import TemplateOverride from '../models/TemplateOverride.js';
+import { mergeDefaultCoreFieldDefaults } from '../constants/defaultDescriptionTemplate.js';
 
 const router = express.Router();
 
@@ -192,7 +193,9 @@ router.post('/', requireAuth, async (req, res) => {
     
     // Add coreFieldDefaults if provided
     if (coreFieldDefaults !== undefined) {
-      templateData.coreFieldDefaults = coreFieldDefaults;
+      templateData.coreFieldDefaults = mergeDefaultCoreFieldDefaults(coreFieldDefaults);
+    } else {
+      templateData.coreFieldDefaults = mergeDefaultCoreFieldDefaults({});
     }
 
     // Add hierarchy assignment if provided
@@ -298,7 +301,7 @@ router.put('/:id', requireAuth, async (req, res) => {
     
     // Add coreFieldDefaults if provided
     if (coreFieldDefaults !== undefined) {
-      updateData.coreFieldDefaults = coreFieldDefaults;
+      updateData.coreFieldDefaults = mergeDefaultCoreFieldDefaults(coreFieldDefaults);
     }
 
     // Add customActionField if provided

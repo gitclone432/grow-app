@@ -171,6 +171,11 @@ export default function CoreFieldDefaultsForm({ formData = {}, onChange }) {
                     rows={3}
                     size="small"
                     placeholder={field.placeholder}
+                    helperText={
+                      field.key === 'description'
+                        ? 'Tip: Build a default HTML template here and place {{AI_FEATURE_BULLETS}} where ASIN Auto-Fill AI bullets should be inserted.'
+                        : ''
+                    }
                   />
                 );
               }
