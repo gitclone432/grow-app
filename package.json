@@ -1,0 +1,12 @@
+{
+  "name": "grow-app-monorepo",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n BACK,FRONT -c cyan,magenta \"npm --prefix Back run dev\" \"npm --prefix Front run dev\"",
+    "dev:back": "npm --prefix Back run dev",
+    "dev:front": "npm --prefix Front run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
