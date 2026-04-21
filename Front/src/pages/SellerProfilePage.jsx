@@ -1,7 +1,6 @@
 
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { TextField } from '@mui/material';
 import api from '../lib/api';
 import { getServerBaseUrl } from '../lib/serverBaseUrl.js';
 
@@ -13,9 +12,6 @@ export default function SellerProfilePage() {
   const [successMessage, setSuccessMessage] = useState('');
   const [sellerData, setSellerData] = useState(null);
   const [disconnecting, setDisconnecting] = useState(false);
-  const [oauthPaste, setOauthPaste] = useState('');
-  const [oauthSubmitting, setOauthSubmitting] = useState(false);
-  const [oauthMessage, setOauthMessage] = useState('');
 
   useEffect(() => {
     // Check if redirected back from eBay with success
@@ -65,65 +61,6 @@ export default function SellerProfilePage() {
     }
     const serverUrl = getServerBaseUrl();
     window.location.href = `${serverUrl}/api/ebay/connect?token=${encodeURIComponent(token)}`;
-  }
-
-  function parseEbayOAuthRedirect(raw) {
-    const text = String(raw || '').trim();
-    if (!text) return { code: '', state: '' };
-
-    // If user pasted a full URL, extract query params.
-    try {
-      if (text.startsWith('http://') || text.startsWith('https://')) {
-        const u = new URL(text);
-        const code = u.searchParams.get('code') || '';
-        const state = u.searchParams.get('state') || '';
-        return { code, state };
-      }
-    } catch {
-      // fall through
-    }
-
-    // If user pasted only querystring
-    if (text.startsWith('?')) {
-      const u = new URL(`https://local.invalid${text}`);
-      return {
-        code: u.searchParams.get('code') || '',
-        state: u.searchParams.get('state') || '',
-      };
-    }
-
-    return { code: '', state: '' };
-  }
-
-  async function handleCompleteOAuthPaste() {
-    setOauthMessage('');
-    setError('');
-
-    const { code, state } = parseEbayOAuthRedirect(oauthPaste);
-    if (!code || !state) {
-      setOauthMessage('Paste the full redirect URL from the address bar after eBay authorization (it must include code= and state=).');
-      return;
-    }
-
-    setOauthSubmitting(true);
-    try {
-      await api.post('/ebay/oauth/complete', { code, state });
-      setOauthPaste('');
-      setSuccessMessage('eBay account connected successfully!');
-      await fetchProfile();
-    } catch (e) {
-      const data = e?.response?.data;
-      const msg =
-        (typeof data === 'string' && data) ||
-        data?.error ||
-        data?.error_description ||
-        e.message ||
-        'Failed to complete OAuth';
-      const details = data && typeof data === 'object' ? JSON.stringify(data) : '';
-      setOauthMessage(details ? `${msg}\n\n${details}` : msg);
-    } finally {
-      setOauthSubmitting(false);
-    }
   }
 
   async function handleDisconnectEbay() {
@@ -252,52 +189,6 @@ export default function SellerProfilePage() {
             >
               Connect eBay Account
             </button>
-
-            <div style={{ marginTop: 18, paddingTop: 16, borderTop: '1px solid #dee2e6' }}>
-              <p style={{ margin: '0 0 10px', color: '#495057', fontWeight: 700 }}>
-                If eBay shows “Authorization successfully completed” but you’re still not connected
-              </p>
-              <p style={{ margin: '0 0 12px', color: '#6c757d', fontSize: 13, lineHeight: 1.5 }}>
-                Copy the full URL from your browser address bar on the eBay page that includes <code>code=</code> and <code>state=</code>, then paste it below.
-                This completes OAuth against your local backend even when eBay doesn’t redirect to <code>/api/ebay/callback</code>.
-              </p>
-
-              <TextField
-                value={oauthPaste}
-                onChange={(e) => setOauthPaste(e.target.value)}
-                placeholder="Paste full eBay redirect URL here…"
-                multiline
-                minRows={3}
-                fullWidth
-                size="small"
-                sx={{ mb: 1.5, background: '#fff' }}
-              />
-
-              {oauthMessage && (
-                <div style={{ color: '#856404', background: '#fff3cd', border: '1px solid #ffeeba', padding: 10, borderRadius: 6, marginBottom: 12, fontSize: 13 }}>
-                  {oauthMessage}
-                </div>
-              )}
-
-              <button
-                type="button"
-                onClick={handleCompleteOAuthPaste}
-                disabled={oauthSubmitting}
-                style={{
-                  background: '#198754',
-                  color: '#fff',
-                  padding: '10px 16px',
-                  borderRadius: 6,
-                  border: 'none',
-                  fontSize: 14,
-                  fontWeight: 'bold',
-                  cursor: oauthSubmitting ? 'not-allowed' : 'pointer',
-                  opacity: oauthSubmitting ? 0.7 : 1,
-                }}
-              >
-                {oauthSubmitting ? 'Completing…' : 'Complete OAuth from pasted URL'}
-              </button>
-            </div>
           </div>
         )}
       </div>
