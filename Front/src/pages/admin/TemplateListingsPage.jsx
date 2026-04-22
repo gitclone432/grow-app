@@ -4,7 +4,7 @@ import {
   Box, Button, Paper, Stack, Table, TableBody, TableCell, TableContainer, 
   TableHead, TableRow, Typography, IconButton, Dialog, DialogTitle, 
   DialogContent, DialogActions, Alert, Pagination, TextField, Tabs, Tab, MenuItem,
-  Chip, CircularProgress, Switch, FormControlLabel, LinearProgress, FormControl,
+  Chip, CircularProgress, LinearProgress, FormControl,
   InputLabel, Select, Breadcrumbs, Link, Checkbox, OutlinedInput, Tooltip
 } from '@mui/material';
 import { 
@@ -85,7 +85,7 @@ export default function TemplateListingsPage() {
   const [autoFilledFields, setAutoFilledFields] = useState(new Set());
 
   // Bulk mode state
-  const [bulkMode, setBulkMode] = useState(false);
+  const [bulkMode, setBulkMode] = useState(true);
   const [bulkResults, setBulkResults] = useState([]);
   const [loadingBulk, setLoadingBulk] = useState(false);
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
@@ -358,8 +358,8 @@ export default function TemplateListingsPage() {
     setAsinError('');
     setAsinSuccess('');
     setAutoFilledFields(new Set());
-    // Only enable bulk mode by default when ASIN automation exists for this template.
-    setBulkMode(Boolean(template?.asinAutomation?.enabled));
+    // Bulk-only mode for new listings in this dialog.
+    setBulkMode(true);
     
     // Apply template's core field defaults (if any)
     const defaults = template?.coreFieldDefaults || {};
@@ -1213,7 +1213,7 @@ export default function TemplateListingsPage() {
           variant="contained" 
           startIcon={<AddIcon />} 
           onClick={handleAddListing}
-          disabled={!sellerId || batchFilter !== 'active' || fromAsinList}
+          disabled={!sellerId || batchFilter !== 'active' || fromAsinList || !template?.asinAutomation?.enabled}
         >
           Add Listing
         </Button>
@@ -1587,49 +1587,32 @@ export default function TemplateListingsPage() {
                 <Typography variant="subtitle2">
                   Auto-Fill from Amazon ASIN
                 </Typography>
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={bulkMode}
-                      onChange={(e) => {
-                        setBulkMode(e.target.checked);
-                        setBulkResults([]);
-                        setAsinInput('');
-                        setAsinError('');
-                        setAsinSuccess('');
-                      }}
-                      size="small"
-                    />
-                  }
-                  label={bulkMode ? '📦 Bulk Mode' : 'Single Mode'}
-                />
+                <Chip color="success" size="small" label="📦 Bulk Mode" />
               </Stack>
               
               <Stack spacing={2}>
                 <TextField
-                  label={bulkMode ? "Amazon ASINs (any format)" : "Amazon ASIN"}
+                  label="Amazon ASINs (any format)"
                   size="small"
                   value={asinInput}
                   onChange={(e) => setAsinInput(e.target.value)}
-                  placeholder={bulkMode ? "Paste ASINs separated by commas, spaces, or newlines (e.g., from Excel/Sheets)" : "e.g., B08N5WRWNW"}
-                  multiline={bulkMode}
-                  rows={bulkMode ? 3 : 1}
+                  placeholder="Paste ASINs separated by commas, spaces, or newlines (e.g., from Excel/Sheets)"
+                  multiline
+                  rows={3}
                   fullWidth
                   disabled={loadingAsin || loadingBulk}
                   helperText={
-                    bulkMode ? 
-                      (() => {
-                        const stats = getParsingStats(asinInput);
-                        if (stats.total === 0) return 'Enter ASINs (max 100) - supports any format: commas, newlines, spaces, tabs';
-                        
-                        const parts = [];
-                        parts.push(`✓ ${stats.uniqueValid} valid ASIN${stats.uniqueValid !== 1 ? 's' : ''}`);
-                        if (stats.invalid > 0) parts.push(`⚠ ${stats.invalid} invalid`);
-                        if (stats.duplicates > 0) parts.push(`ℹ ${stats.duplicates} duplicate${stats.duplicates !== 1 ? 's' : ''}`);
-                        if (stats.uniqueValid > 100) parts.push(`❌ Exceeds limit (100 max)`);
-                        return parts.join(' • ');
-                      })()
-                      : ''
+                    (() => {
+                      const stats = getParsingStats(asinInput);
+                      if (stats.total === 0) return 'Enter ASINs (max 100) - supports any format: commas, newlines, spaces, tabs';
+
+                      const parts = [];
+                      parts.push(`✓ ${stats.uniqueValid} valid ASIN${stats.uniqueValid !== 1 ? 's' : ''}`);
+                      if (stats.invalid > 0) parts.push(`⚠ ${stats.invalid} invalid`);
+                      if (stats.duplicates > 0) parts.push(`ℹ ${stats.duplicates} duplicate${stats.duplicates !== 1 ? 's' : ''}`);
+                      if (stats.uniqueValid > 100) parts.push(`❌ Exceeds limit (100 max)`);
+                      return parts.join(' • ');
+                    })()
                   }
                 />
 
@@ -1648,27 +1631,15 @@ export default function TemplateListingsPage() {
                 </FormControl>
                 
                 <Stack direction="row" spacing={2}>
-                  {!bulkMode ? (
-                    <Button
-                      variant="contained"
-                      onClick={handleAsinAutofill}
-                      disabled={loadingAsin || !asinInput.trim()}
-                      startIcon={loadingAsin && <CircularProgress size={16} />}
-                      fullWidth
-                    >
-                      {loadingAsin ? 'Loading...' : 'Auto-Fill'}
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="contained"
-                      onClick={handleBulkAutofill}
-                      disabled={loadingBulk || parseAsinCount() === 0 || parseAsinCount() > 100}
-                      startIcon={loadingBulk && <CircularProgress size={16} />}
-                      fullWidth
-                    >
-                      {loadingBulk ? `Processing... ${bulkProgress.current}/${bulkProgress.total}` : `🚀 Bulk Auto-Fill (${parseAsinCount()} ASINs)`}
-                    </Button>
-                  )}
+                  <Button
+                    variant="contained"
+                    onClick={handleBulkAutofill}
+                    disabled={loadingBulk || parseAsinCount() === 0 || parseAsinCount() > 100}
+                    startIcon={loadingBulk && <CircularProgress size={16} />}
+                    fullWidth
+                  >
+                    {loadingBulk ? `Processing... ${bulkProgress.current}/${bulkProgress.total}` : `🚀 Bulk Auto-Fill (${parseAsinCount()} ASINs)`}
+                  </Button>
                 </Stack>
               </Stack>
               
@@ -1761,8 +1732,8 @@ export default function TemplateListingsPage() {
             </Alert>
           )}
 
-          {/* Show form tabs only in single mode */}
-          {(!bulkMode || !template?.asinAutomation?.enabled) && (
+          {/* Manual form is only for editing existing listings */}
+          {editingListing && (
             <>
               <Tabs value={currentTab} onChange={(e, v) => setCurrentTab(v)} sx={{ mb: 2, mt: 1 }} variant="scrollable" scrollButtons="auto">
             <Tab label="Basic Info" />
@@ -2200,7 +2171,7 @@ export default function TemplateListingsPage() {
             <>
               <Button onClick={() => {
                 setAddEditDialog(false);
-                setBulkMode(false);
+                setBulkMode(true);
                 setBulkResults([]);
                 setAsinInput('');
               }}>
