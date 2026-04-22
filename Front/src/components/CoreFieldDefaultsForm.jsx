@@ -2,16 +2,6 @@ import {
   Stack, Typography, Divider, TextField, MenuItem, FormControlLabel, Checkbox, Box
 } from '@mui/material';
 
-const HARD_LOCKED_CORE_DEFAULTS = {
-  upc: 'Does Not Apply',
-  quantity: 1,
-  format: 'FixedPrice',
-  duration: 'GTC',
-  shippingProfileName: 'Shipping Policy',
-  returnProfileName: 'Return Policy',
-  paymentProfileName: 'Payment Policy'
-};
-
 export const CORE_FIELD_SECTIONS = [
   {
     title: 'Basic Information',
@@ -131,8 +121,7 @@ export default function CoreFieldDefaultsForm({ formData = {}, onChange }) {
           
           <Stack spacing={2}>
             {section.fields.map(field => {
-              const isHardLockedField = Object.prototype.hasOwnProperty.call(HARD_LOCKED_CORE_DEFAULTS, field.key);
-              const fieldValue = isHardLockedField ? HARD_LOCKED_CORE_DEFAULTS[field.key] : (formData[field.key] || '');
+              const fieldValue = formData[field.key] || '';
 
               if (field.type === 'checkbox') {
                 return (
@@ -159,14 +148,10 @@ export default function CoreFieldDefaultsForm({ formData = {}, onChange }) {
                     onChange={(e) => handleChange(field.key, e.target.value)}
                     fullWidth
                     size="small"
-                    disabled={isHardLockedField}
-                    helperText={isHardLockedField ? `Hardcoded: ${String(fieldValue)}` : ''}
                   >
-                    {!isHardLockedField && (
-                      <MenuItem value="">
-                        <em>No default</em>
-                      </MenuItem>
-                    )}
+                    <MenuItem value="">
+                      <em>No default</em>
+                    </MenuItem>
                     {field.options.map(opt => (
                       <MenuItem key={opt.value} value={opt.value}>
                         {opt.label}
@@ -207,8 +192,6 @@ export default function CoreFieldDefaultsForm({ formData = {}, onChange }) {
                   fullWidth
                   size="small"
                   placeholder={field.placeholder}
-                  disabled={isHardLockedField}
-                  helperText={isHardLockedField ? `Hardcoded: ${String(fieldValue)}` : ''}
                 />
               );
             })}
