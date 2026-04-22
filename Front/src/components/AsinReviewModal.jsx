@@ -120,6 +120,14 @@ export default function AsinReviewModal({
     }
   }, [previewItems]);
 
+  // Reset transient review state for each new preview run/open
+  useEffect(() => {
+    if (!open) return;
+    setDismissedItems(new Set());
+    setCurrentIndex(0);
+    setHasUnsavedChanges(false);
+  }, [open, previewItems]);
+
   // Sync Amazon preview window when navigating
   useEffect(() => {
     if (showAmazonPreview && amazonWindowRef && !amazonWindowRef.closed && currentItem?.asin) {
@@ -408,7 +416,19 @@ export default function AsinReviewModal({
   };
 
   if (!currentItem) {
-    return null;
+    return (
+      <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
+        <DialogContent sx={{ py: 4 }}>
+          <Stack spacing={2} alignItems="center">
+            <Typography variant="h6">Review Generated Listings</Typography>
+            <Alert severity="info" sx={{ width: '100%' }}>
+              No preview items are available to review right now. Please run Bulk Auto-Fill again.
+            </Alert>
+            <Button variant="contained" onClick={handleClose}>Close</Button>
+          </Stack>
+        </DialogContent>
+      </Dialog>
+    );
   }
 
 

@@ -36,6 +36,7 @@ import AsinReviewModal from '../../components/AsinReviewModal.jsx';
 import ListDirectlyDialog from '../../components/ListDirectlyDialog.jsx';
 import { parseAsins, getParsingStats, getValidationError } from '../../utils/asinParser.js';
 import { generateSKUFromASIN } from '../../utils/skuGenerator.js';
+import { mergeDefaultCoreFieldDefaults } from '../../constants/defaultDescriptionTemplate.js';
 
 export default function TemplateListingsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -363,7 +364,7 @@ export default function TemplateListingsPage() {
     setBulkMode(true);
     
     // Apply template's core field defaults (if any)
-    const defaults = template?.coreFieldDefaults || {};
+    const defaults = mergeDefaultCoreFieldDefaults(template?.coreFieldDefaults || {});
     console.log('📋 Applying core field defaults:', defaults);
     console.log('📄 Current template:', template);
     
@@ -870,7 +871,7 @@ export default function TemplateListingsPage() {
 
     try {
       // Get template defaults
-      const defaults = template?.coreFieldDefaults || {};
+      const defaults = mergeDefaultCoreFieldDefaults(template?.coreFieldDefaults || {});
       console.log('📋 Applying defaults to bulk listings:', defaults);
       
       // Prepare listings for bulk create - merge defaults with autofilled data

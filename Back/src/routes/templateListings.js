@@ -51,11 +51,36 @@ function normalizeAiFeatureBullets(aiDescription = '') {
   return lines.map((line, idx) => formatBulletLi(line, idx === lines.length - 1)).join('');
 }
 
+function parseAmazonPriceToNumber(priceValue) {
+  const numeric = parseFloat(String(priceValue || '').replace(/[^0-9.]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+}
+
 function mergeTemplateCoreFields(coreFieldDefaults = {}, autoCoreFields = {}, amazonData = {}) {
   const merged = {
     ...(coreFieldDefaults || {}),
     ...(autoCoreFields || {})
   };
+
+  // Apply resilient fallbacks so preview still has usable output
+  // even when field configs are missing or incomplete.
+  if (!String(merged.title || '').trim() && String(amazonData?.title || '').trim()) {
+    merged.title = String(amazonData.title).trim().slice(0, 80);
+  }
+
+  if (!String(merged.itemPhotoUrl || '').trim() && Array.isArray(amazonData?.images) && amazonData.images[0]) {
+    merged.itemPhotoUrl = amazonData.images[0];
+  }
+
+  if (!String(merged.description || '').trim() && String(amazonData?.description || '').trim()) {
+    merged.description = String(amazonData.description).trim();
+  }
+
+  if (merged.startPrice === undefined || merged.startPrice === null || merged.startPrice === '') {
+    const parsedAmazonPrice = parseAmazonPriceToNumber(amazonData?.price);
+    // Keep the listing valid even when Amazon price is unavailable.
+    merged.startPrice = parsedAmazonPrice ? parsedAmazonPrice.toFixed(2) : '0.01';
+  }
 
   const templateDescription = coreFieldDefaults?.description;
   if (typeof templateDescription !== 'string' || !templateDescription) {

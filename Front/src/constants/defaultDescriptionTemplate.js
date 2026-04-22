@@ -1,5 +1,27 @@
 export const DEFAULT_DESCRIPTION_TEMPLATE = `<div style='max-width:1000px;margin:auto;font-family:Arial,Helvetica,sans-serif;'><table width='100%' cellpadding='0' cellspacing='0'><tr><td style='background:#b8960c;padding:4px 0;'></td></tr><tr><td style='background:#1a1a1a;color:#f0c040;text-align:center;padding:24px 20px;font-size:30px;font-weight:bold;letter-spacing:1px;'>{{TITLE_CLEAN}}</td></tr><tr><td style='background:#b8960c;padding:4px 0;'></td></tr></table><table width='100%' cellpadding='0' cellspacing='0' style='margin-top:30px;'><tr><td width='40%' align='center' valign='top'><img src='{{MAIN_IMAGE}}' width='100%' style='border:2px solid #b8960c;'></td><td width='60%' valign='top' style='padding-left:20px;'><div style='font-family:Arial,Helvetica,sans-serif;'><div style='background:#1a1a1a;color:#f0c040;font-size:15px;font-weight:bold;padding:10px 14px;'>Product Highlights</div><ul style='margin:0;padding:0;list-style:none;border:1px solid #b8960c;'>{{AI_FEATURE_BULLETS}}</ul></div><table width='100%' cellpadding='5' cellspacing='0' style='margin-top:10px;'><tr><td align='center' width='33%'><img src='{{SUB1}}' width='80%' style='border:1px solid #b8960c;'></td><td align='center' width='33%'><img src='{{SUB2}}' width='80%' style='border:1px solid #b8960c;'></td><td align='center' width='33%'><img src='{{SUB3}}' width='80%' style='border:1px solid #b8960c;'></td></tr></table></td></tr></table><div style='text-align:center;margin-top:20px;'><div style='font-weight:bold;color:#1a1a1a;font-size:20px;text-decoration:underline;'>Great Seller | Fast, Reliable Shipping | Always Free | 1-Day Processing | Customer Support You Can Trust</div><div style='height:4px;background:#b8960c;margin:16px 0;'></div><table width='100%' cellpadding='0' cellspacing='0' style='margin-top:16px;'><tr><td width='50%' valign='top' style='padding-right:6px;'><table width='100%' cellpadding='0' cellspacing='0'><tr><td style='background:#1a1a1a;color:#f0c040;font-weight:bold;font-size:14px;padding:10px 14px;text-align:left;'>Questions? We Are Happy to Help</td></tr><tr><td style='border:1px solid #b8960c;padding:14px;font-size:14px;color:#333;line-height:1.7;background:#fffdf0;text-align:left;'>We are committed to a five-star experience from start to finish. Whether you are just browsing or have already made a purchase, we are available to answer your questions quickly and clearly.<br><br>All communication is handled through eBay messaging platform. We usually respond within 24 hours.</td></tr></table></td><td width='50%' valign='top' style='padding-left:6px;'><table width='100%' cellpadding='0' cellspacing='0'><tr><td style='background:#1a1a1a;color:#f0c040;font-weight:bold;font-size:14px;padding:10px 14px;text-align:left;'>Buy with Confidence</td></tr><tr><td style='border:1px solid #b8960c;padding:14px;font-size:14px;color:#333;line-height:1.7;background:#fffdf0;text-align:left;'>Each item is carefully inspected before shipping to ensure it arrives as described.<br><br>Orders ship within 1 business day using USPS or UPS. Shipping is always free.</td></tr></table></td></tr></table><div style='font-weight:bold;color:#b8960c;margin-top:14px;font-size:13px;'>Due to lighting and screen differences, actual color may vary slightly.</div><div style='height:4px;background:#b8960c;margin:16px 0;'></div><table width='100%' cellpadding='10' cellspacing='0'><tr align='center'><td style='font-size:40px'>&#127482;&#127480;<br><span style='font-size:16px;font-weight:bold;color:#1a1a1a;'>Ship from USA</span></td><td style='font-size:40px'>&#128666;<br><span style='font-size:16px;font-weight:bold;color:#1a1a1a;'>Free and Fast Shipping</span></td><td style='font-size:40px'>&#128257;<br><span style='font-size:16px;font-weight:bold;color:#1a1a1a;'>30 Days Return</span></td></tr></table><div style='height:4px;background:#b8960c;margin:16px 0;'></div></div><table width='100%' cellpadding='0' cellspacing='0'><tr><td style='background:#b8960c;padding:4px 0;'></td></tr><tr><td style='background:#1a1a1a;padding:20px;text-align:center;'><div style='color:#f0c040;font-size:18px;font-weight:bold;letter-spacing:1px;'>VISIT OUR STORE FOR MORE GREAT ITEMS</div><div style='color:#b8960c;font-size:14px;margin-top:8px;'>Thank you for shopping with us!</div></td></tr><tr><td style='background:#b8960c;padding:4px 0;'></td></tr></table></div>`;
 
+export const HARDCODED_CORE_FIELD_DEFAULTS = {
+  upc: 'Does Not Apply',
+  quantity: 1,
+  format: 'FixedPrice',
+  duration: 'GTC',
+  shippingProfileName: 'Shipping Policy',
+  returnProfileName: 'Return Policy',
+  paymentProfileName: 'Payment Policy'
+};
+
+export function mergeDefaultCoreFieldDefaults(coreFieldDefaults = {}) {
+  const merged = {
+    description: DEFAULT_DESCRIPTION_TEMPLATE,
+    ...(coreFieldDefaults || {}),
+    ...HARDCODED_CORE_FIELD_DEFAULTS
+  };
+  if (!String(merged.description || '').trim()) {
+    merged.description = DEFAULT_DESCRIPTION_TEMPLATE;
+  }
+  return merged;
+}
+
 export function createDefaultCoreFieldDefaults() {
-  return { description: DEFAULT_DESCRIPTION_TEMPLATE };
+  return mergeDefaultCoreFieldDefaults({});
 }

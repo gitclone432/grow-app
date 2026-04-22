@@ -155,6 +155,7 @@ router.get('/', requireAuth, async (req, res) => {
           ? normalized.asinAutomation.fieldConfigs
           : []
       };
+      normalized.coreFieldDefaults = mergeDefaultCoreFieldDefaults(normalized.coreFieldDefaults || {});
       return normalized;
     });
 
@@ -182,6 +183,7 @@ router.get('/:id', requireAuth, async (req, res) => {
         ? normalizedTemplate.asinAutomation.fieldConfigs
         : []
     };
+    normalizedTemplate.coreFieldDefaults = mergeDefaultCoreFieldDefaults(normalizedTemplate.coreFieldDefaults || {});
 
     res.json(normalizedTemplate);
   } catch (error) {
