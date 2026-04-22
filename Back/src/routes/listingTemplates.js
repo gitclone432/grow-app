@@ -6,6 +6,117 @@ import { mergeDefaultCoreFieldDefaults } from '../constants/defaultDescriptionTe
 
 const router = express.Router();
 
+const DEFAULT_TEMPLATE_CUSTOM_COLUMNS = [
+  { name: 'C:Brand', displayName: 'C:Brand', dataType: 'text', defaultValue: 'Does Not Apply', isRequired: false, placeholder: '' },
+  { name: 'C:Shipping', displayName: 'C:Shipping', dataType: 'text', defaultValue: 'Free & Fast', isRequired: false, placeholder: '' },
+  { name: 'C:Return', displayName: 'C:Return', dataType: 'text', defaultValue: 'Hassel Free', isRequired: false, placeholder: '' },
+  { name: 'C:USE', displayName: 'C:USE', dataType: 'text', defaultValue: 'Easy To Use', isRequired: false, placeholder: '' }
+];
+
+const DEFAULT_ASIN_FIELD_CONFIGS = [
+  {
+    fieldType: 'core',
+    ebayField: 'title',
+    source: 'ai',
+    promptTemplate: '',
+    amazonField: '',
+    transform: 'none',
+    enabled: true,
+    defaultValue: ''
+  },
+  {
+    fieldType: 'core',
+    ebayField: 'itemPhotoUrl',
+    source: 'direct',
+    promptTemplate: '',
+    amazonField: 'images',
+    transform: 'pipeSeparated',
+    enabled: true,
+    defaultValue: ''
+  },
+  {
+    fieldType: 'core',
+    ebayField: 'description',
+    source: 'ai',
+    promptTemplate: '',
+    amazonField: '',
+    transform: 'none',
+    enabled: true,
+    defaultValue: ''
+  }
+];
+
+function mergeDefaultCustomColumns(customColumns = []) {
+  const incoming = Array.isArray(customColumns) ? customColumns : [];
+  const normalized = incoming.map((column, idx) => ({
+    name: column?.name || '',
+    displayName: column?.displayName || column?.name || '',
+    dataType: column?.dataType || 'text',
+    defaultValue: column?.defaultValue ?? '',
+    isRequired: Boolean(column?.isRequired),
+    placeholder: column?.placeholder ?? '',
+    order: Number.isFinite(column?.order) ? column.order : 39 + idx
+  }));
+
+  const existingNames = new Set(
+    normalized.map(column => String(column?.name || '').trim().toLowerCase()).filter(Boolean)
+  );
+
+  let nextOrder = normalized.length > 0
+    ? Math.max(...normalized.map(column => (Number.isFinite(column.order) ? column.order : 0))) + 1
+    : 39;
+
+  for (const defaultColumn of DEFAULT_TEMPLATE_CUSTOM_COLUMNS) {
+    const normalizedName = defaultColumn.name.toLowerCase();
+    if (!existingNames.has(normalizedName)) {
+      normalized.push({
+        ...defaultColumn,
+        order: nextOrder++
+      });
+      existingNames.add(normalizedName);
+    }
+  }
+
+  return normalized;
+}
+
+function mergeDefaultAsinFieldConfigs(fieldConfigs = []) {
+  const incoming = Array.isArray(fieldConfigs) ? fieldConfigs : [];
+  const merged = incoming.map((config) => ({
+    fieldType: config?.fieldType || 'core',
+    ebayField: config?.ebayField || '',
+    source: config?.source || 'ai',
+    promptTemplate: config?.promptTemplate || '',
+    amazonField: config?.amazonField || '',
+    transform: config?.transform || 'none',
+    enabled: config?.enabled !== false,
+    defaultValue: config?.defaultValue ?? ''
+  }));
+
+  const existingFieldKeys = new Set(
+    merged
+      .map(config => String(config?.ebayField || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  for (const defaultConfig of DEFAULT_ASIN_FIELD_CONFIGS) {
+    const fieldKey = defaultConfig.ebayField.toLowerCase();
+    if (!existingFieldKeys.has(fieldKey)) {
+      merged.push({ ...defaultConfig });
+      existingFieldKeys.add(fieldKey);
+    }
+  }
+
+  return merged;
+}
+
+function normalizeAsinAutomation(asinAutomation = {}) {
+  return {
+    enabled: true,
+    fieldConfigs: mergeDefaultAsinFieldConfigs(asinAutomation?.fieldConfigs || [])
+  };
+}
+
 // Get custom Action field for template
 router.get('/action-field/:templateId', requireAuth, async (req, res) => {
   try {
@@ -149,12 +260,8 @@ router.get('/', requireAuth, async (req, res) => {
 
     const normalizedTemplates = templates.map((template) => {
       const normalized = template.toObject();
-      normalized.asinAutomation = {
-        enabled: true,
-        fieldConfigs: Array.isArray(normalized?.asinAutomation?.fieldConfigs)
-          ? normalized.asinAutomation.fieldConfigs
-          : []
-      };
+      normalized.asinAutomation = normalizeAsinAutomation(normalized?.asinAutomation || {});
+      normalized.customColumns = mergeDefaultCustomColumns(normalized.customColumns || []);
       normalized.coreFieldDefaults = mergeDefaultCoreFieldDefaults(normalized.coreFieldDefaults || {});
       return normalized;
     });
@@ -177,12 +284,8 @@ router.get('/:id', requireAuth, async (req, res) => {
     }
     
     const normalizedTemplate = template.toObject();
-    normalizedTemplate.asinAutomation = {
-      enabled: true,
-      fieldConfigs: Array.isArray(normalizedTemplate?.asinAutomation?.fieldConfigs)
-        ? normalizedTemplate.asinAutomation.fieldConfigs
-        : []
-    };
+    normalizedTemplate.asinAutomation = normalizeAsinAutomation(normalizedTemplate?.asinAutomation || {});
+    normalizedTemplate.customColumns = mergeDefaultCustomColumns(normalizedTemplate.customColumns || []);
     normalizedTemplate.coreFieldDefaults = mergeDefaultCoreFieldDefaults(normalizedTemplate.coreFieldDefaults || {});
 
     res.json(normalizedTemplate);
@@ -206,8 +309,8 @@ router.post('/', requireAuth, async (req, res) => {
       description,
       category,
       ebayCategory,
-      customColumns: customColumns || [],
-      asinAutomation: asinAutomation || { enabled: true, fieldConfigs: [] },
+      customColumns: mergeDefaultCustomColumns(customColumns || []),
+      asinAutomation: normalizeAsinAutomation(asinAutomation || {}),
       pricingConfig: pricingConfig || { enabled: false },
       createdBy: req.user.userId
     };
@@ -263,12 +366,14 @@ router.post('/:id/duplicate', requireAuth, async (req, res) => {
       description: sourceTemplate.description,
       category: sourceTemplate.category,
       ebayCategory: sourceTemplate.ebayCategory,
-      customColumns: sourceTemplate.customColumns ? JSON.parse(JSON.stringify(sourceTemplate.customColumns)) : [],
-      asinAutomation: sourceTemplate.asinAutomation ? {
-        enabled: true,
-        fieldConfigs: sourceTemplate.asinAutomation.fieldConfigs ? 
-          JSON.parse(JSON.stringify(sourceTemplate.asinAutomation.fieldConfigs)) : []
-      } : { enabled: true, fieldConfigs: [] },
+      customColumns: mergeDefaultCustomColumns(
+        sourceTemplate.customColumns ? JSON.parse(JSON.stringify(sourceTemplate.customColumns)) : []
+      ),
+      asinAutomation: normalizeAsinAutomation(sourceTemplate.asinAutomation ? {
+        fieldConfigs: sourceTemplate.asinAutomation.fieldConfigs
+          ? JSON.parse(JSON.stringify(sourceTemplate.asinAutomation.fieldConfigs))
+          : []
+      } : {}),
       pricingConfig: sourceTemplate.pricingConfig ? {
         enabled: sourceTemplate.pricingConfig.enabled,
         spentRate: sourceTemplate.pricingConfig.spentRate,
@@ -314,8 +419,8 @@ router.put('/:id', requireAuth, async (req, res) => {
       description,
       category,
       ebayCategory,
-      customColumns: customColumns || [],
-      asinAutomation: asinAutomation || { enabled: true, fieldConfigs: [] },
+      customColumns: mergeDefaultCustomColumns(customColumns || []),
+      asinAutomation: normalizeAsinAutomation(asinAutomation || {}),
       pricingConfig: pricingConfig || { enabled: false },
       updatedAt: Date.now()
     };

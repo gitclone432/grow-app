@@ -77,6 +77,11 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
         const fieldInfo = allFieldOptions.find(f => f.value === config.ebayField);
         const isExpanded = expandedIndex === index;
         const isCustomField = config.fieldType === 'custom';
+        const matchedCustomColumn = isCustomField
+          ? (customColumns || []).find(col => col?.name === config.ebayField)
+          : null;
+        const customColumnDefaultValue = String(matchedCustomColumn?.defaultValue || '').trim();
+        const hasCustomColumnDefault = isCustomField && customColumnDefaultValue.length > 0;
         
         return (
           <Paper key={index} sx={{ p: 2 }}>
@@ -201,86 +206,94 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
                     })}
                   </TextField>
                   
-                  <TextField                    label="Default Value (optional)"
-                    value={config.defaultValue || ''}
-                    onChange={(e) => handleUpdate(index, 'defaultValue', e.target.value)}
-                    fullWidth
-                    placeholder={
-                      config.ebayField === 'startPrice' || config.ebayField === 'buyItNowPrice'
-                        ? 'e.g., 29.99'
-                        : 'Enter default value for this field'
-                    }
-                    helperText={
-                      config.defaultValue 
-                        ? '✓ This field will be pre-filled with this value when auto-fill is disabled or fails'
-                        : 'Optional: Provide a fallback value. Used when auto-fill is disabled or encounters errors.'
-                    }
-                    type={
-                      config.ebayField === 'startPrice' || config.ebayField === 'buyItNowPrice'
-                        ? 'number'
-                        : 'text'
-                    }
-                    InputProps={{
-                      startAdornment: config.defaultValue ? (
-                        <Chip 
-                          label="Default Set" 
-                          size="small" 
-                          color="info" 
-                          sx={{ mr: 1, height: 20 }}
-                        />
-                      ) : null
-                    }}
-                  />
+                  {!isCustomField && (
+                    <TextField                    label="Default Value (optional)"
+                      value={config.defaultValue || ''}
+                      onChange={(e) => handleUpdate(index, 'defaultValue', e.target.value)}
+                      fullWidth
+                      placeholder={
+                        config.ebayField === 'startPrice' || config.ebayField === 'buyItNowPrice'
+                          ? 'e.g., 29.99'
+                          : 'Enter default value for this field'
+                      }
+                      helperText={
+                        config.defaultValue 
+                          ? '✓ This field will be pre-filled with this value when auto-fill is disabled or fails'
+                          : 'Optional: Provide a fallback value. Used when auto-fill is disabled or encounters errors.'
+                      }
+                      type={
+                        config.ebayField === 'startPrice' || config.ebayField === 'buyItNowPrice'
+                          ? 'number'
+                          : 'text'
+                      }
+                      InputProps={{
+                        startAdornment: config.defaultValue ? (
+                          <Chip 
+                            label="Default Set" 
+                            size="small" 
+                            color="info" 
+                            sx={{ mr: 1, height: 20 }}
+                          />
+                        ) : null
+                      }}
+                    />
+                  )}
                   
-                  <TextField                    select
-                    label="Source Type"
-                    value={config.source}
-                    onChange={(e) => {
-                      const newSource = e.target.value;
-                      const newConfigs = [...configs];
-                      newConfigs[index] = { 
-                        ...newConfigs[index], 
-                        source: newSource,
-                        // Reset related fields based on source type
-                        ...(newSource === 'ai' ? {
-                          amazonField: '',
-                          transform: 'none'
-                        } : {
-                          promptTemplate: ''
-                        })
-                      };
-                      onChange(newConfigs);
-                    }}
-                    fullWidth
-                    disabled={isCustomField}
-                    helperText={isCustomField ? 'Custom columns only support AI generation' : ''}
-                  >
-                    <MenuItem value="ai">AI Generated (uses prompt)</MenuItem>
-                    <MenuItem value="direct" disabled={isCustomField}>
-                      Direct Mapping (copy from Amazon)
-                    </MenuItem>
-                  </TextField>
+                  {!isCustomField && (
+                    <TextField                    select
+                      label="Source Type"
+                      value={config.source}
+                      onChange={(e) => {
+                        const newSource = e.target.value;
+                        const newConfigs = [...configs];
+                        newConfigs[index] = { 
+                          ...newConfigs[index], 
+                          source: newSource,
+                          // Reset related fields based on source type
+                          ...(newSource === 'ai' ? {
+                            amazonField: '',
+                            transform: 'none'
+                          } : {
+                            promptTemplate: ''
+                          })
+                        };
+                        onChange(newConfigs);
+                      }}
+                      fullWidth
+                    >
+                      <MenuItem value="ai">AI Generated (uses prompt)</MenuItem>
+                      <MenuItem value="direct">
+                        Direct Mapping (copy from Amazon)
+                      </MenuItem>
+                    </TextField>
+                  )}
                   
                   {config.source === 'ai' ? (
                     <>
-                      <TextField
-                        label="AI Prompt Template"
-                        multiline
-                        rows={4}
-                        value={config.promptTemplate || ''}
-                        onChange={(e) => handleUpdate(index, 'promptTemplate', e.target.value)}
-                        fullWidth
-                        helperText={
-                          config.ebayField === 'description'
-                            ? 'Use this prompt to generate ONLY feature bullets/HTML snippet. Insert it into Core Defaults > Description with {{AI_FEATURE_BULLETS}}.'
-                            : 'Available placeholders: {title}, {brand}, {description}, {price}, {asin}'
-                        }
-                        placeholder={
-                          config.ebayField === 'description'
-                            ? "Example: Rephrase {description} into 5 concise HTML <li> bullets for eBay. Exclude Amazon/returns/warranty claims."
-                            : "Example: Generate an 80-character eBay title for {title} by {brand}..."
-                        }
-                      />
+                      {hasCustomColumnDefault ? (
+                        <Typography variant="body2" color="text.secondary">
+                          AI Prompt Template is hidden because this custom column already has a default value: "{customColumnDefaultValue}".
+                        </Typography>
+                      ) : (
+                        <TextField
+                          label="AI Prompt Template"
+                          multiline
+                          rows={4}
+                          value={config.promptTemplate || ''}
+                          onChange={(e) => handleUpdate(index, 'promptTemplate', e.target.value)}
+                          fullWidth
+                          helperText={
+                            config.ebayField === 'description'
+                              ? 'Use this prompt to generate ONLY feature bullets/HTML snippet. Insert it into Core Defaults > Description with {{AI_FEATURE_BULLETS}}.'
+                              : 'Available placeholders: {title}, {brand}, {description}, {price}, {asin}'
+                          }
+                          placeholder={
+                            config.ebayField === 'description'
+                              ? "Example: Rephrase {description} into 5 concise HTML <li> bullets for eBay. Exclude Amazon/returns/warranty claims."
+                              : "Example: Generate an 80-character eBay title for {title} by {brand}..."
+                          }
+                        />
+                      )}
                     </>
                   ) : (
                     <>

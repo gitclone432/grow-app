@@ -39,6 +39,139 @@ const MARKETPLACE_LABELS = {
   UK:        'eBay UK',
 };
 
+const DEFAULT_TEMPLATE_CUSTOM_COLUMNS = [
+  { name: 'C:Brand', displayName: 'C:Brand', dataType: 'text', defaultValue: 'Does Not Apply', isRequired: false, placeholder: '' },
+  { name: 'C:Shipping', displayName: 'C:Shipping', dataType: 'text', defaultValue: 'Free & Fast', isRequired: false, placeholder: '' },
+  { name: 'C:Return', displayName: 'C:Return', dataType: 'text', defaultValue: 'Hassel Free', isRequired: false, placeholder: '' },
+  { name: 'C:USE', displayName: 'C:USE', dataType: 'text', defaultValue: 'Easy To Use', isRequired: false, placeholder: '' }
+];
+
+const DEFAULT_ASIN_FIELD_CONFIGS = [
+  {
+    fieldType: 'core',
+    ebayField: 'title',
+    source: 'ai',
+    promptTemplate: '',
+    amazonField: '',
+    transform: 'none',
+    enabled: true,
+    defaultValue: ''
+  },
+  {
+    fieldType: 'core',
+    ebayField: 'itemPhotoUrl',
+    source: 'direct',
+    promptTemplate: '',
+    amazonField: 'images',
+    transform: 'pipeSeparated',
+    enabled: true,
+    defaultValue: ''
+  },
+  {
+    fieldType: 'core',
+    ebayField: 'description',
+    source: 'ai',
+    promptTemplate: '',
+    amazonField: '',
+    transform: 'none',
+    enabled: true,
+    defaultValue: ''
+  }
+];
+
+const DEFAULT_TEMPLATE_PRICING_CONFIG = {
+  enabled: false,
+  spentRate: null,
+  payoutRate: null,
+  desiredProfit: null,
+  fixedFee: 0,
+  saleTax: 0,
+  ebayFee: 12.9,
+  adsFee: 3,
+  tdsFee: 1,
+  shippingCost: 0,
+  taxRate: 10
+};
+
+function mergeDefaultCustomColumns(customColumns = []) {
+  const incoming = Array.isArray(customColumns) ? customColumns : [];
+  const normalized = incoming.map((column, idx) => ({
+    ...column,
+    name: column?.name || '',
+    displayName: column?.displayName || column?.name || '',
+    dataType: column?.dataType || 'text',
+    defaultValue: column?.defaultValue ?? '',
+    isRequired: Boolean(column?.isRequired),
+    placeholder: column?.placeholder ?? '',
+    order: Number.isFinite(column?.order) ? column.order : 39 + idx
+  }));
+
+  const existingNames = new Set(
+    normalized.map(column => String(column?.name || '').trim().toLowerCase()).filter(Boolean)
+  );
+
+  let nextOrder = normalized.length > 0
+    ? Math.max(...normalized.map(column => (Number.isFinite(column.order) ? column.order : 0))) + 1
+    : 39;
+
+  for (const defaultColumn of DEFAULT_TEMPLATE_CUSTOM_COLUMNS) {
+    const normalizedName = defaultColumn.name.toLowerCase();
+    if (!existingNames.has(normalizedName)) {
+      normalized.push({ ...defaultColumn, order: nextOrder++ });
+      existingNames.add(normalizedName);
+    }
+  }
+
+  return normalized;
+}
+
+function mergeDefaultAsinFieldConfigs(fieldConfigs = []) {
+  const incoming = Array.isArray(fieldConfigs) ? fieldConfigs : [];
+  const merged = incoming.map((config) => ({
+    ...config,
+    fieldType: config?.fieldType || 'core',
+    ebayField: config?.ebayField || '',
+    source: config?.source || 'ai',
+    promptTemplate: config?.promptTemplate || '',
+    amazonField: config?.amazonField || '',
+    transform: config?.transform || 'none',
+    enabled: config?.enabled !== false,
+    defaultValue: config?.defaultValue ?? ''
+  }));
+
+  const existingFieldKeys = new Set(
+    merged
+      .map(config => String(config?.ebayField || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  for (const defaultConfig of DEFAULT_ASIN_FIELD_CONFIGS) {
+    const fieldKey = defaultConfig.ebayField.toLowerCase();
+    if (!existingFieldKeys.has(fieldKey)) {
+      merged.push({ ...defaultConfig });
+      existingFieldKeys.add(fieldKey);
+    }
+  }
+
+  return merged;
+}
+
+function createEmptyTemplateFormData() {
+  return {
+    name: '',
+    customColumns: mergeDefaultCustomColumns([]),
+    asinAutomation: {
+      enabled: true,
+      fieldConfigs: mergeDefaultAsinFieldConfigs([])
+    },
+    coreFieldDefaults: createDefaultCoreFieldDefaults(),
+    customActionField: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
+    rangeId: null,
+    listProductId: null,
+    pricingConfig: { ...DEFAULT_TEMPLATE_PRICING_CONFIG }
+  };
+}
+
 export default function ManageTemplatesPage() {
   const navigate = useNavigate();
   const [templates, setTemplates] = useState([]);
@@ -46,31 +179,7 @@ export default function ManageTemplatesPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  const [formData, setFormData] = useState({
-    name: '',
-    customColumns: [],
-    asinAutomation: {
-      enabled: false,
-      fieldConfigs: []
-    },
-    coreFieldDefaults: createDefaultCoreFieldDefaults(),
-    customActionField: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
-    rangeId: null,
-    listProductId: null,
-    pricingConfig: {
-      enabled: false,
-      spentRate: null,
-      payoutRate: null,
-      desiredProfit: null,
-      fixedFee: 0,
-      saleTax: 0,
-      ebayFee: 12.9,
-      adsFee: 3,
-      tdsFee: 1,
-      shippingCost: 0,
-      taxRate: 10
-    }
-  });
+  const [formData, setFormData] = useState(() => createEmptyTemplateFormData());
   
   const [currentTab, setCurrentTab] = useState(0);
 
@@ -207,28 +316,7 @@ export default function ManageTemplatesPage() {
       setLoading(true);
       await api.post('/listing-templates', formData);
       setSuccess('Template created successfully!');
-      setFormData({
-        name: '',
-        customColumns: [],
-        asinAutomation: {
-          enabled: false,
-          fieldConfigs: []
-        },
-        coreFieldDefaults: createDefaultCoreFieldDefaults(),
-        pricingConfig: {
-          enabled: false,
-          spentRate: null,
-          payoutRate: null,
-          desiredProfit: null,
-          fixedFee: 0,
-          saleTax: 0,
-          ebayFee: 12.9,
-          adsFee: 3,
-          tdsFee: 1,
-          shippingCost: 0,
-          taxRate: 10
-        }
-      });
+      setFormData(createEmptyTemplateFormData());
       fetchTemplates();
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to create template');
@@ -257,10 +345,10 @@ export default function ManageTemplatesPage() {
     }
     setFormData({
       name: template.name,
-      customColumns: template.customColumns || [],
-      asinAutomation: template.asinAutomation || {
-        enabled: false,
-        fieldConfigs: []
+      customColumns: mergeDefaultCustomColumns(template.customColumns || []),
+      asinAutomation: {
+        enabled: template?.asinAutomation?.enabled !== false,
+        fieldConfigs: mergeDefaultAsinFieldConfigs(template?.asinAutomation?.fieldConfigs || [])
       },
       coreFieldDefaults: {
         ...createDefaultCoreFieldDefaults(),
@@ -269,19 +357,7 @@ export default function ManageTemplatesPage() {
       customActionField: template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
       rangeId: template.rangeId || null,
       listProductId: template.listProductId || null,
-      pricingConfig: template.pricingConfig || {
-        enabled: false,
-        spentRate: null,
-        payoutRate: null,
-        desiredProfit: null,
-        fixedFee: 0,
-        saleTax: 0,
-        ebayFee: 12.9,
-        adsFee: 3,
-        tdsFee: 1,
-        shippingCost: 0,
-        taxRate: 10
-      }
+      pricingConfig: template.pricingConfig || { ...DEFAULT_TEMPLATE_PRICING_CONFIG }
     });
     setEditDialog(true);
   };
@@ -293,31 +369,17 @@ export default function ManageTemplatesPage() {
     setFormCategoryId('');
     setFormRanges([]);
     setFormProducts([]);
-    setFormData({
-      name: '',
-      customColumns: [],
-      asinAutomation: {
-        enabled: false,
-        fieldConfigs: []
-      },
-      coreFieldDefaults: createDefaultCoreFieldDefaults(),
-      customActionField: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
-      rangeId: null,
-      listProductId: null,
-      pricingConfig: {
-        enabled: false,
-        spentRate: null,
-        payoutRate: null,
-        desiredProfit: null,
-        fixedFee: 0,
-        saleTax: 0,
-        ebayFee: 12.9,
-        adsFee: 3,
-        tdsFee: 1,
-        shippingCost: 0,
-        taxRate: 10
-      }
-    });
+    setFormData(createEmptyTemplateFormData());
+  };
+
+  const handleOpenCreateDialog = () => {
+    setEditingTemplate(null);
+    setCurrentTab(0);
+    setFormCategoryId('');
+    setFormRanges([]);
+    setFormProducts([]);
+    setFormData(createEmptyTemplateFormData());
+    setEditDialog(true);
   };
 
   const handleUpdate = async () => {
@@ -326,38 +388,19 @@ export default function ManageTemplatesPage() {
 
     try {
       setLoading(true);
-      await api.put(`/listing-templates/${editingTemplate._id}`, formData);
-      setSuccess('Template updated successfully!');
+      if (editingTemplate?._id) {
+        await api.put(`/listing-templates/${editingTemplate._id}`, formData);
+        setSuccess('Template updated successfully!');
+      } else {
+        await api.post('/listing-templates', formData);
+        setSuccess('Template created successfully!');
+      }
       setEditDialog(false);
       setEditingTemplate(null);
       setFormCategoryId('');
       setFormRanges([]);
       setFormProducts([]);
-      setFormData({
-        name: '',
-        customColumns: [],
-        asinAutomation: {
-          enabled: false,
-          fieldConfigs: []
-        },
-        coreFieldDefaults: createDefaultCoreFieldDefaults(),
-        customActionField: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
-        rangeId: null,
-        listProductId: null,
-        pricingConfig: {
-          enabled: false,
-          spentRate: null,
-          payoutRate: null,
-          desiredProfit: null,
-          fixedFee: 0,
-          saleTax: 0,
-          ebayFee: 12.9,
-          adsFee: 3,
-          tdsFee: 1,
-          shippingCost: 0,
-          taxRate: 10
-        }
-      });
+      setFormData(createEmptyTemplateFormData());
       fetchTemplates();
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to update template');
@@ -590,88 +633,30 @@ export default function ManageTemplatesPage() {
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
       {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
 
-      <Paper sx={{ p: 2, mb: 3 }}>
-        <Typography variant="subtitle1" fontWeight="bold" sx={{ mb: 2 }}>
-          Create New Template
-        </Typography>
-        <Box component="form" onSubmit={handleSubmit}>
-          <Stack spacing={2}>
-            <TextField
-              label="Template Name"
-              required
-              fullWidth
-              value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              placeholder="e.g., Phone Case Template"
-              helperText="All 38 core eBay columns will be automatically included. You can add custom columns below."
-            />
-
-            <Box>
-              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-                <Typography variant="subtitle2">Custom Columns</Typography>
-                <Button size="small" startIcon={<AddIcon />} onClick={handleAddColumn}>
-                  Add Column
-                </Button>
-              </Stack>
-
-              {formData.customColumns.length === 0 ? (
-                <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'italic' }}>
-                  No custom columns added yet. Click "Add Column" to create template-specific fields.
-                </Typography>
-              ) : (
-                <Stack spacing={1}>
-                  {formData.customColumns.map((col) => (
-                    <Paper key={col.name} variant="outlined" sx={{ p: 1.5 }}>
-                      <Stack direction="row" justifyContent="space-between" alignItems="center">
-                        <Box>
-                          <Typography variant="body2" fontWeight="bold">{col.name}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {col.displayName} • {col.dataType}
-                            {col.isRequired && ' • Required'}
-                            {col.defaultValue && ` • Default: ${col.defaultValue}`}
-                          </Typography>
-                        </Box>
-                        <IconButton size="small" color="error" onClick={() => handleRemoveColumn(col.name)}>
-                          <DeleteIcon fontSize="small" />
-                        </IconButton>
-                      </Stack>
-                    </Paper>
-                  ))}
-                </Stack>
-              )}
-            </Box>
-
-            <Button
-              type="submit"
-              variant="contained"
-              disabled={loading}
-              sx={{ mt: 2 }}
-            >
-              Create Template
-            </Button>
-          </Stack>
-        </Box>
-      </Paper>
-
       <Paper>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ p: 2, bgcolor: 'grey.100', borderBottom: 1, borderColor: 'divider' }}>
           <Typography variant="h6">
             Existing Templates ({filteredTemplates.length}{hasActiveFilters ? ` of ${templates.length}` : ''})
           </Typography>
-          <TextField
-            size="small"
-            placeholder="Search by name…"
-            value={templateSearch}
-            onChange={(e) => setTemplateSearch(e.target.value)}
-            sx={{ width: 320, bgcolor: 'background.paper', borderRadius: 1 }}
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon fontSize="small" color="action" />
-                </InputAdornment>
-              ),
-            }}
-          />
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Button variant="contained" onClick={handleOpenCreateDialog}>
+              Create Template
+            </Button>
+            <TextField
+              size="small"
+              placeholder="Search by name…"
+              value={templateSearch}
+              onChange={(e) => setTemplateSearch(e.target.value)}
+              sx={{ width: 320, bgcolor: 'background.paper', borderRadius: 1 }}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" color="action" />
+                  </InputAdornment>
+                ),
+              }}
+            />
+          </Stack>
         </Stack>
 
         {/* ── Filter Bar ── */}
@@ -762,7 +747,6 @@ export default function ManageTemplatesPage() {
               <TableRow>
                 <TableCell sx={{ fontWeight: 'bold' }}>Name</TableCell>
                 <TableCell sx={{ fontWeight: 'bold' }}>Marketplace</TableCell>
-                <TableCell sx={{ fontWeight: 'bold' }}>Custom Columns</TableCell>
                 <TableCell sx={{ fontWeight: 'bold' }}>Created</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 'bold' }}>Actions</TableCell>
               </TableRow>
@@ -770,19 +754,19 @@ export default function ManageTemplatesPage() {
             <TableBody>
               {loading && templates.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} align="center" sx={{ py: 4 }}>
+                  <TableCell colSpan={4} align="center" sx={{ py: 4 }}>
                     <CircularProgress size={28} />
                   </TableCell>
                 </TableRow>
               ) : templates.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} align="center" sx={{ py: 3, color: 'text.secondary' }}>
-                    No templates found. Create one above!
+                  <TableCell colSpan={4} align="center" sx={{ py: 3, color: 'text.secondary' }}>
+                    No templates found.
                   </TableCell>
                 </TableRow>
               ) : filteredTemplates.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} align="center" sx={{ py: 3, color: 'text.secondary' }}>
+                  <TableCell colSpan={4} align="center" sx={{ py: 3, color: 'text.secondary' }}>
                     No templates match the current filters.
                   </TableCell>
                 </TableRow>
@@ -803,13 +787,6 @@ export default function ManageTemplatesPage() {
                         size="small"
                         variant="outlined"
                       />
-                    </TableCell>
-                    <TableCell>
-                      {template.customColumns?.length > 0 ? (
-                        <Chip label={`${template.customColumns.length} columns`} size="small" color="primary" variant="outlined" />
-                      ) : (
-                        <Typography variant="body2" color="text.secondary">None</Typography>
-                      )}
                     </TableCell>
                     <TableCell>
                       {new Date(template.createdAt).toLocaleDateString()}
@@ -841,7 +818,7 @@ export default function ManageTemplatesPage() {
 
       {/* Edit Template Dialog */}
       <Dialog open={editDialog} onClose={handleCloseEditDialog} maxWidth="md" fullWidth>
-        <DialogTitle>Edit Template</DialogTitle>
+        <DialogTitle>{editingTemplate ? 'Edit Template' : 'Create Template'}</DialogTitle>
         <DialogContent>
           <Box sx={{ mt: 1 }}>
             <Tabs 
@@ -982,7 +959,7 @@ export default function ManageTemplatesPage() {
                   )}
                 </Box>
               )}
-              
+
               {/* Tab 2: ASIN Auto-Fill */}
               {currentTab === 2 && (
                 <Stack spacing={3}>
@@ -1114,7 +1091,7 @@ export default function ManageTemplatesPage() {
         <DialogActions>
           <Button onClick={handleCloseEditDialog}>Cancel</Button>
           <Button onClick={handleUpdate} variant="contained" disabled={loading}>
-            Update
+            {editingTemplate ? 'Update' : 'Create'}
           </Button>
         </DialogActions>
       </Dialog>
