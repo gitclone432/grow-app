@@ -2437,7 +2437,13 @@ export default function TemplateListingsPage() {
           { name: 'title', label: 'Title', type: 'core' },
           { name: 'description', label: 'Description', type: 'core' },
           { name: 'startPrice', label: 'Start Price', type: 'core' },
-          { name: 'quantity', label: 'Quantity', type: 'core' }
+          { name: 'quantity', label: 'Quantity', type: 'core' },
+          { name: 'upc', label: 'UPC', type: 'core' },
+          { name: 'format', label: 'Format', type: 'core' },
+          { name: 'duration', label: 'Duration', type: 'core' },
+          { name: 'shippingProfileName', label: 'Shipping Profile Name', type: 'core' },
+          { name: 'returnProfileName', label: 'Return Profile Name', type: 'core' },
+          { name: 'paymentProfileName', label: 'Payment Profile Name', type: 'core' }
         ]}
       />
 
