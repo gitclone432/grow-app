@@ -46,6 +46,20 @@ const DEFAULT_ASIN_FIELD_CONFIGS = [
   }
 ];
 
+const DEFAULT_TEMPLATE_PRICING_CONFIG = {
+  enabled: true,
+  spentRate: 93,
+  payoutRate: 87,
+  desiredProfit: null,
+  fixedFee: 0.24,
+  saleTax: 0,
+  ebayFee: 12.9,
+  adsFee: 15,
+  tdsFee: 1,
+  shippingCost: 0,
+  taxRate: 10
+};
+
 function mergeDefaultCustomColumns(customColumns = []) {
   const incoming = Array.isArray(customColumns) ? customColumns : [];
   const normalized = incoming.map((column, idx) => ({
@@ -311,7 +325,7 @@ router.post('/', requireAuth, async (req, res) => {
       ebayCategory,
       customColumns: mergeDefaultCustomColumns(customColumns || []),
       asinAutomation: normalizeAsinAutomation(asinAutomation || {}),
-      pricingConfig: pricingConfig || { enabled: false },
+      pricingConfig: pricingConfig || { ...DEFAULT_TEMPLATE_PRICING_CONFIG },
       createdBy: req.user.userId
     };
     
@@ -391,7 +405,7 @@ router.post('/:id/duplicate', requireAuth, async (req, res) => {
           tiers: sourceTemplate.pricingConfig.profitTiers.tiers ? 
             JSON.parse(JSON.stringify(sourceTemplate.pricingConfig.profitTiers.tiers)) : []
         } : { enabled: false, tiers: [] }
-      } : { enabled: false },
+      } : { ...DEFAULT_TEMPLATE_PRICING_CONFIG },
       coreFieldDefaults: sourceTemplate.coreFieldDefaults ? 
         JSON.parse(JSON.stringify(sourceTemplate.coreFieldDefaults)) : {},
       customActionField: sourceTemplate.customActionField,
@@ -421,7 +435,7 @@ router.put('/:id', requireAuth, async (req, res) => {
       ebayCategory,
       customColumns: mergeDefaultCustomColumns(customColumns || []),
       asinAutomation: normalizeAsinAutomation(asinAutomation || {}),
-      pricingConfig: pricingConfig || { enabled: false },
+      pricingConfig: pricingConfig || { ...DEFAULT_TEMPLATE_PRICING_CONFIG },
       updatedAt: Date.now()
     };
     
