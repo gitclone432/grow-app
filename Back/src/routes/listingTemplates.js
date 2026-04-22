@@ -146,8 +146,19 @@ router.get('/', requireAuth, async (req, res) => {
     const templates = await ListingTemplate.find(filter)
       .populate('createdBy', 'name email')
       .sort({ createdAt: -1 });
-    
-    res.json(templates);
+
+    const normalizedTemplates = templates.map((template) => {
+      const normalized = template.toObject();
+      normalized.asinAutomation = {
+        enabled: true,
+        fieldConfigs: Array.isArray(normalized?.asinAutomation?.fieldConfigs)
+          ? normalized.asinAutomation.fieldConfigs
+          : []
+      };
+      return normalized;
+    });
+
+    res.json(normalizedTemplates);
   } catch (error) {
     console.error('Error fetching templates:', error);
     res.status(500).json({ error: error.message });
@@ -164,7 +175,15 @@ router.get('/:id', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'Template not found' });
     }
     
-    res.json(template);
+    const normalizedTemplate = template.toObject();
+    normalizedTemplate.asinAutomation = {
+      enabled: true,
+      fieldConfigs: Array.isArray(normalizedTemplate?.asinAutomation?.fieldConfigs)
+        ? normalizedTemplate.asinAutomation.fieldConfigs
+        : []
+    };
+
+    res.json(normalizedTemplate);
   } catch (error) {
     console.error('Error fetching template:', error);
     res.status(500).json({ error: error.message });
@@ -186,7 +205,7 @@ router.post('/', requireAuth, async (req, res) => {
       category,
       ebayCategory,
       customColumns: customColumns || [],
-      asinAutomation: asinAutomation || { enabled: false, fieldConfigs: [] },
+      asinAutomation: asinAutomation || { enabled: true, fieldConfigs: [] },
       pricingConfig: pricingConfig || { enabled: false },
       createdBy: req.user.userId
     };
@@ -244,10 +263,10 @@ router.post('/:id/duplicate', requireAuth, async (req, res) => {
       ebayCategory: sourceTemplate.ebayCategory,
       customColumns: sourceTemplate.customColumns ? JSON.parse(JSON.stringify(sourceTemplate.customColumns)) : [],
       asinAutomation: sourceTemplate.asinAutomation ? {
-        enabled: sourceTemplate.asinAutomation.enabled,
+        enabled: true,
         fieldConfigs: sourceTemplate.asinAutomation.fieldConfigs ? 
           JSON.parse(JSON.stringify(sourceTemplate.asinAutomation.fieldConfigs)) : []
-      } : { enabled: false, fieldConfigs: [] },
+      } : { enabled: true, fieldConfigs: [] },
       pricingConfig: sourceTemplate.pricingConfig ? {
         enabled: sourceTemplate.pricingConfig.enabled,
         spentRate: sourceTemplate.pricingConfig.spentRate,
@@ -294,7 +313,7 @@ router.put('/:id', requireAuth, async (req, res) => {
       category,
       ebayCategory,
       customColumns: customColumns || [],
-      asinAutomation: asinAutomation || { enabled: false, fieldConfigs: [] },
+      asinAutomation: asinAutomation || { enabled: true, fieldConfigs: [] },
       pricingConfig: pricingConfig || { enabled: false },
       updatedAt: Date.now()
     };

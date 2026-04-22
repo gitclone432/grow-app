@@ -538,6 +538,10 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
       res.write('data: [DONE]\n\n');
       return res.end();
     }
+
+    const fieldConfigs = Array.isArray(template?.asinAutomation?.fieldConfigs)
+      ? template.asinAutomation.fieldConfigs
+      : [];
     
     // Get pricing config
     let pricingConfig = template.pricingConfig;
@@ -673,7 +677,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         // Fetch and process ASIN (new listing case)
         const amazonData = await fetchAmazonData(asin, region);
         const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+          await applyFieldConfigs(amazonData, fieldConfigs, pricingConfig);
         
         const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
         
@@ -805,6 +809,10 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
       return res.end();
     }
 
+    const fieldConfigs = Array.isArray(template?.asinAutomation?.fieldConfigs)
+      ? template.asinAutomation.fieldConfigs
+      : [];
+
     // Get pricing config (seller override takes priority)
     let pricingConfig = template.pricingConfig;
     const sellerConfig = await SellerPricingConfig.findOne({ sellerId, templateId });
@@ -933,7 +941,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         };
 
         const { coreFields, customFields, pricingCalculation } =
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+          await applyFieldConfigs(amazonData, fieldConfigs, pricingConfig);
 
         const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
 
@@ -1390,11 +1398,9 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'Template not found' });
     }
     
-    if (!template.asinAutomation?.enabled) {
-      return res.status(400).json({ 
-        error: 'ASIN automation is not enabled for this template' 
-      });
-    }
+    const fieldConfigs = Array.isArray(template?.asinAutomation?.fieldConfigs)
+      ? template.asinAutomation.fieldConfigs
+      : [];
     
     // 1.5. Get seller-specific pricing config if sellerId is provided
     let pricingConfig = template.pricingConfig;
@@ -1413,10 +1419,10 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
     const amazonData = await fetchAmazonData(asin, region);
     
     // 3. Apply field configurations (AI + direct mappings)
-    console.log(`Processing ${template.asinAutomation.fieldConfigs.length} field configs`);
+    console.log(`Processing ${fieldConfigs.length} field configs`);
     const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
       amazonData,
-      template.asinAutomation.fieldConfigs,
+      fieldConfigs,
       pricingConfig  // Use seller-specific or template default pricing config
     );
     const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
@@ -1479,11 +1485,9 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'Template not found' });
     }
     
-    if (!template.asinAutomation?.enabled) {
-      return res.status(400).json({ 
-        error: 'ASIN automation is not enabled for this template' 
-      });
-    }
+    const fieldConfigs = Array.isArray(template?.asinAutomation?.fieldConfigs)
+      ? template.asinAutomation.fieldConfigs
+      : [];
     
     // Get seller-specific pricing config if available
     let pricingConfig = template.pricingConfig;
@@ -1503,7 +1507,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
     console.log(`\n========== BULK AUTOFILL: ${cleanedAsins.length} ASINs ==========`);
     console.log(`Template: ${template.name || templateId}`);
     console.log(`Seller: ${sellerId}`);
-    console.log(`AI Fields: ${template.asinAutomation.fieldConfigs.filter(c => c.source === 'ai' && c.enabled).length}`);
+    console.log(`AI Fields: ${fieldConfigs.filter(c => c.source === 'ai' && c.enabled).length}`);
     
     // Check for existing ACTIVE listings with these ASINs across ALL templates for this seller
     const existingListings = await TemplateListing.find({
@@ -1640,7 +1644,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
           // Apply field configurations
           const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
             amazonData,
-            template.asinAutomation.fieldConfigs,
+            fieldConfigs,
             pricingConfig  // Use seller-specific or template default pricing config
           );
           const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
@@ -2108,11 +2112,9 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'Template not found' });
     }
     
-    if (!template.asinAutomation?.enabled) {
-      return res.status(400).json({ 
-        error: 'ASIN automation is not enabled for this template' 
-      });
-    }
+    const fieldConfigs = Array.isArray(template?.asinAutomation?.fieldConfigs)
+      ? template.asinAutomation.fieldConfigs
+      : [];
     
     // Get seller-specific pricing config if available
     let pricingConfig = template.pricingConfig;
@@ -2136,13 +2138,13 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         });
       }
     }
-    console.log(`📋 Field configs: ${template.asinAutomation.fieldConfigs.length} total`);
+    console.log(`📋 Field configs: ${fieldConfigs.length} total`);
     
     // Log field config breakdown
-    const coreConfigs = template.asinAutomation.fieldConfigs.filter(c => c.fieldType === 'core');
-    const customConfigs = template.asinAutomation.fieldConfigs.filter(c => c.fieldType === 'custom');
-    const aiConfigs = template.asinAutomation.fieldConfigs.filter(c => c.source === 'ai');
-    const directConfigs = template.asinAutomation.fieldConfigs.filter(c => c.source === 'direct');
+    const coreConfigs = fieldConfigs.filter(c => c.fieldType === 'core');
+    const customConfigs = fieldConfigs.filter(c => c.fieldType === 'custom');
+    const aiConfigs = fieldConfigs.filter(c => c.source === 'ai');
+    const directConfigs = fieldConfigs.filter(c => c.source === 'direct');
     
     console.log(`   Core: ${coreConfigs.length}, Custom: ${customConfigs.length}`);
     console.log(`   AI: ${aiConfigs.length}, Direct: ${directConfigs.length}`);
@@ -2270,7 +2272,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         
         // Apply field configurations
         const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, template.asinAutomation.fieldConfigs, pricingConfig);
+          await applyFieldConfigs(amazonData, fieldConfigs, pricingConfig);
         
         // Apply template core field defaults as base layer (autofilled fields override these)
         const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);

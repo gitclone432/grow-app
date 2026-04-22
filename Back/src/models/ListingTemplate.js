@@ -71,7 +71,7 @@ const fieldConfigSchema = new mongoose.Schema({
 const asinAutomationSchema = new mongoose.Schema({
   enabled: {
     type: Boolean,
-    default: false
+    default: true
   },
   fieldConfigs: [fieldConfigSchema]
 }, { _id: false });
@@ -185,7 +185,7 @@ const listingTemplateSchema = new mongoose.Schema({
   customColumns: [customColumnSchema],
   asinAutomation: {
     type: asinAutomationSchema,
-    default: { enabled: false, fieldConfigs: [] }
+    default: { enabled: true, fieldConfigs: [] }
   },
   pricingConfig: {
     type: pricingConfigSchema,

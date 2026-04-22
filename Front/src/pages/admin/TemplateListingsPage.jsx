@@ -90,6 +90,7 @@ export default function TemplateListingsPage() {
   const [loadingBulk, setLoadingBulk] = useState(false);
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
   const [processingLog, setProcessingLog] = useState([]);
+  const isAsinAutofillEnabled = true;
 
   // Marketplace / region state (for ScraperAPI)
   const [region, setRegion] = useState('US');
@@ -1213,7 +1214,7 @@ export default function TemplateListingsPage() {
           variant="contained" 
           startIcon={<AddIcon />} 
           onClick={handleAddListing}
-          disabled={!sellerId || batchFilter !== 'active' || fromAsinList || !template?.asinAutomation?.enabled}
+          disabled={!sellerId || batchFilter !== 'active' || fromAsinList || !isAsinAutofillEnabled}
         >
           Add Listing
         </Button>
@@ -1580,8 +1581,8 @@ export default function TemplateListingsPage() {
           {editingListing ? 'Edit Listing' : bulkMode ? 'Bulk Add Listings' : 'Add New Listing'}
         </DialogTitle>
         <DialogContent>
-          {/* ASIN Auto-Fill Section (only show if template has automation enabled and not editing) */}
-          {!editingListing && template?.asinAutomation?.enabled && (
+          {/* ASIN Auto-Fill Section (hard-coded enabled) */}
+          {!editingListing && isAsinAutofillEnabled && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3, mt: 1, bgcolor: 'primary.50' }}>
               <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
                 <Typography variant="subtitle2">
@@ -1725,7 +1726,7 @@ export default function TemplateListingsPage() {
             </Paper>
           )}
 
-          {!editingListing && !template?.asinAutomation?.enabled && (
+          {!editingListing && !isAsinAutofillEnabled && (
             <Alert severity="info" sx={{ mb: 2, mt: 1 }}>
               ASIN Auto-Fill (including Bulk Add mode) is disabled for this template.
               Enable it from <strong>Customize Template → ASIN Auto-Fill</strong> to use bulk ASIN generation.
