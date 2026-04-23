@@ -156,7 +156,7 @@ export default function TemplateListingsPage() {
     quantity: 1,
     itemPhotoUrl: '',
     videoId: '',
-    conditionId: '1000',
+    conditionId: '1000-New',
     description: '',
     format: 'FixedPrice',
     duration: 'GTC',
