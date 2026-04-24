@@ -4,6 +4,7 @@ import {
   FormControlLabel, Typography, Collapse, Box, Chip
 } from '@mui/material';
 import { Delete as DeleteIcon, ExpandMore as ExpandMoreIcon } from '@mui/icons-material';
+import { AMAZON_DIRECT_SOURCE_OPTIONS } from '../constants/amazonDirectSourceFields.js';
 
 const AVAILABLE_EBAY_FIELDS = [
   { value: 'title', label: 'Title', supportsAI: true },
@@ -14,14 +15,6 @@ const AVAILABLE_EBAY_FIELDS = [
   { value: 'categoryName', label: 'Category Name', supportsAI: true },
   { value: 'brand', label: 'Brand', supportsAI: false },
   { value: 'location', label: 'Location', supportsAI: true }
-];
-
-const DIRECT_SOURCE_OPTIONS = [
-  { value: 'title', label: 'Amazon Title' },
-  { value: 'price', label: 'Amazon Price' },
-  { value: 'brand', label: 'Amazon Brand' },
-  { value: 'description', label: 'Amazon Description' },
-  { value: 'images', label: 'Amazon Images' }
 ];
 
 const TRANSFORM_OPTIONS = [
@@ -161,13 +154,21 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
                       console.log('Current config:', config);
                       
                       const newConfigs = [...configs];
+                      const nowCustom = selectedField?.fieldType === 'custom';
+                      const wasCustom = config.fieldType === 'custom';
                       newConfigs[index] = {
                         ...newConfigs[index],
                         ebayField: selectedValue,
-                        fieldType: selectedField?.fieldType || 'core',
-                        // Force AI source for custom fields
-                        ...(selectedField?.fieldType === 'custom' ? { source: 'ai' } : {})
+                        fieldType: selectedField?.fieldType || 'core'
                       };
+                      // First time picking a custom column: default to AI (legacy behavior).
+                      // Switching between custom columns keeps source / mapping as-is.
+                      if (nowCustom && !wasCustom) {
+                        newConfigs[index].source = 'ai';
+                        newConfigs[index].amazonField = '';
+                        newConfigs[index].transform = 'none';
+                        newConfigs[index].promptTemplate = newConfigs[index].promptTemplate || '';
+                      }
                       
                       console.log('Updated config:', newConfigs[index]);
                       console.log('All configs:', newConfigs);
@@ -206,7 +207,7 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
                     })}
                   </TextField>
                   
-                  {!isCustomField && (
+                  {(!isCustomField || config.source === 'direct') && (
                     <TextField                    label="Default Value (optional)"
                       value={config.defaultValue || ''}
                       onChange={(e) => handleUpdate(index, 'defaultValue', e.target.value)}
@@ -239,34 +240,32 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
                     />
                   )}
                   
-                  {!isCustomField && (
-                    <TextField                    select
-                      label="Source Type"
-                      value={config.source}
-                      onChange={(e) => {
-                        const newSource = e.target.value;
-                        const newConfigs = [...configs];
-                        newConfigs[index] = { 
-                          ...newConfigs[index], 
-                          source: newSource,
-                          // Reset related fields based on source type
-                          ...(newSource === 'ai' ? {
-                            amazonField: '',
-                            transform: 'none'
-                          } : {
-                            promptTemplate: ''
-                          })
-                        };
-                        onChange(newConfigs);
-                      }}
-                      fullWidth
-                    >
-                      <MenuItem value="ai">AI Generated (uses prompt)</MenuItem>
-                      <MenuItem value="direct">
-                        Direct Mapping (copy from Amazon)
-                      </MenuItem>
-                    </TextField>
-                  )}
+                  <TextField                    select
+                    label="Source Type"
+                    value={config.source}
+                    onChange={(e) => {
+                      const newSource = e.target.value;
+                      const newConfigs = [...configs];
+                      newConfigs[index] = { 
+                        ...newConfigs[index], 
+                        source: newSource,
+                        // Reset related fields based on source type
+                        ...(newSource === 'ai' ? {
+                          amazonField: '',
+                          transform: 'none'
+                        } : {
+                          promptTemplate: ''
+                        })
+                      };
+                      onChange(newConfigs);
+                    }}
+                    fullWidth
+                  >
+                    <MenuItem value="ai">AI Generated (uses prompt)</MenuItem>
+                    <MenuItem value="direct">
+                      Direct Mapping (copy from Amazon)
+                    </MenuItem>
+                  </TextField>
                   
                   {config.source === 'ai' ? (
                     <>
@@ -285,7 +284,7 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
                           helperText={
                             config.ebayField === 'description'
                               ? 'Use this prompt to generate ONLY feature bullets/HTML snippet. Insert it into Core Defaults > Description with {{AI_FEATURE_BULLETS}}.'
-                              : 'Available placeholders: {title}, {brand}, {description}, {price}, {asin}'
+                              : 'Available placeholders: {title}, {brand}, {description}, {price}, {asin}, {color}, {compatibility}, {model}, {material}, {specialFeatures}, {size}, {screenSize}, {formFactor}, {bandMaterial}, {bandWidth}, {bandColor}'
                           }
                           placeholder={
                             config.ebayField === 'description'
@@ -304,7 +303,7 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
                         onChange={(e) => handleUpdate(index, 'amazonField', e.target.value)}
                         fullWidth
                       >
-                        {DIRECT_SOURCE_OPTIONS.map(opt => (
+                        {AMAZON_DIRECT_SOURCE_OPTIONS.map(opt => (
                           <MenuItem key={opt.value} value={opt.value}>
                             {opt.label}
                           </MenuItem>

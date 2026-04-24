@@ -34,6 +34,10 @@ import {
   SmartToy as AiIcon,
   SwapHoriz as DirectIcon
 } from '@mui/icons-material';
+import {
+  AMAZON_DIRECT_SOURCE_OPTIONS,
+  AMAZON_AI_PLACEHOLDER_CHIPS
+} from '../../constants/amazonDirectSourceFields.js';
 
 // Core eBay fields available for auto-fill
 const CORE_EBAY_FIELDS = [
@@ -48,15 +52,6 @@ const CORE_EBAY_FIELDS = [
   { value: 'upc', label: 'UPC' },
   { value: 'ean', label: 'EAN' },
   { value: 'categoryId', label: 'Category ID' }
-];
-
-// Amazon fields for direct mapping
-const AMAZON_FIELDS = [
-  { value: 'title', label: 'Title' },
-  { value: 'brand', label: 'Brand' },
-  { value: 'price', label: 'Price' },
-  { value: 'description', label: 'Description (Features)' },
-  { value: 'asin', label: 'ASIN' }
 ];
 
 // Transform options
@@ -514,7 +509,7 @@ export default function AsinAutomationEditor({
                   value={fieldForm.promptTemplate}
                   onChange={(e) => setFieldForm({ ...fieldForm, promptTemplate: e.target.value })}
                   placeholder="Enter prompt template with placeholders"
-                  helperText="Use placeholders: {title}, {brand}, {description}, {price}, {asin}"
+                  helperText="Use curly-brace placeholders from Amazon data (see chips below)."
                 />
                 
                 <Paper variant="outlined" sx={{ p: 2, bgcolor: 'grey.50' }}>
@@ -522,7 +517,7 @@ export default function AsinAutomationEditor({
                     Quick Insert Placeholders:
                   </Typography>
                   <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    {['{title}', '{brand}', '{description}', '{price}', '{asin}'].map(ph => (
+                    {AMAZON_AI_PLACEHOLDER_CHIPS.map(ph => (
                       <Chip
                         key={ph}
                         label={ph}
@@ -563,7 +558,7 @@ export default function AsinAutomationEditor({
                     label="Amazon Field"
                     onChange={(e) => setFieldForm({ ...fieldForm, amazonField: e.target.value })}
                   >
-                    {AMAZON_FIELDS.map(field => (
+                    {AMAZON_DIRECT_SOURCE_OPTIONS.map(field => (
                       <MenuItem key={field.value} value={field.value}>
                         {field.label}
                       </MenuItem>

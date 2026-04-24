@@ -744,7 +744,16 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             description: amazonData.description,
             images: amazonData.images,
             color: amazonData.color,
-            compatibility: amazonData.compatibility
+            compatibility: amazonData.compatibility,
+            model: amazonData.model,
+            material: amazonData.material,
+            specialFeatures: amazonData.specialFeatures,
+            size: amazonData.size,
+            formFactor: amazonData.formFactor,
+            screenSize: amazonData.screenSize,
+            bandMaterial: amazonData.bandMaterial,
+            bandWidth: amazonData.bandWidth,
+            bandColor: amazonData.bandColor
           },
           generatedListing: {
             ...mergedCoreFields,
@@ -1008,7 +1017,16 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             description: amazonData.description,
             images: amazonData.images,
             color: amazonData.color,
-            compatibility: amazonData.compatibility
+            compatibility: amazonData.compatibility,
+            model: amazonData.model,
+            material: amazonData.material,
+            specialFeatures: amazonData.specialFeatures,
+            size: amazonData.size,
+            formFactor: amazonData.formFactor,
+            screenSize: amazonData.screenSize,
+            bandMaterial: amazonData.bandMaterial,
+            bandWidth: amazonData.bandWidth,
+            bandColor: amazonData.bandColor
           },
           generatedListing: {
             ...mergedCoreFields,
@@ -2367,6 +2385,15 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             images: amazonData.images,
             color: amazonData.color,
             compatibility: amazonData.compatibility,
+            model: amazonData.model,
+            material: amazonData.material,
+            specialFeatures: amazonData.specialFeatures,
+            size: amazonData.size,
+            formFactor: amazonData.formFactor,
+            screenSize: amazonData.screenSize,
+            bandMaterial: amazonData.bandMaterial,
+            bandWidth: amazonData.bandWidth,
+            bandColor: amazonData.bandColor,
             rawData: amazonData.rawData
           },
           generatedListing: {

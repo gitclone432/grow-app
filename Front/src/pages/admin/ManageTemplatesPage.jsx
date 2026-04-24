@@ -982,7 +982,9 @@ export default function ManageTemplatesPage() {
                   {formData.asinAutomation?.enabled && (
                     <>
                       <Alert severity="info">
-                        Configure which eBay fields should auto-populate when users enter an ASIN while creating listings. The system will fetch Amazon data and use AI to generate field values.
+                        Configure which eBay fields auto-populate when users enter an ASIN. Expand each field row:
+                        use Direct Mapping to copy Amazon fields (compatibility, material, size, images, etc.), or AI Generated for prompts.
+                        Seller template overrides use the same Amazon field list.
                       </Alert>
                       
                       <Typography variant="subtitle2">

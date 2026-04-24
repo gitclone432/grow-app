@@ -30,7 +30,24 @@ export async function fetchAmazonData(asin, region = 'US') {
     const responseTime = Date.now() - startTime;
     
     // Extract fields
-    let { title, brand, price, description, images, color, compatibility, model, material, specialFeatures, size } = scrapedData;
+    let {
+      title,
+      brand,
+      price,
+      description,
+      images,
+      color,
+      compatibility,
+      model,
+      material,
+      specialFeatures,
+      size,
+      formFactor,
+      screenSize,
+      bandMaterial,
+      bandWidth,
+      bandColor
+    } = scrapedData;
     
     // Remove brand from title (maintain existing behavior)
     if (brand && brand !== 'Unbranded' && title.toLowerCase().includes(brand.toLowerCase())) {
@@ -59,6 +76,11 @@ export async function fetchAmazonData(asin, region = 'US') {
       material: material || '',
       specialFeatures: specialFeatures || '',
       size: size || '',
+      formFactor: formFactor || '',
+      screenSize: screenSize || '',
+      bandMaterial: bandMaterial || '',
+      bandWidth: bandWidth || '',
+      bandColor: bandColor || '',
       rawData: scrapedData // Store scraped data for debugging
     };
     
@@ -104,13 +126,26 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
     promptLength: c.promptTemplate?.length || 0
   })), null, 2));
   
-  // Placeholder data for AI prompts
+  // Placeholder data for AI prompts ({key} tokens in replacePlaceholders)
+  const imagesJoined = Array.isArray(amazonData.images) ? amazonData.images.join(' | ') : '';
   const placeholderData = {
-    title: amazonData.title,
-    brand: amazonData.brand,
-    description: amazonData.description,
-    price: amazonData.price,
-    asin: amazonData.asin
+    title: amazonData.title || '',
+    brand: amazonData.brand || '',
+    description: amazonData.description || '',
+    price: amazonData.price || '',
+    asin: amazonData.asin || '',
+    images: imagesJoined,
+    color: amazonData.color || '',
+    compatibility: amazonData.compatibility || '',
+    model: amazonData.model || '',
+    material: amazonData.material || '',
+    specialFeatures: amazonData.specialFeatures || '',
+    size: amazonData.size || '',
+    screenSize: amazonData.screenSize || '',
+    formFactor: amazonData.formFactor || '',
+    bandMaterial: amazonData.bandMaterial || '',
+    bandWidth: amazonData.bandWidth || '',
+    bandColor: amazonData.bandColor || ''
   };
   
   console.log(`📝 Placeholder data:`, JSON.stringify(placeholderData, null, 2));
@@ -179,7 +214,9 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
       }
       
       const fieldLabel = config.fieldType === 'custom' ? `[Custom] ${config.ebayField}` : config.ebayField;
-      console.log(`Auto-filled ${fieldLabel}: ${targetObject[config.ebayField]?.substring(0, 50)}...`);
+      const filled = targetObject[config.ebayField];
+      const filledPreview = typeof filled === 'string' ? filled.substring(0, 50) : String(filled ?? '').substring(0, 50);
+      console.log(`Auto-filled ${fieldLabel}: ${filledPreview}...`);
       
     } catch (error) {
       console.error(`[ASIN: ${amazonData.asin}] Error processing direct mapping for ${config.ebayField}:`, error);

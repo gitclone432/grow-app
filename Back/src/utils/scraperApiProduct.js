@@ -44,6 +44,36 @@ function cleanText(str) {
     .trim();
 }
 
+function normalizeValue(value, separator = ', ') {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) {
+    return value
+      .map(v => String(v || '').trim())
+      .filter(Boolean)
+      .join(separator);
+  }
+  if (typeof value === 'number') return String(value);
+  return String(value).trim();
+}
+
+/** Top-line brand varies: "Visit the X Store", "Brand: X", or only product_information.brand_name */
+function extractStructuredBrand(data) {
+  if (!data) return '';
+  let fromByline = data.brand || '';
+  fromByline = fromByline
+    .replace(/^Visit the /i, '')
+    .replace(/ Store$/i, '')
+    .replace(/^Brand:\s*/i, '')
+    .trim();
+  const cleaned = cleanText(fromByline);
+  if (cleaned) return cleaned;
+  return cleanText(
+    data.product_information?.brand_name ||
+      data.product_information?.brand ||
+      ''
+  );
+}
+
 /**
  * Extract price from structured API response
  */
@@ -95,6 +125,9 @@ function extractColor(data) {
 function extractCompatibility(data) {
   if (!data) return '';
 
+  if (data.product_information?.compatible_with_vehicle_type) {
+    return normalizeValue(data.product_information.compatible_with_vehicle_type);
+  }
   // Try dedicated compatible_devices / compatible_phone_models fields
   if (data.product_information?.compatible_devices) {
     const v = data.product_information.compatible_devices;
@@ -117,6 +150,9 @@ function extractCompatibility(data) {
 function extractModel(data) {
   if (!data) return '';
 
+  if (data.product_information?.model_number) {
+    return String(data.product_information.model_number);
+  }
   // Most reliable: product_information.item_model_number
   if (data.product_information?.item_model_number) {
     return String(data.product_information.item_model_number);
@@ -151,6 +187,20 @@ function extractMaterial(data) {
   if (data.product_information?.outer_material) {
     return String(data.product_information.outer_material);
   }
+  if (data.product_information?.enclosure_material) {
+    return String(data.product_information.enclosure_material);
+  }
+
+  // Fallback for categories where material is only mentioned in prose.
+  const materialText = normalizeValue(
+    data.small_description || data.full_description || data.name || ''
+  ).toLowerCase();
+  const materialMatch = materialText.match(
+    /\b(leather|genuine leather|crazy horse leather|oxford fabric|nylon|silicone|rubber|stainless steel|canvas|metal)\b/
+  );
+  if (materialMatch) {
+    return materialMatch[0];
+  }
 
   return '';
 }
@@ -161,6 +211,9 @@ function extractMaterial(data) {
 function extractSpecialFeatures(data) {
   if (!data) return '';
 
+  if (data.product_information?.additional_features) {
+    return normalizeValue(data.product_information.additional_features);
+  }
   if (data.product_information?.special_features) {
     const v = data.product_information.special_features;
     return Array.isArray(v) ? v.join(', ') : String(v);
@@ -169,6 +222,18 @@ function extractSpecialFeatures(data) {
     const v = data.product_information.special_feature;
     return Array.isArray(v) ? v.join(', ') : String(v);
   }
+
+  // Category-specific specs (automotive, covers, etc.) — Amazon key names vary by vertical
+  const pi = data.product_information || {};
+  const parts = [];
+  if (pi.item_type_name) parts.push(String(pi.item_type_name));
+  if (pi.fit_type) parts.push(`Fit: ${pi.fit_type}`);
+  if (pi.automotive_fit_type && pi.automotive_fit_type !== pi.fit_type) {
+    parts.push(`Automotive fit: ${pi.automotive_fit_type}`);
+  }
+  if (pi.ultraviolet_light_protection) parts.push(`UV: ${pi.ultraviolet_light_protection}`);
+  if (pi.water_resistance_level) parts.push(`Water: ${pi.water_resistance_level}`);
+  if (parts.length) return parts.join(' | ');
 
   return '';
 }
@@ -185,6 +250,9 @@ function extractSize(data) {
   if (data.product_information?.item_size) {
     return String(data.product_information.item_size);
   }
+  if (data.product_information?.coverage) {
+    return String(data.product_information.coverage);
+  }
   if (data.product_information?.item_dimensions) {
     return String(data.product_information.item_dimensions);
   }
@@ -194,6 +262,53 @@ function extractSize(data) {
     if (selected?.value) return selected.value;
   }
 
+  // Some products expose size ranges only in title/small_description.
+  const sizeText = normalizeValue(data.small_description || data.name || '');
+  const mmRange = sizeText.match(/\b\d{1,2}\s*mm(?:[^\n]{0,40}\b\d{1,2}\s*mm)+\b/i);
+  if (mmRange) {
+    return mmRange[0].replace(/\s+/g, ' ').trim();
+  }
+
+  return '';
+}
+
+function extractFormFactor(data) {
+  if (!data) return '';
+  return normalizeValue(data.product_information?.form_factor);
+}
+
+function extractScreenSize(data) {
+  if (!data) return '';
+  return normalizeValue(data.product_information?.screen_size);
+}
+
+function extractBandColor(data) {
+  if (!data) return '';
+  const color = extractColor(data);
+  if (color) return color;
+  return normalizeValue(data.product_information?.band_color);
+}
+
+function extractBandMaterial(data) {
+  if (!data) return '';
+  const pi = data.product_information || {};
+  if (pi.band_material_type) return normalizeValue(pi.band_material_type);
+  if (pi.band_material) return normalizeValue(pi.band_material);
+  return extractMaterial(data);
+}
+
+function extractBandWidth(data) {
+  if (!data) return '';
+  const pi = data.product_information || {};
+  if (pi.band_width) return normalizeValue(pi.band_width);
+  if (pi.band_size) return normalizeValue(pi.band_size);
+
+  // Common watch-band fallback from title/short text (e.g., 14mm ... 24mm)
+  const text = normalizeValue(data.small_description || data.name || '');
+  const rangeMatch = text.match(/\b\d{1,2}\s*mm(?:[^\n]{0,40}\b\d{1,2}\s*mm)+\b/i);
+  if (rangeMatch) return rangeMatch[0].replace(/\s+/g, ' ').trim();
+  const singleMatch = text.match(/\b\d{1,2}\s*mm\b/i);
+  if (singleMatch) return singleMatch[0].replace(/\s+/g, ' ').trim();
   return '';
 }
 
@@ -562,17 +677,21 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
 
         // Extract product data from structured JSON
         const title = cleanText(data.name || '');
-        const brand = cleanText(data.brand?.replace(/^Visit the /, '').replace(/ Store$/, '') || '');
+        const brand = extractStructuredBrand(data);
         const price = extractPriceFromStructured(data);
         
         // Extract description — layered fallback chain:
         // 1. feature_bullets (bulleted list, best source)
-        // 2. full_description (prose text from product description section)
+        // 2. small_description (if provided by scraper)
+        // 3. full_description (prose text from product description section)
         // 3. empty string (logged for debugging)
         const features = data.feature_bullets || [];
         let description = features.join('\n');
         if (!description) {
-          if (data.full_description) {
+          if (data.small_description) {
+            description = cleanText(data.small_description);
+            console.log(`[ScraperAPI] ℹ️ Used fallback small_description for ${asin}`);
+          } else if (data.full_description) {
             description = cleanText(data.full_description);
             console.log(`[ScraperAPI] ℹ️ Used fallback full_description for ${asin}`);
           } else {
@@ -581,13 +700,18 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
           }
         }
         
-        // Extract color, compatibility and new enrichment fields
+        // Extract color, compatibility and enrichment fields
         const color = extractColor(data);
         const compatibility = extractCompatibility(data);
         const model = extractModel(data);
         const material = extractMaterial(data);
         const specialFeatures = extractSpecialFeatures(data);
         const size = extractSize(data);
+        const formFactor = extractFormFactor(data);
+        const screenSize = extractScreenSize(data);
+        const bandMaterial = extractBandMaterial(data);
+        const bandWidth = extractBandWidth(data);
+        const bandColor = extractBandColor(data);
         
         // Use high_res_images if available, otherwise fall back to regular images
         // Take ONLY first 6 images (main product images, not all variants)
@@ -647,6 +771,11 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         if (material) extractedFields.push('material');
         if (specialFeatures) extractedFields.push('specialFeatures');
         if (size) extractedFields.push('size');
+        if (formFactor) extractedFields.push('formFactor');
+        if (screenSize) extractedFields.push('screenSize');
+        if (bandMaterial) extractedFields.push('bandMaterial');
+        if (bandWidth) extractedFields.push('bandWidth');
+        if (bandColor) extractedFields.push('bandColor');
 
         trackApiUsage({
           service: 'ScraperAPI',
@@ -672,6 +801,11 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
           material: material || '',
           specialFeatures: specialFeatures || '',
           size: size || '',
+          formFactor: formFactor || '',
+          screenSize: screenSize || '',
+          bandMaterial: bandMaterial || '',
+          bandWidth: bandWidth || '',
+          bandColor: bandColor || '',
           rawData: data // Store full response for debugging
         };
       } catch (error) {
