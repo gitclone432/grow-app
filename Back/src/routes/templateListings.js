@@ -93,7 +93,11 @@ function mergeTemplateCoreFields(coreFieldDefaults = {}, autoCoreFields = {}, am
   const normalizedAiBullets = normalizeAiFeatureBullets(aiDescription);
   const fallbackBullets = buildFallbackFeatureBullets(amazonData?.description || '');
   const resolvedBullets = normalizedAiBullets || fallbackBullets;
-  const titleClean = typeof merged?.title === 'string' ? merged.title : '';
+  // Use source Amazon title in description placeholders when available,
+  // so description content is not limited by eBay title-length constraints.
+  const titleClean = typeof amazonData?.title === 'string' && amazonData.title.trim()
+    ? amazonData.title.trim()
+    : (typeof merged?.title === 'string' ? merged.title : '');
   const imageUrls = Array.isArray(amazonData?.images) ? amazonData.images : [];
 
   let composedDescription = templateDescription;
@@ -753,7 +757,8 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             screenSize: amazonData.screenSize,
             bandMaterial: amazonData.bandMaterial,
             bandWidth: amazonData.bandWidth,
-            bandColor: amazonData.bandColor
+            bandColor: amazonData.bandColor,
+            includedComponents: amazonData.includedComponents
           },
           generatedListing: {
             ...mergedCoreFields,
@@ -966,12 +971,14 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           model: doc.model || '',
           material: doc.material || '',
           specialFeatures: doc.specialFeatures || '',
-          size: doc.size || ''
+          size: doc.size || '',
+          includedComponents: doc.includedComponents || ''
         } : {
           asin,
           title: '', brand: '', price: '', description: '',
           images: [], color: '', compatibility: '',
-          model: '', material: '', specialFeatures: '', size: ''
+          model: '', material: '', specialFeatures: '', size: '',
+          includedComponents: ''
         };
 
         const { coreFields, customFields, pricingCalculation } =
@@ -1026,7 +1033,8 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             screenSize: amazonData.screenSize,
             bandMaterial: amazonData.bandMaterial,
             bandWidth: amazonData.bandWidth,
-            bandColor: amazonData.bandColor
+            bandColor: amazonData.bandColor,
+            includedComponents: amazonData.includedComponents
           },
           generatedListing: {
             ...mergedCoreFields,
@@ -2394,6 +2402,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             bandMaterial: amazonData.bandMaterial,
             bandWidth: amazonData.bandWidth,
             bandColor: amazonData.bandColor,
+            includedComponents: amazonData.includedComponents,
             rawData: amazonData.rawData
           },
           generatedListing: {

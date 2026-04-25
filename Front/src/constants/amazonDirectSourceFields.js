@@ -19,7 +19,8 @@ export const AMAZON_DIRECT_SOURCE_OPTIONS = [
   { value: 'screenSize', label: 'Amazon Screen Size' },
   { value: 'bandMaterial', label: 'Amazon Band Material' },
   { value: 'bandWidth', label: 'Amazon Band Width' },
-  { value: 'bandColor', label: 'Amazon Band Color' }
+  { value: 'bandColor', label: 'Amazon Band Color' },
+  { value: 'includedComponents', label: 'Amazon Included Components' }
 ];
 
 /** Placeholders supported in AI prompts (subset of amazonData + joined images). */
@@ -40,5 +41,6 @@ export const AMAZON_AI_PLACEHOLDER_CHIPS = [
   '{formFactor}',
   '{bandMaterial}',
   '{bandWidth}',
-  '{bandColor}'
+  '{bandColor}',
+  '{includedComponents}'
 ];

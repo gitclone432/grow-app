@@ -46,7 +46,8 @@ export async function fetchAmazonData(asin, region = 'US') {
       screenSize,
       bandMaterial,
       bandWidth,
-      bandColor
+      bandColor,
+      includedComponents
     } = scrapedData;
     
     // Remove brand from title (maintain existing behavior)
@@ -81,6 +82,7 @@ export async function fetchAmazonData(asin, region = 'US') {
       bandMaterial: bandMaterial || '',
       bandWidth: bandWidth || '',
       bandColor: bandColor || '',
+      includedComponents: includedComponents || '',
       rawData: scrapedData // Store scraped data for debugging
     };
     
@@ -145,7 +147,8 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
     formFactor: amazonData.formFactor || '',
     bandMaterial: amazonData.bandMaterial || '',
     bandWidth: amazonData.bandWidth || '',
-    bandColor: amazonData.bandColor || ''
+    bandColor: amazonData.bandColor || '',
+    includedComponents: amazonData.includedComponents || ''
   };
   
   console.log(`📝 Placeholder data:`, JSON.stringify(placeholderData, null, 2));

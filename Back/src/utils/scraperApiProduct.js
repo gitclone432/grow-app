@@ -56,6 +56,33 @@ function normalizeValue(value, separator = ', ') {
   return String(value).trim();
 }
 
+/**
+ * ScraperAPI `small_description` sometimes includes a spec header and then
+ * an "About this item" section separated by pipes.
+ * Return only the human-readable bullets from that section, one per line.
+ */
+function extractDescriptionFromSmallDescription(smallDescription) {
+  const raw = cleanText(smallDescription || '');
+  if (!raw) return '';
+
+  // Split into segments while preserving natural sentence spacing.
+  const segments = raw
+    .split('|')
+    .map(s => cleanText(s))
+    .filter(Boolean);
+  if (!segments.length) return raw;
+
+  const aboutIdx = segments.findIndex(s => /^about this item$/i.test(s));
+  const fromAbout = aboutIdx >= 0 ? segments.slice(aboutIdx + 1) : segments;
+
+  // Drop spec-like leading rows when "About this item" is missing.
+  const content = aboutIdx >= 0
+    ? fromAbout
+    : fromAbout.filter(s => !/^[a-z][a-z0-9\s/_-]{1,60}:\s*.+/i.test(s));
+
+  return content.join('\n').trim() || raw;
+}
+
 /** Top-line brand varies: "Visit the X Store", "Brand: X", or only product_information.brand_name */
 function extractStructuredBrand(data) {
   if (!data) return '';
@@ -102,21 +129,31 @@ function extractPriceFromStructured(data) {
  */
 function extractColor(data) {
   if (!data) return '';
-  
-  // Try product_information.color first
-  if (data.product_information?.color) {
-    return data.product_information.color;
-  }
-  
-  // Try customization_options.color for selected variant
+
+  // Prefer selected variant color (product_information.color is often a kit/SKU label)
   if (data.customization_options?.color && Array.isArray(data.customization_options.color)) {
     const selectedColor = data.customization_options.color.find(c => c.is_selected);
     if (selectedColor?.value) {
       return selectedColor.value;
     }
   }
-  
+
+  if (data.product_information?.color) {
+    return String(data.product_information.color);
+  }
+
   return '';
+}
+
+/**
+ * Kit / bundle contents from structured API (product_information.included_components)
+ */
+function extractIncludedComponents(data) {
+  if (!data) return '';
+  const pi = data.product_information || {};
+  const v = pi.included_components ?? pi.includedComponents;
+  if (v == null || v === '') return '';
+  return normalizeValue(v);
 }
 
 /**
@@ -127,6 +164,12 @@ function extractCompatibility(data) {
 
   if (data.product_information?.compatible_with_vehicle_type) {
     return normalizeValue(data.product_information.compatible_with_vehicle_type);
+  }
+  if (data.product_information?.fit_type) {
+    return normalizeValue(data.product_information.fit_type);
+  }
+  if (data.product_information?.automotive_fit_type) {
+    return normalizeValue(data.product_information.automotive_fit_type);
   }
   // Try dedicated compatible_devices / compatible_phone_models fields
   if (data.product_information?.compatible_devices) {
@@ -140,6 +183,20 @@ function extractCompatibility(data) {
   if (data.product_information?.compatibility) {
     return String(data.product_information.compatibility);
   }
+
+  // Title fallback (common for automotive accessories)
+  const nameText = normalizeValue(data.name || '');
+  const compatibleWithMatch = nameText.match(/compatible with\s+(.+?)(?:,|\(|-|\||$)/i);
+  if (compatibleWithMatch?.[1]) {
+    return compatibleWithMatch[1].trim();
+  }
+
+  // Prose fallback (common on automotive/covers/accessories)
+  const text = normalizeValue(
+    data.small_description || data.full_description || data.name || ''
+  ).toLowerCase();
+  if (text.includes('universal fit')) return 'Universal Fit';
+  if (text.includes('universal compatibility')) return 'Universal';
 
   return '';
 }
@@ -196,7 +253,7 @@ function extractMaterial(data) {
     data.small_description || data.full_description || data.name || ''
   ).toLowerCase();
   const materialMatch = materialText.match(
-    /\b(leather|genuine leather|crazy horse leather|oxford fabric|nylon|silicone|rubber|stainless steel|canvas|metal)\b/
+    /\b(leather|genuine leather|crazy horse leather|oxford fabric|nylon|silicone|rubber|stainless steel|canvas|metal|carbon fiber|fiberglass)\b/
   );
   if (materialMatch) {
     return materialMatch[0];
@@ -222,6 +279,9 @@ function extractSpecialFeatures(data) {
     const v = data.product_information.special_feature;
     return Array.isArray(v) ? v.join(', ') : String(v);
   }
+  if (data.product_information?.other_special_features_of_the_product) {
+    return normalizeValue(data.product_information.other_special_features_of_the_product);
+  }
 
   // Category-specific specs (automotive, covers, etc.) — Amazon key names vary by vertical
   const pi = data.product_information || {};
@@ -234,6 +294,21 @@ function extractSpecialFeatures(data) {
   if (pi.ultraviolet_light_protection) parts.push(`UV: ${pi.ultraviolet_light_protection}`);
   if (pi.water_resistance_level) parts.push(`Water: ${pi.water_resistance_level}`);
   if (parts.length) return parts.join(' | ');
+
+  // Sporting / fishing — Amazon uses fishing_* keys on rod & reel listings
+  if (pi.fishing_technique || pi.fishing_rod_power || pi.target_species) {
+    const fp = [];
+    if (pi.fishing_technique) fp.push(`Technique: ${pi.fishing_technique}`);
+    if (pi.target_species) fp.push(`Target: ${pi.target_species}`);
+    if (pi.fishing_rod_power) fp.push(`Rod power: ${pi.fishing_rod_power}`);
+    if (pi.rod_length) fp.push(`Rod length: ${pi.rod_length}`);
+    if (pi.line_weight) fp.push(`Line weight: ${pi.line_weight}`);
+    if (pi.fishing_line_type) fp.push(`Line type: ${pi.fishing_line_type}`);
+    if (pi.line_capacity) fp.push(`Line capacity: ${pi.line_capacity}`);
+    if (pi.gearbox_ratio) fp.push(`Gear ratio: ${pi.gearbox_ratio}`);
+    if (pi.hand_orientation) fp.push(`Hand: ${pi.hand_orientation}`);
+    if (fp.length) return fp.join(' | ');
+  }
 
   return '';
 }
@@ -255,6 +330,9 @@ function extractSize(data) {
   }
   if (data.product_information?.item_dimensions) {
     return String(data.product_information.item_dimensions);
+  }
+  if (data.product_information?.product_dimensions) {
+    return String(data.product_information.product_dimensions);
   }
   // Customization size option (variant selector)
   if (data.customization_options?.size && Array.isArray(data.customization_options.size)) {
@@ -689,7 +767,7 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         let description = features.join('\n');
         if (!description) {
           if (data.small_description) {
-            description = cleanText(data.small_description);
+            description = extractDescriptionFromSmallDescription(data.small_description);
             console.log(`[ScraperAPI] ℹ️ Used fallback small_description for ${asin}`);
           } else if (data.full_description) {
             description = cleanText(data.full_description);
@@ -712,6 +790,7 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         const bandMaterial = extractBandMaterial(data);
         const bandWidth = extractBandWidth(data);
         const bandColor = extractBandColor(data);
+        const includedComponents = extractIncludedComponents(data);
         
         // Use high_res_images if available, otherwise fall back to regular images
         // Take ONLY first 6 images (main product images, not all variants)
@@ -776,6 +855,7 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         if (bandMaterial) extractedFields.push('bandMaterial');
         if (bandWidth) extractedFields.push('bandWidth');
         if (bandColor) extractedFields.push('bandColor');
+        if (includedComponents) extractedFields.push('includedComponents');
 
         trackApiUsage({
           service: 'ScraperAPI',
@@ -806,6 +886,7 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
           bandMaterial: bandMaterial || '',
           bandWidth: bandWidth || '',
           bandColor: bandColor || '',
+          includedComponents: includedComponents || '',
           rawData: data // Store full response for debugging
         };
       } catch (error) {
