@@ -124,19 +124,28 @@ function normalizeEbayOAuthCode(code) {
 // Set RUNNER_ID=render in Render's env vars, leave unset (defaults to 'local') locally.
 const RUNNER_ID = process.env.RUNNER_ID || 'local';
 
-const DEFAULT_NEW_SELLER_SYNC_START = new Date(Date.UTC(2026, 2, 1, 0, 0, 0, 0));
 const EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS = 120;
+/** Fulfillment getOrders: practical backfill window for first sync (days). */
+const EBAY_ORDER_INITIAL_LOOKBACK_DAYS = (() => {
+  const n = parseInt(process.env.EBAY_ORDER_INITIAL_LOOKBACK_DAYS || '90', 10);
+  if (!Number.isFinite(n)) return 90;
+  return Math.min(90, Math.max(1, n));
+})();
 
 function getDefaultNewSellerSyncStart() {
-  return new Date(DEFAULT_NEW_SELLER_SYNC_START);
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS);
+  return d;
 }
 
 function getEffectiveInitialSyncDate(initialSyncDate) {
-  const defaultStart = getDefaultNewSellerSyncStart();
-  if (!initialSyncDate) return defaultStart;
+  const rollingDefault = getDefaultNewSellerSyncStart();
+  if (!initialSyncDate) return rollingDefault;
 
   const configuredStart = new Date(initialSyncDate);
-  return configuredStart < defaultStart ? defaultStart : configuredStart;
+  if (Number.isNaN(configuredStart.getTime())) return rollingDefault;
+  // Respect seller-configured backfill; range is still clamped to eBay max (120d) per request.
+  return configuredStart;
 }
 
 function getClampedSellerListStart(startTimeFrom, startTimeTo) {
@@ -1983,26 +1992,20 @@ router.get('/orders', async (req, res) => {
     const lastOrder = await Order.findOne({ seller: seller._id }).sort({ lastModifiedDate: -1 });
     const lastModifiedDate = lastOrder ? lastOrder.lastModifiedDate : null;
 
-    // Build eBay API params
-    const params = {
-      limit: orderCount === 0 ? 15 : 200 // If no orders exist, fetch only 5, else fetch all new/updated
-    };
-
-    // If we have orders already, only fetch orders modified after the last one
-    if (lastModifiedDate) {
-      params.filter = `lastmodifieddate:[${new Date(lastModifiedDate).toISOString()}..${new Date().toISOString()}]`;
+    const toDate = new Date();
+    let filter;
+    if (orderCount === 0 || !lastModifiedDate) {
+      const fromDate = new Date(Date.now() - EBAY_ORDER_INITIAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+      filter = `creationdate:[${fromDate.toISOString()}..${toDate.toISOString()}]`;
+    } else {
+      filter = `lastmodifieddate:[${new Date(lastModifiedDate).toISOString()}..${toDate.toISOString()}]`;
     }
 
-    // Fetch orders from eBay API
-    const ordersRes = await axios.get('https://api.ebay.com/sell/fulfillment/v1/order', {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      params
-    });
-
-    const ebayOrders = ordersRes.data.orders || [];
+    const ebayOrders = await fetchAllOrdersWithPagination(
+      accessToken,
+      filter,
+      `seller-${sellerId}`
+    );
 
     // Save/update orders in database
     for (const order of ebayOrders) {
@@ -4814,12 +4817,13 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
     }
 
     const nowUTC = Date.now();
-    const thirtyDaysAgoMs = 30 * 24 * 60 * 60 * 1000;
-    const thirtyDaysAgo = new Date(nowUTC - thirtyDaysAgoMs);
+    const orderPollLookbackDays = Math.min(90, parseInt(process.env.EBAY_ORDER_POLL_LOOKBACK_DAYS || '90', 10) || 90);
+    const lookbackMs = orderPollLookbackDays * 24 * 60 * 60 * 1000;
+    const lookbackFloor = new Date(nowUTC - lookbackMs);
 
     console.log(`\n========== POLLING ORDER UPDATES FOR ${sellers.length} SELLERS ==========`);
     console.log(`UTC Time: ${new Date(nowUTC).toISOString()}`);
-    console.log(`Checking orders from: ${thirtyDaysAgo.toISOString()}`);
+    console.log(`Checking orders from: ${lookbackFloor.toISOString()} (${orderPollLookbackDays}d floor)`);
 
     const pollingPromises = sellers.map(async (seller) => {
       const sellerName = seller.user?.username || seller.user?.email || seller._id.toString();
@@ -4844,15 +4848,15 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
           console.log(`[${sellerName}] Latest order: ${latestOrder.orderId}`);
           console.log(`[${sellerName}] Latest lastModifiedDate: ${sinceDate.toISOString()}`);
         } else {
-          // No orders yet - use initialSyncDate or 30 days ago
-          sinceDate = seller.initialSyncDate || thirtyDaysAgo;
+          // No orders yet - use initialSyncDate or lookback floor
+          sinceDate = seller.initialSyncDate || lookbackFloor;
           console.log(`[${sellerName}] No existing orders - using: ${sinceDate.toISOString()}`);
         }
 
-        // Ensure we don't go beyond 30 days
-        if (sinceDate < thirtyDaysAgo) {
-          sinceDate = thirtyDaysAgo;
-          console.log(`[${sellerName}] Capped to 30-day limit`);
+        // Fulfillment filter is effectively limited to recent history; keep a configurable floor.
+        if (sinceDate < lookbackFloor) {
+          sinceDate = lookbackFloor;
+          console.log(`[${sellerName}] Capped to ${orderPollLookbackDays}-day lookback floor`);
         }
 
         // Token refresh
@@ -4892,10 +4896,10 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
 
         const recentOrders = await Order.find({
           seller: seller._id,
-          creationDate: { $gte: thirtyDaysAgo }
+          creationDate: { $gte: lookbackFloor }
         }).select('orderId lastModifiedDate creationDate');
 
-        console.log(`[${sellerName}] ${recentOrders.length} orders < 30 days old`);
+        console.log(`[${sellerName}] ${recentOrders.length} orders within lookback window`);
 
         if (recentOrders.length > 0) {
 
@@ -5160,7 +5164,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
     }
 
     const nowUTC = Date.now();
-    const days = Math.min(Math.max(parseInt(req.body.days) || 10, 1), 30); // Default 10, max 30
+    const days = Math.min(Math.max(parseInt(req.body.days) || 10, 1), 90); // Default 10, max 90
     const sinceDate = new Date(nowUTC - days * 24 * 60 * 60 * 1000);
 
     console.log(`\n========== RESYNC RECENT ORDERS (${days} DAYS) FOR ${sellers.length} SELLERS ==========`);
@@ -9119,10 +9123,9 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
 
     const token = await ensureValidToken(seller);
 
-    // Use a fixed start date for initial sync (Feb 3, 2026)
-    const defaultStartDate = new Date('2026-02-03T00:00:00Z');
-    const startTimeFrom = seller.lastAllListingsPolledAt || defaultStartDate;
     const startTimeTo = new Date();
+    let startTimeFrom = seller.lastAllListingsPolledAt || getEffectiveInitialSyncDate(seller.initialSyncDate);
+    startTimeFrom = getClampedSellerListStart(startTimeFrom, startTimeTo);
 
     let page = 1;
     let totalPages = 1;
