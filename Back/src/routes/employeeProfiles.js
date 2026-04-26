@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { requireAuth, requireAuthFile } from '../middleware/auth.js';
 import EmployeeProfile from '../models/EmployeeProfile.js';
 import User from '../models/User.js';
+import Seller from '../models/Seller.js';
+import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import multer from 'multer';
 
 const router = Router();
@@ -510,6 +512,13 @@ router.delete('/:id', requireAuth, async (req, res) => {
 
     // Delete the associated user account if it exists
     if (userId) {
+      // Delete seller record tied to this user (prevents stale seller from appearing in seller dropdowns/pages)
+      const seller = await Seller.findOne({ user: userId }).select('_id').lean();
+      if (seller?._id) {
+        await UserSellerAssignment.deleteMany({ seller: seller._id });
+        await Seller.findByIdAndDelete(seller._id);
+      }
+
       await User.findByIdAndDelete(userId);
     }
 

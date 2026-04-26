@@ -6,13 +6,20 @@ import UserSellerAssignment from '../models/UserSellerAssignment.js';
 
 const router = Router();
 
+async function getActiveUserIdsSet() {
+  const users = await User.find({ active: true }).select('_id').lean();
+  return users.map(u => u._id);
+}
+
 // List all sellers (for admin dashboard)
 // Superadmin sees all; other users see only their assigned sellers
 router.get('/all', requireAuth, async (req, res) => {
   try {
+    const activeUserIds = await getActiveUserIdsSet();
+
     if (req.user.role === 'superadmin') {
-      // Superadmin sees all sellers
-      const sellers = await Seller.find().populate('user', 'username email');
+      // Superadmin sees all sellers with an active linked user
+      const sellers = await Seller.find({ user: { $in: activeUserIds } }).populate('user', 'username email active');
       return res.json(sellers);
     }
 
@@ -23,12 +30,15 @@ router.get('/all', requireAuth, async (req, res) => {
     if (assignedSellerIds.length === 0) {
       // No assignments — return all sellers (backward compat for roles that had full access before)
       // This preserves existing behavior for users who haven't been explicitly assigned sellers
-      const sellers = await Seller.find().populate('user', 'username email');
+      const sellers = await Seller.find({ user: { $in: activeUserIds } }).populate('user', 'username email active');
       return res.json(sellers);
     }
 
     // Filter to only assigned sellers
-    const sellers = await Seller.find({ _id: { $in: assignedSellerIds } }).populate('user', 'username email');
+    const sellers = await Seller.find({
+      _id: { $in: assignedSellerIds },
+      user: { $in: activeUserIds }
+    }).populate('user', 'username email active');
     res.json(sellers);
   } catch (err) {
     console.error('Error fetching sellers:', err);
@@ -40,7 +50,8 @@ router.get('/all', requireAuth, async (req, res) => {
 // All authenticated users can see all sellers
 router.get('/all-unfiltered', requireAuth, async (req, res) => {
   try {
-    const sellers = await Seller.find().populate('user', 'username email');
+    const activeUserIds = await getActiveUserIdsSet();
+    const sellers = await Seller.find({ user: { $in: activeUserIds } }).populate('user', 'username email active');
     res.json(sellers);
   } catch (err) {
     console.error('Error fetching sellers:', err);
