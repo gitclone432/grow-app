@@ -110,6 +110,7 @@ export const PAGE_REGISTRY = [
   { id: 'LeaveAdmin', name: 'Leave Admin', path: '/leave-admin', category: 'hrManagement', defaultRoles: ['superadmin', 'hradmin'] },
   { id: 'EmployeeManagement', name: 'Employee Management', path: '/employee-management', category: 'hrManagement', defaultRoles: ['superadmin', 'hradmin'] },
   { id: 'AddUser', name: 'Add User', path: '/add-user', category: 'hrManagement', defaultRoles: ['superadmin', 'listingadmin', 'hradmin', 'operationhead'] },
+  { id: 'AddSeller', name: 'Add Seller', path: '/add-seller', category: 'hrManagement', defaultRoles: ['superadmin', 'hradmin', 'operationhead'] },
   { id: 'UserSellerAssignments', name: 'User-Seller Assignments', path: '/user-seller-assignments', category: 'hrManagement', defaultRoles: ['superadmin', 'hradmin', 'hr'] },
   { id: 'ViewAllMessages', name: 'View All Messages', path: '/internal-messages-admin', category: 'hrManagement', defaultRoles: ['superadmin'] },
   { id: 'Attendance', name: 'Working Hours Tracking', path: '/attendance', category: 'hrManagement', defaultRoles: ['superadmin'] },

@@ -73,6 +73,7 @@ export const PAGE_DEFAULT_ROLES = {
   'LeaveAdmin': ['superadmin', 'hradmin'],
   'EmployeeManagement': ['superadmin', 'hradmin'],
   'AddUser': ['superadmin', 'listingadmin', 'hradmin', 'operationhead'],
+  'AddSeller': ['superadmin', 'hradmin', 'operationhead'],
   'UserSellerAssignments': ['superadmin', 'hradmin', 'hr'],
   'ViewAllMessages': ['superadmin'],
   'Attendance': ['superadmin'],

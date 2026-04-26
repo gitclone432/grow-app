@@ -33,6 +33,7 @@ import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import PersonOutlineIcon from '@mui/icons-material/PersonOutline';
 import ProductResearchPage from '../pages/admin/ProductResearchPage.jsx';
 import AddListerPage from '../pages/admin/AddListerPage.jsx';
+import AddSellerPage from '../pages/admin/AddSellerPage.jsx';
 import ListingManagementPage from '../pages/admin/ListingManagementPage.jsx';
 import ManagePlatformsPage from '../pages/admin/ManagePlatformsPage.jsx';
 import ManageStoresPage from '../pages/admin/ManageStoresPage.jsx';
@@ -297,6 +298,7 @@ const COMPONENT_MAP = {
   'LeaveAdmin': LeaveAdminPage,
   'EmployeeManagement': EmployeeManagementPage,
   'AddUser': AddListerPage,
+  'AddSeller': AddSellerPage,
   'UserSellerAssignments': UserSellerAssignmentPage,
   'ViewAllMessages': InternalMessagesAdminPage,
   'Attendance': AttendanceAdminPage,

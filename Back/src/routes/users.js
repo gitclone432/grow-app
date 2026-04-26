@@ -18,6 +18,33 @@ import {
 
 const router = Router();
 
+async function createUserWithOptionalSeller({
+  email,
+  username,
+  password,
+  newUserRole,
+  department
+}) {
+  const passwordHash = await bcrypt.hash(password, 10);
+  const isStrictTimer = newUserRole !== 'superadmin';
+
+  const user = await User.create({
+    email,
+    username,
+    passwordHash,
+    role: newUserRole,
+    department,
+    isStrictTimer
+  });
+
+  await EmployeeProfile.create({ user: user._id, email: user.email });
+  if (newUserRole === 'seller') {
+    await Seller.create({ user: user._id, ebayMarketplaces: [] });
+  }
+
+  return user;
+}
+
 // Superadmin creates all (productadmin, listingadmin, lister); Listing Admin creates listers only
 router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   const { role } = req.user;
@@ -75,7 +102,6 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
 
   const existingUsername = await User.findOne({ username });
   if (existingUsername) return res.status(409).json({ error: 'Username already in use' });
-  const passwordHash = await bcrypt.hash(password, 10);
 
   // Compute department rules
   let finalDepartment = department || '';
@@ -84,25 +110,13 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   // Compatibility admins and creating compatibility editors default to Compatibility
   if (role === 'compatibilityadmin' || newUserRole === 'compatibilityeditor') finalDepartment = 'Compatibility';
 
-  // Set isStrictTimer to false for superadmin, true for all others
-  const isStrictTimer = newUserRole !== 'superadmin';
-
-  const user = await User.create({
+  const user = await createUserWithOptionalSeller({
     email,
     username,
-    passwordHash,
-    role: newUserRole,
-    department: finalDepartment,
-    isStrictTimer
+    password,
+    newUserRole,
+    department: finalDepartment
   });
-
-  // Create an EmployeeProfile for the new user so they appear on admin pages immediately
-  await EmployeeProfile.create({ user: user._id, email: user.email });
-
-  // If creating a seller, also create a Seller document
-  if (newUserRole === 'seller') {
-    await Seller.create({ user: user._id, ebayMarketplaces: [] });
-  }
 
   try {
     const actorUser = await User.findById(req.user.userId).select('username email role').lean();
@@ -133,6 +147,66 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
     });
   } else {
     res.json({ id: user._id, email: user.email, username: user.username, role: user.role });
+  }
+});
+
+// Quick-create seller account from HR/Admin flow.
+// Role and department are enforced on backend regardless of client payload.
+router.post('/seller', requireAuth, async (req, res) => {
+  try {
+    const { role } = req.user;
+    if (!['superadmin', 'hradmin', 'operationhead'].includes(role)) {
+      return res.status(403).json({ error: 'Only superadmin, hradmin or operationhead can create sellers' });
+    }
+
+    const { username, password, email } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: 'username and password are required' });
+    }
+
+    if (email) {
+      const existingEmail = await User.findOne({ email });
+      if (existingEmail) return res.status(409).json({ error: 'Email already in use' });
+    }
+
+    const existingUsername = await User.findOne({ username });
+    if (existingUsername) return res.status(409).json({ error: 'Username already in use' });
+
+    const user = await createUserWithOptionalSeller({
+      email,
+      username,
+      password,
+      newUserRole: 'seller',
+      department: 'Executives'
+    });
+
+    try {
+      const actorUser = await User.findById(req.user.userId).select('username email role').lean();
+      const afterSnapshot = buildPermissionSnapshot(user);
+      await createPageAccessAuditLog({
+        actor: actorUser || { id: req.user.userId, username: 'Unknown', role: req.user.role },
+        target: user,
+        before: null,
+        after: afterSnapshot,
+        diff: diffPermissionSnapshots(null, afterSnapshot),
+        eventType: 'user_created',
+        source: 'seller_creation',
+        sessionInvalidated: false,
+        metadata: getRequestMetadata(req),
+      });
+    } catch (auditError) {
+      console.error('Failed to write page access audit log for seller creation:', auditError);
+    }
+
+    res.json({
+      id: user._id,
+      email: user.email,
+      username: user.username,
+      role: user.role,
+      department: user.department
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to create seller user' });
   }
 });
 
