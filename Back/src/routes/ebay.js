@@ -1439,7 +1439,12 @@ function calculateOrderEarnings() {
 
 
 // --- NEW CONFIG: AUTOMATED WELCOME MESSAGE ---
-const ENABLE_AUTO_WELCOME = true; // Set to false to disable
+// Keep disabled by default to avoid backfill/polling sending messages to older orders.
+const ENABLE_AUTO_WELCOME = process.env.ENABLE_AUTO_WELCOME === 'true';
+const AUTO_WELCOME_MAX_ORDER_AGE_HOURS = Math.max(
+  1,
+  parseInt(process.env.AUTO_WELCOME_MAX_ORDER_AGE_HOURS || '24', 10) || 24
+);
 const WELCOME_TEMPLATE = `Hello {BUYER_NAME},
 
 Thank you for your recent purchase!
@@ -1453,6 +1458,27 @@ async function sendAutoWelcomeMessage(seller, order) {
   if (!ENABLE_AUTO_WELCOME) return;
 
   try {
+    // Never auto-message orders that are already fulfilled/refunded/cancelled.
+    if (order?.orderFulfillmentStatus === 'FULFILLED') return;
+    if (order?.orderPaymentStatus === 'FULLY_REFUNDED' || order?.orderPaymentStatus === 'PARTIALLY_REFUNDED') return;
+    if (order?.cancelStatus?.cancelState && order.cancelStatus.cancelState !== 'NONE_REQUESTED') return;
+
+    // Guard against backfilled/older orders during polling sync runs.
+    const orderCreatedAt = order?.creationDate ? new Date(order.creationDate) : null;
+    if (orderCreatedAt && !Number.isNaN(orderCreatedAt.getTime())) {
+      const ageMs = Date.now() - orderCreatedAt.getTime();
+      if (ageMs > AUTO_WELCOME_MAX_ORDER_AGE_HOURS * 60 * 60 * 1000) return;
+    }
+
+    // Prevent duplicate auto-welcome messages for the same order.
+    const existingAutoWelcome = await Message.exists({
+      seller: seller._id,
+      orderId: order.orderId,
+      sender: 'SELLER',
+      subject: { $regex: /^Thanks for your order!/i }
+    });
+    if (existingAutoWelcome) return;
+
     const buyerUsername = order.buyer?.username;
     const buyerName = order.buyer?.buyerRegistrationAddress?.fullName || buyerUsername;
 
