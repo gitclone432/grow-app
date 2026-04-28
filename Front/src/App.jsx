@@ -19,10 +19,6 @@ import SalaryPage from './pages/admin/SalaryPage.jsx';
 import IdeasPage from './pages/IdeasPage.jsx';
 
 import { setAuthToken } from './lib/api'
-import { AttendanceProvider } from './context/AttendanceContext';
-import AttendanceModal from './components/Attendance/AttendanceModal';
-import AttendanceTimer from './components/Attendance/AttendanceTimer';
-import TimerPausedModal from './components/Attendance/TimerPausedModal';
 import { PAGE_REGISTRY } from './constants/pages';
 import { createAppTheme } from './theme/appTheme';
 
@@ -152,10 +148,6 @@ export default function App() {
     <ThemeProvider theme={theme}>
       <CssBaseline />
       {token && user ? (
-        <AttendanceProvider user={user}>
-          <AttendanceModal />
-          <TimerPausedModal />
-          <AttendanceTimer />
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage onLogin={login} />} />
@@ -212,7 +204,6 @@ export default function App() {
             />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </AttendanceProvider>
       ) : (
         <Routes>
           <Route path="/" element={<LandingPage />} />

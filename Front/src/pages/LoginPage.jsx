@@ -8,10 +8,10 @@ import api from '../lib/api.js';
 import { BRAND_DARK, BRAND_DARK_ALT, BRAND_DARK_DEEP, BRAND_YELLOW, BRAND_YELLOW_DARK } from '../constants/brandTheme';
 
 const brandFeatures = [
-  'Analytics & Order Reporting',
-  'Listing & Template Management',
-  'Order Fulfilment Tracking',
-  'Employee & Role Management',
+  'Revenue, Profit & Margin Analytics',
+  'Payouts, On-Hold & Processing Funds',
+  'Order Cost, Fee & Reconciliation',
+  'Expense, Salary & Cash Flow Visibility',
 ];
 
 function BrandMark({ size = 'md' }) {
@@ -98,11 +98,11 @@ export default function LoginPage({ onLogin }) {
           </Box>
 
           <Typography variant="h4" fontWeight={800} sx={{ color: '#ffffff', mb: 1.5, lineHeight: 1.2 }}>
-            Employee Management{' '}
+            Finance & Cash Flow{' '}
             <Box component="span" sx={{ color: BRAND_YELLOW }}>System</Box>
           </Typography>
           <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.50)', mb: 4, lineHeight: 1.8 }}>
-            Everything your team needs in one unified platform.
+            Track revenue, payouts, margins, and costs in one unified platform.
           </Typography>
 
           <Stack spacing={1.5}>

@@ -76,7 +76,6 @@ export const PAGE_DEFAULT_ROLES = {
   'AddSeller': ['superadmin', 'hradmin', 'operationhead'],
   'UserSellerAssignments': ['superadmin', 'hradmin', 'hr'],
   'ViewAllMessages': ['superadmin'],
-  'Attendance': ['superadmin'],
   'PageAccessManagement': ['superadmin'],
   'PageAccessAuditLog': ['superadmin'],
   'UserPasswordManagement': ['superadmin'],

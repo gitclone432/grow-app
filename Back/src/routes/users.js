@@ -18,6 +18,12 @@ import {
 
 const router = Router();
 
+function normalizeOptionalEmail(email) {
+  if (typeof email !== 'string') return undefined;
+  const trimmed = email.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 async function createUserWithOptionalSeller({
   email,
   username,
@@ -49,6 +55,7 @@ async function createUserWithOptionalSeller({
 router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   const { role } = req.user;
   const { email, username, password, newUserRole, department } = req.body || {};
+  const normalizedEmail = normalizeOptionalEmail(email);
   if (!username || !password || !newUserRole) {
     return res.status(400).json({ error: 'username, password, newUserRole required' });
   }
@@ -95,8 +102,8 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   }
 
   // Check both email and username uniqueness
-  if (email) {
-    const existingEmail = await User.findOne({ email });
+  if (normalizedEmail) {
+    const existingEmail = await User.findOne({ email: normalizedEmail });
     if (existingEmail) return res.status(409).json({ error: 'Email already in use' });
   }
 
@@ -111,7 +118,7 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
   if (role === 'compatibilityadmin' || newUserRole === 'compatibilityeditor') finalDepartment = 'Compatibility';
 
   const user = await createUserWithOptionalSeller({
-    email,
+    email: normalizedEmail,
     username,
     password,
     newUserRole,
@@ -160,12 +167,13 @@ router.post('/seller', requireAuth, async (req, res) => {
     }
 
     const { username, password, email } = req.body || {};
+    const normalizedEmail = normalizeOptionalEmail(email);
     if (!username || !password) {
       return res.status(400).json({ error: 'username and password are required' });
     }
 
-    if (email) {
-      const existingEmail = await User.findOne({ email });
+    if (normalizedEmail) {
+      const existingEmail = await User.findOne({ email: normalizedEmail });
       if (existingEmail) return res.status(409).json({ error: 'Email already in use' });
     }
 
@@ -173,7 +181,7 @@ router.post('/seller', requireAuth, async (req, res) => {
     if (existingUsername) return res.status(409).json({ error: 'Username already in use' });
 
     const user = await createUserWithOptionalSeller({
-      email,
+      email: normalizedEmail,
       username,
       password,
       newUserRole: 'seller',

@@ -287,6 +287,7 @@ function extractSpecialFeatures(data) {
   const pi = data.product_information || {};
   const parts = [];
   if (pi.item_type_name) parts.push(String(pi.item_type_name));
+  if (pi.closure_type) parts.push(`Closure: ${pi.closure_type}`);
   if (pi.fit_type) parts.push(`Fit: ${pi.fit_type}`);
   if (pi.automotive_fit_type && pi.automotive_fit_type !== pi.fit_type) {
     parts.push(`Automotive fit: ${pi.automotive_fit_type}`);
@@ -331,6 +332,9 @@ function extractSize(data) {
   if (data.product_information?.item_dimensions) {
     return String(data.product_information.item_dimensions);
   }
+  if (data.product_information?.item_dimensions_l_x_w_x_h) {
+    return String(data.product_information.item_dimensions_l_x_w_x_h);
+  }
   if (data.product_information?.product_dimensions) {
     return String(data.product_information.product_dimensions);
   }
@@ -338,6 +342,15 @@ function extractSize(data) {
   if (data.customization_options?.size && Array.isArray(data.customization_options.size)) {
     const selected = data.customization_options.size.find(s => s.is_selected);
     if (selected?.value) return selected.value;
+  }
+
+  // Some categories (e.g. grill covers) store variant size text in "style".
+  if (data.customization_options?.style && Array.isArray(data.customization_options.style)) {
+    const styleOptions = data.customization_options.style;
+    const selectedStyle =
+      styleOptions.find(s => s.is_selected && s?.value) ||
+      styleOptions.find(s => s?.asin && data.asin && s.asin === data.asin && s?.value);
+    if (selectedStyle?.value) return selectedStyle.value;
   }
 
   // Some products expose size ranges only in title/small_description.

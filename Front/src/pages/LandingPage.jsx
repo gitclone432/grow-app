@@ -9,10 +9,10 @@ import PeopleIcon from '@mui/icons-material/People';
 import { BRAND_DARK, BRAND_YELLOW, BRAND_YELLOW_DARK } from '../constants/brandTheme';
 
 const features = [
-  { icon: <BarChartIcon sx={{ fontSize: 17 }} />, label: 'Analytics & Reporting' },
-  { icon: <InventoryIcon sx={{ fontSize: 17 }} />, label: 'Listing Management' },
-  { icon: <LocalShippingIcon sx={{ fontSize: 17 }} />, label: 'Order Fulfilment' },
-  { icon: <PeopleIcon sx={{ fontSize: 17 }} />, label: 'Team Management' },
+  { icon: <BarChartIcon sx={{ fontSize: 17 }} />, label: 'Revenue, Profit & Margin Analytics' },
+  { icon: <InventoryIcon sx={{ fontSize: 17 }} />, label: 'Payouts & Fund Status Tracking' },
+  { icon: <LocalShippingIcon sx={{ fontSize: 17 }} />, label: 'Order Cost & Fee Reconciliation' },
+  { icon: <PeopleIcon sx={{ fontSize: 17 }} />, label: 'Expense & Salary Visibility' },
 ];
 
 export default function LandingPage() {
@@ -101,20 +101,20 @@ export default function LandingPage() {
             fontWeight={800}
             sx={{ color: BRAND_DARK, mb: 2, lineHeight: 1.18, fontSize: { xs: '1.85rem', md: '2.5rem' } }}
           >
-            Manage your team,{' '}
+            Finance & cash flow,{' '}
             <Box component="span" sx={{
               color: '#b8860b',
               borderBottom: `3px solid ${BRAND_YELLOW}`,
               pb: '2px',
             }}>
-              smarter
+              under control
             </Box>
           </Typography>
 
           <Typography sx={{
             color: '#5a5a7a', mb: 5, lineHeight: 1.8, maxWidth: 480, mx: 'auto', fontSize: '1.05rem',
           }}>
-            A unified platform for listings, analytics, order fulfilment, and team management
+            A unified platform for revenue, payouts, margins, and operational costs
             — built for Grow Mentality.
           </Typography>
 

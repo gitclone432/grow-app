@@ -8,6 +8,12 @@ const router = Router();
 // Nomenclature note:
 // This route file uses the legacy name `attendance` for compatibility,
 // but the feature behavior is WORKING HOURS TRACKING (start/pause/resume/stop timer + reports).
+router.use((req, res) => {
+    return res.status(410).json({
+        error: 'WORK_TIMER_REMOVED',
+        message: 'Work timer feature has been removed.'
+    });
+});
 
 // Helper function to get today's date string (YYYY-MM-DD) in IST
 function getTodayDateString() {

@@ -140,6 +140,33 @@ function getImageCount(images) {
   return 0;
 }
 
+function getOrderedUniqueCustomColumns(customColumns = []) {
+  const seen = new Set();
+  return (Array.isArray(customColumns) ? customColumns : [])
+    .slice()
+    .sort((a, b) => (a?.order ?? 0) - (b?.order ?? 0))
+    .filter((col) => {
+      const name = String(col?.name || '').trim();
+      if (!name) return false;
+      const normalized = name.toLowerCase();
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+}
+
+function sanitizeCustomCsvValueByHeader(header, value) {
+  const headerName = String(header || '').trim().toLowerCase();
+  const raw = value == null ? '' : String(value);
+
+  // eBay category template constraint: C:Feature max length is 65 chars.
+  if (headerName === 'c:feature' && raw.length > 65) {
+    return raw.slice(0, 65);
+  }
+
+  return raw;
+}
+
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
   try {
@@ -3569,9 +3596,8 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     ];
     
     // Add custom column headers
-    const customHeaders = template.customColumns
-      .sort((a, b) => a.order - b.order)
-      .map(col => col.name);
+    const orderedUniqueCustomColumns = getOrderedUniqueCustomColumns(template.customColumns);
+    const customHeaders = orderedUniqueCustomColumns.map(col => col.name);
     
     const allHeaders = [...coreHeaders, ...customHeaders];
     const columnCount = allHeaders.length;
@@ -3646,9 +3672,8 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
       ];
       
       // Get custom field values in order
-      const customValues = template.customColumns
-        .sort((a, b) => a.order - b.order)
-        .map(col => listing.customFields.get(col.name) || '');
+      const customValues = orderedUniqueCustomColumns
+        .map(col => sanitizeCustomCsvValueByHeader(col.name, listing.customFields.get(col.name) || ''));
       
       return [...coreValues, ...customValues];
     });
@@ -3818,9 +3843,8 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
       'Shipping profile name', 'Return profile name', 'Payment profile name'
     ];
 
-    const customHeaders = template.customColumns
-      .sort((a, b) => a.order - b.order)
-      .map(col => col.name);
+    const orderedUniqueCustomColumns = getOrderedUniqueCustomColumns(template.customColumns);
+    const customHeaders = orderedUniqueCustomColumns.map(col => col.name);
 
     const allHeaders = [...coreHeaders, ...customHeaders];
     const columnCount = allHeaders.length;
@@ -3872,9 +3896,8 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
         listing.returnProfileName || '', listing.paymentProfileName || ''
       ];
 
-      const customValues = template.customColumns
-        .sort((a, b) => a.order - b.order)
-        .map(col => getCustomField(col.name));
+      const customValues = orderedUniqueCustomColumns
+        .map(col => sanitizeCustomCsvValueByHeader(col.name, getCustomField(col.name)));
 
       return [...coreValues, ...customValues];
     });
@@ -4137,9 +4160,8 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
     ];
     
     // Add custom column headers
-    const customHeaders = template.customColumns
-      .sort((a, b) => a.order - b.order)
-      .map(col => col.name);
+    const orderedUniqueCustomColumns = getOrderedUniqueCustomColumns(template.customColumns);
+    const customHeaders = orderedUniqueCustomColumns.map(col => col.name);
     
     const allHeaders = [...coreHeaders, ...customHeaders];
     const columnCount = allHeaders.length;
@@ -4214,9 +4236,8 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
       ];
       
       // Get custom field values in order
-      const customValues = template.customColumns
-        .sort((a, b) => a.order - b.order)
-        .map(col => listing.customFields.get(col.name) || '');
+      const customValues = orderedUniqueCustomColumns
+        .map(col => sanitizeCustomCsvValueByHeader(col.name, listing.customFields.get(col.name) || ''));
       
       return [...coreValues, ...customValues];
     });
