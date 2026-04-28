@@ -19,7 +19,7 @@ router.get('/all', requireAuth, async (req, res) => {
 
     if (req.user.role === 'superadmin') {
       // Superadmin sees all sellers with an active linked user
-      const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: true }).populate('user', 'username email active');
+      const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: { $ne: false } }).populate('user', 'username email active');
       return res.json(sellers);
     }
 
@@ -30,7 +30,7 @@ router.get('/all', requireAuth, async (req, res) => {
     if (assignedSellerIds.length === 0) {
       // No assignments — return all sellers (backward compat for roles that had full access before)
       // This preserves existing behavior for users who haven't been explicitly assigned sellers
-      const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: true }).populate('user', 'username email active');
+      const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: { $ne: false } }).populate('user', 'username email active');
       return res.json(sellers);
     }
 
@@ -38,7 +38,7 @@ router.get('/all', requireAuth, async (req, res) => {
     const sellers = await Seller.find({
       _id: { $in: assignedSellerIds },
       user: { $in: activeUserIds },
-      isStoreActive: true
+      isStoreActive: { $ne: false }
     }).populate('user', 'username email active');
     res.json(sellers);
   } catch (err) {
@@ -52,7 +52,7 @@ router.get('/all', requireAuth, async (req, res) => {
 router.get('/all-unfiltered', requireAuth, async (req, res) => {
   try {
     const activeUserIds = await getActiveUserIdsSet();
-    const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: true }).populate('user', 'username email active');
+    const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: { $ne: false } }).populate('user', 'username email active');
     res.json(sellers);
   } catch (err) {
     console.error('Error fetching sellers:', err);

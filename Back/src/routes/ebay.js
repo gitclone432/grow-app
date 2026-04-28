@@ -177,7 +177,7 @@ async function getExcludedClientSellerIds() {
 async function getActiveSellerIds() {
   const activeUserIds = await User.find({ active: true }).distinct('_id');
   if (!activeUserIds.length) return [];
-  return Seller.find({ user: { $in: activeUserIds }, isStoreActive: true }).distinct('_id');
+  return Seller.find({ user: { $in: activeUserIds }, isStoreActive: { $ne: false } }).distinct('_id');
 }
 
 async function applyActiveSellerScope(query, requestedSellerId) {
