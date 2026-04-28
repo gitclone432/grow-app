@@ -19,7 +19,7 @@ router.get('/all', requireAuth, async (req, res) => {
 
     if (req.user.role === 'superadmin') {
       // Superadmin sees all sellers with an active linked user
-      const sellers = await Seller.find({ user: { $in: activeUserIds } }).populate('user', 'username email active');
+      const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: true }).populate('user', 'username email active');
       return res.json(sellers);
     }
 
@@ -30,14 +30,15 @@ router.get('/all', requireAuth, async (req, res) => {
     if (assignedSellerIds.length === 0) {
       // No assignments — return all sellers (backward compat for roles that had full access before)
       // This preserves existing behavior for users who haven't been explicitly assigned sellers
-      const sellers = await Seller.find({ user: { $in: activeUserIds } }).populate('user', 'username email active');
+      const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: true }).populate('user', 'username email active');
       return res.json(sellers);
     }
 
     // Filter to only assigned sellers
     const sellers = await Seller.find({
       _id: { $in: assignedSellerIds },
-      user: { $in: activeUserIds }
+      user: { $in: activeUserIds },
+      isStoreActive: true
     }).populate('user', 'username email active');
     res.json(sellers);
   } catch (err) {
@@ -51,7 +52,7 @@ router.get('/all', requireAuth, async (req, res) => {
 router.get('/all-unfiltered', requireAuth, async (req, res) => {
   try {
     const activeUserIds = await getActiveUserIdsSet();
-    const sellers = await Seller.find({ user: { $in: activeUserIds } }).populate('user', 'username email active');
+    const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: true }).populate('user', 'username email active');
     res.json(sellers);
   } catch (err) {
     console.error('Error fetching sellers:', err);
@@ -108,6 +109,8 @@ router.delete('/disconnect-ebay', requireAuth, requireRole('seller'), async (req
     
     // Clear the eBay tokens
     seller.ebayTokens = {};
+    seller.isStoreActive = false;
+    seller.disconnectedAt = new Date();
     await seller.save();
     
     console.log(`eBay disconnected for seller ${seller._id}`);

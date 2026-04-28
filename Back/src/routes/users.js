@@ -172,13 +172,46 @@ router.post('/seller', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'username and password are required' });
     }
 
+    const existingUsername = await User.findOne({ username });
+    if (existingUsername) {
+      const seller = await Seller.findOne({ user: existingUsername._id });
+      const canReactivate = existingUsername.role === 'seller' && seller && existingUsername.active === false;
+
+      if (!canReactivate) {
+        return res.status(409).json({ error: 'Username already in use' });
+      }
+
+      if (normalizedEmail) {
+        const existingEmail = await User.findOne({ email: normalizedEmail, _id: { $ne: existingUsername._id } });
+        if (existingEmail) return res.status(409).json({ error: 'Email already in use' });
+      }
+
+      existingUsername.passwordHash = await bcrypt.hash(password, 10);
+      existingUsername.active = true;
+      existingUsername.department = 'Executives';
+      existingUsername.role = 'seller';
+      if (normalizedEmail !== undefined) existingUsername.email = normalizedEmail;
+      await existingUsername.save();
+
+      seller.isStoreActive = true;
+      seller.reconnectedAt = new Date();
+      seller.disconnectedAt = null;
+      await seller.save();
+
+      return res.json({
+        id: existingUsername._id,
+        email: existingUsername.email,
+        username: existingUsername.username,
+        role: existingUsername.role,
+        department: existingUsername.department,
+        reactivated: true
+      });
+    }
+
     if (normalizedEmail) {
       const existingEmail = await User.findOne({ email: normalizedEmail });
       if (existingEmail) return res.status(409).json({ error: 'Email already in use' });
     }
-
-    const existingUsername = await User.findOne({ username });
-    if (existingUsername) return res.status(409).json({ error: 'Username already in use' });
 
     const user = await createUserWithOptionalSeller({
       email: normalizedEmail,

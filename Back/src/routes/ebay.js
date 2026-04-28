@@ -174,6 +174,34 @@ async function getExcludedClientSellerIds() {
   }).distinct('_id');
 }
 
+async function getActiveSellerIds() {
+  const activeUserIds = await User.find({ active: true }).distinct('_id');
+  if (!activeUserIds.length) return [];
+  return Seller.find({ user: { $in: activeUserIds }, isStoreActive: true }).distinct('_id');
+}
+
+async function applyActiveSellerScope(query, requestedSellerId) {
+  const activeSellerIds = await getActiveSellerIds();
+  if (activeSellerIds.length === 0) {
+    query.seller = { $in: [] };
+    return;
+  }
+
+  if (requestedSellerId) {
+    if (!mongoose.Types.ObjectId.isValid(requestedSellerId)) {
+      query.seller = { $in: [] };
+      return;
+    }
+    const requestedObjectId = new mongoose.Types.ObjectId(requestedSellerId);
+    const isAllowed = activeSellerIds.some((id) => id.equals(requestedObjectId));
+    query.seller = isAllowed ? requestedObjectId : { $in: [] };
+    return;
+  }
+
+  query.$and = query.$and || [];
+  query.$and.push({ seller: { $in: activeSellerIds } });
+}
+
 function summarizeAutoCompatItems(items = []) {
   return items.reduce((acc, item) => {
     acc.processedCount += 1;
@@ -1805,6 +1833,10 @@ async function connectSellerToEbayOAuthCode({ userId, code }) {
     scope: tokenRes.data.scope,
     fetchedAt: new Date()
   };
+  seller.isStoreActive = true;
+  seller.lastConnectedAt = new Date();
+  seller.reconnectedAt = new Date();
+  seller.disconnectedAt = null;
   await seller.save();
 
   // Fetch first 15 orders for new seller (best-effort)
@@ -2221,9 +2253,7 @@ router.get('/stored-orders', async (req, res) => {
 
   try {
     let query = {};
-    if (sellerId) {
-      query.seller = sellerId;
-    }
+    await applyActiveSellerScope(query, sellerId);
 
     if (excludeClient === 'true') {
       const excludedSellerIds = await getExcludedClientSellerIds();
@@ -2588,10 +2618,7 @@ router.get('/all-orders-usd', async (req, res) => {
     };
 
     let query = {};
-    if (sellerId) {
-      // Convert sellerId to ObjectId for proper matching in MongoDB
-      query.seller = new mongoose.Types.ObjectId(sellerId);
-    }
+    await applyActiveSellerScope(query, sellerId);
 
     query.$and = query.$and || [];
     query.$and.push({

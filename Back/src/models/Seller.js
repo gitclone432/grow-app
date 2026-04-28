@@ -22,7 +22,11 @@ const SellerSchema = new mongoose.Schema(
     lastListingPolledAt: { type: Date, default: null },
 
     // For Edit Listings: tracks last sync of ALL listings (not just Motors)
-    lastAllListingsPolledAt: { type: Date, default: null }
+    lastAllListingsPolledAt: { type: Date, default: null },
+    isStoreActive: { type: Boolean, default: true },
+    disconnectedAt: { type: Date, default: null },
+    reconnectedAt: { type: Date, default: null },
+    lastConnectedAt: { type: Date, default: null }
 
   },
   { timestamps: true }

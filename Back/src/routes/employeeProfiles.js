@@ -490,7 +490,7 @@ router.patch('/:id/toggle-hidden', requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /api/employee-profiles/:id - Hard delete employee profile and user account (admin only)
+// DELETE /api/employee-profiles/:id - Archive seller users; hard-delete non-seller users (admin only)
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
     if (!['superadmin', 'hradmin', 'operationhead'].includes(req.user.role)) {
@@ -510,20 +510,28 @@ router.delete('/:id', requireAuth, async (req, res) => {
     // Delete the employee profile
     await EmployeeProfile.findByIdAndDelete(req.params.id);
 
-    // Delete the associated user account if it exists
+    // Handle associated user account if it exists
     if (userId) {
-      // Delete seller record tied to this user (prevents stale seller from appearing in seller dropdowns/pages)
       const seller = await Seller.findOne({ user: userId }).select('_id').lean();
       if (seller?._id) {
+        // Seller path: keep seller/user records for reconnect, but archive + disconnect store.
         await UserSellerAssignment.deleteMany({ seller: seller._id });
-        await Seller.findByIdAndDelete(seller._id);
+        await Seller.findByIdAndUpdate(seller._id, {
+          $set: {
+            isStoreActive: false,
+            disconnectedAt: new Date(),
+            ebayTokens: {}
+          }
+        });
+        await User.findByIdAndUpdate(userId, { $set: { active: false } });
+      } else {
+        // Non-seller path: preserve previous hard-delete behavior.
+        await User.findByIdAndDelete(userId);
       }
-
-      await User.findByIdAndDelete(userId);
     }
 
     res.json({
-      message: 'Employee and user account permanently deleted',
+      message: 'Employee removed. Seller accounts are archived for reconnect; non-seller users are permanently deleted.',
       deletedProfile: req.params.id,
       deletedUser: userId,
       username
