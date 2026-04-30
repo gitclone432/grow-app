@@ -62,6 +62,18 @@ function getEffectiveSpendAmount(order) {
     return Number(amount) || 0;
 }
 
+function resolveDateWindowFromQuery({ date, startDate, endDate }) {
+    if (startDate || endDate) {
+        const resolvedStart = startDate || endDate;
+        const resolvedEnd = endDate || startDate;
+        return { startDate: resolvedStart, endDate: resolvedEnd };
+    }
+    if (date) {
+        return { startDate: date, endDate: date };
+    }
+    return null;
+}
+
 function extractOrderSku(order) {
     const lineItem = Array.isArray(order?.lineItems) ? order.lineItems[0] : null;
     return (
@@ -243,6 +255,51 @@ function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = [], o
     };
 }
 
+function buildAffiliateQueueQueryForRange(startDateStr, endDateStr, excludeLowValue, extraFilters = [], options = {}) {
+    const { start, end } = {
+        start: buildDayRange(startDateStr).start,
+        end: buildDayRange(endDateStr).end,
+    };
+    const carryOverStart = buildDayRange(CARRY_OVER_START_DATE).start;
+    const { includeCompletedCarryOver = false } = options;
+    const queueScopes = [{ dateSold: { $gte: start, $lte: end } }];
+
+    if (start.getTime() > carryOverStart.getTime()) {
+        queueScopes.push({
+            dateSold: { $gte: carryOverStart, $lt: start },
+            sourcingStatus: 'Not Yet',
+        });
+
+        if (includeCompletedCarryOver) {
+            queueScopes.push({
+                dateSold: { $gte: carryOverStart, $lt: start },
+                sourcingStatus: 'Done',
+                sourcingCompletedAt: { $gte: start, $lte: end },
+            });
+        }
+    }
+
+    const filters = [
+        { $or: queueScopes },
+        ...extraFilters.filter(Boolean),
+    ];
+
+    if (excludeLowValue === 'true') {
+        filters.push({
+            $or: [
+                { subtotalUSD: { $gte: 3 } },
+                { subtotal: { $gte: 3 } },
+            ],
+        });
+    }
+
+    return {
+        start,
+        end,
+        query: filters.length === 1 ? filters[0] : { $and: filters },
+    };
+}
+
 function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
     const { start, end } = buildDayRange(dateStr);
     const filters = [
@@ -286,8 +343,11 @@ function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
 // ---------------------------------------------------------------------------
 router.get('/daily/sellers', async (req, res) => {
     try {
-        const { date, excludeLowValue, includeDone } = req.query;
-        if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
+        const { date, startDate, endDate, excludeLowValue, includeDone } = req.query;
+        const resolvedWindow = resolveDateWindowFromQuery({ date, startDate, endDate });
+        if (!resolvedWindow) {
+            return res.status(400).json({ error: 'date or startDate/endDate query params required (YYYY-MM-DD)' });
+        }
         const shouldIncludeDone = includeDone === 'true';
 
         const extraFilters = [];
@@ -295,9 +355,15 @@ router.get('/daily/sellers', async (req, res) => {
             extraFilters.push({ sourcingStatus: { $ne: 'Done' } });
         }
 
-        const { query } = buildAffiliateQueueQuery(date, excludeLowValue, extraFilters, {
+        const { query } = buildAffiliateQueueQueryForRange(
+            resolvedWindow.startDate,
+            resolvedWindow.endDate,
+            excludeLowValue,
+            extraFilters,
+            {
             includeCompletedCarryOver: shouldIncludeDone,
-        });
+            }
+        );
 
         const groupedSellers = await Order.aggregate([
             { $match: query },
@@ -345,8 +411,11 @@ router.get('/daily/sellers', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/daily', async (req, res) => {
     try {
-        const { date, excludeLowValue, includeDone, sellerId } = req.query;
-        if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
+        const { date, startDate, endDate, excludeLowValue, includeDone, sellerId } = req.query;
+        const resolvedWindow = resolveDateWindowFromQuery({ date, startDate, endDate });
+        if (!resolvedWindow) {
+            return res.status(400).json({ error: 'date or startDate/endDate query params required (YYYY-MM-DD)' });
+        }
         const shouldIncludeDone = includeDone === 'true';
 
         const extraFilters = [];
@@ -357,9 +426,15 @@ router.get('/daily', async (req, res) => {
             extraFilters.push({ seller: sellerId });
         }
 
-        const { query } = buildAffiliateQueueQuery(date, excludeLowValue, extraFilters, {
+        const { query } = buildAffiliateQueueQueryForRange(
+            resolvedWindow.startDate,
+            resolvedWindow.endDate,
+            excludeLowValue,
+            extraFilters,
+            {
             includeCompletedCarryOver: shouldIncludeDone,
-        });
+            }
+        );
 
         const orders = await Order.find(query)
             .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
@@ -368,7 +443,7 @@ router.get('/daily', async (req, res) => {
 
         const ordersWithSupplierLink = await applySupplierLinksFromSavedAsins(orders);
 
-        const selectedDayUtc = Date.parse(`${date}T00:00:00Z`);
+        const selectedDayUtc = Date.parse(`${resolvedWindow.startDate}T00:00:00Z`);
         const enrichedOrders = ordersWithSupplierLink
             .map((order) => {
                 const sourceDay = getPlatformDayString(order.dateSold || order.creationDate || new Date());

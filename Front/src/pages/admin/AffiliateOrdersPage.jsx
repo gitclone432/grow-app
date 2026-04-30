@@ -987,10 +987,16 @@ function TabPanel({ children, value, index }) {
 
 export default function AffiliateOrdersPage() {
     const COLUMN_STORAGE_KEY = 'affiliate_orders_visible_columns';
-    const [date, setDate] = useState(getTodayStr());
+    const initialDateFilter = {
+        mode: 'single',
+        single: getTodayStr(),
+        from: '',
+        to: '',
+    };
+    const [dateFilter, setDateFilter] = useState(initialDateFilter);
     const [tab, setTab] = useState(0);
     const [selectedSeller, setSelectedSeller] = useState('');
-    const [excludeLowValue, setExcludeLowValue] = useState(false);
+    const [excludeLowValue, setExcludeLowValue] = useState(true);
     const [showDoneEntries, setShowDoneEntries] = useState(false);
     const [showNotYetFirst, setShowNotYetFirst] = useState(true);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
@@ -1032,6 +1038,7 @@ export default function AffiliateOrdersPage() {
     // Snackbar
     const [snack, setSnack] = useState({ open: false, msg: '', severity: 'success' });
     const notify = (severity, msg) => setSnack({ open: true, msg, severity });
+    const singleDate = dateFilter.single;
 
     // Product images
     const [itemImages, setItemImages] = useState({});
@@ -1077,7 +1084,12 @@ export default function AffiliateOrdersPage() {
         try {
             const { data } = await api.get('/affiliate-orders/daily/sellers', {
                 params: {
-                    date,
+                    ...(dateFilter.mode === 'single'
+                        ? { date: dateFilter.single }
+                        : {
+                            ...(dateFilter.from ? { startDate: dateFilter.from } : {}),
+                            ...(dateFilter.to ? { endDate: dateFilter.to } : {}),
+                        }),
                     excludeLowValue: excludeLowValue ? 'true' : 'false',
                     includeDone: showDoneEntries ? 'true' : 'false',
                 }
@@ -1090,7 +1102,7 @@ export default function AffiliateOrdersPage() {
         } finally {
             setSellerOptionsLoading(false);
         }
-    }, [date, excludeLowValue, showDoneEntries]);
+    }, [dateFilter, excludeLowValue, showDoneEntries]);
 
     const fetchOrders = useCallback(async () => {
         setOrdersLoading(true);
@@ -1098,7 +1110,12 @@ export default function AffiliateOrdersPage() {
         try {
             const { data } = await api.get('/affiliate-orders/daily', {
                 params: {
-                    date,
+                    ...(dateFilter.mode === 'single'
+                        ? { date: dateFilter.single }
+                        : {
+                            ...(dateFilter.from ? { startDate: dateFilter.from } : {}),
+                            ...(dateFilter.to ? { endDate: dateFilter.to } : {}),
+                        }),
                     excludeLowValue: excludeLowValue ? 'true' : 'false',
                     includeDone: showDoneEntries ? 'true' : 'false',
                     ...(selectedSeller ? { sellerId: selectedSeller } : {}),
@@ -1110,7 +1127,7 @@ export default function AffiliateOrdersPage() {
         } finally {
             setOrdersLoading(false);
         }
-    }, [date, excludeLowValue, selectedSeller, showDoneEntries]);
+    }, [dateFilter, excludeLowValue, selectedSeller, showDoneEntries]);
 
     const fetchAmazonAccounts = useCallback(async () => {
         try {
@@ -1123,40 +1140,40 @@ export default function AffiliateOrdersPage() {
         setBalancesLoading(true);
         setBalancesError('');
         try {
-            const { data } = await api.get('/affiliate-orders/balances', { params: { date, excludeLowValue: excludeLowValue ? 'true' : 'false' } });
+            const { data } = await api.get('/affiliate-orders/balances', { params: { date: singleDate, excludeLowValue: excludeLowValue ? 'true' : 'false' } });
             setBalances(data);
         } catch (err) {
             setBalancesError(err?.response?.data?.error || 'Failed to load balances');
         } finally {
             setBalancesLoading(false);
         }
-    }, [date, excludeLowValue]);
+    }, [singleDate, excludeLowValue]);
 
     const fetchSummary = useCallback(async () => {
         setSummaryLoading(true);
         setSummaryError('');
         try {
-            const { data } = await api.get('/affiliate-orders/summary', { params: { date, excludeLowValue: excludeLowValue ? 'true' : 'false' } });
+            const { data } = await api.get('/affiliate-orders/summary', { params: { date: singleDate, excludeLowValue: excludeLowValue ? 'true' : 'false' } });
             setSummary(data);
         } catch (err) {
             setSummaryError(err?.response?.data?.error || 'Failed to load summary');
         } finally {
             setSummaryLoading(false);
         }
-    }, [date, excludeLowValue]);
+    }, [singleDate, excludeLowValue]);
 
     const fetchSpendOrders = useCallback(async () => {
         setSpendOrdersLoading(true);
         setSpendOrdersError('');
         try {
-            const { data } = await api.get('/affiliate-orders/spend', { params: { date, excludeLowValue: excludeLowValue ? 'true' : 'false' } });
+            const { data } = await api.get('/affiliate-orders/spend', { params: { date: singleDate, excludeLowValue: excludeLowValue ? 'true' : 'false' } });
             setSpendOrders((data || []).map(normalizeAffiliateOrder));
         } catch (err) {
             setSpendOrdersError(err?.response?.data?.error || 'Failed to load spend orders');
         } finally {
             setSpendOrdersLoading(false);
         }
-    }, [date, excludeLowValue]);
+    }, [singleDate, excludeLowValue]);
 
     const backfillSupplierLinks = useCallback(async () => {
         const confirmed = window.confirm(
@@ -1184,7 +1201,7 @@ export default function AffiliateOrdersPage() {
         fetchBalances();
         fetchSummary();
         fetchSpendOrders();
-    }, [date, excludeLowValue, showDoneEntries, fetchSellerOptions, fetchAmazonAccounts, fetchBalances, fetchSummary, fetchSpendOrders]);
+    }, [dateFilter, excludeLowValue, showDoneEntries, fetchSellerOptions, fetchAmazonAccounts, fetchBalances, fetchSummary, fetchSpendOrders]);
 
     useEffect(() => {
         if (sellerOptionsLoading) {
@@ -1227,7 +1244,7 @@ export default function AffiliateOrdersPage() {
             const current = balances.find((b) => b.amazonAccountName === accountName) || {};
             const payload = {
                 amazonAccountName: accountName,
-                date,
+                date: singleDate,
                 availableBalance: current.availableBalance ?? 0,
                 addedBalance: current.addedBalance ?? 0,
                 note: current.note ?? '',
@@ -1255,7 +1272,7 @@ export default function AffiliateOrdersPage() {
         } catch (err) {
             notify('error', err?.response?.data?.error || `Failed to update ${field}`);
         }
-    }, [balances, date, fetchSummary]);
+    }, [balances, singleDate, fetchSummary]);
 
     const fetchThumbnail = async (order) => {
         const orderId = order._id;
@@ -1498,7 +1515,7 @@ export default function AffiliateOrdersPage() {
         }, {});
 
         const csvData = prepareCSVData(rowsWithIndex, csvFieldMapping);
-        downloadCSV(csvData, `Affiliate_Orders_${date}`);
+        downloadCSV(csvData, `Affiliate_Orders_${singleDate}`);
         setExportDialogOpen(false);
         notify('success', `Exported ${rowsWithIndex.length} eligible affiliate orders`);
     };
@@ -1512,7 +1529,7 @@ export default function AffiliateOrdersPage() {
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
                 <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                     <Typography variant="subtitle2" color="text.secondary">
-                        {isDailyOrdersLoading ? 'Loading…' : `${displayedOrders.length} order${displayedOrders.length !== 1 ? 's' : ''} in queue for ${date}`}
+                        {isDailyOrdersLoading ? 'Loading…' : `${displayedOrders.length} order${displayedOrders.length !== 1 ? 's' : ''} in queue for ${dateFilter.mode === 'single' ? singleDate : `${dateFilter.from || '...'} to ${dateFilter.to || '...'}`}`}
                     </Typography>
                     {!isDailyOrdersLoading && carryOverCount > 0 && (
                         <Chip
@@ -2139,7 +2156,7 @@ export default function AffiliateOrdersPage() {
         <>
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
                 <Typography variant="subtitle2" color="text.secondary">
-                    Summary for {date}
+                    Summary for {singleDate}
                 </Typography>
                 <Button size="small" startIcon={<RefreshIcon />} onClick={fetchSummary}>Refresh</Button>
             </Stack>
@@ -2258,7 +2275,7 @@ export default function AffiliateOrdersPage() {
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1, gap: 1, flexWrap: 'wrap' }}>
                 <Stack spacing={0.5}>
                     <Typography variant="subtitle2" color="text.secondary">
-                        Actual spend view for {date}
+                        Actual spend view for {singleDate}
                     </Typography>
                     <Typography variant="caption" color="text.secondary">
                         Gift Card uses before tax. Credit Card uses before tax + estimated tax. Markup and IGST apply to both.
@@ -2552,15 +2569,50 @@ export default function AffiliateOrdersPage() {
                         label="Exclude < $3"
                         sx={{ m: 0 }}
                     />
-                    <TextField
-                        type="date"
-                        size="small"
-                        value={date}
-                        onChange={(e) => setDate(e.target.value)}
-                        label="Date"
-                        InputLabelProps={{ shrink: true }}
-                        sx={{ width: 170 }}
-                    />
+                    <FormControl size="small" sx={{ minWidth: 140 }}>
+                        <InputLabel id="affiliate-date-mode-label">Date Mode</InputLabel>
+                        <Select
+                            labelId="affiliate-date-mode-label"
+                            value={dateFilter.mode}
+                            label="Date Mode"
+                            onChange={(e) => setDateFilter((prev) => ({ ...prev, mode: e.target.value }))}
+                        >
+                            <MenuItem value="single">Single Day</MenuItem>
+                            <MenuItem value="range">Date Range</MenuItem>
+                        </Select>
+                    </FormControl>
+                    {dateFilter.mode === 'single' ? (
+                        <TextField
+                            type="date"
+                            size="small"
+                            value={dateFilter.single}
+                            onChange={(e) => setDateFilter((prev) => ({ ...prev, single: e.target.value }))}
+                            label="Date"
+                            InputLabelProps={{ shrink: true }}
+                            sx={{ width: 170 }}
+                        />
+                    ) : (
+                        <>
+                            <TextField
+                                type="date"
+                                size="small"
+                                value={dateFilter.from}
+                                onChange={(e) => setDateFilter((prev) => ({ ...prev, from: e.target.value }))}
+                                label="From"
+                                InputLabelProps={{ shrink: true }}
+                                sx={{ width: 170 }}
+                            />
+                            <TextField
+                                type="date"
+                                size="small"
+                                value={dateFilter.to}
+                                onChange={(e) => setDateFilter((prev) => ({ ...prev, to: e.target.value }))}
+                                label="To"
+                                InputLabelProps={{ shrink: true }}
+                                sx={{ width: 170 }}
+                            />
+                        </>
+                    )}
                 </Stack>
             </Stack>
 
