@@ -5,6 +5,7 @@ import AmazonAccountDailyBalance from '../models/AmazonAccountDailyBalance.js';
 import Seller from '../models/Seller.js';
 import TemplateListing from '../models/TemplateListing.js';
 import Listing from '../models/Listing.js';
+import User from '../models/User.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -308,23 +309,25 @@ router.get('/daily/sellers', async (req, res) => {
             },
         ]);
 
-        const sellerIds = groupedSellers
-            .map((row) => row._id)
-            .filter(Boolean);
-
-        const sellers = await Seller.find({ _id: { $in: sellerIds } })
+        const activeUserIds = await User.find({ active: true }).distinct('_id');
+        const sellers = await Seller.find({
+            user: { $in: activeUserIds },
+            isStoreActive: { $ne: false },
+        })
             .populate({ path: 'user', select: 'username' })
             .lean();
 
-        const sellerNameById = new Map(
-            sellers.map((seller) => [String(seller._id), seller.user?.username || 'Unknown Seller'])
+        const countBySellerId = new Map(
+            groupedSellers
+                .filter((row) => row?._id)
+                .map((row) => [String(row._id), row.count || 0])
         );
 
-        const sellerOptions = groupedSellers
-            .map((row) => ({
-                value: String(row._id),
-                label: sellerNameById.get(String(row._id)) || 'Unknown Seller',
-                count: row.count || 0,
+        const sellerOptions = sellers
+            .map((seller) => ({
+                value: String(seller._id),
+                label: seller.user?.username || 'Unknown Seller',
+                count: countBySellerId.get(String(seller._id)) || 0,
             }))
             .sort((left, right) => left.label.localeCompare(right.label));
 
