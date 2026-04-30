@@ -12,29 +12,42 @@ const router = express.Router();
 // All routes require authentication
 router.use(requireAuth);
 
-// PST offset used throughout the platform
-const PST_OFFSET_HOURS = 8;
+const PT_TIMEZONE = 'America/Los_Angeles';
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const CARRY_OVER_START_DATE = '2026-03-10';
 const MAX_ORDERS_PER_AMAZON_ACCOUNT = 9;
 
 /**
- * Builds a UTC date range for a given YYYY-MM-DD string (PST day boundaries)
+ * Builds UTC day bounds for a given YYYY-MM-DD in Pacific timezone (PST/PDT aware)
  */
 function buildDayRange(dateStr) {
-    const start = new Date(dateStr);
-    start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
+    function findMidnightUTC(ds) {
+        const pdt = new Date(`${ds}T07:00:00.000Z`);
+        const ptStr = new Intl.DateTimeFormat('en-CA', {
+            timeZone: PT_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit'
+        }).format(pdt);
+        const ptHour = parseInt(new Intl.DateTimeFormat('en-US', {
+            timeZone: PT_TIMEZONE, hour: 'numeric', hour12: false, hourCycle: 'h23'
+        }).format(pdt), 10);
+        if (ptStr === ds && ptHour === 0) return pdt;
+        return new Date(`${ds}T08:00:00.000Z`); // PST fallback
+    }
 
-    const end = new Date(dateStr);
-    end.setDate(end.getDate() + 1);
-    end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
-
+    const start = findMidnightUTC(dateStr);
+    const tmp = new Date(`${dateStr}T12:00:00.000Z`);
+    tmp.setUTCDate(tmp.getUTCDate() + 1);
+    const nextDateStr = tmp.toISOString().slice(0, 10);
+    const end = new Date(findMidnightUTC(nextDateStr).getTime() - 1);
     return { start, end };
 }
 
 function getPlatformDayString(dateValue) {
-    const shifted = new Date(new Date(dateValue).getTime() - PST_OFFSET_HOURS * 60 * 60 * 1000);
-    return shifted.toISOString().slice(0, 10);
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: PT_TIMEZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    }).format(new Date(dateValue));
 }
 
 function getCarryOverLabel(carryOverDays) {

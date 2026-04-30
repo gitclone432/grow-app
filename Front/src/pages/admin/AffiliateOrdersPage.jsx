@@ -1187,11 +1187,11 @@ export default function AffiliateOrdersPage() {
     }, [date, excludeLowValue, showDoneEntries, fetchSellerOptions, fetchAmazonAccounts, fetchBalances, fetchSummary, fetchSpendOrders]);
 
     useEffect(() => {
-        if (sellerOptionsLoading || !selectedSeller) {
+        if (sellerOptionsLoading) {
             return;
         }
-
-        if (!sellerOptions.some((option) => option.value === selectedSeller)) {
+        if (selectedSeller && !sellerOptions.some((option) => option.value === selectedSeller)) {
+            setSelectedSeller('');
             return;
         }
 
