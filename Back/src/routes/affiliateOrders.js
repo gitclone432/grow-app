@@ -4,6 +4,7 @@ import AmazonAccount from '../models/AmazonAccount.js';
 import AmazonAccountDailyBalance from '../models/AmazonAccountDailyBalance.js';
 import Seller from '../models/Seller.js';
 import TemplateListing from '../models/TemplateListing.js';
+import Listing from '../models/Listing.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -57,6 +58,15 @@ function extractOrderSku(order) {
     ).toString().trim();
 }
 
+function extractOrderItemNumber(order) {
+    const lineItem = Array.isArray(order?.lineItems) ? order.lineItems[0] : null;
+    return (
+        lineItem?.legacyItemId ||
+        order?.itemNumber ||
+        ''
+    ).toString().trim();
+}
+
 function buildAmazonLinkFromAsin(asin) {
     const clean = String(asin || '').trim();
     if (!clean) return '';
@@ -66,17 +76,40 @@ function buildAmazonLinkFromAsin(asin) {
 async function applySupplierLinksFromSavedAsins(orders = []) {
     if (!Array.isArray(orders) || orders.length === 0) return orders;
 
-    const orderLookupKeys = orders
+    const rawLookupRows = orders
         .map((order) => ({
-            order,
             sellerId: String(order?.seller?._id || order?.seller || '').trim(),
             sku: extractOrderSku(order),
+            itemNumber: extractOrderItemNumber(order),
         }))
-        .filter((row) => row.sellerId && row.sku);
+        .filter((row) => row.sellerId);
+
+    if (!rawLookupRows.length) return orders;
+
+    const sellerIds = [...new Set(rawLookupRows.map((row) => row.sellerId))];
+    const missingSkuItemNumbers = [...new Set(
+        rawLookupRows.filter((row) => !row.sku && row.itemNumber).map((row) => row.itemNumber)
+    )];
+
+    const listingDocs = missingSkuItemNumbers.length > 0
+        ? await Listing.find({
+            seller: { $in: sellerIds },
+            itemId: { $in: missingSkuItemNumbers },
+          }).select('seller itemId sku').lean()
+        : [];
+
+    const listingSkuBySellerItem = new Map(
+        listingDocs.map((row) => [`${String(row.seller)}::${String(row.itemId || '').trim()}`, String(row.sku || '').trim()])
+    );
+
+    const orderLookupKeys = rawLookupRows.map((row) => {
+        if (row.sku) return row;
+        const fallbackSku = listingSkuBySellerItem.get(`${row.sellerId}::${row.itemNumber}`) || '';
+        return { ...row, sku: fallbackSku };
+    }).filter((row) => row.sellerId && row.sku);
 
     if (!orderLookupKeys.length) return orders;
 
-    const sellerIds = [...new Set(orderLookupKeys.map((row) => row.sellerId))];
     const skus = [...new Set(orderLookupKeys.map((row) => row.sku))];
 
     const templateListings = await TemplateListing.find({
@@ -96,7 +129,8 @@ async function applySupplierLinksFromSavedAsins(orders = []) {
         if (existingLink) return order;
 
         const sellerId = String(order?.seller?._id || order?.seller || '').trim();
-        const sku = extractOrderSku(order);
+        const itemNumber = extractOrderItemNumber(order);
+        const sku = extractOrderSku(order) || listingSkuBySellerItem.get(`${sellerId}::${itemNumber}`) || '';
         if (!sellerId || !sku) return order;
 
         const asin = asinBySellerSku.get(`${sellerId}::${sku}`) || '';
@@ -108,6 +142,50 @@ async function applySupplierLinksFromSavedAsins(orders = []) {
         };
     });
 }
+
+// Persist supplier links for old orders by matching seller+SKU with saved template ASINs.
+router.post('/backfill-supplier-links', async (req, res) => {
+    try {
+        const { sellerId, limit = 2000 } = req.body || {};
+        const filter = {
+            $or: [
+                { affiliateLink: { $exists: false } },
+                { affiliateLink: null },
+                { affiliateLink: '' },
+            ],
+        };
+        if (sellerId) filter.seller = sellerId;
+
+        const orders = await Order.find(filter)
+            .select('seller lineItems itemNumber affiliateLink')
+            .sort({ createdAt: -1 })
+            .limit(Math.max(1, Math.min(Number(limit) || 2000, 10000)))
+            .lean();
+
+        const enriched = await applySupplierLinksFromSavedAsins(orders);
+        const updates = enriched
+            .filter((row) => String(row.affiliateLink || '').trim())
+            .map((row) => ({
+                updateOne: {
+                    filter: { _id: row._id },
+                    update: { $set: { affiliateLink: row.affiliateLink } },
+                },
+            }));
+
+        if (updates.length > 0) {
+            await Order.bulkWrite(updates, { ordered: false });
+        }
+
+        return res.json({
+            scanned: orders.length,
+            updated: updates.length,
+            message: `Supplier link backfill complete. Updated ${updates.length} order(s).`,
+        });
+    } catch (err) {
+        console.error('POST /affiliate-orders/backfill-supplier-links error:', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
 
 function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = [], options = {}) {
     const { start, end } = buildDayRange(dateStr);

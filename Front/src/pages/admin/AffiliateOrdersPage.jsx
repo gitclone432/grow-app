@@ -91,6 +91,7 @@ const MSG_STATUS_COLORS = {
 const DAILY_ORDER_ALL_COLUMNS = [
     { id: 'index', label: '#' },
     { id: 'orderId', label: 'Order ID' },
+    { id: 'orderDate', label: 'Order Date' },
     { id: 'productName', label: 'Product Name' },
     { id: 'seller', label: 'Seller' },
     { id: 'supplierLink', label: 'Supplier Link' },
@@ -132,6 +133,14 @@ function getTodayStr() {
 function fmt(val, digits = 2) {
     if (val == null || val === '') return '—';
     return Number(val).toFixed(digits);
+}
+
+function formatOrderDate(order) {
+    const raw = order?.dateSold || order?.creationDate;
+    if (!raw) return '—';
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return '—';
+    return parsed.toISOString().slice(0, 10);
 }
 
 function roundMoney(value) {
@@ -999,6 +1008,7 @@ export default function AffiliateOrdersPage() {
     // Tab 1 state
     const [orders, setOrders] = useState([]);
     const [ordersLoading, setOrdersLoading] = useState(false);
+    const [supplierBackfillLoading, setSupplierBackfillLoading] = useState(false);
     const [ordersError, setOrdersError] = useState('');
     const [sellerOptions, setSellerOptions] = useState([]);
     const [sellerOptionsLoading, setSellerOptionsLoading] = useState(false);
@@ -1052,20 +1062,10 @@ export default function AffiliateOrdersPage() {
     }, [visibleColumns]);
 
     useEffect(() => {
-        if (sellerOptionsLoading) {
-            return;
-        }
-
-        if (sellerOptions.length === 0) {
-            if (selectedSeller) {
-                setSelectedSeller('');
-            }
-            setOrders([]);
-            return;
-        }
-
-        if (!selectedSeller || !sellerOptions.some((option) => option.value === selectedSeller)) {
-            setSelectedSeller(sellerOptions[0].value);
+        if (sellerOptionsLoading) return;
+        // Keep empty selection as "All Sellers".
+        if (selectedSeller && !sellerOptions.some((option) => option.value === selectedSeller)) {
+            setSelectedSeller('');
         }
     }, [selectedSeller, sellerOptions, sellerOptionsLoading]);
 
@@ -1093,11 +1093,6 @@ export default function AffiliateOrdersPage() {
     }, [date, excludeLowValue, showDoneEntries]);
 
     const fetchOrders = useCallback(async () => {
-        if (!selectedSeller) {
-            setOrders([]);
-            return;
-        }
-
         setOrdersLoading(true);
         setOrdersError('');
         try {
@@ -1106,7 +1101,7 @@ export default function AffiliateOrdersPage() {
                     date,
                     excludeLowValue: excludeLowValue ? 'true' : 'false',
                     includeDone: showDoneEntries ? 'true' : 'false',
-                    sellerId: selectedSeller,
+                    ...(selectedSeller ? { sellerId: selectedSeller } : {}),
                 }
             });
             setOrders((data || []).map(normalizeAffiliateOrder));
@@ -1162,6 +1157,26 @@ export default function AffiliateOrdersPage() {
             setSpendOrdersLoading(false);
         }
     }, [date, excludeLowValue]);
+
+    const backfillSupplierLinks = useCallback(async () => {
+        const confirmed = window.confirm(
+            'Backfill Supplier Links for existing orders?\n\n' +
+            'This will map saved SKU -> ASIN and write missing Supplier Link values in database.'
+        );
+        if (!confirmed) return;
+
+        setSupplierBackfillLoading(true);
+        try {
+            const payload = selectedSeller ? { sellerId: selectedSeller } : {};
+            const { data } = await api.post('/affiliate-orders/backfill-supplier-links', payload);
+            notify('success', data?.message || 'Supplier links backfilled successfully');
+            await Promise.all([fetchOrders(), fetchSpendOrders()]);
+        } catch (err) {
+            notify('error', err?.response?.data?.error || 'Failed to backfill supplier links');
+        } finally {
+            setSupplierBackfillLoading(false);
+        }
+    }, [selectedSeller, fetchOrders, fetchSpendOrders]);
 
     useEffect(() => {
         fetchSellerOptions();
@@ -1453,6 +1468,7 @@ export default function AffiliateOrdersPage() {
         const exportFieldMap = {
             index: 'exportIndex',
             orderId: 'orderId',
+            orderDate: (order) => formatOrderDate(order),
             productName: (order) => order.lineItems?.[0]?.title || order.productName || '',
             seller: (order) => order.sellerGroupName || '',
             supplierLink: 'affiliateLink',
@@ -1539,6 +1555,7 @@ export default function AffiliateOrdersPage() {
                             label="Seller"
                             onChange={(e) => setSelectedSeller(e.target.value)}
                         >
+                            <MenuItem value="">All Sellers</MenuItem>
                             {sellerOptions.map((option) => (
                                 <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
                             ))}
@@ -1565,6 +1582,16 @@ export default function AffiliateOrdersPage() {
                         page="affiliate-orders"
                     />
                     <Button size="small" startIcon={<RefreshIcon />} onClick={fetchSellerOptions}>Refresh</Button>
+                    <Button
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        startIcon={supplierBackfillLoading ? <CircularProgress size={14} color="inherit" /> : <PlaylistAddIcon />}
+                        onClick={backfillSupplierLinks}
+                        disabled={supplierBackfillLoading}
+                    >
+                        {supplierBackfillLoading ? 'Filling...' : 'Fill Old Links'}
+                    </Button>
                 </Stack>
             </Stack>
 
@@ -1647,6 +1674,13 @@ export default function AffiliateOrdersPage() {
                                                         </Tooltip>
                                                     </Stack>
                                                 </TableCell>}
+
+                                                {/* Order Date */}
+                                                {isColVisible('orderDate') && (
+                                                    <TableCell sx={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>
+                                                        {formatOrderDate(order)}
+                                                    </TableCell>
+                                                )}
 
                                                 {/* Product Name */}
                                                 {isColVisible('productName') && <TableCell sx={{ minWidth: 300, maxWidth: 360 }}>
@@ -2421,7 +2455,7 @@ export default function AffiliateOrdersPage() {
                             <Table size="small" sx={{ minWidth: 980 }}>
                                 <TableHead>
                                     <TableRow sx={{ bgcolor: '#edf7ed' }}>
-                                        {['#', 'Order ID', 'Product', 'Seller', 'Amazon Account', 'Type', 'Base Amount', 'Markup 3.5%', 'IGST 18% on Markup', 'Final Actual Spend'].map((label) => (
+                                        {['#', 'Order ID', 'Order Date', 'Product', 'Seller', 'Amazon Account', 'Type', 'Base Amount', 'Markup 3.5%', 'IGST 18% on Markup', 'Final Actual Spend'].map((label) => (
                                             <TableCell key={label} sx={{ fontWeight: 'bold', fontSize: '0.78rem', whiteSpace: 'nowrap' }}>
                                                 {label}
                                             </TableCell>
@@ -2431,7 +2465,7 @@ export default function AffiliateOrdersPage() {
                                 <TableBody>
                                     {actualSpendRows.length === 0 ? (
                                         <TableRow>
-                                            <TableCell colSpan={10} align="center" sx={{ color: 'text.secondary', py: 4 }}>
+                                            <TableCell colSpan={11} align="center" sx={{ color: 'text.secondary', py: 4 }}>
                                                 No orders found for this date.
                                             </TableCell>
                                         </TableRow>
@@ -2444,6 +2478,7 @@ export default function AffiliateOrdersPage() {
                                                 <TableRow key={row._id} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#fafafa' } }}>
                                                     <TableCell sx={{ fontSize: '0.78rem', color: 'text.secondary' }}>{row.rowIndex}</TableCell>
                                                     <TableCell sx={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>{row.orderId || '—'}</TableCell>
+                                                    <TableCell sx={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>{formatOrderDate(row)}</TableCell>
                                                     <TableCell sx={{ minWidth: 260 }}>
                                                         {itemId ? (
                                                             <Link
