@@ -1479,6 +1479,7 @@ function FulfillmentDashboard() {
   // Recalculate Earnings state
   const [recalcEarningsLoading, setRecalcEarningsLoading] = useState(false);
   const [recalcAmazonLoading, setRecalcAmazonLoading] = useState(false);
+  const [backfillEverythingLoading, setBackfillEverythingLoading] = useState(false);
   const [fetchingAdFeeGeneral, setFetchingAdFeeGeneral] = useState({});
 
   // Auto-message state
@@ -2550,6 +2551,37 @@ function FulfillmentDashboard() {
     }
   };
 
+  const backfillEverythingAllStores = async () => {
+    const confirmed = window.confirm(
+      'Run full historical backfill for ALL stores?\n\n' +
+      'This runs Orders, Messages, Listings, Returns, INR Cases, and Payment Disputes sync in sequence and may take several minutes.'
+    );
+    if (!confirmed) return;
+
+    setBackfillEverythingLoading(true);
+    setError('');
+    try {
+      const { data } = await api.post('/ebay/backfill-everything-all-stores', {
+        modules: ['orders', 'messages', 'listings', 'returns', 'inrCases', 'paymentDisputes'],
+        continueOnError: true,
+      });
+
+      await loadStoredOrders();
+
+      const ok = Number(data?.successfulSteps || 0);
+      const failed = Number(data?.failedSteps || 0);
+      setSnackbarMsg(`Backfill finished. Successful steps: ${ok}, Failed steps: ${failed}.`);
+      setSnackbarSeverity(failed > 0 ? 'warning' : 'success');
+      setSnackbarOpen(true);
+    } catch (e) {
+      setSnackbarMsg(e?.response?.data?.error || 'Failed to run full backfill');
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setBackfillEverythingLoading(false);
+    }
+  };
+
   // Update messaging status in database
   const updateMessagingStatus = async (orderId, status) => {
     try {
@@ -3382,6 +3414,22 @@ function FulfillmentDashboard() {
                         </Button>
                       </span>
                     </Tooltip>
+                    <Tooltip title="Run full historical backfill for all stores (orders/messages/listings/returns/cases/disputes)">
+                      <span style={{ flex: 1 }}>
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          size="small"
+                          fullWidth
+                          startIcon={backfillEverythingLoading ? <CircularProgress size={14} color="inherit" /> : <SyncIcon />}
+                          onClick={backfillEverythingAllStores}
+                          disabled={backfillEverythingLoading}
+                          sx={{ fontSize: '0.7rem' }}
+                        >
+                          {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
+                        </Button>
+                      </span>
+                    </Tooltip>
                   </>
                 )}
                 <Tooltip title="Select Columns">
@@ -3498,6 +3546,22 @@ function FulfillmentDashboard() {
                           sx={{ minWidth: 130 }}
                         >
                           {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
+                        </Button>
+                      </span>
+                    </Tooltip>
+
+                    <Tooltip title="Run full historical backfill for all stores (orders/messages/listings/returns/cases/disputes)">
+                      <span>
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          size="small"
+                          startIcon={backfillEverythingLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+                          onClick={backfillEverythingAllStores}
+                          disabled={backfillEverythingLoading}
+                          sx={{ minWidth: 130 }}
+                        >
+                          {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
                         </Button>
                       </span>
                     </Tooltip>

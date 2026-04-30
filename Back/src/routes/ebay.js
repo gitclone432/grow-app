@@ -202,6 +202,54 @@ async function applyActiveSellerScope(query, requestedSellerId) {
   query.$and.push({ seller: { $in: activeSellerIds } });
 }
 
+function getInternalApiBaseUrl(req) {
+  if (process.env.INTERNAL_API_BASE_URL) return process.env.INTERNAL_API_BASE_URL;
+  const port = process.env.PORT || 5000;
+  const protocol = req.protocol || 'http';
+  return `${protocol}://127.0.0.1:${port}`;
+}
+
+async function runInternalBackfillStep({ req, name, path, body = {} }) {
+  const startedAt = new Date();
+  try {
+    const baseUrl = getInternalApiBaseUrl(req);
+    const response = await axios.post(`${baseUrl}${path}`, body, {
+      headers: {
+        Authorization: req.headers.authorization || '',
+        Cookie: req.headers.cookie || '',
+        'Content-Type': 'application/json',
+      },
+      timeout: 10 * 60 * 1000, // 10 minutes per step
+      validateStatus: () => true,
+    });
+
+    const completedAt = new Date();
+    const ok = response.status >= 200 && response.status < 300;
+    return {
+      name,
+      path,
+      ok,
+      status: response.status,
+      startedAt,
+      completedAt,
+      durationMs: completedAt.getTime() - startedAt.getTime(),
+      result: response.data,
+    };
+  } catch (error) {
+    const completedAt = new Date();
+    return {
+      name,
+      path,
+      ok: false,
+      status: 500,
+      startedAt,
+      completedAt,
+      durationMs: completedAt.getTime() - startedAt.getTime(),
+      error: error.message || 'Unknown error',
+    };
+  }
+}
+
 function summarizeAutoCompatItems(items = []) {
   return items.reduce((acc, item) => {
     acc.processedCount += 1;
@@ -9274,6 +9322,74 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[Sync All Listings] Error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// One-click all-store historical backfill orchestrator.
+// Runs module sync steps sequentially and returns per-step status.
+router.post('/backfill-everything-all-stores', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  try {
+    const {
+      continueOnError = true,
+      modules = ['orders', 'messages', 'listings', 'returns', 'inrCases', 'paymentDisputes'],
+    } = req.body || {};
+
+    const moduleSet = new Set(Array.isArray(modules) ? modules : []);
+    const steps = [];
+    if (moduleSet.has('orders')) {
+      steps.push({ name: 'orders', path: '/api/ebay/poll-order-updates' });
+    }
+    if (moduleSet.has('messages')) {
+      steps.push({ name: 'messages', path: '/api/ebay/sync-inbox' });
+    }
+    if (moduleSet.has('listings')) {
+      steps.push({ name: 'listings', path: '/api/ebay/sync-all-sellers-listings' });
+    }
+    if (moduleSet.has('returns')) {
+      steps.push({ name: 'returns', path: '/api/ebay/fetch-returns' });
+    }
+    if (moduleSet.has('inrCases')) {
+      steps.push({ name: 'inrCases', path: '/api/ebay/fetch-inr-cases' });
+    }
+    if (moduleSet.has('paymentDisputes')) {
+      steps.push({ name: 'paymentDisputes', path: '/api/ebay/fetch-payment-disputes' });
+    }
+
+    if (steps.length === 0) {
+      return res.status(400).json({
+        error: 'No valid modules selected',
+        validModules: ['orders', 'messages', 'listings', 'returns', 'inrCases', 'paymentDisputes'],
+      });
+    }
+
+    const runStartedAt = new Date();
+    const results = [];
+
+    for (const step of steps) {
+      const result = await runInternalBackfillStep({ req, ...step });
+      results.push(result);
+      if (!result.ok && !continueOnError) break;
+    }
+
+    const runCompletedAt = new Date();
+    const failedSteps = results.filter((r) => !r.ok);
+    const successfulSteps = results.filter((r) => r.ok);
+
+    return res.json({
+      message: failedSteps.length
+        ? 'Backfill completed with some step failures'
+        : 'Backfill completed successfully',
+      startedAt: runStartedAt,
+      completedAt: runCompletedAt,
+      durationMs: runCompletedAt.getTime() - runStartedAt.getTime(),
+      requestedModules: Array.from(moduleSet),
+      successfulSteps: successfulSteps.length,
+      failedSteps: failedSteps.length,
+      results,
+    });
+  } catch (err) {
+    console.error('[Backfill Everything] Error:', err);
+    return res.status(500).json({ error: err.message || 'Failed to run full backfill' });
   }
 });
 

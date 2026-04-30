@@ -3,6 +3,7 @@ import Order from '../models/Order.js';
 import AmazonAccount from '../models/AmazonAccount.js';
 import AmazonAccountDailyBalance from '../models/AmazonAccountDailyBalance.js';
 import Seller from '../models/Seller.js';
+import TemplateListing from '../models/TemplateListing.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -44,6 +45,68 @@ function getCarryOverLabel(carryOverDays) {
 function getEffectiveSpendAmount(order) {
     const amount = order?.affiliatePrice;
     return Number(amount) || 0;
+}
+
+function extractOrderSku(order) {
+    const lineItem = Array.isArray(order?.lineItems) ? order.lineItems[0] : null;
+    return (
+        lineItem?.sku ||
+        lineItem?.SKU ||
+        order?.sku ||
+        ''
+    ).toString().trim();
+}
+
+function buildAmazonLinkFromAsin(asin) {
+    const clean = String(asin || '').trim();
+    if (!clean) return '';
+    return `https://www.amazon.com/dp/${clean}`;
+}
+
+async function applySupplierLinksFromSavedAsins(orders = []) {
+    if (!Array.isArray(orders) || orders.length === 0) return orders;
+
+    const orderLookupKeys = orders
+        .map((order) => ({
+            order,
+            sellerId: String(order?.seller?._id || order?.seller || '').trim(),
+            sku: extractOrderSku(order),
+        }))
+        .filter((row) => row.sellerId && row.sku);
+
+    if (!orderLookupKeys.length) return orders;
+
+    const sellerIds = [...new Set(orderLookupKeys.map((row) => row.sellerId))];
+    const skus = [...new Set(orderLookupKeys.map((row) => row.sku))];
+
+    const templateListings = await TemplateListing.find({
+        sellerId: { $in: sellerIds },
+        customLabel: { $in: skus },
+        deletedAt: null,
+    })
+        .select('+_asinReference sellerId customLabel')
+        .lean();
+
+    const asinBySellerSku = new Map(
+        templateListings.map((row) => [`${String(row.sellerId)}::${String(row.customLabel || '').trim()}`, row._asinReference || ''])
+    );
+
+    return orders.map((order) => {
+        const existingLink = String(order?.affiliateLink || '').trim();
+        if (existingLink) return order;
+
+        const sellerId = String(order?.seller?._id || order?.seller || '').trim();
+        const sku = extractOrderSku(order);
+        if (!sellerId || !sku) return order;
+
+        const asin = asinBySellerSku.get(`${sellerId}::${sku}`) || '';
+        if (!asin) return order;
+
+        return {
+            ...order,
+            affiliateLink: buildAmazonLinkFromAsin(asin),
+        };
+    });
 }
 
 function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = [], options = {}) {
@@ -209,8 +272,10 @@ router.get('/daily', async (req, res) => {
             .sort({ dateSold: 1 })
             .lean();
 
+        const ordersWithSupplierLink = await applySupplierLinksFromSavedAsins(orders);
+
         const selectedDayUtc = Date.parse(`${date}T00:00:00Z`);
-        const enrichedOrders = orders
+        const enrichedOrders = ordersWithSupplierLink
             .map((order) => {
                 const sourceDay = getPlatformDayString(order.dateSold || order.creationDate || new Date());
                 const sourceDayUtc = Date.parse(`${sourceDay}T00:00:00Z`);
@@ -258,7 +323,9 @@ router.get('/spend', async (req, res) => {
             .sort({ sourcingCompletedAt: 1, dateSold: 1 })
             .lean();
 
-        const enrichedOrders = orders
+        const ordersWithSupplierLink = await applySupplierLinksFromSavedAsins(orders);
+
+        const enrichedOrders = ordersWithSupplierLink
             .map((order) => {
                 const sellerName = order.seller?.user?.username || order.sellerId || 'Unknown Seller';
 
