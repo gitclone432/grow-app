@@ -53,6 +53,7 @@ import NavigateNextIcon from '@mui/icons-material/NavigateNext';
 import PersonIcon from '@mui/icons-material/Person';
 import SettingsIcon from '@mui/icons-material/Settings';
 import api from '../../lib/api';
+import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderSyncEvents';
 import ColumnSelector from '../../components/ColumnSelector';
 import TemplateManagementModal from '../../components/TemplateManagementModal';
 import { CHAT_TEMPLATES, personalizeTemplate } from '../../constants/chatTemplates';
@@ -1188,6 +1189,7 @@ export default function AffiliateOrdersPage() {
             const { data } = await api.post('/affiliate-orders/backfill-supplier-links', payload);
             notify('success', data?.message || 'Supplier links backfilled successfully');
             await Promise.all([fetchOrders(), fetchSpendOrders()]);
+            publishOrderSyncEvent('AffiliateOrdersPage', 'backfill-supplier-links');
         } catch (err) {
             notify('error', err?.response?.data?.error || 'Failed to backfill supplier links');
         } finally {
@@ -1214,6 +1216,22 @@ export default function AffiliateOrdersPage() {
 
         fetchOrders();
     }, [fetchOrders, selectedSeller, sellerOptions, sellerOptionsLoading]);
+
+    useEffect(() => {
+        const unsubscribe = subscribeOrderSyncEvent(() => {
+            Promise.all([
+                fetchSellerOptions(),
+                fetchOrders(),
+                fetchBalances(),
+                fetchSummary(),
+                fetchSpendOrders(),
+            ]).catch(() => {
+                // Individual fetchers already surface errors in page state/snackbar.
+            });
+        });
+
+        return unsubscribe;
+    }, [fetchSellerOptions, fetchOrders, fetchBalances, fetchSummary, fetchSpendOrders]);
 
     // ── Order field patch ──────────────────────────────────────────────────────
 

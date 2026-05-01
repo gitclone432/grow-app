@@ -80,6 +80,7 @@ import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import ColumnSelector from '../../components/ColumnSelector';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import api from '../../lib/api';
+import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderSyncEvents';
 import TemplateManagementModal from '../../components/TemplateManagementModal';
 import { CHAT_TEMPLATES, personalizeTemplate } from '../../constants/chatTemplates';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
@@ -1938,6 +1939,15 @@ function FulfillmentDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const unsubscribe = subscribeOrderSyncEvent(() => {
+      if (!hasFetchedInitialData.current) return;
+      loadStoredOrders();
+    });
+    return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Reload orders when page changes (but not on initial mount)
   useEffect(() => {
     // Skip on initial mount (already loaded above)
@@ -2301,6 +2311,7 @@ function FulfillmentDashboard() {
         setSnackbarSeverity('info');
         setSnackbarOpen(true);
       }
+      publishOrderSyncEvent('FulfillmentDashboard', 'poll-new-orders');
     } catch (e) {
       setError(e?.response?.data?.error || 'Failed to poll new orders');
     } finally {
@@ -2347,6 +2358,7 @@ function FulfillmentDashboard() {
         setSnackbarSeverity('info');
         setSnackbarOpen(true);
       }
+      publishOrderSyncEvent('FulfillmentDashboard', 'poll-order-updates');
     } catch (e) {
       setError(e?.response?.data?.error || 'Failed to poll order updates');
     } finally {
@@ -2400,6 +2412,7 @@ function FulfillmentDashboard() {
         setSnackbarSeverity('info');
         setSnackbarOpen(true);
       }
+      publishOrderSyncEvent('FulfillmentDashboard', 'resync-recent');
     } catch (e) {
       setError(e?.response?.data?.error || 'Failed to resync orders');
     } finally {
@@ -2573,6 +2586,7 @@ function FulfillmentDashboard() {
       setSnackbarMsg(`Backfill finished. Successful steps: ${ok}, Failed steps: ${failed}.`);
       setSnackbarSeverity(failed > 0 ? 'warning' : 'success');
       setSnackbarOpen(true);
+      publishOrderSyncEvent('FulfillmentDashboard', 'backfill-everything-all-stores');
     } catch (e) {
       setSnackbarMsg(e?.response?.data?.error || 'Failed to run full backfill');
       setSnackbarSeverity('error');

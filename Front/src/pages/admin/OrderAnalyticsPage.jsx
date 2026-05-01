@@ -26,6 +26,7 @@ import {
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
 import api from '../../lib/api';
+import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderSyncEvents';
 import OrderAnalyticsSkeleton from '../../components/skeletons/OrderAnalyticsSkeleton';
 import { dashboardSignatureTokens } from '../../theme/appTheme';
 
@@ -207,6 +208,14 @@ export default function OrderAnalyticsPage() {
     fetchStatistics();
   };
 
+  useEffect(() => {
+    const unsubscribe = subscribeOrderSyncEvent(() => {
+      fetchStatistics();
+    });
+    return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleApplyFilters = () => {
     setAppliedDateFilter(draftDateFilter);
     setAppliedMarketplace(draftMarketplace);
@@ -223,6 +232,7 @@ export default function OrderAnalyticsPage() {
 
       // Refresh statistics after polling
       await fetchStatistics();
+      publishOrderSyncEvent('OrderAnalyticsPage', 'poll-all-sellers');
 
       if (data && data.totalNewOrders > 0) {
         console.log(`✅ Polled ${data.totalNewOrders} new orders`);
