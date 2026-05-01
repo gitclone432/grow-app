@@ -1170,6 +1170,15 @@ const EditableCell = memo(function EditableCell({ value, type = 'text', onSave }
 // Sticky header cell style — extracted to avoid re-creating per render
 const HEADER_CELL_SX = { backgroundColor: 'primary.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 100 };
 const HEADER_CELL_RIGHT_SX = { ...HEADER_CELL_SX, textAlign: 'right' };
+const getOrderSku = (order) => {
+  if (!order) return '';
+  if (order.sku) return String(order.sku);
+  if (Array.isArray(order.lineItems)) {
+    const skuFromLine = order.lineItems.find((item) => item?.sku)?.sku;
+    if (skuFromLine) return String(skuFromLine);
+  }
+  return '';
+};
 
 const createEmptyDateFilter = () => ({ mode: 'none', single: '', from: '', to: '' });
 const normalizeDateFilter = (value) => (
@@ -1545,7 +1554,7 @@ function FulfillmentDashboard() {
 
   // Column visibility state - persisted in sessionStorage
   const DEFAULT_VISIBLE_COLUMNS = [
-    'seller', 'orderId', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'itemCategory', 'buyerNote',
+    'seller', 'orderId', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'sku', 'itemCategory', 'buyerNote',
     'buyerName', 'shippingAddress', 'marketplace', 'subtotal',
     'shipping', 'salesTax', 'discount', 'transactionFees',
     'adFeeGeneral', 'cancelStatus', 'refunds', 'orderEarnings', 'trackingNumber',
@@ -1561,6 +1570,7 @@ function FulfillmentDashboard() {
     { id: 'shipBy', label: 'Ship By' },
     { id: 'deliveryDate', label: 'Delivery Date' },
     { id: 'productName', label: 'Product Name' },
+    { id: 'sku', label: 'SKU' },
     { id: 'itemCategory', label: 'Category' },
     { id: 'buyerNote', label: 'Buyer Note' },
     { id: 'buyerName', label: 'Buyer Name' },
@@ -2972,6 +2982,7 @@ function FulfillmentDashboard() {
           accessor: (o) => formatDeliveryDate(o)
         },
         productName: { header: 'Product Name', accessor: 'productName' },
+        sku: { header: 'SKU', accessor: (o) => getOrderSku(o) },
         buyerNote: { header: 'Buyer Note', accessor: 'buyerCheckoutNotes' },
         buyerName: { header: 'Buyer Name', accessor: 'shippingFullName' },
         shippingAddress: {
@@ -3779,6 +3790,7 @@ function FulfillmentDashboard() {
                       {visibleColumnsSet.has('shipBy') && <TableCell sx={HEADER_CELL_SX}>Ship By</TableCell>}
                       {visibleColumnsSet.has('deliveryDate') && <TableCell sx={HEADER_CELL_SX}>Delivery Date</TableCell>}
                       {visibleColumnsSet.has('productName') && <TableCell sx={HEADER_CELL_SX}>Product Name</TableCell>}
+                      {visibleColumnsSet.has('sku') && <TableCell sx={HEADER_CELL_SX}>SKU</TableCell>}
                       {visibleColumnsSet.has('itemCategory') && <TableCell sx={HEADER_CELL_SX}>Category</TableCell>}
                       {visibleColumnsSet.has('buyerNote') && <TableCell sx={HEADER_CELL_SX}>Buyer Note</TableCell>}
                       {visibleColumnsSet.has('buyerName') && <TableCell sx={HEADER_CELL_SX}>Buyer Name</TableCell>}
@@ -4000,11 +4012,6 @@ function FulfillmentDashboard() {
                                             </Typography>
                                             <OpenInNewIcon sx={{ fontSize: 12, color: 'primary.main' }} />
                                           </Link>
-                                          {item.sku && (
-                                            <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
-                                              | SKU: {item.sku}
-                                            </Typography>
-                                          )}
                                         </Stack>
                                       </Box>
 
@@ -4027,6 +4034,24 @@ function FulfillmentDashboard() {
                                       {order.productName || '-'}
                                     </Typography>
                                   </Box>
+                                )}
+                              </Stack>
+                            </TableCell>
+                          )}
+                          {visibleColumnsSet.has('sku') && (
+                            <TableCell sx={{ maxWidth: 220, pr: 1 }}>
+                              <Stack direction="row" spacing={0.5} alignItems="center">
+                                <Typography variant="body2" sx={{ wordBreak: 'break-word' }}>
+                                  {getOrderSku(order) || '-'}
+                                </Typography>
+                                {getOrderSku(order) && (
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => handleCopy(getOrderSku(order))}
+                                    aria-label="copy sku"
+                                  >
+                                    <ContentCopyIcon fontSize="small" sx={{ fontSize: '1rem' }} />
+                                  </IconButton>
                                 )}
                               </Stack>
                             </TableCell>
