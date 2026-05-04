@@ -27,9 +27,14 @@ const calculateFields = (amount, exchangeRate) => {
 // GET /api/payoneer - List all records with pagination and filtering
 router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
-        const { page = 1, limit = 50, startDate, endDate, store } = req.query;
+        const { page = 1, limit = 50, startDate, endDate, store, bankAccount } = req.query;
 
         const query = {};
+
+        // Bank account filter (links Bank Accounts page → Payoneer sheet)
+        if (bankAccount) {
+            query.bankAccount = bankAccount;
+        }
 
         // Store Filter
         if (store) {
@@ -84,10 +89,18 @@ router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => 
 // POST /api/payoneer - Create new record
 router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
-        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit } = req.body;
+        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit, ebayPayoutId } = req.body;
 
         if (!bankAccount || !paymentDate || !amount || !exchangeRate || !store) {
             return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        const payoutIdTrim = typeof ebayPayoutId === 'string' && ebayPayoutId.trim() ? ebayPayoutId.trim() : null;
+        if (payoutIdTrim) {
+            const dup = await PayoneerRecord.findOne({ ebayPayoutId: payoutIdTrim }).select('_id').lean();
+            if (dup) {
+                return res.status(409).json({ error: 'A Payoneer row with this eBay payout ID already exists.' });
+            }
         }
 
         const calcs = calculateFields(amount, exchangeRate);
@@ -97,6 +110,7 @@ router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) =>
             paymentDate,
             store,
             ...calcs,
+            ...(payoutIdTrim && { ebayPayoutId: payoutIdTrim }),
             ...(periodStart && { periodStart }),
             ...(periodEnd && { periodEnd }),
             ...(profit !== undefined && profit !== '' && { profit: parseFloat(profit) })
@@ -142,7 +156,7 @@ router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) =>
 router.put('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { id } = req.params;
-        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit } = req.body;
+        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit, ebayPayoutId } = req.body;
 
         const record = await PayoneerRecord.findById(id);
         if (!record) return res.status(404).json({ error: 'Record not found' });
@@ -151,6 +165,21 @@ router.put('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) 
         if (bankAccount) record.bankAccount = bankAccount;
         if (paymentDate) record.paymentDate = paymentDate;
         if (store) record.store = store;
+        if (ebayPayoutId !== undefined) {
+            const payoutIdTrim = typeof ebayPayoutId === 'string' && ebayPayoutId.trim() ? ebayPayoutId.trim() : null;
+            if (payoutIdTrim) {
+                const dup = await PayoneerRecord.findOne({
+                    ebayPayoutId: payoutIdTrim,
+                    _id: { $ne: record._id }
+                }).select('_id').lean();
+                if (dup) {
+                    return res.status(409).json({ error: 'Another Payoneer row already uses this eBay payout ID.' });
+                }
+                record.ebayPayoutId = payoutIdTrim;
+            } else {
+                record.ebayPayoutId = null;
+            }
+        }
         if (periodStart !== undefined) record.periodStart = periodStart || null;
         if (periodEnd !== undefined) record.periodEnd = periodEnd || null;
         if (profit !== undefined) record.profit = profit !== '' ? parseFloat(profit) : null;

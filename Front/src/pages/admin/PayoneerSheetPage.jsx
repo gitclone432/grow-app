@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams, Link as RouterLink } from 'react-router-dom';
 import {
     Box,
     Typography,
@@ -23,17 +24,113 @@ import {
     useTheme,
     useMediaQuery,
     Pagination,
-    CircularProgress
+    CircularProgress,
+    Alert,
+    Chip
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
 import SaveIcon from '@mui/icons-material/Save';
 import CancelIcon from '@mui/icons-material/Close';
 import api from '../../lib/api';
 
+const EMPTY_PAYONEER_FORM = () => ({
+    bankAccount: '',
+    paymentDate: new Date().toISOString().split('T')[0],
+    amount: '',
+    exchangeRate: '',
+    store: '',
+    periodStart: '',
+    periodEnd: '',
+    /** Finances payoutId from Recently completed (last 30d) / Save row */
+    ebayPayoutId: ''
+});
+
+/** Max DB rows to merge with eBay feed (client-side sort + pagination). */
+const MERGE_FETCH_LIMIT = 5000;
+
+/** Local calendar YYYY-MM-DD — aligns table dates with eBay payout dates (avoids UTC slice mismatches). */
+function paymentDayKey(value) {
+    if (value == null || value === '') return '';
+    const x = new Date(value);
+    if (Number.isNaN(x.getTime())) return '';
+    const y = x.getFullYear();
+    const m = String(x.getMonth() + 1).padStart(2, '0');
+    const d = String(x.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function dbRowDedupeKey(r) {
+    const sid = String(r.store?._id || '');
+    const d = paymentDayKey(r.paymentDate);
+    const amt = Number(r.amount);
+    if (!sid || !d || Number.isNaN(amt)) return null;
+    return `${sid}|${d}|${amt.toFixed(2)}`;
+}
+
+function feedRowDedupeKey(f) {
+    const sid = String(f.sellerId);
+    const d = paymentDayKey(f.payoutDate);
+    const amt = Number(f.amount);
+    if (!sid || !d || Number.isNaN(amt)) return null;
+    return `${sid}|${d}|${amt.toFixed(2)}`;
+}
+
+/**
+ * Payout ID from DB, else match Recently completed feed (same store, local payment day, amount).
+ * Handles legacy rows saved before ebayPayoutId existed.
+ */
+function resolvePayoutIdFromFeed(record, payoutFeedRows) {
+    if (!record || record._fromEbay || !Array.isArray(payoutFeedRows)) return null;
+    if (record.ebayPayoutId) return record.ebayPayoutId;
+
+    const sid = String(record.store?._id || '');
+    const day = paymentDayKey(record.paymentDate);
+    const amt = Number(record.amount);
+    if (!sid || !day || Number.isNaN(amt)) return null;
+
+    const exactKey = `${sid}|${day}|${amt.toFixed(2)}`;
+    for (const f of payoutFeedRows) {
+        const fk = feedRowDedupeKey(f);
+        if (fk === exactKey) return String(f.payoutId);
+    }
+
+    const tol = payoutFeedRows.filter((f) => {
+        if (String(f.sellerId) !== sid) return false;
+        if (paymentDayKey(f.payoutDate) !== day) return false;
+        return Math.abs(Number(f.amount) - amt) < 0.02;
+    });
+    if (tol.length === 1) return String(tol[0].payoutId);
+
+    const sameDay = payoutFeedRows.filter(
+        (f) => String(f.sellerId) === sid && paymentDayKey(f.payoutDate) === day
+    );
+    if (sameDay.length === 1) return String(sameDay[0].payoutId);
+    if (sameDay.length > 1) {
+        const best = sameDay.reduce((a, b) =>
+            Math.abs(Number(a.amount) - amt) <= Math.abs(Number(b.amount) - amt) ? a : b
+        );
+        if (Math.abs(Number(best.amount) - amt) <= 1) return String(best.payoutId);
+    }
+
+    return null;
+}
+
+/** Match sellers whose username/email appears in the bank account's Sellers field (same as Bank Accounts page). */
+function filterSellersByBankSellersField(bankAccount, sellersList) {
+    if (!bankAccount?.sellers?.trim()) return sellersList;
+    const tokens = bankAccount.sellers.split(/[,;]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+    if (!tokens.length) return sellersList;
+    return sellersList.filter((s) => {
+        const u = (s.user?.username || s.user?.email || '').toLowerCase();
+        return tokens.some((t) => u === t || u.includes(t));
+    });
+}
+
 // --- MOBILE PAYONEER CARD COMPONENT ---
-function MobilePayoneerCard({ record, isEditing, renderCell, onEdit, onDelete, onSave, onCancel }) {
+function MobilePayoneerCard({ record, isEditing, displayPayoutId, renderCell, onEdit, onDelete, onSave, onCancel }) {
     return (
         <Paper elevation={2} sx={{ p: 2, borderRadius: 2 }}>
             <Stack spacing={1.5}>
@@ -135,30 +232,27 @@ function MobilePayoneerCard({ record, isEditing, renderCell, onEdit, onDelete, o
                         </Paper>
                     )}
 
-                    {/* Period & Profit */}
-                    <Stack direction="row" spacing={2}>
-                        <Box sx={{ flex: 1 }}>
-                            <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem', fontWeight: 'bold' }}>
-                                PERIOD
+                    <Box>
+                        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem', fontWeight: 'bold' }}>
+                            PERIOD
+                        </Typography>
+                        {isEditing ? (
+                            <Stack spacing={0.5} sx={{ mt: 0.5 }}>
+                                <TextField type="date" size="small" label="From" InputLabelProps={{ shrink: true }} value={editFormData?.periodStart || ''} onChange={(e) => handleEditChange('periodStart', e.target.value)} fullWidth />
+                                <TextField type="date" size="small" label="To" InputLabelProps={{ shrink: true }} value={editFormData?.periodEnd || ''} onChange={(e) => handleEditChange('periodEnd', e.target.value)} fullWidth />
+                            </Stack>
+                        ) : (
+                            <Typography variant="body2" sx={{ mt: 0.5 }}>
+                                {record.periodStart ? new Date(record.periodStart).toLocaleDateString() : '-'} → {record.periodEnd ? new Date(record.periodEnd).toLocaleDateString() : '-'}
                             </Typography>
-                            {isEditing ? (
-                                <Stack spacing={0.5} sx={{ mt: 0.5 }}>
-                                    <TextField type="date" size="small" label="From" InputLabelProps={{ shrink: true }} value={editFormData?.periodStart || ''} onChange={(e) => handleEditChange('periodStart', e.target.value)} fullWidth />
-                                    <TextField type="date" size="small" label="To" InputLabelProps={{ shrink: true }} value={editFormData?.periodEnd || ''} onChange={(e) => handleEditChange('periodEnd', e.target.value)} fullWidth />
-                                </Stack>
-                            ) : (
-                                <Typography variant="body2" sx={{ mt: 0.5 }}>
-                                    {record.periodStart ? new Date(record.periodStart).toLocaleDateString() : '-'} → {record.periodEnd ? new Date(record.periodEnd).toLocaleDateString() : '-'}
-                                </Typography>
-                            )}
-                        </Box>
-                        <Box sx={{ flex: 1 }}>
-                            <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem', fontWeight: 'bold' }}>
-                                PROFIT ($)
-                            </Typography>
-                            <Box sx={{ mt: 0.5 }}>{renderCell(record, 'profit', 'number')}</Box>
-                        </Box>
-                    </Stack>
+                        )}
+                    </Box>
+
+                    {!isEditing && displayPayoutId && (
+                        <Typography variant="caption" color="text.secondary" sx={{ wordBreak: 'break-all', display: 'block' }}>
+                            eBay payout ID: {displayPayoutId}
+                        </Typography>
+                    )}
                 </Stack>
             </Stack>
         </Paper>
@@ -178,32 +272,32 @@ const PayoneerSheetPage = () => {
     const [loading, setLoading] = useState(false);
     const [pageLoading, setPageLoading] = useState(true);
 
+    const [searchParams, setSearchParams] = useSearchParams();
+
     // Advanced Filter State
     const [filters, setFilters] = useState({
         store: '',
+        bankAccount: '', // BankAccount _id — synced with ?bankAccount= from Bank Accounts page
         dateMode: 'none', // 'none', 'single', 'range'
         singleDate: '',
         dateRange: { start: '', end: '' }
     });
 
-    // Pagination State
+    // Client-side pagination over merged (eBay feed + saved) rows
     const [pagination, setPagination] = useState({
         page: 1,
-        limit: 50,
-        totalPages: 1,
-        totalRecords: 0
+        limit: 50
     });
 
-    const [formData, setFormData] = useState({
-        bankAccount: '', // ObjectId of BankAccount
-        paymentDate: new Date().toISOString().split('T')[0],
-        amount: '',
-        exchangeRate: '',
-        store: '',
-        periodStart: '',
-        periodEnd: '',
-        profit: ''
-    });
+    const [formData, setFormData] = useState(() => EMPTY_PAYONEER_FORM());
+
+    /** eBay Finances SUCCEEDED payouts (last 30d) — same pool as Seller Funds “Recently completed” */
+    const [payoutFeedRows, setPayoutFeedRows] = useState([]);
+    const [payoutFeedLoading, setPayoutFeedLoading] = useState(false);
+    const [payoutFeedError, setPayoutFeedError] = useState('');
+
+    /** Hint after auto-fill from Bank Accounts + Seller Funds / eBay APIs */
+    const [autoFillHint, setAutoFillHint] = useState('');
 
     // Calculated Preview for "Add New"
     const [preview, setPreview] = useState({
@@ -221,22 +315,81 @@ const PayoneerSheetPage = () => {
         fetchBankAccounts();
     }, []);
 
-    // Fetch Records when Filters or Page Changes
     useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            setPayoutFeedLoading(true);
+            setPayoutFeedError('');
+            try {
+                const { data } = await api.get('/ebay/payoneer-recent-completed-feed');
+                if (!cancelled) setPayoutFeedRows(Array.isArray(data.rows) ? data.rows : []);
+            } catch (e) {
+                const msg =
+                    e.response?.status === 403
+                        ? 'Cannot load eBay payout feed (check page access).'
+                        : e.response?.data?.error || e.message;
+                if (!cancelled) setPayoutFeedError(msg);
+            } finally {
+                if (!cancelled) setPayoutFeedLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    const filteredPayoutFeed = useMemo(() => {
+        let rows = payoutFeedRows;
+        if (filters.store) {
+            rows = rows.filter((r) => String(r.sellerId) === String(filters.store));
+        }
+        if (filters.bankAccount) {
+            rows = rows.filter((r) => String(r.suggestedBankAccountId || '') === String(filters.bankAccount));
+        }
+        if (filters.dateMode === 'single' && filters.singleDate) {
+            const d = filters.singleDate;
+            rows = rows.filter((r) => r.payoutDate && paymentDayKey(r.payoutDate) === d);
+        } else if (filters.dateMode === 'range' && (filters.dateRange.start || filters.dateRange.end)) {
+            const start = filters.dateRange.start ? new Date(filters.dateRange.start) : null;
+            const end = filters.dateRange.end ? new Date(filters.dateRange.end) : null;
+            if (end) end.setHours(23, 59, 59, 999);
+            rows = rows.filter((r) => {
+                const pd = new Date(r.payoutDate);
+                if (Number.isNaN(pd.getTime())) return false;
+                if (start && pd < start) return false;
+                if (end && pd > end) return false;
+                return true;
+            });
+        }
+        return rows;
+    }, [payoutFeedRows, filters]);
+
+    // Deep link from Bank Accounts: /admin/payoneer?bankAccount=<id> (keep filter in sync with URL)
+    useEffect(() => {
+        const bid = searchParams.get('bankAccount') || '';
+        setFilters((prev) => ({ ...prev, bankAccount: bid }));
+        setPagination((prev) => ({ ...prev, page: 1 }));
+    }, [searchParams]);
+
+    // Fetch all matching saved rows (high limit) when filters change — merge with eBay feed is client-side
+    useEffect(() => {
+        setPagination((p) => ({ ...p, page: 1 }));
         fetchRecords();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [pagination.page, filters]);
+    }, [filters]);
 
     const fetchRecords = async () => {
         setLoading(true);
         try {
             const params = {
-                page: pagination.page,
-                limit: pagination.limit
+                page: 1,
+                limit: MERGE_FETCH_LIMIT
             };
 
             // Add Store Filter
             if (filters.store) params.store = filters.store;
+
+            if (filters.bankAccount) params.bankAccount = filters.bankAccount;
 
             // Add Date Filter based on Mode
             if (filters.dateMode === 'single' && filters.singleDate) {
@@ -249,17 +402,10 @@ const PayoneerSheetPage = () => {
 
             const { data } = await api.get('/payoneer', { params });
 
-            // Backend now returns { records, totalRecords, totalPages, currentPage }
             if (data.records) {
                 setRecords(data.records);
-                setPagination(prev => ({
-                    ...prev,
-                    totalPages: data.totalPages,
-                    totalRecords: data.totalRecords
-                }));
             } else {
-                // Fallback for old API response (array)
-                setRecords(data);
+                setRecords(Array.isArray(data) ? data : []);
             }
         } catch (error) {
             console.error('Failed to fetch records:', error);
@@ -268,6 +414,62 @@ const PayoneerSheetPage = () => {
             setPageLoading(false);
         }
     };
+
+    const mergedRows = useMemo(() => {
+        const savedKeys = new Set();
+        const savedPayoutIds = new Set();
+        for (const r of records) {
+            const k = dbRowDedupeKey(r);
+            if (k) savedKeys.add(k);
+            if (r.ebayPayoutId) savedPayoutIds.add(String(r.ebayPayoutId));
+        }
+
+        const ebayMapped = filteredPayoutFeed
+            .filter((f) => {
+                if (f.payoutId && savedPayoutIds.has(String(f.payoutId))) return false;
+                const k = feedRowDedupeKey(f);
+                return k && !savedKeys.has(k);
+            })
+            .map((f) => ({
+                _fromEbay: true,
+                _feedSource: f,
+                _id: `ebay-${f.payoutId}-${f.sellerId}`,
+                bankAccount: f.suggestedBankAccountId
+                    ? { _id: f.suggestedBankAccountId, name: f.suggestedBankName }
+                    : null,
+                paymentDate: f.payoutDate,
+                store: { _id: f.sellerId, user: { username: f.sellerName } },
+                amount: f.amount,
+                exchangeRate: null,
+                actualExchangeRate: null,
+                bankDeposit: null,
+                periodStart: null,
+                periodEnd: null
+            }));
+
+        const combined = [...ebayMapped, ...records];
+        combined.sort((a, b) => {
+            const ta = new Date(a.paymentDate).getTime();
+            const tb = new Date(b.paymentDate).getTime();
+            const da = Number.isNaN(ta) ? 0 : ta;
+            const dbn = Number.isNaN(tb) ? 0 : tb;
+            return dbn - da;
+        });
+        return combined;
+    }, [filteredPayoutFeed, records]);
+
+    const mergedTotalPages = Math.max(1, Math.ceil(mergedRows.length / pagination.limit) || 1);
+
+    const visibleRows = useMemo(() => {
+        const start = (pagination.page - 1) * pagination.limit;
+        return mergedRows.slice(start, start + pagination.limit);
+    }, [mergedRows, pagination.page, pagination.limit]);
+
+    useEffect(() => {
+        if (pagination.page > mergedTotalPages) {
+            setPagination((p) => ({ ...p, page: mergedTotalPages }));
+        }
+    }, [mergedTotalPages, pagination.page]);
 
     const fetchSellers = async () => {
         try {
@@ -287,6 +489,140 @@ const PayoneerSheetPage = () => {
         }
     };
 
+    /**
+     * Payment date + amount from eBay Finances (same sources as Seller Funds page):
+     * 1) Upcoming / recent payouts for the store
+     * 2) Else available balance from seller-funds-summary
+     */
+    /**
+     * Same source as Seller Funds Overview → "Recently Completed Payouts (Last 30 Days)":
+     * GET /ebay/upcoming-payouts/:sellerId → rows with payoutStatus === 'SUCCEEDED', newest payoutDate first.
+     */
+    const fillFromSellerFunds = useCallback(async (sellerId) => {
+        if (!sellerId) return;
+        setAutoFillHint('Loading Seller Funds Overview data…');
+        try {
+            const { data: summary } = await api.get('/ebay/seller-funds-summary');
+            const summaryRow = (Array.isArray(summary) ? summary : []).find(
+                (s) => String(s.sellerId) === String(sellerId)
+            );
+            const mp = summaryRow?.financesMarketplaceId;
+
+            const { data: up } = await api.get(`/ebay/upcoming-payouts/${sellerId}`, {
+                params: mp ? { marketplace: mp } : undefined
+            });
+            const payouts = up.payouts || [];
+
+            const byNewest = (a, b) => new Date(b.payoutDate) - new Date(a.payoutDate);
+            const completed = payouts
+                .filter((p) => p.payoutStatus === 'SUCCEEDED')
+                .sort(byNewest);
+            const pickCompleted = completed[0];
+
+            const bySoonestInitiated = (a, b) => new Date(a.payoutDate) - new Date(b.payoutDate);
+            const initiated = payouts
+                .filter((p) => p.payoutStatus === 'INITIATED')
+                .sort(bySoonestInitiated);
+            const pickInitiated = initiated[0];
+
+            const pick = pickCompleted || pickInitiated;
+
+            if (pick) {
+                const payDate = pick.payoutDate ? new Date(pick.payoutDate).toISOString().split('T')[0] : '';
+                const amt = pick.amount?.value != null ? String(parseFloat(pick.amount.value)) : '';
+                const pid = pick.payoutId != null && pick.payoutId !== '' ? String(pick.payoutId) : '';
+                setFormData((prev) => ({
+                    ...prev,
+                    paymentDate: payDate || prev.paymentDate,
+                    amount: amt || prev.amount,
+                    ...(pid ? { ebayPayoutId: pid } : {})
+                }));
+                if (pickCompleted) {
+                    setAutoFillHint(
+                        'Payment date and amount match Seller Funds Overview — top row of Recently Completed Payouts (last 30 days).'
+                    );
+                } else {
+                    setAutoFillHint(
+                        'No completed payout in window; using upcoming payout from Seller Funds (INITIATED). Adjust if needed.'
+                    );
+                }
+                return;
+            }
+
+            if (summaryRow?.availableFunds?.value != null) {
+                setFormData((prev) => ({
+                    ...prev,
+                    amount: String(parseFloat(summaryRow.availableFunds.value)),
+                    ebayPayoutId: ''
+                }));
+                setAutoFillHint(
+                    'No payouts in Seller Funds list; amount prefilled from available balance on Seller Funds Overview. Set payment date manually.'
+                );
+                return;
+            }
+
+            setAutoFillHint('No payout or balance row found in Seller Funds; enter amount and date manually.');
+        } catch (e) {
+            const msg =
+                e.response?.status === 403
+                    ? 'Cannot read Seller Funds APIs (need access). Enter payment date and amount manually.'
+                    : 'Could not auto-fill from eBay. Enter values manually.';
+            setAutoFillHint(msg);
+        }
+    }, []);
+
+    const runBankAccountLinkedAutoFill = useCallback(
+        async (bankId) => {
+            if (!bankId || !sellers.length) return;
+            const acc = bankAccounts.find((a) => String(a._id) === String(bankId));
+            if (!acc) return;
+            const matched = filterSellersByBankSellersField(acc, sellers);
+            if (matched.length === 1) {
+                const sid = matched[0]._id;
+                setFormData((prev) => ({ ...prev, store: sid }));
+                await fillFromSellerFunds(sid);
+            } else if (matched.length === 0 && acc.sellers?.trim()) {
+                setAutoFillHint(
+                    'Bank account "Sellers" text did not match any store username — pick Store manually to load amounts.'
+                );
+            } else if (matched.length > 1) {
+                setAutoFillHint('Multiple stores match this bank account — choose Store to load payment date and amount.');
+            }
+        },
+        [bankAccounts, sellers, fillFromSellerFunds]
+    );
+
+    const openAddDialog = useCallback(() => {
+        const bid = searchParams.get('bankAccount') || filters.bankAccount || '';
+        setAutoFillHint('');
+        setFormData({
+            ...EMPTY_PAYONEER_FORM(),
+            bankAccount: bid,
+            paymentDate: new Date().toISOString().split('T')[0]
+        });
+        setOpenDialog(true);
+    }, [searchParams, filters.bankAccount]);
+
+    const openAddFromFeedRow = useCallback((row) => {
+        setAutoFillHint('Prefilled from eBay Recently completed payout. Enter exchange rate, then save.');
+        setFormData({
+            ...EMPTY_PAYONEER_FORM(),
+            bankAccount: row.suggestedBankAccountId ? String(row.suggestedBankAccountId) : '',
+            store: String(row.sellerId),
+            paymentDate: row.payoutDate ? new Date(row.payoutDate).toISOString().split('T')[0] : '',
+            amount: Number.isFinite(row.amount) ? String(row.amount) : '',
+            ebayPayoutId: row.payoutId != null && row.payoutId !== '' ? String(row.payoutId) : ''
+        });
+        setOpenDialog(true);
+    }, []);
+
+    // After Add dialog opens: auto-match store from Bank Accounts "Sellers" + pull payout/amount from Seller Funds APIs
+    useEffect(() => {
+        if (!openDialog || !formData.bankAccount || !sellers.length) return;
+        if (formData.ebayPayoutId) return;
+        void runBankAccountLinkedAutoFill(formData.bankAccount);
+    }, [openDialog, formData.bankAccount, formData.ebayPayoutId, sellers.length, runBankAccountLinkedAutoFill]);
+
     // Update calculations when Amount or Rate changes (for Add Dialog)
     useEffect(() => {
         const amount = parseFloat(formData.amount) || 0;
@@ -305,20 +641,13 @@ const PayoneerSheetPage = () => {
     const handleCreate = async () => {
         try {
             setLoading(true);
-            await api.post('/payoneer', formData);
+            const payload = { ...formData };
+            if (!payload.ebayPayoutId?.trim()) delete payload.ebayPayoutId;
+            await api.post('/payoneer', payload);
             setOpenDialog(false);
+            setAutoFillHint('');
             fetchRecords();
-            // Reset form
-            setFormData({
-                bankAccount: '',
-                paymentDate: new Date().toISOString().split('T')[0],
-                amount: '',
-                exchangeRate: '',
-                store: '',
-                periodStart: '',
-                periodEnd: '',
-                profit: ''
-            });
+            setFormData(EMPTY_PAYONEER_FORM());
         } catch (error) {
             alert('Failed to create: ' + (error.response?.data?.error || error.message));
         } finally {
@@ -330,7 +659,7 @@ const PayoneerSheetPage = () => {
         if (!window.confirm('Are you sure you want to delete this record?')) return;
         try {
             await api.delete(`/payoneer/${id}`);
-            setRecords(prev => prev.filter(r => r._id !== id));
+            await fetchRecords();
         } catch (error) {
             console.error(error);
         }
@@ -339,6 +668,7 @@ const PayoneerSheetPage = () => {
     // --- EDITING LOGIC ---
 
     const startEditing = (record) => {
+        if (record._fromEbay) return;
         setEditingId(record._id);
         setEditFormData({
             bankAccount: record.bankAccount?._id,
@@ -347,8 +677,7 @@ const PayoneerSheetPage = () => {
             exchangeRate: record.exchangeRate,
             store: record.store?._id,
             periodStart: record.periodStart ? record.periodStart.split('T')[0] : '',
-            periodEnd: record.periodEnd ? record.periodEnd.split('T')[0] : '',
-            profit: record.profit ?? ''
+            periodEnd: record.periodEnd ? record.periodEnd.split('T')[0] : ''
         });
     };
 
@@ -373,6 +702,14 @@ const PayoneerSheetPage = () => {
 
     // Render a cell that is text normally, but an input when editing
     const renderCell = (record, field, type = 'text') => {
+        if (record._fromEbay) {
+            if (field === 'bankAccount') return record.bankAccount?.name || '—';
+            if (field === 'store') return record.store?.user?.username || '—';
+            if (field === 'amount') return Number.isFinite(record.amount) ? record.amount.toFixed(2) : '—';
+            if (field === 'paymentDate') return record.paymentDate ? new Date(record.paymentDate).toLocaleDateString() : '—';
+            if (field === 'exchangeRate') return '—';
+            return '—';
+        }
         const isEditing = editingId === record._id;
         let value = isEditing ? editFormData[field] : (field === 'store' ? (record.store?.user?.username || 'Unknown') : record[field]);
 
@@ -385,7 +722,6 @@ const PayoneerSheetPage = () => {
             if (field === 'actualExchangeRate') return value?.toFixed(4);
             if (field === 'paymentDate') return new Date(value).toLocaleDateString();
             if (field === 'periodStart' || field === 'periodEnd') return value ? new Date(value).toLocaleDateString() : '-';
-            if (field === 'profit') return value != null ? value.toFixed(2) : '-';
             return value;
         }
 
@@ -457,14 +793,25 @@ const PayoneerSheetPage = () => {
                 <Typography variant={isSmallMobile ? 'h6' : 'h5'} sx={{ fontWeight: 'bold' }}>
                     Payoneer Sheet
                 </Typography>
-                <Button
-                    variant="contained"
-                    startIcon={<AddIcon />}
-                    onClick={() => setOpenDialog(true)}
-                    fullWidth={isSmallMobile}
-                >
-                    Add Record
-                </Button>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
+                    <Button
+                        variant="outlined"
+                        startIcon={<AccountBalanceIcon />}
+                        component={RouterLink}
+                        to="/admin/bank-accounts"
+                        fullWidth={isSmallMobile}
+                    >
+                        Bank accounts
+                    </Button>
+                    <Button
+                        variant="contained"
+                        startIcon={<AddIcon />}
+                        onClick={openAddDialog}
+                        fullWidth={isSmallMobile}
+                    >
+                        Add Record
+                    </Button>
+                </Stack>
             </Box>
 
             {/* ADVANCED FILTERS */}
@@ -486,6 +833,32 @@ const PayoneerSheetPage = () => {
                             {sellers.map((s) => (
                                 <MenuItem key={s._id} value={s._id}>
                                     {s.user?.username || s.user?.email || 'Unknown'}
+                                </MenuItem>
+                            ))}
+                        </TextField>
+
+                        <TextField
+                            select
+                            label="Bank account"
+                            size="small"
+                            value={filters.bankAccount}
+                            onChange={(e) => {
+                                const v = e.target.value;
+                                setFilters((prev) => ({ ...prev, bankAccount: v }));
+                                setPagination((prev) => ({ ...prev, page: 1 }));
+                                const next = new URLSearchParams(searchParams);
+                                if (v) next.set('bankAccount', v);
+                                else next.delete('bankAccount');
+                                setSearchParams(next, { replace: true });
+                            }}
+                            sx={{ minWidth: 180 }}
+                        >
+                            <MenuItem value="">
+                                <em>All bank accounts</em>
+                            </MenuItem>
+                            {bankAccounts.map((acc) => (
+                                <MenuItem key={acc._id} value={acc._id}>
+                                    {acc.name}
                                 </MenuItem>
                             ))}
                         </TextField>
@@ -549,11 +922,13 @@ const PayoneerSheetPage = () => {
                             onClick={() => {
                                 setFilters({
                                     store: '',
+                                    bankAccount: '',
                                     dateMode: 'none',
                                     singleDate: '',
                                     dateRange: { start: '', end: '' }
                                 });
                                 setPagination(prev => ({ ...prev, page: 1 }));
+                                setSearchParams({}, { replace: true });
                             }}
                         >
                             Clear Filters
@@ -562,17 +937,83 @@ const PayoneerSheetPage = () => {
                 </Stack>
             </Paper>
 
+            {payoutFeedLoading && (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
+                    <CircularProgress size={22} />
+                    <Typography variant="body2" color="text.secondary">
+                        Loading eBay completed payouts (last 30 days)…
+                    </Typography>
+                </Box>
+            )}
+            {payoutFeedError && (
+                <Alert severity="warning" sx={{ mb: 2 }}>
+                    {payoutFeedError}
+                </Alert>
+            )}
+
+            <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+                eBay SUCCEEDED payouts (last 30 days) appear here with the eBay · last 30d chip; use Save row to enter exchange rate and
+                save to your book.
+            </Typography>
+
             {isMobile ? (
                 // MOBILE CARD VIEW
                 <Box sx={{ mt: { xs: 1.5, sm: 2 } }}>
                     <Stack spacing={1.5}>
-                        {records.map((record) => {
+                        {visibleRows.map((record) => {
+                            if (record._fromEbay) {
+                                const f = record._feedSource;
+                                return (
+                                    <Paper
+                                        key={record._id}
+                                        elevation={2}
+                                        sx={{
+                                            p: 2,
+                                            borderRadius: 2,
+                                            borderLeft: 4,
+                                            borderColor: 'divider',
+                                            bgcolor: 'action.hover'
+                                        }}
+                                    >
+                                        <Stack spacing={1.25}>
+                                            <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
+                                                <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" sx={{ minWidth: 0 }}>
+                                                    <Chip size="small" label="eBay · last 30d" variant="outlined" />
+                                                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }} noWrap>
+                                                        {record.store?.user?.username || '—'}
+                                                    </Typography>
+                                                </Stack>
+                                                <Button
+                                                    size="small"
+                                                    variant="contained"
+                                                    startIcon={<AddIcon />}
+                                                    onClick={() => openAddFromFeedRow(f)}
+                                                >
+                                                    Save row
+                                                </Button>
+                                            </Stack>
+                                            <Typography variant="body2" color="text.secondary">
+                                                Bank (suggested): {record.bankAccount?.name || '—'}
+                                            </Typography>
+                                            <Typography variant="body2">
+                                                {record.paymentDate ? new Date(record.paymentDate).toLocaleDateString() : '—'} ·{' '}
+                                                {Number.isFinite(record.amount) ? record.amount.toFixed(2) : '—'}{' '}
+                                                {f?.currency || 'USD'}
+                                            </Typography>
+                                            <Typography variant="caption" sx={{ wordBreak: 'break-all' }}>
+                                                Payout ID: {f?.payoutId}
+                                            </Typography>
+                                        </Stack>
+                                    </Paper>
+                                );
+                            }
                             const isEditing = editingId === record._id;
                             return (
                                 <MobilePayoneerCard
                                     key={record._id}
                                     record={record}
                                     isEditing={isEditing}
+                                    displayPayoutId={resolvePayoutIdFromFeed(record, payoutFeedRows)}
                                     renderCell={renderCell}
                                     onEdit={() => startEditing(record)}
                                     onDelete={() => handleDelete(record._id)}
@@ -582,10 +1023,14 @@ const PayoneerSheetPage = () => {
                             );
                         })}
 
-                        {records.length === 0 && !loading && (
+                        {visibleRows.length === 0 && !loading && !payoutFeedLoading && (
                             <Paper sx={{ p: 2, textAlign: 'center' }}>
                                 <Typography color="text.secondary">
-                                    No records found.
+                                    {mergedRows.length === 0
+                                        ? payoutFeedError
+                                            ? 'No rows — fix the eBay feed warning above if needed.'
+                                            : 'No records found.'
+                                        : 'No rows on this page.'}
                                 </Typography>
                             </Paper>
                         )}
@@ -605,12 +1050,51 @@ const PayoneerSheetPage = () => {
                                 <TableCell>Actual Rate (+2%)</TableCell>
                                 <TableCell>Bank Deposit (INR)</TableCell>
                                 <TableCell>Period</TableCell>
-                                <TableCell>Profit ($)</TableCell>
+                                <TableCell>Payout ID</TableCell>
                                 <TableCell align="right">Actions</TableCell>
                             </TableRow>
                         </TableHead>
                         <TableBody>
-                            {records.map((record) => {
+                            {visibleRows.map((record) => {
+                                if (record._fromEbay) {
+                                    const f = record._feedSource;
+                                    return (
+                                        <TableRow key={record._id} sx={{ bgcolor: 'action.hover' }}>
+                                            <TableCell>
+                                                <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
+                                                    <Typography variant="body2" component="span">
+                                                        {record.bankAccount?.name || '—'}
+                                                    </Typography>
+                                                    <Chip size="small" label="eBay · last 30d" variant="outlined" />
+                                                </Stack>
+                                            </TableCell>
+                                            <TableCell>{renderCell(record, 'paymentDate', 'date')}</TableCell>
+                                            <TableCell>{record.store?.user?.username || '—'}</TableCell>
+                                            <TableCell>{renderCell(record, 'amount', 'number')}</TableCell>
+                                            <TableCell>—</TableCell>
+                                            <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
+                                            <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
+                                            <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
+                                            <TableCell>
+                                                <Typography variant="caption" sx={{ wordBreak: 'break-all', display: 'block', fontFamily: 'ui-monospace, monospace' }}>
+                                                    {f?.payoutId || '—'}
+                                                </Typography>
+                                            </TableCell>
+                                            <TableCell align="right">
+                                                <Tooltip title="Prefill Add Record — enter exchange rate to save">
+                                                    <Button
+                                                        size="small"
+                                                        variant="outlined"
+                                                        startIcon={<AddIcon />}
+                                                        onClick={() => openAddFromFeedRow(f)}
+                                                    >
+                                                        Save row
+                                                    </Button>
+                                                </Tooltip>
+                                            </TableCell>
+                                        </TableRow>
+                                    );
+                                }
                                 const isEditing = editingId === record._id;
                                 return (
                                     <TableRow key={record._id}>
@@ -660,8 +1144,36 @@ const PayoneerSheetPage = () => {
                                             )}
                                         </TableCell>
 
-                                        {/* Profit */}
-                                        <TableCell>{renderCell(record, 'profit', 'number')}</TableCell>
+                                        <TableCell>
+                                            {(() => {
+                                                const displayPid = resolvePayoutIdFromFeed(record, payoutFeedRows);
+                                                const inner = (
+                                                    <Typography
+                                                        variant="caption"
+                                                        sx={{
+                                                            wordBreak: 'break-all',
+                                                            display: 'block',
+                                                            fontFamily: 'ui-monospace, monospace'
+                                                        }}
+                                                    >
+                                                        {displayPid}
+                                                    </Typography>
+                                                );
+                                                if (!displayPid) {
+                                                    return (
+                                                        <Typography component="span" sx={{ color: 'text.secondary' }}>
+                                                            —
+                                                        </Typography>
+                                                    );
+                                                }
+                                                if (record.ebayPayoutId) return inner;
+                                                return (
+                                                    <Tooltip title="Matched from eBay Recently completed (last 30 days)">
+                                                        {inner}
+                                                    </Tooltip>
+                                                );
+                                            })()}
+                                        </TableCell>
 
                                         <TableCell align="right">
                                             {isEditing ? (
@@ -695,10 +1207,14 @@ const PayoneerSheetPage = () => {
                                     </TableRow>
                                 );
                             })}
-                            {records.length === 0 && !loading && (
+                            {visibleRows.length === 0 && !loading && !payoutFeedLoading && (
                                 <TableRow>
                                     <TableCell colSpan={10} align="center">
-                                        No records found.
+                                        {mergedRows.length === 0
+                                            ? payoutFeedError
+                                                ? 'No rows — fix the eBay feed warning above if needed.'
+                                                : 'No records found.'
+                                            : 'No rows on this page.'}
                                     </TableCell>
                                 </TableRow>
                             )}
@@ -710,9 +1226,9 @@ const PayoneerSheetPage = () => {
             {/* PAGINATION */}
             <Box sx={{ mt: 2, display: 'flex', justifyContent: 'center' }}>
                 <Pagination
-                    count={pagination.totalPages}
-                    page={pagination.currentPage}
-                    onChange={(e, value) => setPagination(prev => ({ ...prev, page: value }))}
+                    count={mergedTotalPages}
+                    page={pagination.page}
+                    onChange={(e, value) => setPagination((prev) => ({ ...prev, page: value }))}
                     color="primary"
                     showFirstButton
                     showLastButton
@@ -722,7 +1238,10 @@ const PayoneerSheetPage = () => {
             {/* CREATE DIALOG */}
             <Dialog
                 open={openDialog}
-                onClose={() => setOpenDialog(false)}
+                onClose={() => {
+                    setOpenDialog(false);
+                    setAutoFillHint('');
+                }}
                 maxWidth="sm"
                 fullWidth
                 fullScreen={isSmallMobile}
@@ -730,12 +1249,27 @@ const PayoneerSheetPage = () => {
                 <DialogTitle>Add Payoneer Record</DialogTitle>
                 <DialogContent>
                     <Box display="flex" flexDirection="column" gap={2} mt={1}>
+                        {autoFillHint && (
+                            <Alert severity="info" onClose={() => setAutoFillHint('')}>
+                                {autoFillHint}
+                            </Alert>
+                        )}
                         <TextField
                             select
                             label="Bank Account"
                             fullWidth
                             value={formData.bankAccount}
-                            onChange={(e) => setFormData({ ...formData, bankAccount: e.target.value })}
+                            onChange={(e) => {
+                                const v = e.target.value;
+                                setFormData((prev) => ({
+                                    ...prev,
+                                    bankAccount: v,
+                                    store: '',
+                                    amount: '',
+                                    ebayPayoutId: ''
+                                }));
+                                setAutoFillHint('');
+                            }}
                         >
                             {bankAccounts.map((acc) => (
                                 <MenuItem key={acc._id} value={acc._id}>
@@ -744,15 +1278,27 @@ const PayoneerSheetPage = () => {
                             ))}
                         </TextField>
 
-                        {/* Store Name Selection */}
+                        {/* Store Name Selection — filtered by Sellers field on Bank Accounts when set */}
                         <TextField
                             select
                             label="Store Name"
                             fullWidth
                             value={formData.store}
-                            onChange={(e) => setFormData({ ...formData, store: e.target.value })}
+                            onChange={(e) => {
+                                const v = e.target.value;
+                                setFormData((prev) => ({ ...prev, store: v, ebayPayoutId: '' }));
+                                setAutoFillHint('');
+                                if (v) void fillFromSellerFunds(v);
+                            }}
                         >
-                            {sellers.map((seller) => (
+                            {(formData.bankAccount
+                                ? (() => {
+                                      const b = bankAccounts.find((a) => String(a._id) === String(formData.bankAccount));
+                                      const filtered = b ? filterSellersByBankSellersField(b, sellers) : sellers;
+                                      return filtered.length ? filtered : sellers;
+                                  })()
+                                : sellers
+                            ).map((seller) => (
                                 <MenuItem key={seller._id} value={seller._id}>
                                     {seller.user?.username || seller.user?.email}
                                 </MenuItem>
@@ -767,6 +1313,16 @@ const PayoneerSheetPage = () => {
                             value={formData.paymentDate}
                             onChange={(e) => setFormData({ ...formData, paymentDate: e.target.value })}
                         />
+
+                        {formData.ebayPayoutId ? (
+                            <TextField
+                                label="eBay payout ID (Recently completed)"
+                                fullWidth
+                                value={formData.ebayPayoutId}
+                                InputProps={{ readOnly: true }}
+                                helperText="From eBay Finances; stored with this row."
+                            />
+                        ) : null}
 
                         <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
                             <TextField
@@ -814,16 +1370,6 @@ const PayoneerSheetPage = () => {
                                 onChange={(e) => setFormData({ ...formData, periodEnd: e.target.value })}
                             />
                         </Stack>
-
-                        {/* Profit */}
-                        <TextField
-                            label="Profit ($)"
-                            type="number"
-                            fullWidth
-                            placeholder="Enter profit amount (optional)"
-                            value={formData.profit}
-                            onChange={(e) => setFormData({ ...formData, profit: e.target.value })}
-                        />
                     </Box>
                 </DialogContent>
                 <DialogActions sx={{ p: { xs: 1, sm: 2 }, gap: 1, flexDirection: { xs: 'column-reverse', sm: 'row' } }}>

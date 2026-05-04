@@ -1,5 +1,6 @@
 import express from 'express';
 import BankAccount from '../models/BankAccount.js';
+import PayoneerRecord from '../models/PayoneerRecord.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { createBankAccountSchema } from '../schemas/index.js';
@@ -10,8 +11,16 @@ const router = express.Router();
 // Accessible from both BankAccounts page and Transactions page (for dropdown)
 router.get('/', requireAuth, requirePageAccess(['BankAccounts', 'Transactions','Payoneer']), async (req, res) => {
     try {
-        const accounts = await BankAccount.find().sort({ name: 1 });
-        res.json(accounts);
+        const accounts = await BankAccount.find().sort({ name: 1 }).lean();
+        const countAgg = await PayoneerRecord.aggregate([
+            { $group: { _id: '$bankAccount', count: { $sum: 1 } } }
+        ]);
+        const countMap = new Map(countAgg.map((d) => [d._id.toString(), d.count]));
+        const withCounts = accounts.map((a) => ({
+            ...a,
+            payoneerRecordCount: countMap.get(a._id.toString()) || 0
+        }));
+        res.json(withCounts);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -20,11 +29,11 @@ router.get('/', requireAuth, requirePageAccess(['BankAccounts', 'Transactions','
 // POST /api/bank-accounts - Create
 router.post('/', requireAuth, requirePageAccess('BankAccounts'), validate(createBankAccountSchema), async (req, res) => {
     try {
-        const { name, accountNumber, ifscCode } = req.body;
+        const { name, accountNumber, ifscCode, sellers } = req.body;
         if (!name) {
             return res.status(400).json({ error: 'Name is required' });
         }
-        const newAccount = new BankAccount({ name, accountNumber, ifscCode });
+        const newAccount = new BankAccount({ name, accountNumber, ifscCode, sellers });
         await newAccount.save();
         res.status(201).json(newAccount);
     } catch (err) {
@@ -39,10 +48,10 @@ router.post('/', requireAuth, requirePageAccess('BankAccounts'), validate(create
 router.put('/:id', requireAuth, requirePageAccess('BankAccounts'), async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, accountNumber, ifscCode } = req.body;
+        const { name, accountNumber, ifscCode, sellers } = req.body;
         const account = await BankAccount.findByIdAndUpdate(
             id,
-            { name, accountNumber, ifscCode },
+            { name, accountNumber, ifscCode, sellers },
             { new: true }
         );
         res.json(account);

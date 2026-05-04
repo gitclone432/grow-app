@@ -4,7 +4,8 @@ const BankAccountSchema = new mongoose.Schema(
     {
         name: { type: String, required: true, unique: true }, // e.g., "HDFC Bank"
         accountNumber: { type: String },
-        ifscCode: { type: String }
+        ifscCode: { type: String },
+        sellers: { type: String } // free text, e.g. seller names (entered manually)
     },
     { timestamps: true }
 );

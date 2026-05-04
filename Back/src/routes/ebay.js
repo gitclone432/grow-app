@@ -11,6 +11,7 @@ import sharp from 'sharp';
 import FormData from 'form-data';
 import { requireAuth, requirePageAccess, requireRole } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
+import BankAccount from '../models/BankAccount.js';
 import Order from '../models/Order.js';
 import Return from '../models/Return.js';
 import Case from '../models/Case.js';
@@ -1266,77 +1267,200 @@ async function ensureValidToken(seller, retries = 3) {
 }
 
 // ============================================
+// HELPER: Finances API marketplace header (US / GB / AU / CA / …)
+// ============================================
+const VALID_FINANCES_MARKETPLACE_IDS = new Set([
+  'EBAY_US',
+  'EBAY_ENCA',
+  'EBAY_CA',
+  'EBAY_GB',
+  'EBAY_UK',
+  'EBAY_AU',
+  'EBAY_DE',
+  'EBAY_FR',
+  'EBAY_IT',
+  'EBAY_ES'
+]);
+
+function normalizeFinancesMarketplaceId(raw) {
+  if (raw == null) return 'EBAY_US';
+  const s = String(raw).trim();
+  if (!s) return 'EBAY_US';
+  const upper = s.toUpperCase();
+  if (upper === 'UK') return 'EBAY_GB';
+  if (upper === 'GB') return 'EBAY_GB';
+  if (upper === 'AU' || upper === 'AUS' || upper === 'AUSTRALIA') return 'EBAY_AU';
+  if (upper === 'CA' || upper === 'CAN' || upper === 'CANADA') return 'EBAY_CA';
+  if (upper.startsWith('EBAY_')) {
+    if (upper === 'EBAY_UK') return 'EBAY_GB';
+    if (upper === 'EBAY_ENCA') return 'EBAY_CA';
+    return VALID_FINANCES_MARKETPLACE_IDS.has(upper) ? upper : 'EBAY_US';
+  }
+  return 'EBAY_US';
+}
+
+function resolveFinancesMarketplaceIds(seller, queryMarketplace) {
+  const fromQuery = normalizeFinancesMarketplaceId(queryMarketplace);
+  if (queryMarketplace != null && String(queryMarketplace).trim() !== '') {
+    return [fromQuery];
+  }
+  const regions = Array.isArray(seller?.ebayMarketplaces) ? seller.ebayMarketplaces : [];
+  const mapped = regions.map((r) => normalizeFinancesMarketplaceId(r)).filter(Boolean);
+  const uniq = [...new Set(mapped)];
+  return uniq.length ? uniq : ['EBAY_US'];
+}
+
+function resolvePrimaryFinancesMarketplaceId(seller, queryMarketplace) {
+  return resolveFinancesMarketplaceIds(seller, queryMarketplace)[0];
+}
+
+function purchaseMarketplaceToFinancesId(purchaseMarketplaceId) {
+  return normalizeFinancesMarketplaceId(purchaseMarketplaceId);
+}
+
+function financesApiHeaders(accessToken, marketplaceId) {
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+    'X-EBAY-C-MARKETPLACE-ID': normalizeFinancesMarketplaceId(marketplaceId)
+  };
+}
+
+function moneyFromNumber(value, currency = 'USD') {
+  const v = Number.isFinite(value) ? value : 0;
+  return { value: v.toFixed(2), currency: currency || 'USD' };
+}
+
+/** Paginate GET /sell/finances/v1/transaction with a single filter (e.g. transactionStatus:{FUNDS_PROCESSING}). */
+async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filter) {
+  const all = [];
+  let offset = 0;
+  const limit = 200;
+  let hasMore = true;
+  const mp = normalizeFinancesMarketplaceId(marketplaceId);
+
+  while (hasMore) {
+    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+      headers: financesApiHeaders(accessToken, mp),
+      params: { filter, limit, offset }
+    });
+    const batch = response.data?.transactions || [];
+    all.push(...batch);
+    if (batch.length < limit) hasMore = false;
+    else offset += limit;
+  }
+  return all;
+}
+
+/**
+ * Same order-level merge as /processing-transactions and /onhold-transactions:
+ * one row per order (or transaction id fallback), amount = sum of txn.amount.
+ */
+function mergeFinancesTransactionsByOrder(transactions) {
+  const orderMap = new Map();
+  for (const txn of transactions) {
+    const orderId = txn.orderId || null;
+    const orderRef = txn.references?.find(r => r.referenceType === 'ORDER_ID');
+    const effectiveOrderId = orderId || orderRef?.referenceId || txn.transactionId;
+
+    if (!orderMap.has(effectiveOrderId)) {
+      orderMap.set(effectiveOrderId, {
+        orderId: effectiveOrderId,
+        amount: parseFloat(txn.amount?.value || 0),
+        currency: txn.amount?.currency || 'USD',
+        transactionDate: txn.transactionDate
+      });
+    } else {
+      const existing = orderMap.get(effectiveOrderId);
+      existing.amount += parseFloat(txn.amount?.value || 0);
+    }
+  }
+  return orderMap;
+}
+
+function sumOrderMapAmounts(orderMap) {
+  let sum = 0;
+  let currency = 'USD';
+  for (const row of orderMap.values()) {
+    sum += row.amount;
+    if (row.currency) currency = row.currency;
+  }
+  return { sum: parseFloat(sum.toFixed(2)), currency };
+}
+
+/**
+ * Merge NON_SALE_CHARGE pages into adFeeMap for one marketplace.
+ */
+async function fetchNonSaleChargesIntoMap(accessToken, marketplaceId, adFeeMap) {
+  let offset = 0;
+  const limit = 200;
+  let hasMore = true;
+  const mp = normalizeFinancesMarketplaceId(marketplaceId);
+
+  while (hasMore) {
+    const baseUrl = 'https://apiz.ebay.com/sell/finances/v1/transaction';
+    const filterValue = 'transactionType:{NON_SALE_CHARGE}';
+
+    const response = await axios.get(baseUrl, {
+      headers: financesApiHeaders(accessToken, mp),
+      params: {
+        filter: filterValue,
+        limit,
+        offset
+      }
+    });
+
+    const transactions = response.data?.transactions || [];
+
+    for (const txn of transactions) {
+      if (txn.feeType === 'AD_FEE' && txn.references) {
+        const orderRef = txn.references.find(ref => ref.referenceType === 'ORDER_ID');
+
+        if (orderRef) {
+          const orderId = orderRef.referenceId;
+          const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
+
+          const existingFee = adFeeMap.get(orderId) || 0;
+          if (txn.bookingEntry === 'CREDIT') {
+            adFeeMap.set(orderId, existingFee - feeAmount);
+          } else {
+            adFeeMap.set(orderId, existingFee + feeAmount);
+          }
+        }
+      }
+    }
+
+    if (transactions.length < limit) {
+      hasMore = false;
+    } else {
+      offset += limit;
+      if (offset >= 10000) {
+        console.log(`[Finances API] Reached safety limit at offset ${offset} (marketplace ${mp})`);
+        hasMore = false;
+      }
+    }
+  }
+}
+
+// ============================================
 // HELPER: Fetch ALL Ad Fees from Finances API
 // ============================================
 // Returns a Map of orderId -> adFee amount
 // This is more efficient than fetching per-order
-async function fetchAllAdFees(accessToken, sinceDate = null) {
+async function fetchAllAdFees(accessToken, marketplaceIds = ['EBAY_US'], sinceDate = null) {
   const adFeeMap = new Map();
-  let offset = 0;
-  const limit = 200;
-  let hasMore = true;
 
-  console.log(`[Finances API] Fetching all AD_FEE transactions...`);
+  void sinceDate; // reserved for future date filtering
+
+  const ids = (Array.isArray(marketplaceIds) && marketplaceIds.length
+    ? [...new Set(marketplaceIds.map(normalizeFinancesMarketplaceId))]
+    : ['EBAY_US']);
+
+  console.log(`[Finances API] Fetching all AD_FEE transactions for marketplaces: ${ids.join(', ')}...`);
 
   try {
-    while (hasMore) {
-      // Build URL with filter - use proper encoding
-      const baseUrl = 'https://apiz.ebay.com/sell/finances/v1/transaction';
-      const filterValue = 'transactionType:{NON_SALE_CHARGE}';
-
-      console.log(`[Finances API] Calling: ${baseUrl} with filter=${filterValue}, offset=${offset}`);
-
-      const response = await axios.get(baseUrl, {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-        },
-        params: {
-          filter: filterValue,
-          limit: limit,
-          offset: offset
-        }
-      });
-
-      const transactions = response.data?.transactions || [];
-      console.log(`[Finances API] Fetched ${transactions.length} NON_SALE_CHARGE transactions at offset ${offset}`);
-
-      for (const txn of transactions) {
-        // Check if this is an AD_FEE transaction
-        if (txn.feeType === 'AD_FEE' && txn.references) {
-          // Find the ORDER_ID reference
-          const orderRef = txn.references.find(ref => ref.referenceType === 'ORDER_ID');
-
-          if (orderRef) {
-            const orderId = orderRef.referenceId;
-            const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
-
-            // Handle CREDIT (refund) vs DEBIT (charge)
-            // DEBIT = charged, CREDIT = refunded
-            const existingFee = adFeeMap.get(orderId) || 0;
-            if (txn.bookingEntry === 'CREDIT') {
-              // This is a refund of ad fee (subtract from total)
-              adFeeMap.set(orderId, existingFee - feeAmount);
-            } else {
-              // This is a charge (add to total)
-              adFeeMap.set(orderId, existingFee + feeAmount);
-            }
-          }
-        }
-      }
-
-      // Check if there are more transactions
-      if (transactions.length < limit) {
-        hasMore = false;
-      } else {
-        offset += limit;
-        // Safety limit - don't fetch more than 10000 transactions
-        if (offset >= 10000) {
-          console.log(`[Finances API] Reached safety limit at offset ${offset}`);
-          hasMore = false;
-        }
-      }
+    for (const mp of ids) {
+      await fetchNonSaleChargesIntoMap(accessToken, mp, adFeeMap);
     }
 
     console.log(`[Finances API] Built ad fee map with ${adFeeMap.size} orders`);
@@ -1356,7 +1480,7 @@ async function fetchAllAdFees(accessToken, sinceDate = null) {
 }
 
 // Single order lookup (used when ad fee map is not available)
-async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null) {
+async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplaceId = 'EBAY_US') {
   // If we have a pre-built map, use it
   if (adFeeMap) {
     const adFee = adFeeMap.get(orderId) || 0;
@@ -1366,14 +1490,11 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null) {
   // Otherwise, we need to search through transactions
   // This is less efficient but works for single lookups
   try {
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
     const response = await axios.get(
       `https://apiz.ebay.com/sell/finances/v1/transaction`,
       {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-        },
+        headers: financesApiHeaders(accessToken, mp),
         params: {
           filter: `transactionType:{NON_SALE_CHARGE}`,
           limit: 200
@@ -1465,7 +1586,8 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
 
     try {
       // Fetch updated ad fee from Finances API
-      const adFeeResult = await fetchOrderAdFee(accessToken, existingOrder.orderId);
+      const financesMp = purchaseMarketplaceToFinancesId(existingOrder.purchaseMarketplaceId);
+      const adFeeResult = await fetchOrderAdFee(accessToken, existingOrder.orderId, null, financesMp);
       const adFeeGeneral = adFeeResult.success ? adFeeResult.adFeeGeneral : existingOrder.adFeeGeneral;
 
       // Calculate financial fields with $0 earnings while preserving order total for TDS
@@ -3052,6 +3174,7 @@ router.get('/test-finances-basic', requireAuth, requirePageAccess('AllOrdersShee
     }
 
     const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
 
     console.log(`[Test Finances Basic] Testing API without filter...`);
 
@@ -3059,11 +3182,7 @@ router.get('/test-finances-basic', requireAuth, requirePageAccess('AllOrdersShee
     const response = await axios.get(
       `https://apiz.ebay.com/sell/finances/v1/transaction`,
       {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-        },
+        headers: financesApiHeaders(accessToken, marketplaceId),
         params: {
           limit: 10
         }
@@ -3110,6 +3229,10 @@ router.get('/test-finances/:orderId', requireAuth, requirePageAccess('AllOrdersS
     }
 
     const accessToken = await ensureValidToken(seller);
+    const order = await Order.findOne({ orderId }).select('purchaseMarketplaceId').lean();
+    const marketplaceId = order?.purchaseMarketplaceId
+      ? purchaseMarketplaceToFinancesId(order.purchaseMarketplaceId)
+      : resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
 
     // Make direct API call to see raw response
     const filterValue = `orderId:{${orderId}}`;
@@ -3119,11 +3242,7 @@ router.get('/test-finances/:orderId', requireAuth, requirePageAccess('AllOrdersS
     const response = await axios.get(
       `https://apiz.ebay.com/sell/finances/v1/transaction`,
       {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-        },
+        headers: financesApiHeaders(accessToken, marketplaceId),
         params: {
           filter: filterValue,
           limit: 50
@@ -3214,7 +3333,8 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
     }
 
     const accessToken = await ensureValidToken(seller);
-    const adFeeResult = await fetchOrderAdFee(accessToken, order.orderId);
+    const financesMp = purchaseMarketplaceToFinancesId(order.purchaseMarketplaceId);
+    const adFeeResult = await fetchOrderAdFee(accessToken, order.orderId, null, financesMp);
 
     if (!adFeeResult.success) {
       return res.status(400).json({ error: adFeeResult.error || 'Failed to fetch ad fee from eBay' });
@@ -3497,7 +3617,16 @@ router.post('/backfill-ad-fees', requireAuth, requirePageAccess('AllOrdersSheet'
 
         // STEP 1: Fetch ALL ad fees from eBay in one batch
         console.log(`[Backfill Ad Fees] Fetching all ad fees since ${effectiveSinceDate.toISOString()} for ${seller.username || seller._id}...`);
-        const adFeeResult = await fetchAllAdFees(accessToken, effectiveSinceDate);
+        const distinctMp = await Order.distinct('purchaseMarketplaceId', {
+          seller: seller._id,
+          creationDate: { $gte: effectiveSinceDate }
+        });
+        const fromOrders = distinctMp.map((id) => normalizeFinancesMarketplaceId(id)).filter(Boolean);
+        const financeMarketplaceIds = [...new Set([
+          ...resolveFinancesMarketplaceIds(seller),
+          ...fromOrders
+        ])];
+        const adFeeResult = await fetchAllAdFees(accessToken, financeMarketplaceIds, effectiveSinceDate);
 
         if (!adFeeResult.success) {
           totals.sellerErrors.push({ seller: seller.username || seller._id.toString(), error: adFeeResult.error });
@@ -4643,7 +4772,8 @@ router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), a
 
               // Fetch ad fee from eBay Finances API
               try {
-                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId);
+                const financesMp = purchaseMarketplaceToFinancesId(newOrder.purchaseMarketplaceId);
+                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financesMp);
                 if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
                   newOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                   newOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
@@ -5099,7 +5229,8 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
                 // Fetch ad fee if not already set
                 if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
                   try {
-                    const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId);
+                    const financesMp = purchaseMarketplaceToFinancesId(existingOrder.purchaseMarketplaceId);
+                    const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financesMp);
                     if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
                       existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                       existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
@@ -5404,7 +5535,8 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
             // Fetch ad fee if not already set or is $0
             if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
               try {
-                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId);
+                const financesMp = purchaseMarketplaceToFinancesId(existingOrder.purchaseMarketplaceId);
+                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financesMp);
                 if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
                   existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                   existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
@@ -11601,48 +11733,81 @@ router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'
       const sellerName = seller.user?.username || seller._id.toString();
       try {
         const accessToken = await ensureValidToken(seller);
+        const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller);
 
-        const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/seller_funds_summary', {
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+        // Optional eBay wallet snapshot (used only for fallback / currency hints)
+        let ebaySnapshot = null;
+        try {
+          const summaryRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/seller_funds_summary', {
+            headers: financesApiHeaders(accessToken, marketplaceId)
+          });
+          ebaySnapshot = summaryRes.data || null;
+        } catch (sumErr) {
+          if (sumErr.response?.status !== 204) {
+            throw sumErr;
           }
-        });
+        }
+
+        const [procTx, holdTx] = await Promise.all([
+          fetchFinancesTransactionsAllPages(accessToken, marketplaceId, 'transactionStatus:{FUNDS_PROCESSING}'),
+          fetchFinancesTransactionsAllPages(accessToken, marketplaceId, 'transactionStatus:{FUNDS_ON_HOLD}')
+        ]);
+
+        const procAgg = sumOrderMapAmounts(mergeFinancesTransactionsByOrder(procTx));
+        const holdAgg = sumOrderMapAmounts(mergeFinancesTransactionsByOrder(holdTx));
+
+        let availAgg = { sum: 0, currency: procAgg.currency || holdAgg.currency || 'USD' };
+        let availableSource = 'transactions';
+        try {
+          const availTx = await fetchFinancesTransactionsAllPages(
+            accessToken,
+            marketplaceId,
+            'transactionStatus:{FUNDS_AVAILABLE}'
+          );
+          availAgg = sumOrderMapAmounts(mergeFinancesTransactionsByOrder(availTx));
+        } catch {
+          availableSource = 'ebay_summary';
+          const a = ebaySnapshot?.availableFunds;
+          availAgg = {
+            sum: parseFloat(a?.value || 0) || 0,
+            currency: a?.currency || procAgg.currency || holdAgg.currency || 'USD'
+          };
+        }
+
+        const cur = availAgg.currency || procAgg.currency || holdAgg.currency || 'USD';
+        const availNum = parseFloat(availAgg.sum) || 0;
+        const procNum = parseFloat(procAgg.sum) || 0;
+        const holdNum = parseFloat(holdAgg.sum) || 0;
+        const totalNum = parseFloat((availNum + procNum + holdNum).toFixed(2));
 
         results.push({
           sellerId: seller._id,
           sellerName,
-          totalFunds: response.data.totalFunds || { value: '0.00', currency: 'USD' },
-          availableFunds: response.data.availableFunds || { value: '0.00', currency: 'USD' },
-          processingFunds: response.data.processingFunds || { value: '0.00', currency: 'USD' },
-          fundsOnHold: response.data.fundsOnHold || { value: '0.00', currency: 'USD' },
+          financesMarketplaceId: marketplaceId,
+          totalFunds: moneyFromNumber(totalNum, cur),
+          availableFunds: moneyFromNumber(availNum, cur),
+          processingFunds: moneyFromNumber(procNum, cur),
+          fundsOnHold: moneyFromNumber(holdNum, cur),
+          fundsAlignment: {
+            availableSource,
+            processingSource: 'transactions',
+            onHoldSource: 'transactions',
+            totalSource: 'sum_of_buckets'
+          },
           error: null
         });
       } catch (err) {
-        // 204 No Content means no funds
-        if (err.response?.status === 204) {
-          results.push({
-            sellerId: seller._id,
-            sellerName,
-            totalFunds: { value: '0.00', currency: 'USD' },
-            availableFunds: { value: '0.00', currency: 'USD' },
-            processingFunds: { value: '0.00', currency: 'USD' },
-            fundsOnHold: { value: '0.00', currency: 'USD' },
-            error: null
-          });
-        } else {
-          console.error(`[Seller Funds] Error for ${sellerName}:`, err.response?.data || err.message);
-          results.push({
-            sellerId: seller._id,
-            sellerName,
-            totalFunds: null,
-            availableFunds: null,
-            processingFunds: null,
-            fundsOnHold: null,
-            error: err.response?.data?.errors?.[0]?.message || err.message
-          });
-        }
+        console.error(`[Seller Funds] Error for ${sellerName}:`, err.response?.data || err.message);
+        results.push({
+          sellerId: seller._id,
+          sellerName,
+          financesMarketplaceId: resolvePrimaryFinancesMarketplaceId(seller),
+          totalFunds: null,
+          availableFunds: null,
+          processingFunds: null,
+          fundsOnHold: null,
+          error: err.response?.data?.errors?.[0]?.message || err.message
+        });
       }
     }
 
@@ -11663,6 +11828,7 @@ router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess(
     if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
 
     const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
     const sellerName = (seller.user?.username || '').toLowerCase();
 
     // Available date rules per seller
@@ -11697,11 +11863,7 @@ router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess(
 
     while (hasMore) {
       const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-        },
+        headers: financesApiHeaders(accessToken, marketplaceId),
         params: {
           filter: 'transactionStatus:{FUNDS_PROCESSING}',
           limit,
@@ -11790,6 +11952,7 @@ router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess(
     res.json({
       sellerId: seller._id,
       sellerName: seller.user?.username || seller._id.toString(),
+      financesMarketplaceId: marketplaceId,
       availableDateRule: rule,
       totalProcessingTransactions: result.length,
       transactions: result
@@ -11797,6 +11960,186 @@ router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess(
   } catch (err) {
     console.error('[Processing Transactions] Error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Failed to fetch processing transactions' });
+  }
+});
+
+// ============================================
+// AVAILABLE TRANSACTIONS for a specific seller
+// ============================================
+router.get('/available-transactions/:sellerId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.params.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
+
+    const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
+
+    const lookbackDays = Math.max(1, Math.min(90, parseInt(req.query.lookbackDays || '30', 10) || 30));
+    const now = new Date();
+    const fromDate = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+    const fromIso = fromDate.toISOString();
+    const nowIso = now.toISOString();
+
+    let allTransactions = [];
+    let offset = 0;
+    const limit = 200;
+    let hasMore = true;
+
+    const requestPage = async (withStatusFilter, currentOffset) => {
+      const params = { limit, offset: currentOffset };
+      if (withStatusFilter) {
+        params.filter = `transactionStatus:{FUNDS_AVAILABLE},transactionDate:[${fromIso}..${nowIso}]`;
+      } else {
+        params.filter = `transactionDate:[${fromIso}..${nowIso}]`;
+      }
+      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+        headers: financesApiHeaders(accessToken, marketplaceId),
+        params
+      });
+      return response.data?.transactions || [];
+    };
+
+    let useStatusFilter = true;
+    try {
+      while (hasMore) {
+        const transactions = await requestPage(useStatusFilter, offset);
+        allTransactions = allTransactions.concat(transactions);
+
+        if (transactions.length < limit) {
+          hasMore = false;
+        } else {
+          offset += limit;
+        }
+      }
+    } catch (err) {
+      // Some eBay accounts reject FUNDS_AVAILABLE status filter.
+      // Fallback: fetch without status filter and filter rows in-memory.
+      const firstError = err?.response?.data || err?.message;
+      console.warn('[Available Transactions] Status-filter request failed; retrying without filter:', firstError);
+      allTransactions = [];
+      offset = 0;
+      hasMore = true;
+      useStatusFilter = false;
+
+      while (hasMore) {
+        const transactions = await requestPage(useStatusFilter, offset);
+        allTransactions = allTransactions.concat(transactions);
+
+        if (transactions.length < limit) {
+          hasMore = false;
+        } else {
+          offset += limit;
+        }
+      }
+    }
+
+    if (!useStatusFilter) {
+      // Broad fallback when eBay doesn't accept FUNDS_AVAILABLE filter:
+      // remove obvious non-available buckets and keep completed/settled style rows.
+      allTransactions = allTransactions.filter((txn) => {
+        const status = String(txn?.transactionStatus || '').toUpperCase();
+        if (!status) return false;
+        if (status.includes('ON_HOLD')) return false;
+        if (status.includes('PROCESSING')) return false;
+        return true;
+      });
+    }
+
+    // If status filter returned zero rows but seller has available balance,
+    // retry with broad fallback to avoid empty-table false negatives.
+    if (useStatusFilter && allTransactions.length === 0) {
+      let retryRows = [];
+      let retryOffset = 0;
+      let retryHasMore = true;
+      while (retryHasMore) {
+        const rows = await requestPage(false, retryOffset);
+        retryRows = retryRows.concat(rows);
+        if (rows.length < limit) retryHasMore = false;
+        else retryOffset += limit;
+      }
+      allTransactions = retryRows.filter((txn) => {
+        const status = String(txn?.transactionStatus || '').toUpperCase();
+        if (!status) return false;
+        if (status.includes('ON_HOLD')) return false;
+        if (status.includes('PROCESSING')) return false;
+        return true;
+      });
+    }
+
+    // Hard date clamp in case API returns rows outside requested window.
+    allTransactions = allTransactions.filter((txn) => {
+      if (!txn?.transactionDate) return false;
+      const t = new Date(txn.transactionDate).getTime();
+      return t >= fromDate.getTime() && t <= now.getTime();
+    });
+
+    const normalizeSignedNet = (txn) => {
+      const amount = Number(txn?.amount?.value);
+      const fee = Number(
+        txn?.totalFeeBasisAmount?.value ??
+        txn?.feeAmount?.value ??
+        txn?.fee?.value ??
+        0
+      );
+      const fundsImpact = Number(
+        txn?.totalFundsImpact?.value ??
+        txn?.fundsImpact?.value ??
+        txn?.netAmount?.value
+      );
+
+      let net = Number.isFinite(fundsImpact)
+        ? fundsImpact
+        : (Number.isFinite(amount) ? amount : 0) + (Number.isFinite(fee) ? fee : 0);
+
+      const type = String(txn?.transactionType || '').toLowerCase();
+      const memo = String(txn?.transactionMemo || '').toLowerCase();
+      const status = String(txn?.transactionStatus || '').toLowerCase();
+      const isPromoted = type.includes('promoted') || memo.includes('promoted listing');
+      const isRefund = type.includes('refund') || memo.includes('refund') || status.includes('refunded');
+
+      // eBay available page shows promoted/refund effects as negative net.
+      if ((isPromoted || isRefund) && net > 0) {
+        net = -net;
+      }
+      if (isPromoted && net === 0 && Number.isFinite(fee) && fee !== 0) {
+        net = fee; // fee-only promoted lines
+      }
+
+      return parseFloat(net.toFixed(2));
+    };
+
+    // Keep line-level rows (like eBay UI) so fee/refund entries remain visible.
+    const result = allTransactions.map((txn) => {
+      const orderRef = txn.references?.find(r => r.referenceType === 'ORDER_ID');
+      const effectiveOrderId = txn.orderId || orderRef?.referenceId || txn.transactionId;
+      const net = normalizeSignedNet(txn);
+      const currency = txn.amount?.currency || 'USD';
+      return {
+        orderId: effectiveOrderId,
+        net,
+        currency,
+        transactionDate: txn.transactionDate,
+        buyer: txn.buyer?.username || 'N/A',
+        transactionMemo: txn.transactionMemo || null,
+        transactionStatus: txn.transactionStatus || null,
+        transactionType: txn.transactionType || null,
+      };
+    });
+
+    result.sort((a, b) => new Date(b.transactionDate) - new Date(a.transactionDate));
+
+    res.json({
+      sellerId: seller._id,
+      sellerName: seller.user?.username || seller._id.toString(),
+      financesMarketplaceId: marketplaceId,
+      lookbackDays,
+      totalAvailableTransactions: result.length,
+      transactions: result
+    });
+  } catch (err) {
+    console.error('[Available Transactions] Error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to fetch available transactions' });
   }
 });
 
@@ -11810,14 +12153,11 @@ router.get('/upcoming-payouts/:sellerId', requireAuth, requirePageAccess('Seller
     if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
 
     const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
 
     // Fetch upcoming and recent payouts
     const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-      },
+      headers: financesApiHeaders(accessToken, marketplaceId),
       params: {
         sort: '-payoutDate',
         limit: 50
@@ -11853,12 +12193,174 @@ router.get('/upcoming-payouts/:sellerId', requireAuth, requirePageAccess('Seller
     res.json({
       sellerId: seller._id,
       sellerName: seller.user?.username || seller._id.toString(),
+      financesMarketplaceId: marketplaceId,
       totalPayouts: payouts.length,
       payouts
     });
   } catch (err) {
     console.error('[Upcoming Payouts] Error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Failed to fetch upcoming payouts' });
+  }
+});
+
+/**
+ * Aggregated SUCCEEDED payouts (last 30 days) for Payoneer sheet — same Finances API + window as
+ * Seller Funds → "Recently Completed Payouts", across all token-connected sellers.
+ */
+router.get('/payoneer-recent-completed-feed', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
+  try {
+    const bankAccounts = await BankAccount.find().lean();
+    const sellers = await Seller.find({
+      'ebayTokens.access_token': { $exists: true, $ne: null },
+      'ebayTokens.refresh_token': { $exists: true, $ne: null }
+    }).populate('user', 'username email');
+
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const bankForSeller = (seller) => {
+      const username = (seller.user?.username || seller.user?.email || '').toLowerCase();
+      if (!username) return { bankId: null, bankName: null };
+      for (const b of bankAccounts) {
+        if (!b.sellers?.trim()) continue;
+        const tokens = b.sellers.split(/[,;]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+        if (tokens.some((t) => username === t || username.includes(t))) {
+          return { bankId: b._id, bankName: b.name };
+        }
+      }
+      return { bankId: null, bankName: null };
+    };
+
+    const rows = [];
+
+    for (const seller of sellers) {
+      try {
+        const accessToken = await ensureValidToken(seller);
+        const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller);
+        const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
+          headers: financesApiHeaders(accessToken, marketplaceId),
+          params: { sort: '-payoutDate', limit: 50 }
+        });
+        const allPayouts = payoutsRes.data?.payouts || [];
+
+        for (const p of allPayouts) {
+          if (p.payoutStatus !== 'SUCCEEDED' || !p.payoutDate) continue;
+          const payoutDate = new Date(p.payoutDate);
+          if (payoutDate < thirtyDaysAgo) continue;
+
+          const { bankId, bankName } = bankForSeller(seller);
+          rows.push({
+            payoutId: p.payoutId,
+            payoutDate: p.payoutDate,
+            payoutStatus: p.payoutStatus,
+            amount: parseFloat(p.amount?.value || 0),
+            currency: p.amount?.currency || 'USD',
+            sellerId: seller._id,
+            sellerName: seller.user?.username || seller.user?.email || seller._id.toString(),
+            suggestedBankAccountId: bankId,
+            suggestedBankName: bankName,
+            financesMarketplaceId: marketplaceId
+          });
+        }
+      } catch (e) {
+        console.warn('[payoneer-recent-completed-feed] seller', seller._id, e.response?.data || e.message);
+      }
+    }
+
+    rows.sort((a, b) => new Date(b.payoutDate) - new Date(a.payoutDate));
+
+    res.json({ rows, total: rows.length });
+  } catch (err) {
+    console.error('[payoneer-recent-completed-feed]', err);
+    res.status(500).json({ error: err.message || 'Failed to load recent payouts' });
+  }
+});
+
+// ============================================
+// PAYOUT TRANSACTIONS for a specific payout
+// ============================================
+router.get('/payout-transactions/:sellerId/:payoutId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+  try {
+    const { sellerId, payoutId } = req.params;
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
+    if (!payoutId) return res.status(400).json({ error: 'Missing payoutId' });
+
+    const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
+
+    let allTransactions = [];
+    let offset = 0;
+    const limit = 200;
+    let hasMore = true;
+
+    while (hasMore) {
+      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+        headers: financesApiHeaders(accessToken, marketplaceId),
+        params: {
+          filter: `payoutId:{${payoutId}}`,
+          limit,
+          offset
+        }
+      });
+
+      const rows = response.data?.transactions || [];
+      allTransactions = allTransactions.concat(rows);
+      if (rows.length < limit) hasMore = false;
+      else offset += limit;
+    }
+
+    const normalizeNet = (txn) => {
+      const amount = Number(txn?.amount?.value);
+      const fee = Number(
+        txn?.totalFeeBasisAmount?.value ??
+        txn?.feeAmount?.value ??
+        txn?.fee?.value ??
+        0
+      );
+      const fundsImpact = Number(
+        txn?.totalFundsImpact?.value ??
+        txn?.fundsImpact?.value ??
+        txn?.netAmount?.value
+      );
+      let net = Number.isFinite(fundsImpact)
+        ? fundsImpact
+        : (Number.isFinite(amount) ? amount : 0) + (Number.isFinite(fee) ? fee : 0);
+
+      const memo = String(txn?.transactionMemo || '').toLowerCase();
+      const type = String(txn?.transactionType || '').toLowerCase();
+      if ((memo.includes('promoted listing') || type.includes('promoted') || type.includes('refund')) && net > 0) {
+        net = -net;
+      }
+      return parseFloat(net.toFixed(2));
+    };
+
+    const transactions = allTransactions.map((txn) => {
+      const orderRef = txn.references?.find(r => r.referenceType === 'ORDER_ID');
+      const effectiveOrderId = txn.orderId || orderRef?.referenceId || txn.transactionId;
+      return {
+        orderId: effectiveOrderId,
+        net: normalizeNet(txn),
+        currency: txn.amount?.currency || 'USD',
+        buyer: txn.buyer?.username || 'N/A',
+        transactionDate: txn.transactionDate,
+        transactionMemo: txn.transactionMemo || null,
+      };
+    }).sort((a, b) => new Date(b.transactionDate) - new Date(a.transactionDate));
+
+    return res.json({
+      sellerId: seller._id,
+      sellerName: seller.user?.username || seller._id.toString(),
+      financesMarketplaceId: marketplaceId,
+      payoutId,
+      totalTransactions: transactions.length,
+      transactions
+    });
+  } catch (err) {
+    console.error('[Payout Transactions] Error:', err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to fetch payout transactions' });
   }
 });
 
@@ -11872,6 +12374,7 @@ router.get('/onhold-transactions/:sellerId', requireAuth, requirePageAccess('Sel
     if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
 
     const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
 
     let allTransactions = [];
     let offset = 0;
@@ -11880,11 +12383,7 @@ router.get('/onhold-transactions/:sellerId', requireAuth, requirePageAccess('Sel
 
     while (hasMore) {
       const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-        },
+        headers: financesApiHeaders(accessToken, marketplaceId),
         params: {
           filter: 'transactionStatus:{FUNDS_ON_HOLD}',
           limit,
@@ -11934,6 +12433,7 @@ router.get('/onhold-transactions/:sellerId', requireAuth, requirePageAccess('Sel
     res.json({
       sellerId: seller._id,
       sellerName: seller.user?.username || seller._id.toString(),
+      financesMarketplaceId: marketplaceId,
       totalOnHoldTransactions: result.length,
       transactions: result
     });

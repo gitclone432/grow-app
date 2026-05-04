@@ -93,12 +93,15 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
   const holdValue = parseFloat(seller.fundsOnHold?.value || 0);
   const canExpandHold = holdValue > 0;
 
+
   const fetchTransactions = async () => {
     if (!canExpandProcessing || transactions.length > 0) return;
     setLoadingProcessing(true);
     setErrorProcessing(null);
     try {
-      const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`);
+      const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`, {
+        params: seller.financesMarketplaceId ? { marketplace: seller.financesMarketplaceId } : undefined
+      });
       setTransactions(res.data.transactions || []);
     } catch (err) {
       setErrorProcessing(err.response?.data?.error || 'Failed to load transactions');
@@ -112,7 +115,9 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
     setLoadingHold(true);
     setErrorHold(null);
     try {
-      const res = await api.get(`/ebay/onhold-transactions/${seller.sellerId}`);
+      const res = await api.get(`/ebay/onhold-transactions/${seller.sellerId}`, {
+        params: seller.financesMarketplaceId ? { marketplace: seller.financesMarketplaceId } : undefined
+      });
       setHoldTransactions(res.data.transactions || []);
     } catch (err) {
       setErrorHold(err.response?.data?.error || 'Failed to load on-hold transactions');
@@ -120,6 +125,7 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
       setLoadingHold(false);
     }
   };
+
 
   const handleToggleProcessing = () => {
     if (!canExpandProcessing) return;
@@ -394,7 +400,9 @@ const ProcessingByDateSection = ({ sellers }) => {
 
     for (const seller of sellers.filter(s => !s.error)) {
       try {
-        const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`);
+        const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`, {
+          params: seller.financesMarketplaceId ? { marketplace: seller.financesMarketplaceId } : undefined
+        });
         const txns = res.data.transactions || [];
 
         const matchingTxns = txns.filter(txn => {
@@ -542,13 +550,19 @@ const UpcomingPayoutsCard = ({ seller }) => {
   const [payouts, setPayouts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [expandedPayoutRows, setExpandedPayoutRows] = useState({});
+  const [payoutTransactions, setPayoutTransactions] = useState({});
+  const [payoutTxLoading, setPayoutTxLoading] = useState({});
+  const [payoutTxError, setPayoutTxError] = useState({});
 
   const fetchPayouts = async () => {
     if (payouts.length > 0) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await api.get(`/ebay/upcoming-payouts/${seller.sellerId}`);
+      const res = await api.get(`/ebay/upcoming-payouts/${seller.sellerId}`, {
+        params: seller.financesMarketplaceId ? { marketplace: seller.financesMarketplaceId } : undefined
+      });
       setPayouts(res.data.payouts || []);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load payouts');
@@ -561,6 +575,25 @@ const UpcomingPayoutsCard = ({ seller }) => {
     const willOpen = !open;
     setOpen(willOpen);
     if (willOpen && payouts.length === 0) fetchPayouts();
+  };
+
+  const togglePayoutRow = async (payoutId) => {
+    const nextOpen = !expandedPayoutRows[payoutId];
+    setExpandedPayoutRows((prev) => ({ ...prev, [payoutId]: nextOpen }));
+    if (!nextOpen || payoutTransactions[payoutId]) return;
+
+    setPayoutTxLoading((prev) => ({ ...prev, [payoutId]: true }));
+    setPayoutTxError((prev) => ({ ...prev, [payoutId]: null }));
+    try {
+      const res = await api.get(`/ebay/payout-transactions/${seller.sellerId}/${payoutId}`, {
+        params: seller.financesMarketplaceId ? { marketplace: seller.financesMarketplaceId } : undefined
+      });
+      setPayoutTransactions((prev) => ({ ...prev, [payoutId]: res.data.transactions || [] }));
+    } catch (err) {
+      setPayoutTxError((prev) => ({ ...prev, [payoutId]: err.response?.data?.error || 'Failed to load payout transactions' }));
+    } finally {
+      setPayoutTxLoading((prev) => ({ ...prev, [payoutId]: false }));
+    }
   };
 
   return (
@@ -635,30 +668,85 @@ const UpcomingPayoutsCard = ({ seller }) => {
                         </TableHead>
                         <TableBody>
                           {upcomingPayouts.map((payout) => (
-                            <TableRow key={payout.payoutId} hover sx={{ backgroundColor: '#fffbeb' }}>
-                              <TableCell>
-                                <Typography variant="body2" fontWeight={600}>
-                                  {formatDateOnlyPST(payout.payoutDate)}
-                                </Typography>
-                              </TableCell>
-                              <TableCell align="right">
-                                <Typography variant="body2" fontWeight={700} sx={{ color: '#f59e0b' }}>
-                                  {formatCurrency(payout.amount)}
-                                </Typography>
-                              </TableCell>
-                              <TableCell>
-                                <Chip
-                                  label="PENDING"
-                                  size="small"
-                                  sx={{ fontWeight: 600, fontSize: 11, backgroundColor: '#f59e0b', color: 'white' }}
-                                />
-                              </TableCell>
-                              <TableCell>
-                                <Typography variant="body2" fontFamily="monospace" fontSize={11} color="text.secondary">
-                                  {payout.payoutId}
-                                </Typography>
-                              </TableCell>
-                            </TableRow>
+                            <React.Fragment key={payout.payoutId}>
+                              <TableRow hover sx={{ backgroundColor: '#fffbeb', cursor: 'pointer' }} onClick={() => togglePayoutRow(payout.payoutId)}>
+                                <TableCell>
+                                  <Typography variant="body2" fontWeight={600}>
+                                    {formatDateOnlyPST(payout.payoutDate)}
+                                  </Typography>
+                                </TableCell>
+                                <TableCell align="right">
+                                  <Typography variant="body2" fontWeight={700} sx={{ color: '#f59e0b' }}>
+                                    {formatCurrency(payout.amount)}
+                                  </Typography>
+                                </TableCell>
+                                <TableCell>
+                                  <Chip
+                                    label="PENDING"
+                                    size="small"
+                                    sx={{ fontWeight: 600, fontSize: 11, backgroundColor: '#f59e0b', color: 'white' }}
+                                  />
+                                </TableCell>
+                                <TableCell>
+                                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    <Typography variant="body2" fontFamily="monospace" fontSize={11} color="text.secondary">
+                                      {payout.payoutId}
+                                    </Typography>
+                                    <IconButton size="small">
+                                      {expandedPayoutRows[payout.payoutId] ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
+                                    </IconButton>
+                                  </Box>
+                                </TableCell>
+                              </TableRow>
+                              <TableRow>
+                                <TableCell colSpan={4} sx={{ p: 0, borderBottom: expandedPayoutRows[payout.payoutId] ? undefined : 'none' }}>
+                                  <Collapse in={!!expandedPayoutRows[payout.payoutId]} timeout="auto" unmountOnExit>
+                                    <Box sx={{ p: 2, backgroundColor: '#fff7ed' }}>
+                                      {payoutTxLoading[payout.payoutId] && <CircularProgress size={20} />}
+                                      {payoutTxError[payout.payoutId] && <Alert severity="error">{payoutTxError[payout.payoutId]}</Alert>}
+                                      {!payoutTxLoading[payout.payoutId] && !payoutTxError[payout.payoutId] && (
+                                        <Table size="small">
+                                          <TableHead>
+                                            <TableRow>
+                                              <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Order ID</TableCell>
+                                              <TableCell align="right" sx={{ fontWeight: 700, fontSize: 12 }}>Net</TableCell>
+                                              <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Buyer</TableCell>
+                                              <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Transaction Date</TableCell>
+                                              <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Memo</TableCell>
+                                            </TableRow>
+                                          </TableHead>
+                                          <TableBody>
+                                            {(payoutTransactions[payout.payoutId] || []).map((txn, idx) => (
+                                              <TableRow key={`${payout.payoutId}-${idx}`}>
+                                                <TableCell><Typography variant="body2" fontFamily="monospace" fontSize={12}>{txn.orderId}</Typography></TableCell>
+                                                <TableCell align="right">
+                                                  <Typography variant="body2" fontWeight={600} fontSize={12}>
+                                                    {new Intl.NumberFormat('en-US', {
+                                                      style: 'currency',
+                                                      currency: txn.currency || 'USD'
+                                                    }).format(txn.net ?? 0)}
+                                                  </Typography>
+                                                </TableCell>
+                                                <TableCell><Typography variant="body2" fontSize={12}>{txn.buyer}</Typography></TableCell>
+                                                <TableCell><Typography variant="body2" fontSize={11} color="text.secondary">{formatDatePST(txn.transactionDate)}</Typography></TableCell>
+                                                <TableCell><Typography variant="body2" fontSize={11} color="text.secondary">{txn.transactionMemo || '—'}</Typography></TableCell>
+                                              </TableRow>
+                                            ))}
+                                            {(payoutTransactions[payout.payoutId] || []).length === 0 && (
+                                              <TableRow>
+                                                <TableCell colSpan={5}>
+                                                  <Typography variant="body2" color="text.secondary">No transactions found for this payout.</Typography>
+                                                </TableCell>
+                                              </TableRow>
+                                            )}
+                                          </TableBody>
+                                        </Table>
+                                      )}
+                                    </Box>
+                                  </Collapse>
+                                </TableCell>
+                              </TableRow>
+                            </React.Fragment>
                           ))}
                         </TableBody>
                       </Table>
@@ -683,26 +771,81 @@ const UpcomingPayoutsCard = ({ seller }) => {
                         </TableHead>
                         <TableBody>
                           {completedPayouts.map((payout) => (
-                            <TableRow key={payout.payoutId} hover>
-                              <TableCell>
-                                <Typography variant="body2" fontWeight={600}>
-                                  {formatDateOnlyPST(payout.payoutDate)}
-                                </Typography>
-                              </TableCell>
-                              <TableCell align="right">
-                                <Typography variant="body2" fontWeight={700} sx={{ color: '#22c55e' }}>
-                                  {formatCurrency(payout.amount)}
-                                </Typography>
-                              </TableCell>
-                              <TableCell>
-                                <Chip label="COMPLETED" size="small" color="success" sx={{ fontWeight: 600, fontSize: 11 }} />
-                              </TableCell>
-                              <TableCell>
-                                <Typography variant="body2" fontFamily="monospace" fontSize={11} color="text.secondary">
-                                  {payout.payoutId}
-                                </Typography>
-                              </TableCell>
-                            </TableRow>
+                            <React.Fragment key={payout.payoutId}>
+                              <TableRow hover sx={{ cursor: 'pointer' }} onClick={() => togglePayoutRow(payout.payoutId)}>
+                                <TableCell>
+                                  <Typography variant="body2" fontWeight={600}>
+                                    {formatDateOnlyPST(payout.payoutDate)}
+                                  </Typography>
+                                </TableCell>
+                                <TableCell align="right">
+                                  <Typography variant="body2" fontWeight={700} sx={{ color: '#22c55e' }}>
+                                    {formatCurrency(payout.amount)}
+                                  </Typography>
+                                </TableCell>
+                                <TableCell>
+                                  <Chip label="COMPLETED" size="small" color="success" sx={{ fontWeight: 600, fontSize: 11 }} />
+                                </TableCell>
+                                <TableCell>
+                                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    <Typography variant="body2" fontFamily="monospace" fontSize={11} color="text.secondary">
+                                      {payout.payoutId}
+                                    </Typography>
+                                    <IconButton size="small">
+                                      {expandedPayoutRows[payout.payoutId] ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
+                                    </IconButton>
+                                  </Box>
+                                </TableCell>
+                              </TableRow>
+                              <TableRow>
+                                <TableCell colSpan={4} sx={{ p: 0, borderBottom: expandedPayoutRows[payout.payoutId] ? undefined : 'none' }}>
+                                  <Collapse in={!!expandedPayoutRows[payout.payoutId]} timeout="auto" unmountOnExit>
+                                    <Box sx={{ p: 2, backgroundColor: '#f8fafc' }}>
+                                      {payoutTxLoading[payout.payoutId] && <CircularProgress size={20} />}
+                                      {payoutTxError[payout.payoutId] && <Alert severity="error">{payoutTxError[payout.payoutId]}</Alert>}
+                                      {!payoutTxLoading[payout.payoutId] && !payoutTxError[payout.payoutId] && (
+                                        <Table size="small">
+                                          <TableHead>
+                                            <TableRow>
+                                              <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Order ID</TableCell>
+                                              <TableCell align="right" sx={{ fontWeight: 700, fontSize: 12 }}>Net</TableCell>
+                                              <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Buyer</TableCell>
+                                              <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Transaction Date</TableCell>
+                                              <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Memo</TableCell>
+                                            </TableRow>
+                                          </TableHead>
+                                          <TableBody>
+                                            {(payoutTransactions[payout.payoutId] || []).map((txn, idx) => (
+                                              <TableRow key={`${payout.payoutId}-${idx}`}>
+                                                <TableCell><Typography variant="body2" fontFamily="monospace" fontSize={12}>{txn.orderId}</Typography></TableCell>
+                                                <TableCell align="right">
+                                                  <Typography variant="body2" fontWeight={600} fontSize={12}>
+                                                    {new Intl.NumberFormat('en-US', {
+                                                      style: 'currency',
+                                                      currency: txn.currency || 'USD'
+                                                    }).format(txn.net ?? 0)}
+                                                  </Typography>
+                                                </TableCell>
+                                                <TableCell><Typography variant="body2" fontSize={12}>{txn.buyer}</Typography></TableCell>
+                                                <TableCell><Typography variant="body2" fontSize={11} color="text.secondary">{formatDatePST(txn.transactionDate)}</Typography></TableCell>
+                                                <TableCell><Typography variant="body2" fontSize={11} color="text.secondary">{txn.transactionMemo || '—'}</Typography></TableCell>
+                                              </TableRow>
+                                            ))}
+                                            {(payoutTransactions[payout.payoutId] || []).length === 0 && (
+                                              <TableRow>
+                                                <TableCell colSpan={5}>
+                                                  <Typography variant="body2" color="text.secondary">No transactions found for this payout.</Typography>
+                                                </TableCell>
+                                              </TableRow>
+                                            )}
+                                          </TableBody>
+                                        </Table>
+                                      )}
+                                    </Box>
+                                  </Collapse>
+                                </TableCell>
+                              </TableRow>
+                            </React.Fragment>
                           ))}
                         </TableBody>
                       </Table>
