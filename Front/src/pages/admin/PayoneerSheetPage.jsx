@@ -78,6 +78,9 @@ function feedRowDedupeKey(f) {
     return `${sid}|${d}|${amt.toFixed(2)}`;
 }
 
+const formatUsd = (v) => (Number.isFinite(Number(v)) ? `$${Number(v).toFixed(2)}` : '—');
+const formatInr = (v, digits = 2) => (Number.isFinite(Number(v)) ? `₹${Number(v).toFixed(digits)}` : '—');
+
 /**
  * Payout ID from DB, else match Recently completed feed (same store, local payment day, amount).
  * Handles legacy rows saved before ebayPayoutId existed.
@@ -217,7 +220,7 @@ function MobilePayoneerCard({ record, isEditing, displayPayoutId, renderCell, on
                                         Actual (+2%)
                                     </Typography>
                                     <Typography variant="body2" sx={{ fontWeight: 'bold' }}>
-                                        {record.actualExchangeRate?.toFixed(4) ?? '-'}
+                                        {formatInr(record.actualExchangeRate, 4)}
                                     </Typography>
                                 </Box>
                                 <Box sx={{ textAlign: 'right' }}>
@@ -225,7 +228,7 @@ function MobilePayoneerCard({ record, isEditing, displayPayoutId, renderCell, on
                                         Deposit (₹)
                                     </Typography>
                                     <Typography variant="body2" sx={{ fontWeight: 'bold', color: 'success.main' }}>
-                                        {record.bankDeposit?.toFixed(2) ?? '-'}
+                                        {formatInr(record.bankDeposit, 2)}
                                     </Typography>
                                 </Box>
                             </Stack>
@@ -464,6 +467,19 @@ const PayoneerSheetPage = () => {
         const start = (pagination.page - 1) * pagination.limit;
         return mergedRows.slice(start, start + pagination.limit);
     }, [mergedRows, pagination.page, pagination.limit]);
+
+    const totals = useMemo(() => {
+        return mergedRows.reduce(
+            (acc, row) => {
+                const amount = Number(row.amount);
+                const bankDeposit = Number(row.bankDeposit);
+                if (Number.isFinite(amount)) acc.amountUSD += amount;
+                if (Number.isFinite(bankDeposit)) acc.bankDepositINR += bankDeposit;
+                return acc;
+            },
+            { amountUSD: 0, bankDepositINR: 0 }
+        );
+    }, [mergedRows]);
 
     useEffect(() => {
         if (pagination.page > mergedTotalPages) {
@@ -705,7 +721,7 @@ const PayoneerSheetPage = () => {
         if (record._fromEbay) {
             if (field === 'bankAccount') return record.bankAccount?.name || '—';
             if (field === 'store') return record.store?.user?.username || '—';
-            if (field === 'amount') return Number.isFinite(record.amount) ? record.amount.toFixed(2) : '—';
+            if (field === 'amount') return formatUsd(record.amount);
             if (field === 'paymentDate') return record.paymentDate ? new Date(record.paymentDate).toLocaleDateString() : '—';
             if (field === 'exchangeRate') return '—';
             return '—';
@@ -718,8 +734,10 @@ const PayoneerSheetPage = () => {
         }
 
         if (!isEditing) {
-            if (field === 'amount' || field === 'bankDeposit') return value?.toFixed(2);
-            if (field === 'actualExchangeRate') return value?.toFixed(4);
+            if (field === 'amount') return formatUsd(value);
+            if (field === 'bankDeposit') return formatInr(value, 2);
+            if (field === 'exchangeRate') return formatInr(value, 2);
+            if (field === 'actualExchangeRate') return formatInr(value, 4);
             if (field === 'paymentDate') return new Date(value).toLocaleDateString();
             if (field === 'periodStart' || field === 'periodEnd') return value ? new Date(value).toLocaleDateString() : '-';
             return value;
@@ -959,6 +977,16 @@ const PayoneerSheetPage = () => {
             {isMobile ? (
                 // MOBILE CARD VIEW
                 <Box sx={{ mt: { xs: 1.5, sm: 2 } }}>
+                    <Paper variant="outlined" sx={{ p: 1.5, mb: 1.5, bgcolor: 'action.hover' }}>
+                        <Stack direction="row" justifyContent="space-between" spacing={2}>
+                            <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                                TOTAL Amount (USD): ${totals.amountUSD.toFixed(2)}
+                            </Typography>
+                            <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                                TOTAL Bank Deposit (INR): ₹{totals.bankDepositINR.toFixed(2)}
+                            </Typography>
+                        </Stack>
+                    </Paper>
                     <Stack spacing={1.5}>
                         {visibleRows.map((record) => {
                             if (record._fromEbay) {
@@ -997,7 +1025,7 @@ const PayoneerSheetPage = () => {
                                             </Typography>
                                             <Typography variant="body2">
                                                 {record.paymentDate ? new Date(record.paymentDate).toLocaleDateString() : '—'} ·{' '}
-                                                {Number.isFinite(record.amount) ? record.amount.toFixed(2) : '—'}{' '}
+                                                {formatUsd(record.amount)}{' '}
                                                 {f?.currency || 'USD'}
                                             </Typography>
                                             <Typography variant="caption" sx={{ wordBreak: 'break-all' }}>
@@ -1106,10 +1134,10 @@ const PayoneerSheetPage = () => {
 
                                         {/* Calculated fields are READ-ONLY even in edit mode (server calculates them) */}
                                         <TableCell sx={{ bgcolor: isEditing ? '#f8f9fa' : 'inherit', color: 'text.secondary' }}>
-                                            {isEditing ? 'Auto-calc' : record.actualExchangeRate?.toFixed(4)}
+                                            {isEditing ? 'Auto-calc' : formatInr(record.actualExchangeRate, 4)}
                                         </TableCell>
                                         <TableCell sx={{ bgcolor: isEditing ? '#f8f9fa' : 'inherit', color: 'text.secondary', fontWeight: 'bold' }}>
-                                            {isEditing ? 'Auto-calc' : record.bankDeposit?.toFixed(2)}
+                                            {isEditing ? 'Auto-calc' : formatInr(record.bankDeposit, 2)}
                                         </TableCell>
 
                                         {/* Period range */}
@@ -1216,6 +1244,24 @@ const PayoneerSheetPage = () => {
                                                 : 'No records found.'
                                             : 'No rows on this page.'}
                                     </TableCell>
+                                </TableRow>
+                            )}
+                            {mergedRows.length > 0 && (
+                                <TableRow sx={{ bgcolor: 'action.hover' }}>
+                                    <TableCell colSpan={3} sx={{ fontWeight: 700 }}>
+                                        TOTAL
+                                    </TableCell>
+                                    <TableCell sx={{ fontWeight: 700 }}>
+                                        {formatUsd(totals.amountUSD)}
+                                    </TableCell>
+                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
+                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
+                                    <TableCell sx={{ fontWeight: 700 }}>
+                                        {formatInr(totals.bankDepositINR)}
+                                    </TableCell>
+                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
+                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
+                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
                                 </TableRow>
                             )}
                         </TableBody>
