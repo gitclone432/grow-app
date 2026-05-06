@@ -280,6 +280,10 @@ const PRESETS = [
   { group: 'Orders & Dashboard', label: 'All Orders USD', method: 'GET', path: '/ebay/all-orders-usd', params: { page: 1, limit: 25 } },
   { group: 'Orders & Dashboard', label: 'Order Dashboard Overview', method: 'GET', path: '/orders/dashboard/overview', params: {} },
   { group: 'Orders & Dashboard', label: 'Order Dashboard Monthly Delta', method: 'GET', path: '/orders/dashboard/monthly-delta', params: {} },
+  { group: 'Orders & Dashboard', label: 'Ad Fee: Backfill Count', method: 'GET', path: '/ebay/backfill-ad-fees/count', params: { sellerId: '<sellerId>' } },
+  { group: 'Orders & Dashboard', label: 'Ad Fee: Backfill Run', method: 'POST', path: '/ebay/backfill-ad-fees', params: {} },
+  { group: 'Orders & Dashboard', label: 'Ad Fee: Fetch For Order', method: 'POST', path: '/ebay/orders/<orderId>/fetch-ad-fee-general', params: {} },
+  { group: 'Orders & Dashboard', label: 'Ad Fee: Manual Update', method: 'PATCH', path: '/ebay/orders/<orderId>/ad-fee-general', params: {} },
 
   // Compliance / Support
   { group: 'Compliance', label: 'Stored Returns', method: 'GET', path: '/ebay/stored-returns', params: { page: 1, limit: 25 } },
@@ -420,6 +424,40 @@ function safeJsonParse(text, fallback = {}) {
   }
 }
 
+function replaceSellerIdPlaceholders(value, sellerId) {
+  if (typeof value === 'string') {
+    return value.replace(/<sellerId>/g, sellerId || '');
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => replaceSellerIdPlaceholders(v, sellerId));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, replaceSellerIdPlaceholders(v, sellerId)])
+    );
+  }
+  return value;
+}
+
+function replaceRuntimePlaceholders(value, map) {
+  if (typeof value === 'string') {
+    let out = value;
+    Object.entries(map || {}).forEach(([k, v]) => {
+      out = out.replace(new RegExp(`<${k}>`, 'g'), v || '');
+    });
+    return out;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => replaceRuntimePlaceholders(v, map));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, replaceRuntimePlaceholders(v, map)])
+    );
+  }
+  return value;
+}
+
 export default function EbayApiTesterPage() {
   const initialPreset = PRESETS[0];
   const [method, setMethod] = useState(initialPreset.method);
@@ -429,6 +467,7 @@ export default function EbayApiTesterPage() {
   const [selectedPresetLabel, setSelectedPresetLabel] = useState(initialPreset.label);
   const [rawEbayMode, setRawEbayMode] = useState(false);
   const [sellerId, setSellerId] = useState('69f452ccccbff2f8810fcbdc');
+  const [orderId, setOrderId] = useState('');
   const [marketplaceId, setMarketplaceId] = useState('');
   const [tradingCallName, setTradingCallName] = useState('GetBestOffers');
   const [tradingSiteId, setTradingSiteId] = useState('0');
@@ -472,6 +511,22 @@ export default function EbayApiTesterPage() {
             allowCounterOffer: true
           }
         ]
+      }, null, 2));
+    } else if (preset.label === 'Ad Fee: Backfill Run') {
+      setBodyText(JSON.stringify({
+        sellerId: '<sellerId>',
+        allSellers: false,
+        skipAlreadySet: true,
+        sinceDate: '2026-01-01'
+      }, null, 2));
+    } else if (preset.label === 'Ad Fee: Fetch For Order') {
+      setBodyText(JSON.stringify({
+        sellerId: '<sellerId>',
+        marketplace: 'EBAY_US'
+      }, null, 2));
+    } else if (preset.label === 'Ad Fee: Manual Update') {
+      setBodyText(JSON.stringify({
+        adFeeGeneral: 1.25
       }, null, 2));
     } else if (preset.label === 'Analytics: Traffic Report') {
       setBodyText('{}');
@@ -1232,17 +1287,21 @@ export default function EbayApiTesterPage() {
   };
 
   const runRequest = async () => {
-    const parsedParams = safeJsonParse(paramsText, {});
-    const parsedBody = safeJsonParse(bodyText, {});
+    const parsedParamsRaw = safeJsonParse(paramsText, {});
+    const parsedBodyRaw = safeJsonParse(bodyText, {});
 
-    if (parsedParams === null) {
+    if (parsedParamsRaw === null) {
       setError('Invalid Params JSON');
       return;
     }
-    if (['POST', 'PATCH', 'PUT'].includes(method) && parsedBody === null) {
+    if (['POST', 'PATCH', 'PUT'].includes(method) && parsedBodyRaw === null) {
       setError('Invalid Body JSON');
       return;
     }
+
+    const placeholderMap = { sellerId, orderId };
+    const parsedParams = replaceRuntimePlaceholders(parsedParamsRaw, placeholderMap);
+    const parsedBody = replaceRuntimePlaceholders(parsedBodyRaw, placeholderMap);
 
     setLoading(true);
     setError('');
@@ -1252,6 +1311,13 @@ export default function EbayApiTesterPage() {
       let statusCode;
       let payload;
       const shouldUseRawProxy = rawEbayMode || isLikelyExternalEbayPath;
+
+      const resolvedPath = String(replaceRuntimePlaceholders(path, placeholderMap) || '').trim();
+      if (/<[^>]+>/.test(resolvedPath)) {
+        setError(`Unresolved placeholder in path: ${resolvedPath}`);
+        setLoading(false);
+        return;
+      }
 
       if (path === '/ebay/dev/trading-call') {
         const proxyRes = await api.post('/ebay/dev/trading-call', {
@@ -1267,7 +1333,7 @@ export default function EbayApiTesterPage() {
         const proxyRes = await api.post('/ebay/dev/raw-call', {
           sellerId,
           method,
-          endpoint: pathText,
+          endpoint: resolvedPath || pathText,
           params: parsedParams,
           body: parsedBody || {},
           marketplace: marketplaceId || undefined
@@ -1277,9 +1343,9 @@ export default function EbayApiTesterPage() {
       } else {
         let res;
         if (method === 'GET' || method === 'DELETE') {
-          res = await api.request({ method, url: path, params: parsedParams });
+          res = await api.request({ method, url: resolvedPath || path, params: parsedParams });
         } else {
-          res = await api.request({ method, url: path, params: parsedParams, data: parsedBody || {} });
+          res = await api.request({ method, url: resolvedPath || path, params: parsedParams, data: parsedBody || {} });
         }
         statusCode = res.status;
         payload = res.data;
@@ -1348,6 +1414,13 @@ export default function EbayApiTesterPage() {
                   label="Seller ID (required)"
                   value={sellerId}
                   onChange={(e) => setSellerId(e.target.value)}
+                  size="small"
+                  sx={{ minWidth: 260 }}
+                />
+                <TextField
+                  label="Order ID (optional)"
+                  value={orderId}
+                  onChange={(e) => setOrderId(e.target.value)}
                   size="small"
                   sx={{ minWidth: 260 }}
                 />
