@@ -86,6 +86,7 @@ import RangeAnalyzerPage from '../pages/admin/RangeAnalyzerPage.jsx';
 import FeedUploadPage from '../pages/ebay/FeedUploadPage.jsx';
 import SellingPrivilegesPage from '../pages/admin/SellingPrivilegesPage.jsx';
 import EbayApiUsagePage from '../pages/admin/EbayApiUsagePage.jsx';
+import EbayApiTesterPage from '../pages/admin/EbayApiTesterPage.jsx';
 import FeedUploadStatsPage from '../pages/admin/FeedUploadStatsPage.jsx';
 import SalaryPage from '../pages/admin/SalaryPage.jsx';
 import SellerFundsPage from '../pages/admin/SellerFundsPage.jsx';
@@ -292,6 +293,7 @@ const COMPONENT_MAP = {
   'AffiliateOrders': AffiliateOrdersPage,
   'SellingPrivileges': SellingPrivilegesPage,
   'EbayApiUsage': EbayApiUsagePage,
+  'EbayApiTester': EbayApiTesterPage,
   'SellerFunds': SellerFundsPage,
   'IdeasAndIssues': IdeasPage,
   'TeamChat': InternalMessagesPage,

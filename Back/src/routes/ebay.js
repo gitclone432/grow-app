@@ -176,7 +176,15 @@ async function getExcludedClientSellerIds() {
 }
 
 async function getActiveSellerIds() {
-  const activeUserIds = await User.find({ active: true }).distinct('_id');
+  // Backward-compatible: many legacy users do not have `active` set.
+  // Treat missing/null as active, only exclude explicit `active: false`.
+  const activeUserIds = await User.find({
+    $or: [
+      { active: true },
+      { active: { $exists: false } },
+      { active: null }
+    ]
+  }).distinct('_id');
   if (!activeUserIds.length) return [];
   return Seller.find({ user: { $in: activeUserIds }, isStoreActive: { $ne: false } }).distinct('_id');
 }
@@ -11447,6 +11455,286 @@ router.get('/selling/summary/all', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('[Selling Summary All] Error:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Dev-only generic eBay API proxy for internal tester page.
+ * Lets admins call arbitrary eBay REST paths with a selected seller token.
+ */
+router.post('/dev/raw-call', requireAuth, requirePageAccess('EbayApiTester'), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      method = 'GET',
+      endpoint = '',
+      params = {},
+      body = {},
+      marketplace
+    } = req.body || {};
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId (Mongo _id or username) is required' });
+    }
+    const endpointText = String(endpoint || '').trim();
+    if (!endpointText) {
+      return res.status(400).json({ error: 'endpoint is required' });
+    }
+
+    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
+      ? await Seller.findById(sellerLookup)
+      : await Seller.findOne({ username: sellerLookup });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
+
+    const accessToken = await ensureValidToken(seller);
+    const upperMethod = String(method || 'GET').toUpperCase();
+    const allowMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+    if (!allowMethods.has(upperMethod)) {
+      return res.status(400).json({ error: `Unsupported method ${upperMethod}` });
+    }
+
+    let targetUrl;
+    if (/^https?:\/\//i.test(endpointText)) {
+      const u = new URL(endpointText);
+      if (!/\.ebay\.com$/i.test(u.hostname)) {
+        return res.status(400).json({ error: 'Only ebay.com hosts are allowed' });
+      }
+      targetUrl = u.toString();
+    } else {
+      const normalizedPath = endpointText.startsWith('/') ? endpointText : `/${endpointText}`;
+      // eBay Finances endpoints in this app use apiz; most other Sell/Commerce APIs use api.
+      const useApizHost = /^\/sell\/finances\//i.test(normalizedPath);
+      const baseHost = useApizHost ? 'https://apiz.ebay.com' : 'https://api.ebay.com';
+      targetUrl = `${baseHost}${normalizedPath}`;
+    }
+
+    const normalizedEndpointPath = endpointText.startsWith('/') ? endpointText : `/${endpointText}`;
+    const isPostOrder = /^\/post-order\//i.test(normalizedEndpointPath);
+    const headers = {
+      Authorization: isPostOrder ? `IAF ${accessToken}` : `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    };
+    const inferredMarketplace =
+      marketplace ||
+      (Array.isArray(seller?.ebayMarketplaces) && seller.ebayMarketplaces[0]) ||
+      'EBAY_US';
+    if (marketplace || /^\/sell\/(negotiation|inventory|account|fulfillment|marketing)\//i.test(normalizedEndpointPath)) {
+      headers['X-EBAY-C-MARKETPLACE-ID'] = String(inferredMarketplace);
+    }
+
+    const safeParams = params && typeof params === 'object' ? params : {};
+    const safeBody = ['POST', 'PUT', 'PATCH'].includes(upperMethod) ? (body && typeof body === 'object' ? body : {}) : undefined;
+    const requestUrlWithParams = axios.getUri({
+      url: targetUrl,
+      params: safeParams
+    });
+
+    const response = await axios.request({
+      method: upperMethod,
+      url: targetUrl,
+      params: safeParams,
+      data: safeBody,
+      headers,
+      timeout: 45000,
+      validateStatus: () => true
+    });
+
+    return res.status(200).json({
+      ok: response.status >= 200 && response.status < 300,
+      statusCode: response.status,
+      statusText: response.statusText,
+      targetUrl: requestUrlWithParams,
+      request: {
+        method: upperMethod,
+        params: safeParams,
+        body: safeBody,
+        marketplace: headers['X-EBAY-C-MARKETPLACE-ID'] || null
+      },
+      data: response.data
+    });
+  } catch (err) {
+    console.error('[eBay Raw Call] Error:', err.response?.data || err.message);
+    return res.status(500).json({ error: err.message || 'Raw call failed' });
+  }
+});
+
+/**
+ * Dev-only Trading API XML proxy for internal tester page.
+ * Supports calls like GetBestOffers, GetMyeBaySelling, GetItem, etc.
+ */
+router.post('/dev/trading-call', requireAuth, requirePageAccess('EbayApiTester'), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      callName = '',
+      requestXml = '',
+      siteId = '0',
+      compatibilityLevel = '1423'
+    } = req.body || {};
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId (Mongo _id or username) is required' });
+    }
+    const callNameText = String(callName || '').trim();
+    const xmlText = String(requestXml || '').trim();
+    if (!callNameText) return res.status(400).json({ error: 'callName is required' });
+    if (!xmlText) return res.status(400).json({ error: 'requestXml is required' });
+
+    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
+      ? await Seller.findById(sellerLookup)
+      : await Seller.findOne({ username: sellerLookup });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
+
+    const token = await ensureValidToken(seller);
+    const hasTokenTag = /<eBayAuthToken>[\s\S]*?<\/eBayAuthToken>/i.test(xmlText);
+    const finalXml = hasTokenTag
+      ? xmlText.replace(/<eBayAuthToken>[\s\S]*?<\/eBayAuthToken>/i, `<eBayAuthToken>${token}</eBayAuthToken>`)
+      : xmlText;
+
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', finalXml, {
+      headers: {
+        'X-EBAY-API-CALL-NAME': callNameText,
+        'X-EBAY-API-SITEID': String(siteId),
+        'X-EBAY-API-COMPATIBILITY-LEVEL': String(compatibilityLevel),
+        'Content-Type': 'text/xml'
+      },
+      timeout: 45000,
+      validateStatus: () => true
+    });
+
+    return res.status(200).json({
+      ok: response.status >= 200 && response.status < 300,
+      statusCode: response.status,
+      statusText: response.statusText,
+      callName: callNameText,
+      rawXml: typeof response.data === 'string' ? response.data : String(response.data || '')
+    });
+  } catch (err) {
+    console.error('[eBay Trading Call] Error:', err.response?.data || err.message);
+    return res.status(500).json({ error: err.message || 'Trading call failed' });
+  }
+});
+
+/**
+ * Fetch eligible Best Offers across all connected stores.
+ * Default status is Active (open offers awaiting action).
+ */
+router.get('/best-offers/eligible/all', requireAuth, requirePageAccess('EbayApiTester'), async (req, res) => {
+  try {
+    const status = String(req.query.status || 'Active').trim();
+    const entriesPerPage = Math.min(Math.max(parseInt(req.query.entriesPerPage, 10) || 100, 1), 200);
+    const maxPages = Math.min(Math.max(parseInt(req.query.maxPages, 10) || 10, 1), 50);
+
+    const sellers = await Seller.find({
+      isStoreActive: { $ne: false },
+      'ebayTokens.access_token': { $exists: true, $ne: null },
+      'ebayTokens.refresh_token': { $exists: true, $ne: null }
+    }).lean(false);
+
+    const results = [];
+
+    for (const seller of sellers) {
+      const sellerName = seller.username || seller.user?.username || String(seller._id);
+      try {
+        const token = await ensureValidToken(seller);
+        const offers = [];
+        let pageNumber = 1;
+        let totalPages = 1;
+
+        while (pageNumber <= totalPages && pageNumber <= maxPages) {
+          const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetBestOffersRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <BestOfferStatus>${status}</BestOfferStatus>
+  <Pagination>
+    <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+    <PageNumber>${pageNumber}</PageNumber>
+  </Pagination>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetBestOffersRequest>`;
+
+          const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+            headers: {
+              'X-EBAY-API-CALL-NAME': 'GetBestOffers',
+              'X-EBAY-API-SITEID': '0',
+              'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+              'Content-Type': 'text/xml'
+            },
+            timeout: 45000
+          });
+
+          const parsed = await parseStringPromise(response.data, { explicitArray: false });
+          const payload = parsed?.GetBestOffersResponse || {};
+          if (payload.Ack === 'Failure') {
+            const err = Array.isArray(payload.Errors) ? payload.Errors[0] : payload.Errors;
+            throw new Error(err?.LongMessage || err?.ShortMessage || 'GetBestOffers failed');
+          }
+
+          const pageOffersRaw = payload.BestOfferArray?.BestOffer || [];
+          const pageOffers = Array.isArray(pageOffersRaw) ? pageOffersRaw : [pageOffersRaw].filter(Boolean);
+          for (const o of pageOffers) {
+            offers.push({
+              sellerId: String(seller._id),
+              sellerUsername: sellerName,
+              bestOfferId: o?.BestOfferID || null,
+              itemId: o?.Item?.ItemID || null,
+              itemTitle: o?.Item?.Title || null,
+              buyerUserId: o?.Buyer?.UserID || null,
+              status: o?.Status || null,
+              price: o?.Price?._ ?? o?.Price ?? null,
+              currency: o?.Price?.$?.currencyID || null,
+              quantity: o?.Quantity || null,
+              createdAt: o?.ExpirationTime || null
+            });
+          }
+
+          const pagesFromApi = parseInt(payload?.PaginationResult?.TotalNumberOfPages, 10);
+          totalPages = Number.isFinite(pagesFromApi) && pagesFromApi > 0 ? pagesFromApi : 1;
+          pageNumber += 1;
+        }
+
+        results.push({
+          sellerId: String(seller._id),
+          sellerUsername: sellerName,
+          ok: true,
+          count: offers.length,
+          offers
+        });
+      } catch (err) {
+        results.push({
+          sellerId: String(seller._id),
+          sellerUsername: sellerName,
+          ok: false,
+          count: 0,
+          error: err.message || 'Failed to fetch offers',
+          offers: []
+        });
+      }
+    }
+
+    const allOffers = results.flatMap((r) => r.offers || []);
+    const successStores = results.filter((r) => r.ok).length;
+    const failedStores = results.filter((r) => !r.ok).length;
+
+    return res.json({
+      success: true,
+      filters: { status, entriesPerPage, maxPages },
+      summary: {
+        stores: results.length,
+        successStores,
+        failedStores,
+        totalOffers: allOffers.length
+      },
+      stores: results,
+      offers: allOffers
+    });
+  } catch (error) {
+    console.error('[BestOffers Eligible All] Error:', error.message);
+    return res.status(500).json({ error: error.message || 'Failed to fetch eligible best offers' });
   }
 });
 
