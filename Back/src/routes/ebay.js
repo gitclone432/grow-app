@@ -1,4 +1,4 @@
-﻿import express from 'express';
+import express from 'express';
 import axios from 'axios';
 import qs from 'qs';
 import jwt from 'jsonwebtoken';
@@ -185,8 +185,21 @@ async function getActiveSellerIds() {
       { active: null }
     ]
   }).distinct('_id');
-  if (!activeUserIds.length) return [];
-  return Seller.find({ user: { $in: activeUserIds }, isStoreActive: { $ne: false } }).distinct('_id');
+  // Local/legacy safety: include sellers that are not linked to a User doc.
+  // This prevents empty dashboards when seller.user is null/missing in older data.
+  return Seller.find({
+    isStoreActive: { $ne: false },
+    $or: activeUserIds.length
+      ? [
+        { user: { $in: activeUserIds } },
+        { user: { $exists: false } },
+        { user: null }
+      ]
+      : [
+        { user: { $exists: false } },
+        { user: null }
+      ]
+  }).distinct('_id');
 }
 
 async function applyActiveSellerScope(query, requestedSellerId) {
@@ -9392,7 +9405,10 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
           <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
           <OutputSelector>ItemArray.Item.Title</OutputSelector>
           <OutputSelector>ItemArray.Item.SKU</OutputSelector>
+          <OutputSelector>ItemArray.Item.Quantity</OutputSelector>
           <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
+          <OutputSelector>ItemArray.Item.WatchCount</OutputSelector>
+          <OutputSelector>ItemArray.Item.TimeLeft</OutputSelector>
           <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
           <OutputSelector>ItemArray.Item.Description</OutputSelector>
           <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
@@ -9437,6 +9453,12 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
             sku: item.SKU ? item.SKU[0] : '',
             currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
             currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
+            quantity: item.Quantity ? parseInt(item.Quantity[0], 10) || 0 : 0,
+            soldQuantity: item.SellingStatus?.[0]?.QuantitySold
+              ? parseInt(item.SellingStatus[0].QuantitySold[0], 10) || 0
+              : 0,
+            watchCount: item.WatchCount ? parseInt(item.WatchCount[0], 10) || 0 : null,
+            timeLeft: item.TimeLeft?.[0] || '',
             listingStatus: status,
             mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
             categoryName: categoryName,
@@ -9567,6 +9589,118 @@ router.get('/all-listings', requireAuth, async (req, res) => {
         page: pageNum,
         pages: Math.ceil(totalDocs / limitNum)
       }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET ALL ACTIVE LISTINGS ACROSS ALL STORES/SELLERS
+router.get('/all-store-listings', requireAuth, async (req, res) => {
+  const { page = 1, limit = 50, search, sellerId, sortBy = 'startDate', sortOrder = 'desc' } = req.query;
+  try {
+    const sortFieldMap = {
+      currentPrice: 'currentPrice',
+      availableQty: 'quantity',
+      soldQty: 'soldQuantity',
+      views30d: 'views30d',
+      startDate: 'startTime',
+      watch: 'watchCount',
+      timeLeft: 'timeLeft',
+    };
+    const resolvedSortField = sortFieldMap[sortBy] || 'startTime';
+    const resolvedSortOrder = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
+    const sortSpec = { [resolvedSortField]: resolvedSortOrder, _id: -1 };
+
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    const activeSellers = await Seller.find({ isStoreActive: { $ne: false } })
+      .select('_id user')
+      .populate('user', 'username')
+      .lean();
+
+    const activeSellerIds = activeSellers.map((s) => s._id);
+    const sellerNameById = new Map(
+      activeSellers.map((s) => [String(s._id), s?.user?.username || String(s._id)])
+    );
+
+    let query = {
+      listingStatus: 'Active',
+      seller: { $in: activeSellerIds },
+    };
+
+    if (sellerId) {
+      query.seller = sellerId;
+    }
+
+    if (search && search.trim() !== '') {
+      const searchRegex = { $regex: search.trim(), $options: 'i' };
+      query.$or = [
+        { title: searchRegex },
+        { sku: searchRegex },
+        { itemId: searchRegex },
+      ];
+    }
+
+    let sourceCollection = 'ActiveListing';
+    let Model = ActiveListing;
+    let totalDocs = await ActiveListing.countDocuments(query);
+    let listings = [];
+
+    if (totalDocs > 0) {
+      listings = await ActiveListing.find(query)
+        .sort(sortSpec)
+        .skip(skip)
+        .limit(limitNum)
+        .lean();
+    } else {
+      // Fallback: many existing sync jobs populate `Listing` (Motors pipeline).
+      // Use it when ActiveListing has no rows so Store Listings can show data immediately.
+      sourceCollection = 'Listing';
+      Model = Listing;
+      totalDocs = await Listing.countDocuments(query);
+      listings = await Listing.find(query)
+        .sort(sortSpec)
+        .skip(skip)
+        .limit(limitNum)
+        .lean();
+    }
+
+    const summaryAgg = await Model.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: null,
+          totalAmount: { $sum: { $ifNull: ['$currentPrice', 0] } },
+          totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } },
+        },
+      },
+    ]);
+    const summary = summaryAgg[0] || { totalAmount: 0, totalQuantity: 0 };
+
+    const enriched = listings.map((listing) => ({
+      ...listing,
+      sellerName: sellerNameById.get(String(listing.seller)) || String(listing.seller),
+    }));
+
+    res.json({
+      listings: enriched,
+      sourceCollection,
+      sorting: {
+        sortBy: resolvedSortField,
+        sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
+      },
+      summary: {
+        totalAmount: Number(summary.totalAmount || 0),
+        totalQuantity: Number(summary.totalQuantity || 0),
+      },
+      pagination: {
+        total: totalDocs,
+        page: pageNum,
+        pages: Math.ceil(totalDocs / limitNum),
+      },
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -13227,7 +13361,10 @@ export async function scheduledSyncAllSellers() {
                 <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
                 <OutputSelector>ItemArray.Item.Title</OutputSelector>
                 <OutputSelector>ItemArray.Item.SKU</OutputSelector>
+                <OutputSelector>ItemArray.Item.Quantity</OutputSelector>
                 <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
+                <OutputSelector>ItemArray.Item.WatchCount</OutputSelector>
+                <OutputSelector>ItemArray.Item.TimeLeft</OutputSelector>
                 <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
                 <OutputSelector>ItemArray.Item.Description</OutputSelector>
                 <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
@@ -13284,6 +13421,33 @@ export async function scheduledSyncAllSellers() {
                 categoryName: categoryName,
                 descriptionPreview: cleanHtml,
                 compatibility: parsedCompatibility,
+                startTime: item.ListingDetails?.[0]?.StartTime?.[0]
+              },
+              { upsert: true }
+            );
+
+            // Also keep the all-store listing dataset updated so Store Listings
+            // shows Qty/Sold/Watchers/Time Left immediately after "Sync All Stores".
+            await ActiveListing.findOneAndUpdate(
+              { itemId: item.ItemID[0] },
+              {
+                seller: seller._id,
+                title: item.Title[0],
+                sku: item.SKU ? item.SKU[0] : '',
+                currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
+                currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
+                quantity: item.Quantity ? parseInt(item.Quantity[0], 10) || 0 : 0,
+                soldQuantity: item.SellingStatus?.[0]?.QuantitySold
+                  ? parseInt(item.SellingStatus[0].QuantitySold[0], 10) || 0
+                  : 0,
+                watchCount: item.WatchCount ? parseInt(item.WatchCount[0], 10) || 0 : 0,
+                timeLeft: item.TimeLeft?.[0] || '',
+                promoted: null,
+                adRate: null,
+                listingStatus: status,
+                mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+                categoryName: categoryName,
+                descriptionPreview: cleanHtml,
                 startTime: item.ListingDetails?.[0]?.StartTime?.[0]
               },
               { upsert: true }

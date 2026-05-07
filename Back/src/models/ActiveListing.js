@@ -9,6 +9,13 @@ const ActiveListingSchema = new mongoose.Schema({
     title: { type: String },
     currentPrice: { type: Number },
     currency: { type: String },
+    quantity: { type: Number, default: 0 },
+    soldQuantity: { type: Number, default: 0 },
+    views30d: { type: Number, default: null },
+    promoted: { type: Boolean, default: null },
+    adRate: { type: Number, default: null },
+    watchCount: { type: Number, default: null },
+    timeLeft: { type: String, default: '' },
     mainImageUrl: { type: String },
 
     // Primary category from eBay

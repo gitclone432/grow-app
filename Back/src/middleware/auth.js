@@ -4,6 +4,9 @@ import User from '../models/User.js';
 // Page registry: maps pageId -> defaultRoles (backward compat)
 // This is the server-side source of truth for which roles have default access to each page
 export const PAGE_DEFAULT_ROLES = {
+  // Store Listings
+  'StoreListings': ['superadmin', 'listingadmin'],
+
   // Order Fulfilment
   'OrdersDashboard': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'OrderAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],

@@ -11,6 +11,7 @@
 
 // Categories for sidebar grouping
 export const PAGE_CATEGORIES = {
+  storeListings: { id: 'storeListings', name: 'Store Listings', icon: 'Inventory2Icon' },
   orderFulfilment: { id: 'orderFulfilment', name: 'Order Fulfilment', icon: 'LocalShippingIcon' },
   compatibility: { id: 'compatibility', name: 'Compatibility', icon: 'TaskIcon' },
   listingResearch: { id: 'listingResearch', name: 'Listing & Research', icon: 'ListAltIcon' },
@@ -38,6 +39,9 @@ export const SUBMENUS = {
 };
 
 export const PAGE_REGISTRY = [
+  // ====== STORE LISTINGS ======
+  { id: 'StoreListings', name: 'Store Listings', path: '/store-listings', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
+
   // ====== ORDER FULFILMENT ======
   { id: 'OrdersDashboard', name: 'Orders Dashboard', path: '/orders-dashboard', category: 'orderFulfilment', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'OrderAnalytics', name: 'Order Analytics', path: '/order-analytics', category: 'orderFulfilment', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },

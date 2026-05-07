@@ -87,6 +87,7 @@ import FeedUploadPage from '../pages/ebay/FeedUploadPage.jsx';
 import SellingPrivilegesPage from '../pages/admin/SellingPrivilegesPage.jsx';
 import EbayApiUsagePage from '../pages/admin/EbayApiUsagePage.jsx';
 import EbayApiTesterPage from '../pages/admin/EbayApiTesterPage.jsx';
+import StoreListingsPage from '../pages/admin/StoreListingsPage.jsx';
 import FeedUploadStatsPage from '../pages/admin/FeedUploadStatsPage.jsx';
 import SalaryPage from '../pages/admin/SalaryPage.jsx';
 import SellerFundsPage from '../pages/admin/SellerFundsPage.jsx';
@@ -195,6 +196,7 @@ const NavIcon = ({ icon: Icon, label, sidebarOpen }) => (
 
 // Map category IDs to their icons
 const categoryIcons = {
+  storeListings: Inventory2Icon,
   orderFulfilment: LocalShippingIcon,
   compatibility: TaskIcon,
   listingResearch: ListAltIcon,
@@ -243,6 +245,7 @@ const flyoutMenuSx = {
 
 // Component map for routing
 const COMPONENT_MAP = {
+  'StoreListings': StoreListingsPage,
   'OrdersDashboard': OrdersDepartmentDashboardPage,
   'OrderAnalytics': OrderAnalyticsPage,
   'CRPAnalytics': CRPAnalyticsPage,
@@ -634,6 +637,7 @@ export default function AdminLayout({ user, onLogout }) {
         <Divider sx={{ my: 1.5, mx: 2, borderColor: 'rgba(0, 0, 0, 0.08)' }} />
 
         {/* ====== DYNAMIC CATEGORY MENUS ====== */}
+        {renderCategoryMenu('storeListings')}
         {renderCategoryMenu('orderFulfilment')}
         {renderCategoryMenu('compatibility')}
         {renderCategoryMenu('listingResearch')}
