@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { 
   Box, Button, Paper, Stack, Table, TableBody, TableCell, TableContainer, 
@@ -37,26 +37,7 @@ import ListDirectlyDialog from '../../components/ListDirectlyDialog.jsx';
 import { parseAsins, getParsingStats, getValidationError } from '../../utils/asinParser.js';
 import { generateSKUFromASIN } from '../../utils/skuGenerator.js';
 import { mergeDefaultCoreFieldDefaults } from '../../constants/defaultDescriptionTemplate.js';
-
-const DESCRIPTION_TEMPLATE_STORAGE_KEY = 'description-templates.gallery.v1';
-const STORE_TEMPLATE_MAP_KEY = 'store-description-template-map.v1';
-
-function resolveStoreDescriptionTemplate(sellerId) {
-  try {
-    if (!sellerId) return null;
-    const rawMap = localStorage.getItem(STORE_TEMPLATE_MAP_KEY);
-    const storeTemplateMap = rawMap ? JSON.parse(rawMap) : {};
-    const assignedTemplateId = storeTemplateMap?.[sellerId];
-    if (!assignedTemplateId) return null;
-
-    const rawTemplates = localStorage.getItem(DESCRIPTION_TEMPLATE_STORAGE_KEY);
-    const templates = rawTemplates ? JSON.parse(rawTemplates) : [];
-    if (!Array.isArray(templates)) return null;
-    return templates.find((template) => String(template?.id) === String(assignedTemplateId)) || null;
-  } catch {
-    return null;
-  }
-}
+import { fetchDescriptionTemplateGallery } from '../../lib/descriptionTemplateGalleryApi.js';
 
 export default function TemplateListingsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -143,7 +124,34 @@ export default function TemplateListingsPage() {
 
   // List Directly dialog state
   const [listDirectlyDialog, setListDirectlyDialog] = useState(false);
-  const selectedStoreTemplate = resolveStoreDescriptionTemplate(sellerId);
+
+  /** Server-backed description HTML gallery + per-seller template selection */
+  const [galleryTemplates, setGalleryTemplates] = useState([]);
+  const [galleryStoreMap, setGalleryStoreMap] = useState({});
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const g = await fetchDescriptionTemplateGallery();
+        if (cancelled) return;
+        setGalleryTemplates(Array.isArray(g.templates) ? g.templates : []);
+        setGalleryStoreMap(g.storeTemplateMap && typeof g.storeTemplateMap === 'object' ? g.storeTemplateMap : {});
+      } catch (err) {
+        console.warn('Could not load description template gallery:', err?.message || err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const selectedStoreTemplate = useMemo(() => {
+    if (!sellerId) return null;
+    const assignedId = galleryStoreMap[sellerId] ?? galleryStoreMap[String(sellerId)];
+    if (!assignedId) return null;
+    return galleryTemplates.find((t) => String(t?.id) === String(assignedId)) || null;
+  }, [sellerId, galleryTemplates, galleryStoreMap]);
 
   // Row selection state
   const [selectedListings, setSelectedListings] = useState(new Set());
@@ -287,29 +295,21 @@ export default function TemplateListingsPage() {
     fetchPricingConfig();
   }, [sellerId, templateId]);
 
-  useEffect(() => {
-    if (templateId && sellerId) {
-      fetchTemplate();
-      fetchListings();
-      fetchDownloadHistory();
-    }
-  }, [templateId, pagination.page, sellerId, batchFilter]);
-
-  const fetchTemplate = async () => {
+  const fetchTemplate = useCallback(async () => {
+    if (!templateId) return;
     try {
-      // Fetch effective template if sellerId is provided (includes seller overrides)
-      const endpoint = sellerId 
+      const endpoint = sellerId
         ? `/template-overrides/${templateId}/effective?sellerId=${sellerId}`
         : `/listing-templates/${templateId}`;
       const { data } = await api.get(endpoint);
-      const storeTemplate = resolveStoreDescriptionTemplate(sellerId);
+      const storeTemplate = sellerId ? selectedStoreTemplate : null;
       if (storeTemplate?.html) {
         setTemplate({
           ...data,
           coreFieldDefaults: {
             ...(data?.coreFieldDefaults || {}),
-            description: storeTemplate.html
-          }
+            description: storeTemplate.html,
+          },
         });
       } else {
         setTemplate(data);
@@ -318,7 +318,20 @@ export default function TemplateListingsPage() {
       setError('Failed to fetch template');
       console.error(err);
     }
-  };
+  }, [templateId, sellerId, selectedStoreTemplate]);
+
+  useEffect(() => {
+    if (templateId && sellerId) {
+      fetchListings();
+      fetchDownloadHistory();
+    }
+  }, [templateId, pagination.page, sellerId, batchFilter]);
+
+  useEffect(() => {
+    if (templateId && sellerId) {
+      void fetchTemplate();
+    }
+  }, [templateId, sellerId, fetchTemplate]);
 
   const fetchListings = async () => {
     try {

@@ -24,9 +24,11 @@ import {
 import RefreshIcon from '@mui/icons-material/Refresh';
 import EditIcon from '@mui/icons-material/Edit';
 import api from '../../lib/api.js';
-
-const DESCRIPTION_TEMPLATE_STORAGE_KEY = 'description-templates.gallery.v1';
-const STORE_TEMPLATE_MAP_KEY = 'store-description-template-map.v1';
+import {
+  fetchDescriptionTemplateGallery,
+  LEGACY_STORE_TEMPLATE_MAP_KEY,
+  patchDescriptionTemplateStoreMap,
+} from '../../lib/descriptionTemplateGalleryApi.js';
 
 export default function StoresPage() {
   const [rows, setRows] = useState([]);
@@ -45,22 +47,41 @@ export default function StoresPage() {
   const [templates, setTemplates] = useState([]);
   const [storeTemplateMap, setStoreTemplateMap] = useState({});
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [galleryError, setGalleryError] = useState('');
 
-  const loadTemplateStorage = () => {
+  const loadTemplateGallery = async () => {
+    setGalleryError('');
     try {
-      const rawTemplates = localStorage.getItem(DESCRIPTION_TEMPLATE_STORAGE_KEY);
-      const parsedTemplates = rawTemplates ? JSON.parse(rawTemplates) : [];
-      setTemplates(Array.isArray(parsedTemplates) ? parsedTemplates : []);
-    } catch {
+      let { templates: list, storeTemplateMap: map } = await fetchDescriptionTemplateGallery();
+      const mapObj = map && typeof map === 'object' ? map : {};
+
+      if (
+        (!mapObj || Object.keys(mapObj).length === 0)
+      ) {
+        try {
+          const rawMap = localStorage.getItem(LEGACY_STORE_TEMPLATE_MAP_KEY);
+          const parsedMap = rawMap ? JSON.parse(rawMap) : {};
+          if (parsedMap && typeof parsedMap === 'object' && Object.keys(parsedMap).length) {
+            await patchDescriptionTemplateStoreMap(parsedMap);
+            ({ templates: list, storeTemplateMap: map } = await fetchDescriptionTemplateGallery());
+            localStorage.removeItem(LEGACY_STORE_TEMPLATE_MAP_KEY);
+          }
+        } catch (e) {
+          console.warn('Legacy store template map migrate skipped:', e?.message || e);
+        }
+      }
+
+      const nextTemplates = Array.isArray(list) ? list : [];
+      const nextMap = map && typeof map === 'object' ? map : {};
+      setTemplates(nextTemplates);
+      setStoreTemplateMap(nextMap);
+      return { templates: nextTemplates, storeTemplateMap: nextMap };
+    } catch (e) {
+      console.error('Failed to load description template gallery', e);
+      setGalleryError(e?.response?.data?.error || 'Failed to load description templates (server)');
       setTemplates([]);
-    }
-
-    try {
-      const rawMap = localStorage.getItem(STORE_TEMPLATE_MAP_KEY);
-      const parsedMap = rawMap ? JSON.parse(rawMap) : {};
-      setStoreTemplateMap(parsedMap && typeof parsedMap === 'object' ? parsedMap : {});
-    } catch {
       setStoreTemplateMap({});
+      return { templates: [], storeTemplateMap: {} };
     }
   };
 
@@ -83,19 +104,12 @@ export default function StoresPage() {
   }, []);
 
   useEffect(() => {
-    loadTemplateStorage();
+    void loadTemplateGallery();
   }, []);
 
-  const openEdit = (seller) => {
-    loadTemplateStorage();
-    let selectedFromStorage = '';
-    try {
-      const rawMap = localStorage.getItem(STORE_TEMPLATE_MAP_KEY);
-      const parsedMap = rawMap ? JSON.parse(rawMap) : {};
-      selectedFromStorage = parsedMap?.[seller?._id] || '';
-    } catch {
-      selectedFromStorage = '';
-    }
+  const openEdit = async (seller) => {
+    const { storeTemplateMap: freshMap } = await loadTemplateGallery();
+    const selectedFromStorage = freshMap?.[seller?._id] || '';
     setEditingSeller(seller);
     setForm({
       username: seller?.user?.username || '',
@@ -108,13 +122,18 @@ export default function StoresPage() {
     setEditOpen(true);
   };
 
-  const saveStoreTemplateSelection = (sellerId, templateId) => {
+  const saveStoreTemplateSelection = async (sellerId, templateId) => {
     if (!sellerId) return;
-    setStoreTemplateMap((prev) => {
-      const next = { ...prev, [sellerId]: templateId || '' };
-      localStorage.setItem(STORE_TEMPLATE_MAP_KEY, JSON.stringify(next));
-      return next;
-    });
+    try {
+      const next = { [sellerId]: templateId || '' };
+      const result = await patchDescriptionTemplateStoreMap(next);
+      const merged = result.storeTemplateMap && typeof result.storeTemplateMap === 'object' ? result.storeTemplateMap : {};
+      setStoreTemplateMap(merged);
+      if (Array.isArray(result.templates)) setTemplates(result.templates);
+    } catch (e) {
+      console.error('Failed to save store template mapping', e);
+      setError(e?.response?.data?.error || 'Failed to save description template for this store');
+    }
   };
 
   const saveEdit = async () => {
@@ -192,6 +211,10 @@ export default function StoresPage() {
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 2 }}>
         Stores
       </Typography>
+
+      {galleryError ? (
+        <Alert severity="warning" sx={{ mb: 2 }}>{galleryError}</Alert>
+      ) : null}
 
       <Paper sx={{ p: 2, borderRadius: 2, mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Typography variant="body2" color="text.secondary">
@@ -287,7 +310,7 @@ export default function StoresPage() {
               onChange={(e) => {
                 const value = e.target.value;
                 setSelectedTemplateId(value);
-                if (editingSeller?._id) saveStoreTemplateSelection(editingSeller._id, value);
+                if (editingSeller?._id) void saveStoreTemplateSelection(editingSeller._id, value);
               }}
             >
               <MenuItem value="">
