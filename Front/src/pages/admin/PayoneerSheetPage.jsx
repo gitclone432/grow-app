@@ -25,8 +25,7 @@ import {
     useMediaQuery,
     Pagination,
     CircularProgress,
-    Alert,
-    Chip
+    Alert
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import SyncIcon from '@mui/icons-material/Sync';
@@ -45,7 +44,7 @@ const EMPTY_PAYONEER_FORM = () => ({
     store: '',
     periodStart: '',
     periodEnd: '',
-    /** Finances payoutId from Recently completed (last 30d) / Save row */
+    /** Finances payoutId from completed payouts feed / Save row */
     ebayPayoutId: ''
 });
 
@@ -296,7 +295,7 @@ const PayoneerSheetPage = () => {
 
     const [formData, setFormData] = useState(() => EMPTY_PAYONEER_FORM());
 
-    /** eBay Finances SUCCEEDED payouts (last 30d) — same pool as Seller Funds “Recently completed” */
+    /** eBay Finances SUCCEEDED payouts (all available history) */
     const [payoutFeedRows, setPayoutFeedRows] = useState([]);
     const [payoutFeedLoading, setPayoutFeedLoading] = useState(false);
     const [payoutFeedError, setPayoutFeedError] = useState('');
@@ -572,7 +571,7 @@ const PayoneerSheetPage = () => {
                 }));
                 if (pickCompleted) {
                     setAutoFillHint(
-                        'Payment date and amount match Seller Funds Overview — top row of Recently Completed Payouts (last 30 days).'
+                        'Payment date and amount match Seller Funds Overview — top row of Recently Completed Payouts.'
                     );
                 } else {
                     setAutoFillHint(
@@ -985,7 +984,7 @@ const PayoneerSheetPage = () => {
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
                     <CircularProgress size={22} />
                     <Typography variant="body2" color="text.secondary">
-                        Loading eBay completed payouts (last 30 days)…
+                        Loading eBay completed payouts…
                     </Typography>
                 </Box>
             )}
@@ -996,8 +995,7 @@ const PayoneerSheetPage = () => {
             )}
 
             <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
-                eBay SUCCEEDED payouts (last 30 days) appear here with the eBay · last 30d chip; use Save row to enter exchange rate and
-                save to your book.
+                eBay SUCCEEDED payouts appear here; use Save row to enter exchange rate and save to your book.
             </Typography>
 
             {isMobile ? (
@@ -1032,7 +1030,6 @@ const PayoneerSheetPage = () => {
                                         <Stack spacing={1.25}>
                                             <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
                                                 <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" sx={{ minWidth: 0 }}>
-                                                    <Chip size="small" label="eBay · last 30d" variant="outlined" />
                                                     <Typography variant="subtitle2" sx={{ fontWeight: 700 }} noWrap>
                                                         {record.store?.user?.username || '—'}
                                                     </Typography>
@@ -1119,7 +1116,6 @@ const PayoneerSheetPage = () => {
                                                     <Typography variant="body2" component="span">
                                                         {record.bankAccount?.name || '—'}
                                                     </Typography>
-                                                    <Chip size="small" label="eBay · last 30d" variant="outlined" />
                                                 </Stack>
                                             </TableCell>
                                             <TableCell>{renderCell(record, 'paymentDate', 'date')}</TableCell>
@@ -1222,7 +1218,7 @@ const PayoneerSheetPage = () => {
                                                 }
                                                 if (record.ebayPayoutId) return inner;
                                                 return (
-                                                    <Tooltip title="Matched from eBay Recently completed (last 30 days)">
+                                                    <Tooltip title="Matched from eBay Recently completed payouts">
                                                         {inner}
                                                     </Tooltip>
                                                 );

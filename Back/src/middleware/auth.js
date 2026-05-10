@@ -63,6 +63,7 @@ export const PAGE_DEFAULT_ROLES = {
   'AmazonAccounts': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'CreditCards': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'ExcludeOrderQtySkips': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'CronJobs': ['superadmin'],
   'AffiliateOrders': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // eBay Parameters

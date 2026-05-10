@@ -103,6 +103,7 @@ export const PAGE_REGISTRY = [
   { id: 'AmazonAccounts', name: 'Supplier Accounts', path: '/amazon-accounts', category: 'settingsSection', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'CreditCards', name: 'Manage Credit Cards', path: '/credit-cards', category: 'settingsSection', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'ExcludeOrderQtySkips', name: 'Exclude <$3', path: '/exclude-order-qty-skips', category: 'settingsSection', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
+  { id: 'CronJobs', name: 'Cron Jobs', path: '/cron-jobs', category: 'settingsSection', defaultRoles: ['superadmin'] },
   { id: 'AffiliateOrders', name: 'Affiliate Orders', path: '/affiliate-orders', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
 
   // ====== EBAY PARAMETERS ======
@@ -150,7 +151,6 @@ export const PAGE_REGISTRY = [
   { id: 'StoresPage', name: 'Stores', path: '/stores-page', category: 'storesSection', defaultRoles: ['superadmin', 'listingadmin'] },
 
   // ====== SETTINGS ======
-  { id: 'SettingsPage', name: 'Settings', path: '/settings-page', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'DescriptionTemplates', name: 'Description Templates', path: '/description-templates', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
 ];
 

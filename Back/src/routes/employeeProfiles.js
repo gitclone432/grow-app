@@ -159,8 +159,21 @@ router.put('/:id', requireAuth, async (req, res) => {
     Object.assign(profile, profileData);
     await profile.save();
 
-    // Update User fields (role, department)
-    const { role, department } = req.body;
+    // Update User fields (username, role, department)
+    const { username, role, department } = req.body;
+    if (username !== undefined) {
+      const normalizedUsername = String(username || '').trim();
+      if (!normalizedUsername) {
+        return res.status(400).json({ error: 'Username is required' });
+      }
+      if (normalizedUsername !== profile.user.username) {
+        const existing = await User.findOne({ username: normalizedUsername, _id: { $ne: profile.user._id } }).lean();
+        if (existing) {
+          return res.status(409).json({ error: 'Username already in use' });
+        }
+      }
+      profile.user.username = normalizedUsername;
+    }
     if (role !== undefined) profile.user.role = role;
     if (department !== undefined) profile.user.department = department;
 

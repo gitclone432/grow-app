@@ -183,6 +183,7 @@ export default function EmployeeManagementPage() {
     const [editOpen, setEditOpen] = useState(false);
     const [editingProfile, setEditingProfile] = useState(null);
     const [editForm, setEditForm] = useState({
+        username: '',
         role: '',
         department: '',
         workingMode: '',
@@ -239,6 +240,7 @@ export default function EmployeeManagementPage() {
     const openEdit = (profile) => {
         setEditingProfile(profile);
         setEditForm({
+            username: profile.user?.username || '',
             role: profile.user?.role || '',
             department: profile.user?.department || '',
             workingMode: profile.workingMode || '',
@@ -281,6 +283,9 @@ export default function EmployeeManagementPage() {
         if (!editForm.name || editForm.name.trim() === '') {
             errors.name = 'Name is required';
         }
+        if (!editForm.username || editForm.username.trim() === '') {
+            errors.username = 'Username is required';
+        }
         if (!editForm.email || editForm.email.trim() === '') {
             errors.email = 'Email is required';
         }
@@ -305,6 +310,7 @@ export default function EmployeeManagementPage() {
             const missingFields = Object.keys(validationErrors).map(field => {
                 const fieldNames = {
                     name: 'Name',
+                    username: 'Username',
                     email: 'Email',
                     role: 'Role',
                     department: 'Department',
@@ -641,6 +647,24 @@ export default function EmployeeManagementPage() {
                                         Professional Details
                                     </Typography>
                                     <Grid container spacing={2}>
+                                        <Grid item xs={12} sm={6}>
+                                            <TextField
+                                                fullWidth
+                                                label="Username"
+                                                value={editForm.username}
+                                                onChange={(e) => setEditForm({ ...editForm, username: e.target.value })}
+                                                size="small"
+                                                disabled={!isEditing}
+                                                required
+                                                error={!!validationErrors.username}
+                                                helperText={validationErrors.username}
+                                                sx={{
+                                                    '& .MuiFormLabel-asterisk': {
+                                                        color: 'red',
+                                                    },
+                                                }}
+                                            />
+                                        </Grid>
                                         <Grid item xs={12} sm={6}>
                                             <TextField
                                                 select

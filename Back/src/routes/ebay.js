@@ -51,6 +51,12 @@ import {
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
 const activeAutoCompatBatchRuns = new Set();
+const PAYONEER_FEED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+let payoneerFeedCache = {
+  rows: [],
+  total: 0,
+  cachedAt: 0,
+};
 
 function normalizeOAuthStateToken(state) {
   if (!state) return '';
@@ -4687,18 +4693,18 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
 });
 
 // Poll all sellers for NEW ORDERS ONLY (Phase 1)
-router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+export async function scheduledPollNewOrders() {
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true, $ne: null } })
       .populate('user', 'username email');
 
     if (sellers.length === 0) {
-      return res.json({
+      return {
         message: 'No sellers with connected eBay accounts found',
         pollResults: [],
         totalPolled: 0,
         totalNewOrders: 0
-      });
+      };
     }
 
     const nowUTC = Date.now();
@@ -4856,12 +4862,12 @@ router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), a
     const pollResults = results.map(result => result.status === 'fulfilled' ? result.value : { success: false, error: result.reason?.message || 'Unknown error' });
     const totalNewOrders = pollResults.reduce((sum, r) => sum + (r.totalNew || 0), 0);
 
-    res.json({
+    const responsePayload = {
       message: 'New orders polling complete',
       pollResults,
       totalPolled: sellers.length,
       totalNewOrders
-    });
+    };
 
     // Trigger delayed policy messaging in background after polling
     processPendingPolicyMessages(50)
@@ -4874,9 +4880,19 @@ router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), a
 
     console.log(`\n========== NEW ORDERS SUMMARY ==========`);
     console.log(`Total new orders: ${totalNewOrders}`);
+    return responsePayload;
 
   } catch (err) {
     console.error('Error polling new orders:', err);
+    throw err;
+  }
+}
+
+router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  try {
+    const payload = await scheduledPollNewOrders();
+    res.json(payload);
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -12801,20 +12817,38 @@ router.get('/upcoming-payouts/:sellerId', requireAuth, requirePageAccess('Seller
 });
 
 /**
- * Aggregated SUCCEEDED payouts (last 30 days) for Payoneer sheet — same Finances API + window as
- * Seller Funds → "Recently Completed Payouts", across all token-connected sellers.
+ * Aggregated SUCCEEDED payouts (all available history) for Payoneer sheet,
+ * across all token-connected sellers.
  */
 router.get('/payoneer-recent-completed-feed', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
   try {
+    const forceRefresh = String(req.query.forceRefresh || '').toLowerCase() === 'true';
+    const nowMs = Date.now();
+    const cacheAgeMs = nowMs - Number(payoneerFeedCache.cachedAt || 0);
+    const cacheValid =
+      !forceRefresh
+      && Array.isArray(payoneerFeedCache.rows)
+      && payoneerFeedCache.cachedAt > 0
+      && cacheAgeMs < PAYONEER_FEED_CACHE_TTL_MS;
+
+    if (cacheValid) {
+      return res.json({
+        rows: payoneerFeedCache.rows,
+        total: payoneerFeedCache.total,
+        cache: {
+          hit: true,
+          cachedAt: new Date(payoneerFeedCache.cachedAt).toISOString(),
+          ageMs: cacheAgeMs,
+          ttlMs: PAYONEER_FEED_CACHE_TTL_MS,
+        },
+      });
+    }
+
     const bankAccounts = await BankAccount.find().lean();
     const sellers = await Seller.find({
       'ebayTokens.access_token': { $exists: true, $ne: null },
       'ebayTokens.refresh_token': { $exists: true, $ne: null }
     }).populate('user', 'username email');
-
-    const now = new Date();
-    const thirtyDaysAgo = new Date(now);
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
     const bankForSeller = (seller) => {
       const username = (seller.user?.username || seller.user?.email || '').toLowerCase();
@@ -12835,16 +12869,25 @@ router.get('/payoneer-recent-completed-feed', requireAuth, requirePageAccess('Pa
       try {
         const accessToken = await ensureValidToken(seller);
         const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller);
-        const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
-          headers: financesApiHeaders(accessToken, marketplaceId),
-          params: { sort: '-payoutDate', limit: 50 }
-        });
-        const allPayouts = payoutsRes.data?.payouts || [];
+        const allPayouts = [];
+        const limit = 200;
+        let offset = 0;
+        let hasMore = true;
+        let guard = 0;
+        while (hasMore && guard < 500) {
+          const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
+            headers: financesApiHeaders(accessToken, marketplaceId),
+            params: { sort: '-payoutDate', limit, offset }
+          });
+          const pageRows = payoutsRes.data?.payouts || [];
+          allPayouts.push(...pageRows);
+          if (pageRows.length < limit) hasMore = false;
+          else offset += limit;
+          guard += 1;
+        }
 
         for (const p of allPayouts) {
           if (p.payoutStatus !== 'SUCCEEDED' || !p.payoutDate) continue;
-          const payoutDate = new Date(p.payoutDate);
-          if (payoutDate < thirtyDaysAgo) continue;
 
           const { bankId, bankName } = bankForSeller(seller);
           rows.push({
@@ -12867,10 +12910,25 @@ router.get('/payoneer-recent-completed-feed', requireAuth, requirePageAccess('Pa
 
     rows.sort((a, b) => new Date(b.payoutDate) - new Date(a.payoutDate));
 
-    res.json({ rows, total: rows.length });
+    payoneerFeedCache = {
+      rows,
+      total: rows.length,
+      cachedAt: Date.now(),
+    };
+
+    res.json({
+      rows,
+      total: rows.length,
+      cache: {
+        hit: false,
+        cachedAt: new Date(payoneerFeedCache.cachedAt).toISOString(),
+        ageMs: 0,
+        ttlMs: PAYONEER_FEED_CACHE_TTL_MS,
+      },
+    });
   } catch (err) {
     console.error('[payoneer-recent-completed-feed]', err);
-    res.status(500).json({ error: err.message || 'Failed to load recent payouts' });
+    res.status(500).json({ error: err.message || 'Failed to load payouts' });
   }
 });
 

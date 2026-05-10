@@ -108,6 +108,7 @@ import InternalMessagesPage from '../pages/admin/InternalMessagesPage.jsx';
 import InternalMessagesAdminPage from '../pages/admin/InternalMessagesAdminPage.jsx';
 import ManageCreditCardsPage from '../pages/admin/ManageCreditCardsPage.jsx';
 import ExcludeOrderQtySkipsPage from '../pages/admin/ExcludeOrderQtySkipsPage.jsx';
+import CronJobsPage from '../pages/admin/CronJobsPage.jsx';
 import AffiliateOrdersPage from '../pages/admin/AffiliateOrdersPage.jsx';
 import LinkIcon from '@mui/icons-material/Link';
 import IdeasPage from '../pages/IdeasPage.jsx';
@@ -163,7 +164,6 @@ import PageAccessManagementPage from '../pages/admin/PageAccessManagementPage.js
 import PageAccessAuditLogPage from '../pages/admin/PageAccessAuditLogPage.jsx';
 import UserPasswordManagementPage from '../pages/admin/UserPasswordManagementPage.jsx';
 import StoresPage from '../pages/admin/StoresPage.jsx';
-import SettingsPage from '../pages/admin/SettingsPage.jsx';
 import DescriptionTemplatesPage from '../pages/admin/DescriptionTemplatesPage.jsx';
 import SettingsIcon from '@mui/icons-material/Settings';
 
@@ -299,6 +299,7 @@ const COMPONENT_MAP = {
   'AmazonAccounts': ManageAmazonAccountsPage,
   'CreditCards': ManageCreditCardsPage,
   'ExcludeOrderQtySkips': ExcludeOrderQtySkipsPage,
+  'CronJobs': CronJobsPage,
   'AffiliateOrders': AffiliateOrdersPage,
   'SellingPrivileges': SellingPrivilegesPage,
   'EbayApiUsage': EbayApiUsagePage,
@@ -337,7 +338,6 @@ const COMPONENT_MAP = {
   'UserPerformance': UserPerformancePage,
   'EmployeeDetails': EmployeeDetailsPage,
   'StoresPage': StoresPage,
-  'SettingsPage': SettingsPage,
   'DescriptionTemplates': DescriptionTemplatesPage,
 };
 
@@ -386,7 +386,7 @@ export default function AdminLayout({ user, onLogout }) {
   // Helper function to check if current route belongs to a category
   const isCategoryActive = (categoryId) => {
     const pages = PAGE_REGISTRY.filter(p => p.category === categoryId);
-    return pages.some(page => location.pathname.includes(page.path));
+    return pages.some((page) => isPageActive(page));
   };
 
   const isPageActive = (page) => {

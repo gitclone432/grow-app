@@ -1,104 +1,176 @@
 import cron from 'node-cron';
 import Attendance from './models/Attendance.js';
+import CronJobConfig from './models/CronJobConfig.js';
 import { runScheduledUploads } from './lib/ebayFeedUpload.js';
-import { scheduledSyncAllSellers, scheduledRunAutoCompatForDate } from './routes/ebay.js';
+import { scheduledSyncAllSellers, scheduledRunAutoCompatForDate, scheduledPollNewOrders } from './routes/ebay.js';
 import { importTransactionsFromGmail } from './utils/gmailTransactionImporter.js';
 
-export function initializeScheduledJobs() {
-    // Auto-stop all active timers daily at 2:00 AM
-    cron.schedule('0 2 * * *', async () => {
-        try {
-            console.log('[CRON] Running daily timer auto-stop at 2:00 AM...');
+const scheduledTaskMap = new Map();
 
-            // Find all active attendance records
-            const activeRecords = await Attendance.find({ status: 'active' });
+const gmailImportEnabled = String(process.env.GMAIL_IMPORT_ENABLED || '').toLowerCase() === 'true';
 
-            let stoppedCount = 0;
+export const CRON_JOB_DEFINITIONS = [
+  {
+    jobKey: 'dailyTimerAutoStop',
+    label: 'Daily timer auto-stop',
+    description: 'Auto-stop active attendance timers and mark records completed.',
+    cronExpr: '0 2 * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: true,
+  },
+  {
+    jobKey: 'csvAutoUpload',
+    label: 'Auto-upload CSV',
+    description: 'Run scheduled CSV uploads.',
+    cronExpr: '* * * * *',
+    timezone: '',
+    enabled: true,
+  },
+  {
+    jobKey: 'pollAllSellers',
+    label: 'Poll all sellers',
+    description: 'Sync all sellers listings from eBay.',
+    cronExpr: '0 1 * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: true,
+  },
+  {
+    jobKey: 'pollNewOrders',
+    label: 'Poll new orders',
+    description: 'Fetch and import new eBay orders for all connected sellers.',
+    cronExpr: '*/10 * * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: false,
+  },
+  {
+    jobKey: 'autoCompatRunForDate',
+    label: 'Auto-compat run-for-date',
+    description: 'Run auto-compat for previous IST day.',
+    cronExpr: '35 1 * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: true,
+  },
+  {
+    jobKey: 'gmailImport',
+    label: 'Gmail transactions import',
+    description: 'Import transactions from Gmail into database.',
+    cronExpr: String(process.env.GMAIL_IMPORT_CRON || '*/5 * * * *').trim(),
+    timezone: '',
+    enabled: gmailImportEnabled,
+  },
+];
 
-            for (const attendance of activeRecords) {
-                // Stop the last active session
-                if (attendance.sessions.length > 0) {
-                    const lastSession = attendance.sessions[attendance.sessions.length - 1];
-                    if (!lastSession.endTime) {
-                        lastSession.endTime = new Date();
-                    }
-                }
-
-                attendance.status = 'completed';
-                attendance.calculateTotalWorkTime();
-                await attendance.save();
-
-                stoppedCount++;
-            }
-
-            console.log(`[CRON] Auto-stopped ${stoppedCount} active timer(s)`);
-        } catch (error) {
-            console.error('[CRON] Error in auto-stop job:', error);
-        }
-    }, {
-        timezone: 'Asia/Kolkata' // IST timezone
-    });
-
-    console.log('[CRON] Scheduled job initialized: Daily timer auto-stop at 2:00 AM IST');
-
-    // Auto-upload scheduled CSVs — runs every minute
-    cron.schedule('* * * * *', async () => {
-        try {
-            await runScheduledUploads();
-        } catch (error) {
-            console.error('[CRON] Error in scheduled upload job:', error);
-        }
-    });
-
-    console.log('[CRON] Scheduled job initialized: Auto-upload CSV (every minute)');
-
-    // Poll All Sellers at 1:00 AM IST daily.
-    // Syncs eBay listings from lastListingPolledAt up to "now" for every seller.
-    // After this runs, the DB will contain the previous day's listings ready for auto-compat.
-    cron.schedule('0 1 * * *', async () => {
-        try {
-            console.log('[CRON] Scheduled Poll All Sellers starting at 1:00 AM IST...');
-            await scheduledSyncAllSellers();
-        } catch (err) {
-            console.error('[CRON] Scheduled Poll All Sellers error:', err.message);
-        }
-    }, { timezone: 'Asia/Kolkata' });
-
-    console.log('[CRON] Scheduled job initialized: Poll All Sellers at 1:00 AM IST');
-
-    // Run Auto-Compat for the previous IST day at 3:18 AM IST daily.
-    // By 3:18 AM the 1:00 AM poll has already finished (~2h18m buffer), so all
-    // previous-day listings are in the DB.
-    cron.schedule('35 1 * * *', async () => {
-        try {
-            // Compute yesterday's date in IST (UTC+5:30 = 330 minutes offset)
-            const now = new Date();
-            const istNow = new Date(now.getTime() + (330 * 60 * 1000));
-            const yesterdayIST = new Date(istNow.getTime() - (24 * 60 * 60 * 1000));
-            const targetDate = yesterdayIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
-            console.log(`[CRON] Scheduled Auto-Compat for ${targetDate} starting at 3:00 AM IST...`);
-            await scheduledRunAutoCompatForDate(targetDate);
-        } catch (err) {
-            console.error('[CRON] Scheduled Auto-Compat error:', err.message);
-        }
-    }, { timezone: 'Asia/Kolkata' });
-
-    console.log('[CRON] Scheduled job initialized: Auto-Compat Run for Date at 3:00 AM IST');
-
-    // Optional Gmail import into Transactions
-    const gmailImportEnabled = String(process.env.GMAIL_IMPORT_ENABLED || '').toLowerCase() === 'true';
-    if (gmailImportEnabled) {
-        const cronExpr = String(process.env.GMAIL_IMPORT_CRON || '*/5 * * * *').trim();
-        cron.schedule(cronExpr, async () => {
-            try {
-                const report = await importTransactionsFromGmail({
-                    limit: Math.max(1, Math.min(100, Number(process.env.GMAIL_IMPORT_LIMIT || 25)))
-                });
-                console.log(`[CRON] Gmail import scanned=${report.scanned} imported=${report.imported} skipped=${report.skipped}`);
-            } catch (err) {
-                console.error('[CRON] Gmail import error:', err.message);
-            }
-        });
-        console.log(`[CRON] Scheduled job initialized: Gmail import (${cronExpr})`);
+function stopAllScheduledTasks() {
+  for (const [, task] of scheduledTaskMap.entries()) {
+    try {
+      task.stop();
+      task.destroy();
+    } catch {
+      // ignore
     }
+  }
+  scheduledTaskMap.clear();
+}
+
+export async function ensureCronConfigDefaults() {
+  for (const def of CRON_JOB_DEFINITIONS) {
+    await CronJobConfig.updateOne(
+      { jobKey: def.jobKey },
+      { $setOnInsert: def },
+      { upsert: true }
+    );
+  }
+}
+
+async function runDailyTimerAutoStop() {
+  console.log('[CRON] Running daily timer auto-stop...');
+  const activeRecords = await Attendance.find({ status: 'active' });
+  let stoppedCount = 0;
+  for (const attendance of activeRecords) {
+    if (attendance.sessions.length > 0) {
+      const lastSession = attendance.sessions[attendance.sessions.length - 1];
+      if (!lastSession.endTime) lastSession.endTime = new Date();
+    }
+    attendance.status = 'completed';
+    attendance.calculateTotalWorkTime();
+    await attendance.save();
+    stoppedCount += 1;
+  }
+  console.log(`[CRON] Auto-stopped ${stoppedCount} active timer(s)`);
+}
+
+async function runCsvAutoUpload() {
+  await runScheduledUploads();
+}
+
+async function runPollAllSellers() {
+  console.log('[CRON] Scheduled Poll All Sellers starting...');
+  await scheduledSyncAllSellers();
+}
+
+async function runPollNewOrders() {
+  console.log('[CRON] Scheduled Poll New Orders starting...');
+  await scheduledPollNewOrders();
+}
+
+async function runAutoCompatForDate() {
+  const now = new Date();
+  const istNow = new Date(now.getTime() + (330 * 60 * 1000));
+  const yesterdayIST = new Date(istNow.getTime() - (24 * 60 * 60 * 1000));
+  const targetDate = yesterdayIST.toISOString().slice(0, 10);
+  console.log(`[CRON] Scheduled Auto-Compat for ${targetDate} starting...`);
+  await scheduledRunAutoCompatForDate(targetDate);
+}
+
+async function runGmailImport() {
+  const report = await importTransactionsFromGmail({
+    limit: Math.max(1, Math.min(100, Number(process.env.GMAIL_IMPORT_LIMIT || 25))),
+  });
+  console.log(`[CRON] Gmail import scanned=${report.scanned} imported=${report.imported} skipped=${report.skipped}`);
+}
+
+const CRON_JOB_HANDLERS = {
+  dailyTimerAutoStop: runDailyTimerAutoStop,
+  csvAutoUpload: runCsvAutoUpload,
+  pollAllSellers: runPollAllSellers,
+  pollNewOrders: runPollNewOrders,
+  autoCompatRunForDate: runAutoCompatForDate,
+  gmailImport: runGmailImport,
+};
+
+function scheduleJob(config) {
+  const { jobKey, cronExpr, timezone, enabled } = config;
+  if (!enabled) {
+    console.log(`[CRON] Skipped disabled job: ${jobKey}`);
+    return;
+  }
+  if (!cron.validate(cronExpr)) {
+    console.error(`[CRON] Invalid expression for ${jobKey}: ${cronExpr}`);
+    return;
+  }
+  const handler = CRON_JOB_HANDLERS[jobKey];
+  if (!handler) return;
+  const options = timezone ? { timezone } : undefined;
+  const task = cron.schedule(cronExpr, async () => {
+    try {
+      await handler();
+    } catch (err) {
+      console.error(`[CRON] Error in ${jobKey}:`, err.message || err);
+    }
+  }, options);
+  scheduledTaskMap.set(jobKey, task);
+  console.log(`[CRON] Scheduled job initialized: ${jobKey} (${cronExpr}${timezone ? `, ${timezone}` : ''})`);
+}
+
+export async function reloadScheduledJobs() {
+  stopAllScheduledTasks();
+  const configs = await CronJobConfig.find().lean();
+  for (const config of configs) {
+    scheduleJob(config);
+  }
+}
+
+export async function initializeScheduledJobs() {
+  await ensureCronConfigDefaults();
+  await reloadScheduledJobs();
 }

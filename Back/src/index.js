@@ -39,6 +39,7 @@ import uploadRoutes from './routes/upload.js';
 import creditCardRoutes from './routes/creditCards.js';
 import creditCardNameRoutes from './routes/creditCardNames.js';
 import orderQtyExcludeLegacyRoutes from './routes/orderQtyExcludeLegacy.js';
+import cronJobsRoutes from './routes/cronJobs.js';
 import resolutionOptionsRoutes from './routes/resolutionOptions.js';
 import exchangeRatesRoutes from './routes/exchangeRates.js';
 import internalMessagesRoutes from './routes/internalMessages.js';
@@ -158,6 +159,7 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/credit-cards', creditCardRoutes);
 app.use('/api/credit-card-names', creditCardNameRoutes);
 app.use('/api/order-qty-exclude-legacy', orderQtyExcludeLegacyRoutes);
+app.use('/api/cron-jobs', cronJobsRoutes);
 app.use('/api/resolution-options', resolutionOptionsRoutes);
 app.use('/api/exchange-rates', exchangeRatesRoutes);
 app.use('/api/internal-messages', internalMessagesRoutes);
@@ -247,7 +249,9 @@ connectToDatabase()
     }
 
     // Initialize scheduled jobs (e.g., daily timer auto-stop)
-    initializeScheduledJobs();
+    initializeScheduledJobs().catch((e) => {
+      console.error('Failed to initialize scheduled jobs:', e?.message || e);
+    });
 
     // Start image cache auto-cleanup (removes expired entries every 10 minutes)
     imageCache.startAutoCleanup();
