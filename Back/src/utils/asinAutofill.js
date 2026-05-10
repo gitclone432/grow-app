@@ -2,6 +2,18 @@ import { generateWithGemini, replacePlaceholders } from './gemini.js';
 import { calculateStartPrice } from './pricingCalculator.js';
 import { processImagePlaceholders } from './imageReplacer.js';
 import { scrapeAmazonProductWithScraperAPI } from './scraperApiProduct.js';
+
+/** Long Amazon descriptions can break or silently fail LLM calls; truncate only inside AI prompts */
+const AI_PROMPT_DESCRIPTION_MAX_CHARS = Math.max(
+  8000,
+  Number.parseInt(process.env.AI_PROMPT_DESCRIPTION_MAX_CHARS || '14000', 10) || 14000
+);
+
+function truncateForAiPrompt(description) {
+  const s = String(description || '');
+  if (s.length <= AI_PROMPT_DESCRIPTION_MAX_CHARS) return s;
+  return `${s.slice(0, AI_PROMPT_DESCRIPTION_MAX_CHARS)}\n\n[Truncated for AI prompt length (${s.length} chars total)]`;
+}
 import { trackApiUsage } from './apiUsageTracker.js';
 import { getCachedAsinData, setCachedAsinData } from './asinCache.js';
 import { createEbayImageWithOverlay } from './imageProcessor.js';
@@ -266,13 +278,42 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
       try {
         console.log(`\n  🔹 Processing AI field: ${config.ebayField} (${config.fieldType})`);
         console.log(`    📝 Original prompt template: "${config.promptTemplate}"`);
-        
-        const processedPrompt = replacePlaceholders(
-          config.promptTemplate, 
-          placeholderData
-        );
-        
-        console.log(`    ✏️  Processed prompt (after placeholders): "${processedPrompt}"`);
+        const aiPlaceholderData =
+          config.ebayField === 'description' || String(config.ebayField || '').toLowerCase().includes('description')
+            ? { ...placeholderData, description: truncateForAiPrompt(placeholderData.description) }
+            : placeholderData;
+
+        let processedPrompt = replacePlaceholders(config.promptTemplate || '', aiPlaceholderData);
+
+        // Empty prompts produce empty/low-quality GPT output; defaults keep bulk preview usable.
+        const fieldKey = String(config.ebayField || '').trim().toLowerCase();
+        if (
+          fieldKey === 'description'
+          && !String(processedPrompt || '').trim()
+        ) {
+          const DEFAULT_DESCRIPTION_AI_PROMPT = [
+            'Rephrase the Amazon product notes below for ONE insertion point in an existing eBay HTML template (already has layout, hero, galleries, footer).',
+            '',
+            'Output HTML only — no markdown fences.',
+            '',
+            'CRITICAL:',
+            '- Output ONLY 5–10 consecutive `<li>...</li>` elements (feature bullets). No wrapping `<ul>`, `<table>`, `<div>`, `<html>`, or `<body>`.',
+            '- Do NOT echo or recreate page chrome: no banners, margins, galleries, seller blocks, shipping tables, or “VISIT OUR STORE” blocks. Never output curly-brace template placeholders (stub merge fields must not appear in your reply).',
+            '- Each `<li>` = one short factual sentence (allowed: light `<strong>` on 2–4 word label only). No images, no nested layout.',
+            '- Facts must come only from Source; never invent warranties, specs, or compatibility beyond the source.',
+            '',
+            'Title: {title}',
+            'Brand: {brand}',
+            'ASIN: {asin}',
+            '',
+            'Source:',
+            '{description}',
+          ].join('\n');
+          processedPrompt = replacePlaceholders(DEFAULT_DESCRIPTION_AI_PROMPT, aiPlaceholderData);
+          console.log('    ⚠️ Empty description AI prompt — using built-in default.');
+        }
+
+        console.log(`    ✏️  Processed prompt (after placeholders): "${processedPrompt.substring(0, 500)}${processedPrompt.length > 500 ? '…' : ''}"`);
         
         // Use higher token limit for description field to avoid truncation
         const maxTokens = config.ebayField === 'description' ? 2000 : 150;

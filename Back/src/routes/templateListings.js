@@ -34,6 +34,13 @@ function getConfiguredAiDescription(fieldConfigs = [], coreFields = {}, customFi
   return typeof candidate === 'string' ? candidate.trim() : '';
 }
 
+/** Warn only when the listing has no description and the scrape/catalog also had none */
+function shouldWarnMissingDescription(mergedCoreFields = {}, amazonData = {}) {
+  const mergedDesc = String(mergedCoreFields?.description || '').trim();
+  const sourceDesc = String(amazonData?.description || '').trim();
+  return !mergedDesc && !sourceDesc;
+}
+
 function mergeTemplateCoreFields(coreFieldDefaults = {}, autoCoreFields = {}, amazonData = {}) {
   const merged = {
     ...(coreFieldDefaults || {}),
@@ -54,6 +61,17 @@ function mergeTemplateCoreFields(coreFieldDefaults = {}, autoCoreFields = {}, am
     const parsedAmazonPrice = parseAmazonPriceToNumber(amazonData?.price);
     // Keep the listing valid even when Amazon price is unavailable.
     merged.startPrice = parsedAmazonPrice ? parsedAmazonPrice.toFixed(2) : '0.01';
+  }
+
+  // Empty strings from a failed AI (or incomplete mapping) must not wipe template defaults or scrape text.
+  if (!String(merged.description || '').trim()) {
+    const fromDefaults = String(coreFieldDefaults?.description || '').trim();
+    const fromAmazon = String(amazonData?.description || '').trim();
+    if (fromDefaults) {
+      merged.description = coreFieldDefaults.description;
+    } else if (fromAmazon) {
+      merged.description = fromAmazon;
+    }
   }
 
   return merged;
@@ -684,7 +702,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           validationErrors.push('Missing required field: startPrice');
         }
         
-        if (!mergedCoreFields.description) {
+        if (shouldWarnMissingDescription(mergedCoreFields, amazonData)) {
           warnings.push('Missing description');
         }
 
@@ -968,7 +986,9 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         if (mergedCoreFields.startPrice === undefined || mergedCoreFields.startPrice === null || mergedCoreFields.startPrice === '') {
           validationErrors.push('Missing required field: startPrice');
         }
-        if (!mergedCoreFields.description) warnings.push('Missing description');
+        if (shouldWarnMissingDescription(mergedCoreFields, amazonData)) {
+          warnings.push('Missing description');
+        }
 
         // Compute count-based SKU using the already-fetched directory doc
         const finalSKU = generateSKUWithCount(asin, doc?.listingCount || 0);
@@ -2339,11 +2359,11 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
           warnings.push('ASIN already exists in this template - will be skipped during save');
         }
         
-        // Check for missing important fields
-        if (!mergedCoreFields.description) {
+        // Check for missing important fields (only when scrape also has no usable text)
+        if (shouldWarnMissingDescription(mergedCoreFields, amazonData)) {
           warnings.push('Missing description');
         }
-        
+
         previewItems.push({
           id: `preview-${asin}`,
           asin,
