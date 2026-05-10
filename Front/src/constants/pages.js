@@ -20,7 +20,6 @@ export const PAGE_CATEGORIES = {
   ebayParams: { id: 'ebayParams', name: 'eBay Parameters', icon: 'StoreIcon' },
   hrManagement: { id: 'hrManagement', name: 'HR & Management', icon: 'SupervisorAccountIcon' },
   others: { id: 'others', name: 'Others', icon: 'AppsIcon' },
-  storesSection: { id: 'storesSection', name: 'Stores', icon: 'StoreIcon' },
   settingsSection: { id: 'settingsSection', name: 'Settings', icon: 'SettingsIcon' },
 };
 
@@ -147,10 +146,8 @@ export const PAGE_REGISTRY = [
   { id: 'UserPerformance', name: 'User Performance Logs', path: '/user-performance', category: 'others', defaultRoles: ['superadmin'] },
   { id: 'EmployeeDetails', name: 'Employee Details', path: '/employee-details', category: 'others', defaultRoles: ['superadmin', 'hradmin', 'operationhead'] },
 
-  // ====== STORES ======
-  { id: 'StoresPage', name: 'Stores', path: '/stores-page', category: 'storesSection', defaultRoles: ['superadmin', 'listingadmin'] },
-
   // ====== SETTINGS ======
+  { id: 'StoresPage', name: 'Stores', path: '/stores-page', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'DescriptionTemplates', name: 'Description Templates', path: '/description-templates', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
 ];
 

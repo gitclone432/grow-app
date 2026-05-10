@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
   CircularProgress,
+  Link,
   Paper,
   Stack,
   Switch,
@@ -17,6 +21,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import cronstrue from 'cronstrue';
 import api from '../../lib/api.js';
 
@@ -147,6 +152,67 @@ export default function CronJobsPage() {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 820 }}>
         Configure scheduler expressions and enable/disable jobs. Saving a row immediately reloads backend schedulers.
       </Typography>
+
+      <Accordion
+        disableGutters
+        elevation={0}
+        sx={{
+          mb: 2,
+          border: '1px solid',
+          borderColor: 'divider',
+          borderRadius: 1,
+          '&:before': { display: 'none' },
+        }}
+      >
+        <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ bgcolor: 'action.hover', minHeight: 44 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+            Cron expression reference
+          </Typography>
+        </AccordionSummary>
+        <AccordionDetails sx={{ pt: 0 }}>
+          <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1.5, display: 'block' }}>
+            Uses standard 5 fields (same as node-cron):{' '}
+            <Box component="span" sx={{ fontFamily: MONO.fontFamily, fontSize: '0.75rem' }}>
+              minute hour day-of-month month day-of-week
+            </Box>
+            . Hours are 0–23 (7pm = 19). Set <strong>Timezone</strong> to an IANA name (e.g. Asia/Kolkata) so hours match that zone.
+          </Typography>
+          <Box
+            component="table"
+            sx={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem', ...MONO }}
+          >
+            <Box component="thead">
+              <Box component="tr" sx={{ borderBottom: '1px solid', borderColor: 'divider' }}>
+                <Box component="th" sx={{ textAlign: 'left', py: 0.75, pr: 2, fontWeight: 700 }}>Expression</Box>
+                <Box component="th" sx={{ textAlign: 'left', py: 0.75, fontWeight: 700 }}>Meaning</Box>
+              </Box>
+            </Box>
+            <Box component="tbody">
+              {[
+                ['0 19 * * *', 'Every day at 7:00 PM (in the job timezone)'],
+                ['30 14 * * *', 'Every day at 2:30 PM'],
+                ['0 1 * * *', 'Every day at 1:00 AM'],
+                ['*/10 * * * *', 'Every 10 minutes'],
+                ['0 */6 * * *', 'Every 6 hours on the hour'],
+                ['0 9 * * 1', 'Every Monday at 9:00 AM'],
+              ].map(([expr, mean]) => (
+                <Box component="tr" key={expr} sx={{ borderBottom: '1px solid', borderColor: 'divider' }}>
+                  <Box component="td" sx={{ py: 0.75, pr: 2, whiteSpace: 'nowrap', verticalAlign: 'top' }}>{expr}</Box>
+                  <Box component="td" sx={{ py: 0.75, verticalAlign: 'top', fontFamily: 'inherit', fontSize: '0.75rem', color: 'text.secondary' }}>
+                    {mean}
+                  </Box>
+                </Box>
+              ))}
+            </Box>
+          </Box>
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 1.5, display: 'block' }}>
+            External checker:{' '}
+            <Link href="https://crontab.guru/" target="_blank" rel="noopener noreferrer">
+              crontab.guru
+            </Link>
+          </Typography>
+        </AccordionDetails>
+      </Accordion>
 
       {error ? <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert> : null}
       {success ? <Alert severity="success" sx={{ mb: 2 }}>{success}</Alert> : null}

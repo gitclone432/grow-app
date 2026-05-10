@@ -209,7 +209,6 @@ const categoryIcons = {
   ebayParams: StoreIcon,
   hrManagement: SupervisorAccountIcon,
   others: AppsIcon,
-  storesSection: StoreIcon,
   settingsSection: SettingsIcon,
 };
 
@@ -655,7 +654,6 @@ export default function AdminLayout({ user, onLogout }) {
         {renderCategoryMenu('ebayParams')}
         {renderCategoryMenu('hrManagement')}
         {renderCategoryMenu('others')}
-        {renderCategoryMenu('storesSection')}
         {renderCategoryMenu('settingsSection')}
 
         {/* Ideas & Issues - standalone for users who don't see it in HR category */}
