@@ -14,9 +14,62 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
+import cronstrue from 'cronstrue';
 import api from '../../lib/api.js';
+
+const MONO = {
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+  fontSize: '0.8125rem',
+  letterSpacing: '0.02em',
+};
+
+/** Plain-English schedule from a 5-field cron (best-effort). */
+function describeCronExpression(expr) {
+  const s = String(expr || '').trim();
+  if (!s) return '';
+  try {
+    return cronstrue.toString(s, { use24HourTimeFormat: false });
+  } catch {
+    return '';
+  }
+}
+
+/** Next run: separate DATE and TIME lines so nothing looks like one unreadable blob. */
+function formatNextRunLines(iso, timezone) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const tz = (timezone || '').trim();
+  const base = {};
+  if (tz) base.timeZone = tz;
+  let dateLine;
+  let timeLine;
+  try {
+    dateLine = new Intl.DateTimeFormat(undefined, {
+      ...base,
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    }).format(d);
+    timeLine = new Intl.DateTimeFormat(undefined, {
+      ...base,
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+      timeZoneName: 'long',
+    }).format(d);
+  } catch {
+    dateLine = d.toDateString();
+    timeLine = d.toLocaleTimeString(undefined, { hour12: true });
+  }
+  const zoneNote = tz ? `Schedule timezone: ${tz}` : 'Using your browser locale (set IANA zone next column for fixed zone)';
+  return { dateLine, timeLine, zoneNote, iso };
+}
 
 export default function CronJobsPage() {
   const [rows, setRows] = useState([]);
@@ -103,14 +156,14 @@ export default function CronJobsPage() {
           <CircularProgress size={28} />
         </Box>
       ) : (
-        <TableContainer component={Paper}>
+        <TableContainer component={Paper} sx={{ overflowX: 'auto' }}>
           <Table size="small">
             <TableHead>
               <TableRow sx={{ bgcolor: 'primary.main' }}>
                 <TableCell sx={{ color: 'white', fontWeight: 'bold' }}>Job</TableCell>
-                <TableCell sx={{ color: 'white', fontWeight: 'bold' }}>Cron</TableCell>
-                <TableCell sx={{ color: 'white', fontWeight: 'bold' }}>Timezone</TableCell>
-                <TableCell sx={{ color: 'white', fontWeight: 'bold' }}>Next run</TableCell>
+                <TableCell sx={{ color: 'white', fontWeight: 'bold', minWidth: 180 }}>Cron</TableCell>
+                <TableCell sx={{ color: 'white', fontWeight: 'bold', minWidth: 140 }}>Timezone</TableCell>
+                <TableCell sx={{ color: 'white', fontWeight: 'bold', minWidth: 220 }}>Next run</TableCell>
                 <TableCell sx={{ color: 'white', fontWeight: 'bold' }}>Enabled</TableCell>
                 <TableCell sx={{ color: 'white', fontWeight: 'bold', width: 120 }} align="right">Action</TableCell>
               </TableRow>
@@ -119,6 +172,7 @@ export default function CronJobsPage() {
               {sortedRows.map((row) => {
                 const state = draft[row.jobKey] || { cronExpr: '', timezone: '', enabled: false };
                 const busy = savingKey === row.jobKey;
+                const cronHuman = describeCronExpression(state.cronExpr);
                 return (
                   <TableRow key={row.jobKey} hover>
                     <TableCell>
@@ -127,37 +181,75 @@ export default function CronJobsPage() {
                         <Typography variant="caption" color="text.secondary">{row.description || row.jobKey}</Typography>
                       </Stack>
                     </TableCell>
-                    <TableCell>
+                    <TableCell sx={{ verticalAlign: 'top' }}>
                       <TextField
                         size="small"
                         value={state.cronExpr}
                         onChange={(e) => setField(row.jobKey, 'cronExpr', e.target.value)}
                         placeholder="*/5 * * * *"
-                        sx={{ minWidth: 170 }}
+                        fullWidth
+                        inputProps={{
+                          spellCheck: false,
+                          'aria-label': 'Cron expression',
+                          style: MONO,
+                        }}
                       />
+                      {cronHuman ? (
+                        <Typography variant="caption" sx={{ mt: 0.75, display: 'block', color: 'text.secondary', lineHeight: 1.45 }}>
+                          <Box component="span" sx={{ fontWeight: 600, color: 'text.primary' }}>Means: </Box>
+                          {cronHuman}
+                        </Typography>
+                      ) : null}
                     </TableCell>
-                    <TableCell>
+                    <TableCell sx={{ verticalAlign: 'top' }}>
                       <TextField
                         size="small"
                         value={state.timezone}
                         onChange={(e) => setField(row.jobKey, 'timezone', e.target.value)}
                         placeholder="Asia/Kolkata"
-                        sx={{ minWidth: 160 }}
+                        fullWidth
+                        inputProps={{
+                          spellCheck: false,
+                          'aria-label': 'IANA timezone',
+                          style: MONO,
+                        }}
                       />
                     </TableCell>
-                    <TableCell>
+                    <TableCell sx={{ verticalAlign: 'top', py: 1, bgcolor: 'grey.50', borderLeft: '1px solid', borderColor: 'divider' }}>
                       {row.enabled ? (
                         row.nextRunAt ? (
-                          <Typography variant="body2">
-                            {new Date(row.nextRunAt).toLocaleString()}
-                          </Typography>
+                          (() => {
+                            const lines = formatNextRunLines(row.nextRunAt, row.timezone);
+                            if (!lines) {
+                              return (
+                                <Typography variant="body2" color="text.secondary">
+                                  Invalid time
+                                </Typography>
+                              );
+                            }
+                            return (
+                              <Tooltip title={`ISO: ${lines.iso}`}>
+                                <Stack spacing={0.25}>
+                                  <Typography variant="body2" sx={{ fontWeight: 700, color: 'text.primary', lineHeight: 1.35 }}>
+                                    {lines.dateLine}
+                                  </Typography>
+                                  <Typography variant="body2" sx={{ fontWeight: 600, color: 'primary.dark', lineHeight: 1.35 }}>
+                                    {lines.timeLine}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.4, display: 'block' }}>
+                                    {lines.zoneNote}
+                                  </Typography>
+                                </Stack>
+                              </Tooltip>
+                            );
+                          })()
                         ) : (
-                          <Typography variant="caption" color="text.secondary">
-                            {row.nextRunError || '—'}
+                          <Typography variant="body2" color="error" sx={{ lineHeight: 1.45, wordBreak: 'break-word' }}>
+                            {row.nextRunError || 'Could not compute next run'}
                           </Typography>
                         )
                       ) : (
-                        <Typography variant="caption" color="text.secondary">Disabled</Typography>
+                        <Typography variant="body2" color="text.secondary">Disabled</Typography>
                       )}
                     </TableCell>
                     <TableCell>

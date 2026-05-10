@@ -182,6 +182,7 @@ export default function AddListerPage() {
               <MenuItem value="Product Research">Product Research Department</MenuItem>
               <MenuItem value="Listing">Listing Department</MenuItem>
               <MenuItem value="Compatibility">Compatibility Department</MenuItem>
+              <MenuItem value="Fulfillment">Fulfillment Department</MenuItem>
               <MenuItem value="HR">HR Department</MenuItem>
               <MenuItem value="Operations">Operations Department</MenuItem>
               <MenuItem value="Executives">Executives Department</MenuItem>

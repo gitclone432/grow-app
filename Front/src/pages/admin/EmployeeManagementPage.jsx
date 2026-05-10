@@ -225,7 +225,8 @@ export default function EmployeeManagementPage() {
         setLoading(true);
         try {
             const list = await listEmployeeProfiles();
-            setRows(list);
+            // Seller accounts are managed elsewhere; exclude from employee roster
+            setRows(list.filter((p) => (p.user?.role || '') !== 'seller'));
         } catch (e) {
             console.error('Failed to load employees', e);
         } finally {
@@ -719,6 +720,7 @@ export default function EmployeeManagementPage() {
                                                 <MenuItem value="Product Research">Product Research Department</MenuItem>
                                                 <MenuItem value="Listing">Listing Department</MenuItem>
                                                 <MenuItem value="Compatibility">Compatibility Department</MenuItem>
+                                                <MenuItem value="Fulfillment">Fulfillment Department</MenuItem>
                                                 <MenuItem value="HR">HR Department</MenuItem>
                                                 <MenuItem value="Operations">Operations Department</MenuItem>
                                                 <MenuItem value="Executives">Executives Department</MenuItem>

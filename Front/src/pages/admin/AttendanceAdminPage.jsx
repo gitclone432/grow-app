@@ -68,6 +68,7 @@ export default function AttendanceAdminPage() {
         'Product Research',
         'Listing',
         'Compatibility',
+        'Fulfillment',
         'HR',
         'Operations',
         'Executives'

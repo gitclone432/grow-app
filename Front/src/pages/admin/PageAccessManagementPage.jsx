@@ -38,8 +38,8 @@ const PageAccessManagementPage = () => {
     try {
       setLoading(true);
       const { data } = await api.get('/users');
-      // Filter out superadmin users (they always have full access)
-      setUsers(data.filter(u => u.role !== 'superadmin'));
+      // Hide superadmin (full access) and sellers (page access is not managed here)
+      setUsers(data.filter((u) => u.role !== 'superadmin' && u.role !== 'seller'));
     } catch (err) {
       setError('Failed to load users');
     } finally {
