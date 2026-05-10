@@ -102,6 +102,7 @@ export const PAGE_REGISTRY = [
   { id: 'ConversationManagement', name: 'Conversation Mgmt', path: '/conversation-management', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'AmazonAccounts', name: 'Supplier Accounts', path: '/amazon-accounts', category: 'settingsSection', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'CreditCards', name: 'Manage Credit Cards', path: '/credit-cards', category: 'settingsSection', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
+  { id: 'ExcludeOrderQtySkips', name: 'Exclude <$3', path: '/exclude-order-qty-skips', category: 'settingsSection', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'AffiliateOrders', name: 'Affiliate Orders', path: '/affiliate-orders', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
 
   // ====== EBAY PARAMETERS ======

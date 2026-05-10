@@ -107,6 +107,7 @@ import ManageAmazonAccountsPage from '../pages/admin/ManageAmazonAccountsPage.js
 import InternalMessagesPage from '../pages/admin/InternalMessagesPage.jsx';
 import InternalMessagesAdminPage from '../pages/admin/InternalMessagesAdminPage.jsx';
 import ManageCreditCardsPage from '../pages/admin/ManageCreditCardsPage.jsx';
+import ExcludeOrderQtySkipsPage from '../pages/admin/ExcludeOrderQtySkipsPage.jsx';
 import AffiliateOrdersPage from '../pages/admin/AffiliateOrdersPage.jsx';
 import LinkIcon from '@mui/icons-material/Link';
 import IdeasPage from '../pages/IdeasPage.jsx';
@@ -297,6 +298,7 @@ const COMPONENT_MAP = {
   'ConversationManagement': ConversationManagementPage,
   'AmazonAccounts': ManageAmazonAccountsPage,
   'CreditCards': ManageCreditCardsPage,
+  'ExcludeOrderQtySkips': ExcludeOrderQtySkipsPage,
   'AffiliateOrders': AffiliateOrdersPage,
   'SellingPrivileges': SellingPrivilegesPage,
   'EbayApiUsage': EbayApiUsagePage,

@@ -62,6 +62,7 @@ export const PAGE_DEFAULT_ROLES = {
   'ConversationManagement': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'AmazonAccounts': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'CreditCards': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'ExcludeOrderQtySkips': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'AffiliateOrders': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // eBay Parameters

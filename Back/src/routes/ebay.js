@@ -22,6 +22,7 @@ import ActiveListing from '../models/ActiveListing.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import ChatAgent from '../models/ChatAgent.js';
+import { getOrderQtyExcludedLegacyIdSet } from '../utils/orderQtyExcludeLegacyCache.js';
 import { parseStringPromise } from 'xml2js';
 import imageCache from '../lib/imageCache.js';
 import multer from 'multer';
@@ -5767,122 +5768,6 @@ const AUTO_COMPAT_EXCLUDED_USERNAMES = [
 ];
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Item IDs that should NOT have their quantity updated when ordered
-const QUANTITY_UPDATE_EXCLUDED_ITEMS = new Set([
-  '127311585410',
-  '127311587672',
-  '127311588411',
-  '127311588863',
-  '127311596014',
-  '389381058706',
-  '389381053145',
-  '389381049342',
-  '389381045467',
-  '389381039761',
-  '317649392161',
-  '317649397683',
-  '317649395742',
-  '317649399983',
-  '317649401541',
-  '127632524706',
-  '127632525908',
-  '127632527199',
-  '127632535240',
-  '127632517576',
-  '397653418688',
-  '397653430223',
-  '397653431626',
-  '397653432958',
-  '397653434997',
-  '389697500304',
-  '389697505524',
-  '389697519189',
-  '389697527530',
-  '389697527648',
-  '389707394803',
-  '389707398007',
-  '389707398167',
-  '406742433098',
-  '406742435500',
-  '406742435984',
-  '177927320888',
-  '177927336580',
-  '177927336724',
-  '389707470348',
-  '389707471563',
-  '389707471798',
-  '177933876674',
-  '177933879168',
-  '177933879217',
-  '389711830316',
-  '389711827996',
-  '389711828096',
-  '389707470348',
-  '389707471563',
-  '389707471798',
-  '389719944291',
-  '389719946273',
-  '389719946325',
-  '236712714683',
-  '236712734790',
-  '236712734883',
-  '236712734944',
-  '236712735005',
-  '389798717090',
-  '389798767664',
-  '389798767905',
-  '389798768087',
-  '389798768257',
-  '137166531019',
-  '137166559893',
-  '137166559917',
-  '137166559933',
-  '137166559948',
-  '389798718204',
-  '389798770343',
-  '389798770391',
-  '389798770430',
-  '389798770555',
-  '397760832934',
-  '397760867895',
-  '397760867926',
-  '397760867950',
-  '397760868001',
-  '397760910024',
-  '397760915006',
-  '397760913732',
-  '397760913792',
-  '397760912460',
-    '318135906852',
-    '318135906854',
-    '318135906872',
-    '318135906878',
-    '318135906890',
-    '389876300253',
-    '389876300254',
-    '389876300263',
-    '389876300264',
-    '389876300271',
-    '397828455740',
-    '397828455742',
-    '397828455743',
-    '397828455744',
-    '397828455749',
-    '397828455873',
-    '397828455874',
-    '397828455876',
-    '397828455877',
-    '397828455878',
-    '389905142747',
-    '389905161240',
-    '389905163638',
-    '389905163695',
-    '389905163516',
-
-
-
-
-]);
 
 // ============================================
 // HELPER: Update Listing Quantity to 1 on New Order
@@ -5896,6 +5781,8 @@ async function updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName) 
   const orderId = ebayOrder.orderId;
   console.log(`[Quantity Update] Processing ${lineItems.length} line item(s) for order ${orderId}`);
 
+  const excludedLegacyIds = await getOrderQtyExcludedLegacyIdSet();
+
   for (const lineItem of lineItems) {
     const legacyItemId = lineItem.legacyItemId;
     const title = lineItem.title || 'Unknown';
@@ -5905,7 +5792,7 @@ async function updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName) 
       continue;
     }
 
-    if (QUANTITY_UPDATE_EXCLUDED_ITEMS.has(legacyItemId)) {
+    if (excludedLegacyIds.has(String(legacyItemId).trim())) {
       console.log(`[Quantity Update] ⏭️ Excluded ItemID: ${legacyItemId} (${title}), skipping`);
       continue;
     }
@@ -9443,6 +9330,29 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
         const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
         const rawHtml = item.Description ? item.Description[0] : '';
         const cleanHtml = extractCleanDescription(rawHtml);
+        const promotedStatusRaw =
+          item.PromotedListingStatus?.[0]
+          || item.ListingDetails?.[0]?.PromotedListingStatus?.[0]
+          || item.AdvertisingStatus?.[0]
+          || '';
+        const adRateRaw =
+          item.PromotedListingDetails?.[0]?.PromotedListingAdRate?.[0]
+          || item.PromotedListingAdRate?.[0]
+          || item.AdRate?.[0]
+          || item.ListingDetails?.[0]?.AdRate?.[0]
+          || null;
+        const parsedAdRate = Number.parseFloat(adRateRaw);
+        const adRate = Number.isFinite(parsedAdRate) ? parsedAdRate : null;
+        let promoted = null;
+        if (typeof promotedStatusRaw === 'string' && promotedStatusRaw.trim()) {
+          const normalizedStatus = promotedStatusRaw.trim().toLowerCase();
+          promoted = !(normalizedStatus.includes('not')
+            || normalizedStatus.includes('off')
+            || normalizedStatus.includes('disabled')
+            || normalizedStatus.includes('ineligible'));
+        } else if (adRate !== null) {
+          promoted = adRate > 0;
+        }
 
         // Upsert to ActiveListing collection (separate from Motors Listing collection)
         await ActiveListing.findOneAndUpdate(
@@ -9463,7 +9373,9 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
             mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
             categoryName: categoryName,
             descriptionPreview: cleanHtml,
-            startTime: item.ListingDetails?.[0]?.StartTime?.[0]
+            startTime: item.ListingDetails?.[0]?.StartTime?.[0],
+            ...(promoted !== null ? { promoted } : {}),
+            ...(adRate !== null ? { adRate } : {}),
           },
           { upsert: true }
         );
@@ -11757,7 +11669,7 @@ router.post('/dev/trading-call', requireAuth, requirePageAccess('EbayApiTester')
  * Fetch eligible Best Offers across all connected stores.
  * Default status is Active (open offers awaiting action).
  */
-router.get('/best-offers/eligible/all', requireAuth, requirePageAccess('EbayApiTester'), async (req, res) => {
+router.get('/best-offers/eligible/all', requireAuth, requirePageAccess('StoreListings'), async (req, res) => {
   try {
     const status = String(req.query.status || 'Active').trim();
     const entriesPerPage = Math.min(Math.max(parseInt(req.query.entriesPerPage, 10) || 100, 1), 200);
@@ -11869,6 +11781,269 @@ router.get('/best-offers/eligible/all', requireAuth, requirePageAccess('EbayApiT
   } catch (error) {
     console.error('[BestOffers Eligible All] Error:', error.message);
     return res.status(500).json({ error: error.message || 'Failed to fetch eligible best offers' });
+  }
+});
+
+/** Trading API GetItem → normalized fields for eligible-offers UI when Mongo has no row yet */
+async function fetchTradingGetItemListingSnapshot(token, itemId) {
+  const id = String(itemId || '').trim();
+  if (!id) return null;
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <ItemID>${escapeXml(id)}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetItemRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'GetItem',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 45000,
+  });
+
+  const result = await parseStringPromise(response.data);
+  const ack = result?.GetItemResponse?.Ack?.[0];
+  if (ack === 'Failure') return null;
+  const item = result?.GetItemResponse?.Item?.[0];
+  if (!item) return null;
+
+  const title = item.Title?.[0] || null;
+  const imageUrl = item.PictureDetails?.[0]?.PictureURL?.[0] || '';
+  let price = null;
+  let currency = null;
+  try {
+    const cp = item.SellingStatus?.[0]?.CurrentPrice?.[0];
+    if (cp?._ != null) price = parseFloat(cp._);
+    currency = cp?.$?.currencyID || null;
+  } catch {
+    // ignore
+  }
+  const quantity = item.Quantity?.[0] != null ? parseInt(item.Quantity[0], 10) || 0 : null;
+  const startTime = item.ListingDetails?.[0]?.StartTime?.[0] || null;
+  const timeLeft = item.TimeLeft?.[0] || '';
+
+  return {
+    title,
+    imageUrl: imageUrl || null,
+    price,
+    currency,
+    quantity,
+    startTime,
+    timeLeft,
+  };
+}
+
+/**
+ * Find Negotiation API offer-eligible listing items.
+ * Optional: sellerId for store-wise fetch.
+ */
+router.get('/negotiation/eligible-items', requireAuth, requirePageAccess('StoreListings'), async (req, res) => {
+  try {
+    const requestedSellerId = String(req.query.sellerId || '').trim();
+    const limitRaw = parseInt(req.query.limit, 10);
+    const offsetRaw = parseInt(req.query.offset, 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 100;
+    const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+    const marketplaceId = normalizeFinancesMarketplaceId(req.query.marketplaceId);
+
+    const sellerQuery = {
+      isStoreActive: { $ne: false },
+      'ebayTokens.access_token': { $exists: true, $ne: null },
+      'ebayTokens.refresh_token': { $exists: true, $ne: null },
+    };
+    if (requestedSellerId) {
+      if (!mongoose.Types.ObjectId.isValid(requestedSellerId)) {
+        return res.status(400).json({ error: 'Invalid sellerId' });
+      }
+      sellerQuery._id = requestedSellerId;
+    }
+
+    const sellers = await Seller.find(sellerQuery).populate('user', 'username email').lean(false);
+    if (!sellers.length) {
+      return res.json({
+        success: true,
+        summary: { stores: 0, successStores: 0, failedStores: 0, totalItems: 0 },
+        stores: [],
+        items: [],
+      });
+    }
+
+    const storeResults = [];
+    for (const seller of sellers) {
+      const sellerName = seller.user?.username || seller.user?.email || String(seller._id);
+      try {
+        const token = await ensureValidToken(seller);
+        const response = await axios.get('https://api.ebay.com/sell/negotiation/v1/find_eligible_items', {
+          params: { limit, offset },
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+          },
+          timeout: 45000,
+        });
+
+        const payloadItems = Array.isArray(response?.data?.eligibleItems) ? response.data.eligibleItems : [];
+
+        const listingIds = payloadItems
+          .map((row) => String(row?.listingId || row?.itemId || row?.legacyItemId || '').trim())
+          .filter(Boolean);
+
+        const activeByItemId = new Map();
+        if (listingIds.length) {
+          const activeRows = await ActiveListing.find({
+            seller: seller._id,
+            itemId: { $in: listingIds },
+          })
+            .select('itemId currentPrice currency quantity startTime timeLeft title mainImageUrl')
+            .lean();
+          for (const row of activeRows) {
+            activeByItemId.set(row.itemId, row);
+          }
+        }
+
+        const missingForListing = listingIds.filter((id) => !activeByItemId.has(id));
+        const listingByItemId = new Map();
+        if (missingForListing.length) {
+          const listingRows = await Listing.find({
+            seller: seller._id,
+            itemId: { $in: missingForListing },
+          })
+            .select('itemId currentPrice currency startTime title mainImageUrl')
+            .lean();
+          for (const row of listingRows) {
+            listingByItemId.set(row.itemId, row);
+          }
+        }
+
+        let items = payloadItems.map((item) => {
+          const listingId = item?.listingId || item?.itemId || item?.legacyItemId || null;
+          const lid = listingId != null ? String(listingId).trim() : '';
+          const storeActive = lid ? activeByItemId.get(lid) : null;
+          const storeListing = lid ? listingByItemId.get(lid) : null;
+          const store = storeActive || storeListing || null;
+
+          const apiPrice = item?.listingPrice?.value ?? null;
+          const apiCurrency = item?.listingPrice?.currency || null;
+          const price = typeof store?.currentPrice === 'number' ? store.currentPrice : apiPrice;
+          const currency = store?.currency || apiCurrency || null;
+          const quantity = typeof storeActive?.quantity === 'number'
+            ? storeActive.quantity
+            : (item?.availableQuantity ?? null);
+          const startTime = store?.startTime ?? null;
+          const timeLeft = typeof storeActive?.timeLeft === 'string' ? storeActive.timeLeft : '';
+
+          const imageUrl =
+            item?.image?.imageUrl
+            || item?.thumbnailImages?.[0]?.imageUrl
+            || storeActive?.mainImageUrl
+            || storeListing?.mainImageUrl
+            || null;
+
+          return {
+            sellerId: String(seller._id),
+            sellerUsername: sellerName,
+            storeName: sellerName,
+            listingId,
+            title: store?.title || item?.title || item?.itemTitle || null,
+            imageUrl,
+            listingPrice: apiPrice,
+            listingCurrency: apiCurrency,
+            minimumOfferPrice: item?.minimumOfferAmount?.value ?? null,
+            minimumOfferCurrency: item?.minimumOfferAmount?.currency || null,
+            availableQuantity: item?.availableQuantity ?? null,
+            marketplaceId,
+            price,
+            currency,
+            quantity,
+            startTime,
+            timeLeft,
+            enrichedFromStore: Boolean(store),
+          };
+        });
+
+        for (let i = 0; i < items.length; i += 1) {
+          const row = items[i];
+          const lid = row.listingId != null ? String(row.listingId).trim() : '';
+          if (!lid) continue;
+          const needsLive =
+            !row.title
+            || row.price == null
+            || row.quantity == null
+            || !row.startTime
+            || !row.timeLeft
+            || !row.imageUrl;
+          if (!needsLive) continue;
+          try {
+            const live = await fetchTradingGetItemListingSnapshot(token, lid);
+            if (!live) continue;
+            items[i] = {
+              ...row,
+              title: row.title || live.title,
+              imageUrl: row.imageUrl || live.imageUrl,
+              price: row.price ?? live.price,
+              currency: row.currency || live.currency,
+              quantity: row.quantity ?? live.quantity,
+              startTime: row.startTime || live.startTime,
+              timeLeft: row.timeLeft || live.timeLeft || '',
+              liveFetched: true,
+            };
+          } catch {
+            // ignore per-item failures
+          }
+        }
+
+        storeResults.push({
+          sellerId: String(seller._id),
+          sellerUsername: sellerName,
+          ok: true,
+          count: items.length,
+          total: Number(response?.data?.total || items.length || 0),
+          items,
+        });
+      } catch (err) {
+        storeResults.push({
+          sellerId: String(seller._id),
+          sellerUsername: sellerName,
+          ok: false,
+          count: 0,
+          total: 0,
+          error: err?.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch eligible items',
+          items: [],
+        });
+      }
+    }
+
+    const allItems = storeResults.flatMap((s) => s.items || []);
+    const successStores = storeResults.filter((s) => s.ok).length;
+    const failedStores = storeResults.filter((s) => !s.ok).length;
+
+    return res.json({
+      success: true,
+      request: {
+        method: 'GET',
+        params: { limit, offset },
+        marketplace: marketplaceId,
+      },
+      filters: { sellerId: requestedSellerId || null, limit, offset, marketplaceId },
+      summary: {
+        stores: storeResults.length,
+        successStores,
+        failedStores,
+        totalItems: allItems.length,
+      },
+      stores: storeResults,
+      items: allItems,
+    });
+  } catch (error) {
+    console.error('[Negotiation Eligible Items] Error:', error.message);
+    return res.status(500).json({ error: error.message || 'Failed to fetch eligible items' });
   }
 });
 
@@ -13398,6 +13573,29 @@ export async function scheduledSyncAllSellers() {
             if (!isMotorsItem) { skippedCount++; continue; }
             const rawHtml = item.Description ? item.Description[0] : '';
             const cleanHtml = extractCleanDescription(rawHtml);
+            const promotedStatusRaw =
+              item.PromotedListingStatus?.[0]
+              || item.ListingDetails?.[0]?.PromotedListingStatus?.[0]
+              || item.AdvertisingStatus?.[0]
+              || '';
+            const adRateRaw =
+              item.PromotedListingDetails?.[0]?.PromotedListingAdRate?.[0]
+              || item.PromotedListingAdRate?.[0]
+              || item.AdRate?.[0]
+              || item.ListingDetails?.[0]?.AdRate?.[0]
+              || null;
+            const parsedAdRate = Number.parseFloat(adRateRaw);
+            const adRate = Number.isFinite(parsedAdRate) ? parsedAdRate : null;
+            let promoted = null;
+            if (typeof promotedStatusRaw === 'string' && promotedStatusRaw.trim()) {
+              const normalizedStatus = promotedStatusRaw.trim().toLowerCase();
+              promoted = !(normalizedStatus.includes('not')
+                || normalizedStatus.includes('off')
+                || normalizedStatus.includes('disabled')
+                || normalizedStatus.includes('ineligible'));
+            } else if (adRate !== null) {
+              promoted = adRate > 0;
+            }
             let parsedCompatibility = [];
             if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
               parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map(comp => ({
@@ -13442,13 +13640,13 @@ export async function scheduledSyncAllSellers() {
                   : 0,
                 watchCount: item.WatchCount ? parseInt(item.WatchCount[0], 10) || 0 : 0,
                 timeLeft: item.TimeLeft?.[0] || '',
-                promoted: null,
-                adRate: null,
                 listingStatus: status,
                 mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
                 categoryName: categoryName,
                 descriptionPreview: cleanHtml,
-                startTime: item.ListingDetails?.[0]?.StartTime?.[0]
+                startTime: item.ListingDetails?.[0]?.StartTime?.[0],
+                ...(promoted !== null ? { promoted } : {}),
+                ...(adRate !== null ? { adRate } : {}),
               },
               { upsert: true }
             );

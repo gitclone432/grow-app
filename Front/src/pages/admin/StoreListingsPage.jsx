@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  Alert,
   Box,
   Button,
   Checkbox,
   CircularProgress,
+  Dialog,
+  DialogContent,
+  DialogTitle,
   FormControl,
   FormControlLabel,
   InputLabel,
@@ -29,6 +33,32 @@ import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import api from '../../lib/api';
 
+/** Overlay Negotiation eligible rows with data already shown on Store Listings (same listingId ↔ itemId). */
+function mergeEligibleItemsWithStoreRows(eligibleItems, storeRows) {
+  const byItemId = new Map();
+  for (const r of storeRows || []) {
+    const id = r?.itemId != null ? String(r.itemId).trim() : '';
+    if (id) byItemId.set(id, r);
+  }
+  return eligibleItems.map((item) => {
+    const lid = item?.listingId != null ? String(item.listingId).trim() : '';
+    const row = lid ? byItemId.get(lid) : null;
+    if (!row) return item;
+
+    return {
+      ...item,
+      title: row.title ?? item.title,
+      imageUrl: row.mainImageUrl ?? item.imageUrl,
+      price: typeof row.currentPrice === 'number' ? row.currentPrice : item.price,
+      currency: row.currency ?? item.currency,
+      soldQuantity: typeof row.soldQuantity === 'number' ? row.soldQuantity : item.soldQuantity,
+      startTime: row.startTime ?? item.startTime,
+      timeLeft: (typeof row.timeLeft === 'string' && row.timeLeft) ? row.timeLeft : item.timeLeft,
+      storeName: item.storeName || row.sellerName || item.sellerUsername,
+    };
+  });
+}
+
 export default function StoreListingsPage() {
   const ALL_COLUMNS = [
     { key: 'actions', label: 'Actions' },
@@ -52,6 +82,12 @@ export default function StoreListingsPage() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [sendingOfferEligible, setSendingOfferEligible] = useState(false);
+  const [eligibleDialogOpen, setEligibleDialogOpen] = useState(false);
+  const [eligibleItems, setEligibleItems] = useState([]);
+  const [eligibleSummary, setEligibleSummary] = useState({ stores: 0, totalItems: 0, failedStores: 0 });
+  const [eligibleError, setEligibleError] = useState('');
+  const [eligibleMarketplace, setEligibleMarketplace] = useState('EBAY_US');
   const [search, setSearch] = useState('');
   const [stores, setStores] = useState([]);
   const [selectedSellerId, setSelectedSellerId] = useState('');
@@ -153,6 +189,38 @@ export default function StoreListingsPage() {
     }
   };
 
+  const handleSendOfferEligible = async () => {
+    setEligibleDialogOpen(true);
+    setSendingOfferEligible(true);
+    setEligibleError('');
+    setEligibleItems([]);
+    setEligibleSummary({ stores: 0, totalItems: 0, failedStores: 0 });
+    setEligibleMarketplace('EBAY_US');
+    try {
+      const { data } = await api.get('/ebay/negotiation/eligible-items', {
+        params: {
+          sellerId: selectedSellerId || undefined,
+          limit: 200,
+          offset: 0,
+        },
+      });
+      const rawItems = Array.isArray(data?.items) ? data.items : [];
+      setEligibleItems(mergeEligibleItemsWithStoreRows(rawItems, rows));
+      setEligibleSummary({
+        stores: Number(data?.summary?.stores || 0),
+        totalItems: Number(data?.summary?.totalItems || 0),
+        failedStores: Number(data?.summary?.failedStores || 0),
+      });
+      setEligibleMarketplace(String(data?.request?.marketplace || data?.filters?.marketplaceId || 'EBAY_US'));
+    } catch (error) {
+      console.error('Failed to fetch eligible offers:', error);
+      const message = error?.response?.data?.error || 'Failed to fetch eligible listings';
+      setEligibleError(message);
+    } finally {
+      setSendingOfferEligible(false);
+    }
+  };
+
   const formatPrice = (value, currency) => {
     if (typeof value !== 'number') return '-';
     if (!currency) return value.toFixed(2);
@@ -166,6 +234,28 @@ export default function StoreListingsPage() {
     const date = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
     const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
     return `${date}\nat ${time}`;
+  };
+
+  const formatTimeLeft = (value) => {
+    if (!value || typeof value !== 'string') return '-';
+
+    // eBay returns ISO-8601 durations like P9DT5H38M4S
+    const match = value.match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+    if (!match) return value;
+
+    const days = Number(match[1] || 0);
+    const hours = Number(match[2] || 0);
+    const minutes = Number(match[3] || 0);
+    const seconds = Number(match[4] || 0);
+
+    const parts = [];
+    if (days) parts.push(`${days}d`);
+    if (hours) parts.push(`${hours}h`);
+    if (minutes) parts.push(`${minutes}m`);
+    if (seconds) parts.push(`${seconds}s`);
+
+    if (parts.length === 0) return '0s';
+    return parts.join(' ');
   };
 
   const isColumnVisible = (key) => visibleColumns[key] !== false;
@@ -249,6 +339,13 @@ export default function StoreListingsPage() {
         </Button>
         <Button variant="contained" startIcon={<RefreshIcon />} onClick={handleSyncAllStores} disabled={syncing}>
           {syncing ? 'Syncing...' : 'Sync All Stores'}
+        </Button>
+        <Button
+          variant="outlined"
+          onClick={handleSendOfferEligible}
+          disabled={sendingOfferEligible}
+        >
+          {sendingOfferEligible ? 'Fetching...' : 'Send Offer Eligible'}
         </Button>
         <Button variant="outlined" onClick={(e) => setCustomizeAnchorEl(e.currentTarget)}>
           Customize Table
@@ -398,10 +495,15 @@ export default function StoreListingsPage() {
                         if (col.key === 'soldQty') return <TableCell key={`${row._id || row.itemId}-soldQty`}>{Number(row.soldQuantity ?? 0)}</TableCell>;
                         if (col.key === 'views30d') return <TableCell key={`${row._id || row.itemId}-views30d`}>{Number(row.views30d ?? 0)}</TableCell>;
                         if (col.key === 'promoted') {
+                          const promotedStatus = row.promoted === true
+                            ? 'General: Promoted'
+                            : row.promoted === false
+                              ? 'General: Not promoted'
+                              : 'General: No data fetched';
                           return (
                             <TableCell key={`${row._id || row.itemId}-promoted`}>
                               <Typography variant="caption" display="block" sx={{ fontWeight: 700 }}>
-                                {row.promoted ? 'General: Promoted' : 'General: Not promoted'}
+                                {promotedStatus}
                               </Typography>
                               <Typography variant="caption" display="block">
                                 Your ad rate: {row.adRate != null ? `${row.adRate}%` : '-'}
@@ -424,7 +526,7 @@ export default function StoreListingsPage() {
                           return (
                             <TableCell key={`${row._id || row.itemId}-timeLeft`}>
                               <Typography variant="body2" sx={{ color: '#d32f2f', fontWeight: 600 }}>
-                                {row.timeLeft || '-'}
+                                {formatTimeLeft(row.timeLeft)}
                               </Typography>
                             </TableCell>
                           );
@@ -452,6 +554,97 @@ export default function StoreListingsPage() {
           rowsPerPageOptions={[25, 50, 100]}
         />
       </Paper>
+
+      <Dialog
+        open={eligibleDialogOpen}
+        onClose={() => setEligibleDialogOpen(false)}
+        fullWidth
+        maxWidth="lg"
+      >
+        <DialogTitle>
+          Send Offer Eligible Listings
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 1.5 }}>
+            Stores: {eligibleSummary.stores} | Eligible listings: {eligibleSummary.totalItems} | Failed stores: {eligibleSummary.failedStores} | Marketplace: {eligibleMarketplace}
+          </Typography>
+          {eligibleError ? <Alert severity="error" sx={{ mb: 1.5 }}>{eligibleError}</Alert> : null}
+          {sendingOfferEligible ? (
+            <Box sx={{ py: 4, display: 'flex', justifyContent: 'center' }}>
+              <CircularProgress size={26} />
+            </Box>
+          ) : (
+            <TableContainer component={Paper} variant="outlined">
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Store</TableCell>
+                    <TableCell>Listing ID</TableCell>
+                    <TableCell>Marketplace</TableCell>
+                    <TableCell>Title</TableCell>
+                    <TableCell>Price</TableCell>
+                    <TableCell>Sold qty</TableCell>
+                    <TableCell>Start date</TableCell>
+                    <TableCell>Time left</TableCell>
+                    <TableCell>Action</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {eligibleItems.map((item, idx) => (
+                    <TableRow key={`${item.sellerId || 'store'}-${item.listingId || idx}`}>
+                      <TableCell>{item.storeName || item.sellerUsername || '-'}</TableCell>
+                      <TableCell>{item.listingId || '-'}</TableCell>
+                      <TableCell>{item.marketplaceId || eligibleMarketplace || '-'}</TableCell>
+                      <TableCell>
+                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start', maxWidth: 360 }}>
+                          <Box
+                            component="img"
+                            src={item.imageUrl || 'https://via.placeholder.com/48?text=No+Img'}
+                            alt={item.title || 'listing'}
+                            sx={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 1, border: '1px solid #eee', flexShrink: 0 }}
+                          />
+                          <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1.25 }}>
+                            {item.title || '-'}
+                          </Typography>
+                        </Box>
+                      </TableCell>
+                      <TableCell>
+                        {typeof item.price === 'number'
+                          ? formatPrice(item.price, item.currency)
+                          : (item.listingPrice != null ? `${item.listingCurrency || ''} ${item.listingPrice}`.trim() : '-')}
+                      </TableCell>
+                      <TableCell>
+                        {item.soldQuantity != null ? Number(item.soldQuantity) : '-'}
+                      </TableCell>
+                      <TableCell sx={{ whiteSpace: 'pre-line' }}>{formatDateTime(item.startTime)}</TableCell>
+                      <TableCell sx={{ color: '#d32f2f', fontWeight: 600 }}>{item.timeLeft ? formatTimeLeft(item.timeLeft) : '-'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          component="a"
+                          href={item.listingId ? `https://www.ebay.com/itm/${item.listingId}` : '#'}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          disabled={!item.listingId}
+                          sx={{ textTransform: 'none' }}
+                        >
+                          View listing
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {!eligibleItems.length && (
+                    <TableRow>
+                      <TableCell colSpan={9} align="center">No eligible listings found.</TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </DialogContent>
+      </Dialog>
     </Box>
   );
 }
