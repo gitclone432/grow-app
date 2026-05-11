@@ -42,6 +42,12 @@ import {
     ptYyyyMmDdToIsoString,
 } from '../../lib/pacificDate.js';
 
+/** MUI menus default to a portal behind modal dialogs; keep them inside the dialog. */
+const SELECT_MENU_IN_DIALOG = {
+    disablePortal: true,
+    PaperProps: { sx: { maxHeight: 360, zIndex: (theme) => theme.zIndex.modal + 2 } },
+};
+
 const EMPTY_PAYONEER_FORM = () => ({
     bankAccount: '',
     paymentDate: getTodayPtDateString(),
@@ -1315,9 +1321,12 @@ const PayoneerSheetPage = () => {
                 maxWidth="sm"
                 fullWidth
                 fullScreen={isSmallMobile}
+                slotProps={{
+                    paper: { sx: { overflow: 'visible' } },
+                }}
             >
                 <DialogTitle>Add Payoneer Record</DialogTitle>
-                <DialogContent>
+                <DialogContent sx={{ overflow: 'visible' }}>
                     <Box display="flex" flexDirection="column" gap={2} mt={1}>
                         {autoFillHint && (
                             <Alert severity="info" onClose={() => setAutoFillHint('')}>
@@ -1328,6 +1337,7 @@ const PayoneerSheetPage = () => {
                             select
                             label="Bank Account"
                             fullWidth
+                            SelectProps={{ MenuProps: SELECT_MENU_IN_DIALOG }}
                             value={formData.bankAccount}
                             onChange={(e) => {
                                 const v = e.target.value;
@@ -1353,6 +1363,7 @@ const PayoneerSheetPage = () => {
                             select
                             label="Store Name"
                             fullWidth
+                            SelectProps={{ MenuProps: SELECT_MENU_IN_DIALOG }}
                             value={formData.store}
                             onChange={(e) => {
                                 const v = e.target.value;

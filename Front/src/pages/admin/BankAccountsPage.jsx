@@ -26,8 +26,6 @@ import {
     OutlinedInput,
     Select,
     MenuItem,
-    Checkbox,
-    ListItemText,
     FormHelperText,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
@@ -48,18 +46,25 @@ function sellersFieldToTokens(s) {
         .filter(Boolean);
 }
 
-/** Store rows for Select: stable id, display label, canonical store name saved in `sellers`. */
-function buildStoreOptions(storesList) {
-    const rows = (storesList || [])
-        .map((st) => {
-            const name = (st.name || '').trim();
-            if (!name) return null;
-            const plat = st.platform?.name?.trim();
-            return {
-                id: String(st._id),
-                label: plat ? `${name} (${plat})` : name,
-                name,
-            };
+/**
+ * Same list as Settings → Stores (`/sellers/all`): eBay seller accounts.
+ * `bankToken` is what we write into BankAccount.sellers (username preferred) — Payoneer matches on username/email.
+ */
+function buildSellerOptions(sellersList) {
+    const rows = (sellersList || [])
+        .map((s) => {
+            const username = (s.user?.username || '').trim();
+            const email = (s.user?.email || '').trim();
+            const bankToken = username || email;
+            if (!bankToken) return null;
+            const label =
+                username && email && username.toLowerCase() !== email.toLowerCase()
+                    ? `${username} (${email})`
+                    : bankToken;
+            const matchLower = new Set(
+                [username, email].filter(Boolean).map((x) => x.toLowerCase())
+            );
+            return { id: String(s._id), label, bankToken, matchLower };
         })
         .filter(Boolean);
     rows.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
@@ -69,20 +74,21 @@ function buildStoreOptions(storesList) {
 const BankAccountsPage = () => {
     const theme = useTheme();
     const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
-    const [stores, setStores] = useState([]);
+    /** Same API as Settings → Stores page (`StoresPage.jsx`). */
+    const [sellers, setSellers] = useState([]);
 
     const { rows: accounts, loading, refetch } = useFetchTable('/bank-accounts');
 
-    const loadStores = useCallback(() => {
+    const loadSellers = useCallback(() => {
         let cancelled = false;
         api
-            .get('/stores')
+            .get('/sellers/all')
             .then(({ data }) => {
                 if (cancelled || !Array.isArray(data)) return;
-                setStores(data);
+                setSellers(data);
             })
             .catch(() => {
-                if (!cancelled) setStores([]);
+                if (!cancelled) setSellers([]);
             });
         return () => {
             cancelled = true;
@@ -90,12 +96,10 @@ const BankAccountsPage = () => {
     }, []);
 
     useEffect(() => {
-        return loadStores();
-    }, [loadStores]);
+        return loadSellers();
+    }, [loadSellers]);
 
-    const storeOptions = useMemo(() => buildStoreOptions(stores), [stores]);
-
-    const storeNameSet = useMemo(() => new Set(storeOptions.map((o) => o.name)), [storeOptions]);
+    const sellerOptions = useMemo(() => buildSellerOptions(sellers), [sellers]);
 
     const dialog = useFormDialog(INITIAL_FORM, {
         onSave: (formData, editingId) =>
@@ -107,32 +111,34 @@ const BankAccountsPage = () => {
 
     useEffect(() => {
         if (!dialog.open) return;
-        const cancel = loadStores();
+        const cancel = loadSellers();
         return cancel;
-    }, [dialog.open, loadStores]);
+    }, [dialog.open, loadSellers]);
 
-    const selectedStoreIds = useMemo(() => {
+    const selectedSellerIds = useMemo(() => {
         const tokens = sellersFieldToTokens(dialog.formData.sellers);
         const ids = [];
         for (const t of tokens) {
-            if (!storeNameSet.has(t)) continue;
-            const opt = storeOptions.find((o) => o.name === t);
+            const tl = t.toLowerCase();
+            const opt = sellerOptions.find((o) => o.matchLower.has(tl));
             if (opt && !ids.includes(opt.id)) ids.push(opt.id);
         }
-        return ids;
-    }, [dialog.formData.sellers, storeNameSet, storeOptions]);
+        return ids.filter((id) => sellerOptions.some((o) => o.id === id));
+    }, [dialog.formData.sellers, sellerOptions]);
 
-    const otherSellerTokens = useMemo(() => {
-        const tokens = sellersFieldToTokens(dialog.formData.sellers);
-        return tokens.filter((t) => !storeNameSet.has(t));
-    }, [dialog.formData.sellers, storeNameSet]);
-
-    const setSellersFromParts = (storeIds, otherTokens) => {
-        const namesFromIds = storeIds
-            .map((id) => storeOptions.find((o) => o.id === id)?.name)
-            .filter(Boolean);
-        const merged = [...namesFromIds, ...otherTokens.map((t) => t.trim()).filter(Boolean)];
-        dialog.setFormData({ ...dialog.formData, sellers: merged.join(', ') });
+    const setSellersFromParts = (sellerIds) => {
+        const ids = (Array.isArray(sellerIds) ? sellerIds : []).map((id) => String(id));
+        dialog.setFormData((prev) => {
+            const prevTokens = sellersFieldToTokens(prev.sellers);
+            const others = prevTokens.filter((t) => {
+                const tl = t.toLowerCase();
+                return !sellerOptions.some((o) => o.matchLower.has(tl));
+            });
+            const tokensFromIds = ids
+                .map((id) => sellerOptions.find((o) => String(o.id) === id)?.bankToken)
+                .filter(Boolean);
+            return { ...prev, sellers: [...tokensFromIds, ...others].join(', ') };
+        });
     };
 
     const handleDelete = async (id) => {
@@ -232,9 +238,17 @@ const BankAccountsPage = () => {
                 </Table>
             </TableContainer>
 
-            <Dialog open={dialog.open} onClose={dialog.handleClose} fullWidth maxWidth="sm">
+            <Dialog
+                open={dialog.open}
+                onClose={dialog.handleClose}
+                fullWidth
+                maxWidth="sm"
+                slotProps={{
+                    paper: { sx: { overflow: 'visible' } },
+                }}
+            >
                 <DialogTitle>{dialog.editingId ? 'Edit Bank Account' : 'New Bank Account'}</DialogTitle>
-                <DialogContent sx={{ pt: 2 }}>
+                <DialogContent sx={{ pt: 2, overflow: 'visible' }}>
                     <Box display="flex" flexDirection="column" gap={2}>
                         <TextField
                             label="Bank Name"
@@ -255,54 +269,60 @@ const BankAccountsPage = () => {
                             onChange={(e) => dialog.setFormData({ ...dialog.formData, ifscCode: e.target.value })}
                         />
                         <FormControl fullWidth>
-                            <InputLabel id="bank-account-stores-label">Stores (dropdown)</InputLabel>
+                            <InputLabel id="bank-account-stores-label">Stores (Settings → Stores)</InputLabel>
                             <Select
                                 labelId="bank-account-stores-label"
                                 multiple
-                                disabled={storeOptions.length === 0}
-                                value={selectedStoreIds}
+                                disabled={sellerOptions.length === 0}
+                                value={selectedSellerIds}
                                 onChange={(e) => {
                                     const raw = e.target.value;
-                                    const nextIds = typeof raw === 'string' ? raw.split(',') : raw;
-                                    setSellersFromParts(nextIds, otherSellerTokens);
+                                    const nextIds = Array.isArray(raw)
+                                        ? raw.map(String)
+                                        : typeof raw === 'string'
+                                          ? raw.split(',').map((s) => s.trim()).filter(Boolean)
+                                          : [];
+                                    setSellersFromParts(nextIds);
                                 }}
-                                input={<OutlinedInput label="Stores (dropdown)" />}
+                                input={<OutlinedInput label="Stores (Settings → Stores)" />}
                                 renderValue={(selected) =>
                                     selected.length
                                         ? selected
-                                              .map((id) => storeOptions.find((o) => o.id === id)?.name)
+                                              .map((id) => sellerOptions.find((o) => String(o.id) === String(id))?.bankToken)
                                               .filter(Boolean)
                                               .join(', ')
-                                        : storeOptions.length === 0
+                                        : sellerOptions.length === 0
                                           ? 'No stores'
                                           : 'Select stores…'
                                 }
-                                MenuProps={{ PaperProps: { style: { maxHeight: 360 } } }}
+                                MenuProps={{
+                                    disablePortal: true,
+                                    PaperProps: {
+                                        sx: { maxHeight: 360, zIndex: (theme) => theme.zIndex.modal + 2 },
+                                    },
+                                }}
                             >
-                                {storeOptions.map((o) => (
+                                {sellerOptions.map((o) => (
                                     <MenuItem key={o.id} value={o.id}>
-                                        <Checkbox checked={selectedStoreIds.indexOf(o.id) > -1} size="small" />
-                                        <ListItemText primary={o.label} />
+                                        {o.label}
                                     </MenuItem>
                                 ))}
                             </Select>
-                            <FormHelperText>
-                                {storeOptions.length === 0
-                                    ? 'No stores in the database yet — add them under Manage Stores, or use Other sellers below.'
-                                    : 'Choose one or more stores; store names are saved together with Other sellers into the Sellers field.'}
+                            <FormHelperText component="div">
+                                {sellerOptions.length === 0 ? (
+                                    <>
+                                        No seller accounts loaded. Add or manage them under{' '}
+                                        <RouterLink to="/admin/stores-page">Settings → Stores</RouterLink>.
+                                    </>
+                                ) : (
+                                    <>
+                                        Same eBay seller accounts as{' '}
+                                        <RouterLink to="/admin/stores-page">Settings → Stores</RouterLink>. Selected
+                                        usernames are saved in Sellers (used by Payoneer to match the right store).
+                                    </>
+                                )}
                             </FormHelperText>
                         </FormControl>
-                        <TextField
-                            label="Other sellers (Optional)"
-                            fullWidth
-                            placeholder="Seller usernames, comma-separated"
-                            value={otherSellerTokens.join(', ')}
-                            onChange={(e) => {
-                                const nextOthers = sellersFieldToTokens(e.target.value);
-                                setSellersFromParts(selectedStoreIds, nextOthers);
-                            }}
-                            helperText="Use for usernames that are not in the store list above."
-                        />
                     </Box>
                 </DialogContent>
                 <DialogActions>
