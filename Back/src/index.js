@@ -74,6 +74,7 @@ import aiRoutes from './routes/ai.js';
 import affiliateOrdersRoutes from './routes/affiliateOrders.js';
 import listingStatsRoutes from './routes/listingStats.js';
 import itemCategoryMapRoutes from './routes/itemCategoryMap.js';
+import microOrdersRoutes from './routes/microOrders.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
@@ -198,6 +199,7 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/affiliate-orders', affiliateOrdersRoutes);
 app.use('/api/listing-stats', listingStatsRoutes);
 app.use('/api/item-category-map', itemCategoryMapRoutes);
+app.use('/api/micro-orders', microOrdersRoutes);
 
 // Optional: same-origin production — serve Vite build (see Dockerfile / deployment-plan.md)
 if (process.env.SERVE_FRONTEND === 'true') {

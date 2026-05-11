@@ -93,6 +93,7 @@ export const PAGE_REGISTRY = [
   { id: 'AllOrdersSheet', name: 'All Orders USD', path: '/all-orders-sheet', category: 'finance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'PriceChangeHistory', name: 'Price Change History', path: '/price-change-history', category: 'finance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'SellerAnalytics', name: 'Seller Analytics', path: '/seller-analytics', category: 'finance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
+  { id: 'MicroOrders', name: 'Micro Orders', path: '/micro-orders', category: 'finance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
 
   // ====== COMPLIANCE & SUPPORT ======
   { id: 'Disputes', name: 'Issues and Resolutions', path: '/disputes', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },

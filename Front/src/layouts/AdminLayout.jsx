@@ -114,6 +114,7 @@ import LinkIcon from '@mui/icons-material/Link';
 import IdeasPage from '../pages/IdeasPage.jsx';
 import LightbulbIcon from '@mui/icons-material/Lightbulb';
 import OrderAnalyticsPage from '../pages/admin/OrderAnalyticsPage.jsx';
+import MicroOrdersPage from '../pages/admin/MicroOrdersPage.jsx';
 import CRPAnalyticsPage from '../pages/admin/CRPAnalyticsPage.jsx';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import SellerAnalyticsPage from '../pages/admin/SellerAnalyticsPage.jsx';
@@ -253,6 +254,7 @@ const COMPONENT_MAP = {
   'StoreListings': StoreListingsPage,
   'OrdersDashboard': OrdersDepartmentDashboardPage,
   'OrderAnalytics': OrderAnalyticsPage,
+  'MicroOrders': MicroOrdersPage,
   'CRPAnalytics': CRPAnalyticsPage,
   'CRPComparison': CRPComparisonPage,
   'Fulfillment': FulfillmentDashboard,
