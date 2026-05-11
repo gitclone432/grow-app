@@ -7,6 +7,7 @@ import {
   Chip,
   CircularProgress,
   FormControl,
+  FormControlLabel,
   Grid,
   InputLabel,
   MenuItem,
@@ -93,6 +94,7 @@ export default function OrdersDepartmentDashboardPage() {
   const [sellers, setSellers] = useState([]);
   const [selectedSeller, setSelectedSeller] = useState('');
   const [date, setDate] = useState(() => sessionStorage.getItem(DASHBOARD_DATE_KEY) || getTodayPtDateString());
+  // Default ON: hide sub-$3 orders; user can turn off for this session
   const [excludeLowValue, setExcludeLowValue] = useState(true);
 
   const [overview, setOverview] = useState(null);
@@ -253,10 +255,30 @@ export default function OrdersDepartmentDashboardPage() {
               ))}
             </Select>
           </FormControl>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ px: 1.5, minHeight: 40, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}>
-            <Switch checked={excludeLowValue} onChange={(e) => setExcludeLowValue(e.target.checked)} color="primary" />
-            <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>Exclude &lt; $3</Typography>
-          </Stack>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={excludeLowValue}
+                onChange={(e) => setExcludeLowValue(e.target.checked)}
+                color="primary"
+              />
+            }
+            label={
+              <Typography component="span" variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
+                Exclude {'<'}$3
+              </Typography>
+            }
+            sx={{
+              m: 0,
+              px: 1.5,
+              minHeight: 40,
+              border: '1px solid',
+              borderColor: 'divider',
+              borderRadius: 2,
+              boxSizing: 'border-box',
+              alignItems: 'center',
+            }}
+          />
           <Button
             variant="outlined"
             color="primary"

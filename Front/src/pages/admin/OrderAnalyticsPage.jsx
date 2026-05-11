@@ -30,6 +30,16 @@ import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderS
 import OrderAnalyticsSkeleton from '../../components/skeletons/OrderAnalyticsSkeleton';
 import { dashboardSignatureTokens } from '../../theme/appTheme';
 
+/** Calendar "today" in Pacific (same as Orders Department Dashboard / backend PT helpers). */
+function getTodayPtDateString() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
 const tableHeaderCellSx = {
   backgroundColor: dashboardSignatureTokens.table.headerBackground,
   color: dashboardSignatureTokens.table.headerForeground,
@@ -127,7 +137,7 @@ function getMarketplaceTone(value, marketplaceKey) {
 export default function OrderAnalyticsPage() {
   const initialDateFilter = {
     mode: 'single',
-    single: new Date().toISOString().split('T')[0],
+    single: getTodayPtDateString(),
     from: '',
     to: ''
   };
@@ -316,13 +326,21 @@ export default function OrderAnalyticsPage() {
 
   const { sellers: sellersList, tableData, dates } = transformToTableFormat();
 
+  /** `dateString` is YYYY-MM-DD in Pacific (from API); avoid UTC parse so weekday matches PT. */
   const formatDate = (dateString) => {
-    const date = new Date(dateString);
+    if (!dateString || typeof dateString !== 'string') return '–';
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateString.trim());
+    if (!m) return dateString;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    const anchorUtc = Date.UTC(y, mo - 1, d, 12, 0, 0);
     return new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      weekday: 'short',
       month: 'short',
       day: 'numeric',
-      weekday: 'short'
-    }).format(date);
+    }).format(new Date(anchorUtc));
   };
 
   // Calculate seller totals across all dates
@@ -403,7 +421,7 @@ export default function OrderAnalyticsPage() {
                 Order Analytics
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
-                Daily seller and marketplace order totals in PST, including cancelled orders for full visibility.
+                Daily seller and marketplace order totals in Pacific Time (America/Los_Angeles), including cancelled orders for full visibility. Single-day default is today in PT.
               </Typography>
             </Box>
 
