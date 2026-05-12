@@ -27,6 +27,7 @@ import {
     Select,
     MenuItem,
     FormHelperText,
+    Alert,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
@@ -35,6 +36,12 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import api from '../../lib/api';
 import useFetchTable from '../../hooks/useFetchTable';
 import useFormDialog from '../../hooks/useFormDialog';
+import {
+    splitBankSellersField,
+    isMongoIdString,
+    normalizeBankSellersPayload,
+} from '../../lib/bankAccountSellers.js';
+import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
 
 const INITIAL_FORM = { name: '', accountNumber: '', ifscCode: '', sellers: '' };
 
@@ -48,7 +55,8 @@ function sellersFieldToTokens(s) {
 
 /**
  * Same list as Settings → Stores (`/sellers/all`): eBay seller accounts.
- * `bankToken` is what we write into BankAccount.sellers (username preferred) — Payoneer matches on username/email.
+ * The form saves comma-separated seller document _id values so multiple stores under one user stay distinct;
+ * Payoneer / eBay still match legacy username/email tokens in existing rows.
  */
 function buildSellerOptions(sellersList) {
     const rows = (sellersList || [])
@@ -69,6 +77,23 @@ function buildSellerOptions(sellersList) {
         .filter(Boolean);
     rows.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
     return rows;
+}
+
+function formatSellersCell(sellersStr, sellerOptions) {
+    if (!sellersStr?.trim()) return '—';
+    return (
+        splitBankSellersField(sellersStr)
+            .map((t) => {
+                if (isMongoIdString(t)) {
+                    const o = sellerOptions.find((x) => String(x.id) === t);
+                    return o ? o.label : t;
+                }
+                const tl = t.toLowerCase();
+                const o = sellerOptions.find((x) => x.matchLower.has(tl));
+                return o ? o.label : t;
+            })
+            .join(', ') || '—'
+    );
 }
 
 const BankAccountsPage = () => {
@@ -102,10 +127,15 @@ const BankAccountsPage = () => {
     const sellerOptions = useMemo(() => buildSellerOptions(sellers), [sellers]);
 
     const dialog = useFormDialog(INITIAL_FORM, {
-        onSave: (formData, editingId) =>
-            editingId
-                ? api.put(`/bank-accounts/${editingId}`, formData)
-                : api.post('/bank-accounts', formData),
+        onSave: (formData, editingId) => {
+            const payload = {
+                ...formData,
+                sellers: normalizeBankSellersPayload(formData.sellers, sellerOptions),
+            };
+            return editingId
+                ? api.put(`/bank-accounts/${editingId}`, payload)
+                : api.post('/bank-accounts', payload);
+        },
         onAfterSave: refetch,
     });
 
@@ -119,25 +149,30 @@ const BankAccountsPage = () => {
         const tokens = sellersFieldToTokens(dialog.formData.sellers);
         const ids = [];
         for (const t of tokens) {
-            const tl = t.toLowerCase();
+            const ts = String(t).trim();
+            if (isMongoIdString(ts)) {
+                if (sellerOptions.some((o) => String(o.id) === ts) && !ids.includes(ts)) ids.push(ts);
+                continue;
+            }
+            const tl = ts.toLowerCase();
             const opt = sellerOptions.find((o) => o.matchLower.has(tl));
-            if (opt && !ids.includes(opt.id)) ids.push(opt.id);
+            if (opt && !ids.includes(String(opt.id))) ids.push(String(opt.id));
         }
-        return ids.filter((id) => sellerOptions.some((o) => o.id === id));
+        return ids.filter((id) => sellerOptions.some((o) => String(o.id) === String(id)));
     }, [dialog.formData.sellers, sellerOptions]);
 
     const setSellersFromParts = (sellerIds) => {
         const ids = (Array.isArray(sellerIds) ? sellerIds : []).map((id) => String(id));
         dialog.setFormData((prev) => {
             const prevTokens = sellersFieldToTokens(prev.sellers);
-            const others = prevTokens.filter((t) => {
-                const tl = t.toLowerCase();
-                return !sellerOptions.some((o) => o.matchLower.has(tl));
+            const legacy = prevTokens.filter((t) => {
+                const ts = String(t).trim();
+                if (isMongoIdString(ts) && sellerOptions.some((o) => String(o.id) === ts)) return false;
+                const tl = ts.toLowerCase();
+                const opt = sellerOptions.find((o) => o.matchLower.has(tl));
+                return !opt;
             });
-            const tokensFromIds = ids
-                .map((id) => sellerOptions.find((o) => String(o.id) === id)?.bankToken)
-                .filter(Boolean);
-            return { ...prev, sellers: [...tokensFromIds, ...others].join(', ') };
+            return { ...prev, sellers: [...ids, ...legacy].join(', ') };
         });
     };
 
@@ -193,7 +228,7 @@ const BankAccountsPage = () => {
                 <Table>
                     <TableHead>
                         <TableRow sx={{ bgcolor: '#f5f5f5' }}>
-                            <TableCell>Bank Name</TableCell>
+                            <TableCell>Bank</TableCell>
                             <TableCell>Account Number</TableCell>
                             <TableCell>IFSC Code</TableCell>
                             <TableCell>Sellers</TableCell>
@@ -204,10 +239,12 @@ const BankAccountsPage = () => {
                     <TableBody>
                         {accounts.map((acc) => (
                             <TableRow key={acc._id}>
-                                <TableCell>{acc.name}</TableCell>
+                                <TableCell>{bankAccountMenuLabel(acc)}</TableCell>
                                 <TableCell sx={{ fontSize: { xs: '0.85rem', sm: '1rem' } }}>{acc.accountNumber}</TableCell>
                                 <TableCell sx={{ fontSize: { xs: '0.85rem', sm: '1rem' } }}>{acc.ifscCode}</TableCell>
-                                <TableCell sx={{ fontSize: { xs: '0.85rem', sm: '1rem' }, maxWidth: 280 }}>{acc.sellers || '—'}</TableCell>
+                                <TableCell sx={{ fontSize: { xs: '0.85rem', sm: '1rem' }, maxWidth: 280 }}>
+                                    {formatSellersCell(acc.sellers, sellerOptions)}
+                                </TableCell>
                                 <TableCell sx={{ whiteSpace: 'nowrap' }}>
                                     <Typography variant="body2" component="span" sx={{ mr: 1 }}>
                                         {(acc.payoneerRecordCount ?? 0) === 0
@@ -249,6 +286,11 @@ const BankAccountsPage = () => {
             >
                 <DialogTitle>{dialog.editingId ? 'Edit Bank Account' : 'New Bank Account'}</DialogTitle>
                 <DialogContent sx={{ pt: 2, overflow: 'visible' }}>
+                    {dialog.saveError ? (
+                        <Alert severity="error" sx={{ mb: 2 }}>
+                            {dialog.saveError}
+                        </Alert>
+                    ) : null}
                     <Box display="flex" flexDirection="column" gap={2}>
                         <TextField
                             label="Bank Name"

@@ -43,6 +43,7 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import api from '../../lib/api';
+import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
 
 // Mobile Transaction Card Component
 const MobileTransactionCard = ({ txn, onEdit, onDelete }) => {
@@ -502,7 +503,9 @@ const TransactionPage = () => {
                         >
                             <MenuItem value="">All Accounts</MenuItem>
                             {bankAccounts.map((acc) => (
-                                <MenuItem key={acc._id} value={acc._id}>{acc.name}</MenuItem>
+                                <MenuItem key={acc._id} value={acc._id}>
+                                    {bankAccountMenuLabel(acc)}
+                                </MenuItem>
                             ))}
                         </TextField>
                     </Grid>
@@ -858,7 +861,7 @@ const TransactionPage = () => {
                         >
                             {bankAccounts.map((acc) => (
                                 <MenuItem key={acc._id} value={acc._id}>
-                                    {acc.name}
+                                    {bankAccountMenuLabel(acc)}
                                 </MenuItem>
                             ))}
                         </TextField>

@@ -37,9 +37,6 @@ router.post('/', requireAuth, requirePageAccess('BankAccounts'), validate(create
         await newAccount.save();
         res.status(201).json(newAccount);
     } catch (err) {
-        if (err.code === 11000) {
-            return res.status(400).json({ error: 'Account name must be unique' });
-        }
         res.status(500).json({ error: err.message });
     }
 });

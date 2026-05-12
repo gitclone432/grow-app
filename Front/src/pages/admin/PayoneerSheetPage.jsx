@@ -41,6 +41,8 @@ import {
     getTodayPtDateString,
     ptYyyyMmDdToIsoString,
 } from '../../lib/pacificDate.js';
+import { filterSellersLinkedToBankField } from '../../lib/bankAccountSellers.js';
+import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
 
 /** MUI menus default to a portal behind modal dialogs; keep them inside the dialog. */
 const SELECT_MENU_IN_DIALOG = {
@@ -120,17 +122,6 @@ function resolvePayoutIdFromFeed(record, payoutFeedRows) {
     }
 
     return null;
-}
-
-/** Match sellers whose username/email appears in the bank account's Sellers field (same as Bank Accounts page). */
-function filterSellersByBankSellersField(bankAccount, sellersList) {
-    if (!bankAccount?.sellers?.trim()) return sellersList;
-    const tokens = bankAccount.sellers.split(/[,;]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
-    if (!tokens.length) return sellersList;
-    return sellersList.filter((s) => {
-        const u = (s.user?.username || s.user?.email || '').toLowerCase();
-        return tokens.some((t) => u === t || u.includes(t));
-    });
 }
 
 // --- MOBILE PAYONEER CARD COMPONENT ---
@@ -609,7 +600,7 @@ const PayoneerSheetPage = () => {
             if (!bankId || !sellers.length) return;
             const acc = bankAccounts.find((a) => String(a._id) === String(bankId));
             if (!acc) return;
-            const matched = filterSellersByBankSellersField(acc, sellers);
+            const matched = filterSellersLinkedToBankField(acc, sellers);
             if (matched.length === 1) {
                 const sid = matched[0]._id;
                 setFormData((prev) => ({ ...prev, store: sid }));
@@ -778,7 +769,7 @@ const PayoneerSheetPage = () => {
                 >
                     {bankAccounts.map((acc) => (
                         <MenuItem key={acc._id} value={acc._id}>
-                            {acc.name}
+                            {bankAccountMenuLabel(acc)}
                         </MenuItem>
                     ))}
                 </TextField>
@@ -909,7 +900,7 @@ const PayoneerSheetPage = () => {
                             </MenuItem>
                             {bankAccounts.map((acc) => (
                                 <MenuItem key={acc._id} value={acc._id}>
-                                    {acc.name}
+                                    {bankAccountMenuLabel(acc)}
                                 </MenuItem>
                             ))}
                         </TextField>
@@ -1353,7 +1344,7 @@ const PayoneerSheetPage = () => {
                         >
                             {bankAccounts.map((acc) => (
                                 <MenuItem key={acc._id} value={acc._id}>
-                                    {acc.name}
+                                    {bankAccountMenuLabel(acc)}
                                 </MenuItem>
                             ))}
                         </TextField>
@@ -1375,7 +1366,7 @@ const PayoneerSheetPage = () => {
                             {(formData.bankAccount
                                 ? (() => {
                                       const b = bankAccounts.find((a) => String(a._id) === String(formData.bankAccount));
-                                      const filtered = b ? filterSellersByBankSellersField(b, sellers) : sellers;
+                                      const filtered = b ? filterSellersLinkedToBankField(b, sellers) : sellers;
                                       return filtered.length ? filtered : sellers;
                                   })()
                                 : sellers

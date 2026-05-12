@@ -23,6 +23,7 @@ import AddIcon from '@mui/icons-material/Add';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
 import api from '../../lib/api';
+import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
 
 const PaymentAccountsPage = () => {
     const [accounts, setAccounts] = useState([]);
@@ -153,7 +154,7 @@ const PaymentAccountsPage = () => {
                         >
                             {bankAccounts.map((bank) => (
                                 <MenuItem key={bank._id} value={bank._id}>
-                                    {bank.name}
+                                    {bankAccountMenuLabel(bank)}
                                 </MenuItem>
                             ))}
                         </TextField>

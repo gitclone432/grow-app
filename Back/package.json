@@ -8,7 +8,8 @@
     "dev:test": "node --env-file=.env.test --watch src/index.js",
     "start": "node src/index.js",
     "start:test": "node --env-file=.env.test src/index.js",
-    "clone": "node copy-prod-to-test.js"
+    "clone": "node copy-prod-to-test.js",
+    "db:drop-bank-name-unique": "node tools/dropBankAccountNameUniqueIndex.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

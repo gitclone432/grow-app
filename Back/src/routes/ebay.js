@@ -12,6 +12,7 @@ import FormData from 'form-data';
 import { requireAuth, requirePageAccess, requireRole } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
 import BankAccount from '../models/BankAccount.js';
+import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.js';
 import Order from '../models/Order.js';
 import Return from '../models/Return.js';
 import Case from '../models/Case.js';
@@ -12869,12 +12870,9 @@ router.get('/payoneer-recent-completed-feed', requireAuth, requirePageAccess('Pa
     }).populate('user', 'username email');
 
     const bankForSeller = (seller) => {
-      const username = (seller.user?.username || seller.user?.email || '').toLowerCase();
-      if (!username) return { bankId: null, bankName: null };
       for (const b of bankAccounts) {
         if (!b.sellers?.trim()) continue;
-        const tokens = b.sellers.split(/[,;]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
-        if (tokens.some((t) => username === t || username.includes(t))) {
+        if (sellerMatchesBankSellersField(b.sellers, seller)) {
           return { bankId: b._id, bankName: b.name };
         }
       }

@@ -1,5 +1,6 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
+import mongoose from 'mongoose';
 import BankAccount from '../models/BankAccount.js';
 import Transaction from '../models/Transaction.js';
 import GmailProcessedMail from '../models/GmailProcessedMail.js';
@@ -52,13 +53,26 @@ function senderAllowed(fromText, allowedSenders) {
     return allowedSenders.some((s) => from.includes(s));
 }
 
+function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 async function resolveBankAccount() {
+    const id = String(process.env.GMAIL_IMPORT_BANK_ACCOUNT_ID || '').trim();
+    if (id && mongoose.isValidObjectId(id)) {
+        const byId = await BankAccount.findById(id).select('_id name').lean();
+        if (byId) return byId;
+    }
+
     const preferredName = String(process.env.GMAIL_IMPORT_BANK_ACCOUNT_NAME || '').trim().toLowerCase();
     if (preferredName) {
-        const byName = await BankAccount.findOne({ name: { $regex: new RegExp(`^${preferredName}$`, 'i') } })
+        const matches = await BankAccount.find({
+            name: { $regex: new RegExp(`^${escapeRegex(preferredName)}$`, 'i') },
+        })
+            .sort({ createdAt: 1 })
             .select('_id name')
             .lean();
-        if (byName) return byName;
+        if (matches.length > 0) return matches[0];
     }
 
     const first = await BankAccount.findOne({}).sort({ createdAt: 1 }).select('_id name').lean();
@@ -78,7 +92,9 @@ export async function importTransactionsFromGmail({ limit = 25 } = {}) {
 
     const bankAccount = await resolveBankAccount();
     if (!bankAccount?._id) {
-        throw new Error('No bank account found. Create one first or set GMAIL_IMPORT_BANK_ACCOUNT_NAME.');
+        throw new Error(
+            'No bank account found. Create one first, or set GMAIL_IMPORT_BANK_ACCOUNT_ID (preferred if names duplicate) or GMAIL_IMPORT_BANK_ACCOUNT_NAME.'
+        );
     }
 
     const allowedSenders = getConfiguredAllowedSenders();
