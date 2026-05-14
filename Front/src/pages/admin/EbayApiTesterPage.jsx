@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import {
   Alert,
   Box,
@@ -9,6 +10,7 @@ import {
   Stack,
   Switch,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import api from '../../lib/api';
@@ -487,6 +489,8 @@ export default function EbayApiTesterPage() {
   const [error, setError] = useState('');
   const [status, setStatus] = useState(null);
   const [responseText, setResponseText] = useState('');
+  const [copyStatus, setCopyStatus] = useState('');
+  const copyStatusTimerRef = useRef(null);
 
   const prettyResponse = useMemo(() => responseText || 'Run a request to see response.', [responseText]);
   const pathText = String(path || '').trim();
@@ -1306,6 +1310,7 @@ export default function EbayApiTesterPage() {
     setLoading(true);
     setError('');
     setStatus(null);
+    setCopyStatus('');
 
     try {
       let statusCode;
@@ -1359,6 +1364,18 @@ export default function EbayApiTesterPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const copyResponseToClipboard = async () => {
+    if (!responseText) return;
+    try {
+      await navigator.clipboard.writeText(responseText);
+      setCopyStatus('Copied to clipboard');
+    } catch {
+      setCopyStatus('Copy failed — check browser permissions');
+    }
+    if (copyStatusTimerRef.current) clearTimeout(copyStatusTimerRef.current);
+    copyStatusTimerRef.current = setTimeout(() => setCopyStatus(''), 2500);
   };
 
   return (
@@ -1531,7 +1548,29 @@ export default function EbayApiTesterPage() {
       {error && <Alert severity="warning" sx={{ mb: 2 }}>{error}</Alert>}
 
       <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" sx={{ mb: 1 }}>Response</Typography>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1} sx={{ mb: 1 }}>
+          <Typography variant="h6">Response</Typography>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            {copyStatus ? (
+              <Typography variant="caption" color="text.secondary">
+                {copyStatus}
+              </Typography>
+            ) : null}
+            <Tooltip title={responseText ? 'Copy raw JSON response' : 'Run a request first'}>
+              <span>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<ContentCopyIcon fontSize="small" />}
+                  onClick={copyResponseToClipboard}
+                  disabled={!responseText}
+                >
+                  Copy
+                </Button>
+              </span>
+            </Tooltip>
+          </Stack>
+        </Stack>
         <Box
           component="pre"
           sx={{
