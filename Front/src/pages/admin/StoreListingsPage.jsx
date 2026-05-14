@@ -10,6 +10,7 @@ import {
   DialogTitle,
   FormControl,
   FormControlLabel,
+  Grid,
   InputLabel,
   Menu,
   MenuItem,
@@ -94,7 +95,16 @@ export default function StoreListingsPage() {
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(50);
   const [total, setTotal] = useState(0);
-  const [summary, setSummary] = useState({ totalAmount: 0, totalQuantity: 0 });
+  const [summary, setSummary] = useState({
+    totalAmount: 0,
+    totalQuantity: 0,
+    totalSoldQuantity: 0,
+    totalViews30d: 0,
+    totalWatchers: 0,
+    promotedCount: 0,
+    inventoryValue: 0,
+    uniqueStoreCount: 0,
+  });
   const [customizeAnchorEl, setCustomizeAnchorEl] = useState(null);
   const [sortBy, setSortBy] = useState('startDate');
   const [sortOrder, setSortOrder] = useState('desc');
@@ -141,12 +151,27 @@ export default function StoreListingsPage() {
       setSummary({
         totalAmount: Number(data?.summary?.totalAmount || 0),
         totalQuantity: Number(data?.summary?.totalQuantity || 0),
+        totalSoldQuantity: Number(data?.summary?.totalSoldQuantity || 0),
+        totalViews30d: Number(data?.summary?.totalViews30d || 0),
+        totalWatchers: Number(data?.summary?.totalWatchers || 0),
+        promotedCount: Number(data?.summary?.promotedCount || 0),
+        inventoryValue: Number(data?.summary?.inventoryValue || 0),
+        uniqueStoreCount: Number(data?.summary?.uniqueStoreCount || 0),
       });
     } catch (error) {
       console.error('Failed to load store listings:', error);
       setRows([]);
       setTotal(0);
-      setSummary({ totalAmount: 0, totalQuantity: 0 });
+      setSummary({
+        totalAmount: 0,
+        totalQuantity: 0,
+        totalSoldQuantity: 0,
+        totalViews30d: 0,
+        totalWatchers: 0,
+        promotedCount: 0,
+        inventoryValue: 0,
+        uniqueStoreCount: 0,
+      });
     } finally {
       setLoading(false);
     }
@@ -282,8 +307,11 @@ export default function StoreListingsPage() {
 
   const resultStart = total === 0 ? 0 : (page * rowsPerPage) + 1;
   const resultEnd = total === 0 ? 0 : Math.min((page * rowsPerPage) + rows.length, total);
-  const formattedTotalAmount = summary.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const formattedTotalQty = summary.totalQuantity.toLocaleString('en-US');
+  const promotedPct = total > 0 ? Math.round((summary.promotedCount / total) * 100) : 0;
+
+  const formatUsd = (n) =>
+    Number(n || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const formatInt = (n) => Number(n || 0).toLocaleString('en-US');
 
   const handleSort = (key) => {
     if (!SORTABLE_COLUMNS.has(key)) return;
@@ -300,6 +328,118 @@ export default function StoreListingsPage() {
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 2 }}>
         Store Listings
       </Typography>
+
+      <Grid container spacing={2} sx={{ mb: 2 }}>
+        <Grid item xs={12} sm={6} md={4} lg={2}>
+          <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
+            <Typography variant="overline" color="text.secondary" display="block">
+              Active listings
+            </Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700 }}>
+              {formatInt(total)}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Matches store / search filters
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={12} sm={6} md={4} lg={2}>
+          <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
+            <Typography variant="overline" color="text.secondary" display="block">
+              Unique stores
+            </Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700 }}>
+              {formatInt(summary.uniqueStoreCount)}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Distinct sellers in this result set
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={12} sm={6} md={4} lg={2}>
+          <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
+            <Typography variant="overline" color="text.secondary" display="block">
+              Available units
+            </Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700 }}>
+              {formatInt(summary.totalQuantity)}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Sum of on-hand qty
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={12} sm={6} md={4} lg={2}>
+          <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
+            <Typography variant="overline" color="text.secondary" display="block">
+              Inventory at list
+            </Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700 }}>
+              {formatUsd(summary.inventoryValue)}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Σ (price × available qty)
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={12} sm={6} md={4} lg={2}>
+          <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
+            <Typography variant="overline" color="text.secondary" display="block">
+              Sold (reported)
+            </Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700 }}>
+              {formatInt(summary.totalSoldQuantity)}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Σ sold quantity on listings
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={12} sm={6} md={4} lg={2}>
+          <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
+            <Typography variant="overline" color="text.secondary" display="block">
+              30-day views
+            </Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700 }}>
+              {formatInt(summary.totalViews30d)}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Σ views (30d) where present
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={12} sm={6} md={4} lg={2}>
+          <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
+            <Typography variant="overline" color="text.secondary" display="block">
+              Watchers
+            </Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700 }}>
+              {formatInt(summary.totalWatchers)}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Σ watcher count
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={12} sm={6} md={4} lg={2}>
+          <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
+            <Typography variant="overline" color="text.secondary" display="block">
+              Promoted listings
+            </Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700 }}>
+              {formatInt(summary.promotedCount)}
+              {total > 0 ? (
+                <Typography component="span" variant="body2" color="text.secondary" sx={{ ml: 0.5, fontWeight: 500 }}>
+                  ({promotedPct}%)
+                </Typography>
+              ) : null}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              eBay Promoted Listings = on
+            </Typography>
+          </Paper>
+        </Grid>
+      </Grid>
 
       <Paper sx={{ p: 2, borderRadius: 2, mb: 2, display: 'flex', gap: 1.5, alignItems: 'center', flexWrap: 'wrap' }}>
         <FormControl size="small" sx={{ minWidth: 220 }}>
@@ -397,7 +537,9 @@ export default function StoreListingsPage() {
       <Paper sx={{ borderRadius: 2, overflow: 'hidden' }}>
         <Box sx={{ px: 2, py: 1.25, borderBottom: '1px solid #eee' }}>
           <Typography variant="body2" sx={{ fontWeight: 600 }}>
-            Results: {resultStart}-{resultEnd} of {total.toLocaleString('en-US')} | Total: ${formattedTotalAmount} | Qty:{formattedTotalQty}
+            Showing {resultStart.toLocaleString('en-US')}-{resultEnd.toLocaleString('en-US')} of{' '}
+            {total.toLocaleString('en-US')} (page {page + 1}
+            {total > 0 ? ` of ${Math.max(1, Math.ceil(total / rowsPerPage))}` : ''})
           </Typography>
         </Box>
         <TableContainer>

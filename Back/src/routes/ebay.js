@@ -9562,8 +9562,39 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
       seller: { $in: activeSellerIds },
     };
 
-    if (sellerId) {
-      query.seller = sellerId;
+    if (sellerId && String(sellerId).trim() !== '') {
+      const sid = String(sellerId).trim();
+      if (!mongoose.Types.ObjectId.isValid(sid)) {
+        return res.status(400).json({ error: 'Invalid sellerId' });
+      }
+      const sellerObjectId = new mongoose.Types.ObjectId(sid);
+      const allowed = activeSellerIds.some((id) => String(id) === String(sellerObjectId));
+      if (!allowed) {
+        return res.json({
+          listings: [],
+          sourceCollection: 'ActiveListing+Listing',
+          sorting: {
+            sortBy: resolvedSortField,
+            sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
+          },
+          summary: {
+            totalAmount: 0,
+            totalQuantity: 0,
+            totalSoldQuantity: 0,
+            totalViews30d: 0,
+            totalWatchers: 0,
+            promotedCount: 0,
+            inventoryValue: 0,
+            uniqueStoreCount: 0,
+          },
+          pagination: {
+            total: 0,
+            page: pageNum,
+            pages: 0,
+          },
+        });
+      }
+      query.seller = sellerObjectId;
     }
 
     if (search && search.trim() !== '') {
@@ -9614,6 +9645,39 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
                 _id: null,
                 totalAmount: { $sum: { $ifNull: ['$currentPrice', 0] } },
                 totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } },
+                totalSoldQuantity: { $sum: { $ifNull: ['$soldQuantity', 0] } },
+                totalViews30d: { $sum: { $ifNull: ['$views30d', 0] } },
+                totalWatchers: { $sum: { $ifNull: ['$watchCount', 0] } },
+                promotedCount: { $sum: { $cond: [{ $eq: ['$promoted', true] }, 1, 0] } },
+                inventoryValue: {
+                  $sum: {
+                    $multiply: [
+                      { $ifNull: ['$currentPrice', 0] },
+                      { $ifNull: ['$quantity', 0] },
+                    ],
+                  },
+                },
+                sellerIds: { $addToSet: '$seller' },
+              },
+            },
+            {
+              $project: {
+                totalAmount: 1,
+                totalQuantity: 1,
+                totalSoldQuantity: 1,
+                totalViews30d: 1,
+                totalWatchers: 1,
+                promotedCount: 1,
+                inventoryValue: 1,
+                uniqueStoreCount: {
+                  $size: {
+                    $filter: {
+                      input: { $ifNull: ['$sellerIds', []] },
+                      as: 'sid',
+                      cond: { $ne: ['$$sid', null] },
+                    },
+                  },
+                },
               },
             },
           ],
@@ -9625,7 +9689,8 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
 
     const totalDocs = facetRow?.meta[0]?.total || 0;
     const listings = facetRow?.data || [];
-    const summary = facetRow?.summary[0] || { totalAmount: 0, totalQuantity: 0 };
+    const summary = facetRow?.summary[0] || {};
+    const toNum = (v) => Number(v || 0);
 
     const enriched = listings.map((listing) => ({
       ...listing,
@@ -9640,8 +9705,14 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
         sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
       },
       summary: {
-        totalAmount: Number(summary.totalAmount || 0),
-        totalQuantity: Number(summary.totalQuantity || 0),
+        totalAmount: toNum(summary.totalAmount),
+        totalQuantity: toNum(summary.totalQuantity),
+        totalSoldQuantity: toNum(summary.totalSoldQuantity),
+        totalViews30d: toNum(summary.totalViews30d),
+        totalWatchers: toNum(summary.totalWatchers),
+        promotedCount: toNum(summary.promotedCount),
+        inventoryValue: toNum(summary.inventoryValue),
+        uniqueStoreCount: toNum(summary.uniqueStoreCount),
       },
       pagination: {
         total: totalDocs,
