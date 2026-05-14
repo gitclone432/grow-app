@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Box,
   Stack,
@@ -38,6 +38,7 @@ import {
   AMAZON_DIRECT_SOURCE_OPTIONS,
   AMAZON_AI_PLACEHOLDER_CHIPS
 } from '../../constants/amazonDirectSourceFields.js';
+import api from '../../lib/api.js';
 
 // Core eBay fields available for auto-fill
 const CORE_EBAY_FIELDS = [
@@ -93,7 +94,28 @@ export default function AsinAutomationEditor({
     enabled: true,
     defaultValue: ''
   });
-  
+  const [amazonPiExtraOptions, setAmazonPiExtraOptions] = useState([]);
+
+  const amazonDirectMerged = useMemo(
+    () => [
+      ...AMAZON_DIRECT_SOURCE_OPTIONS,
+      ...(amazonPiExtraOptions || []).map((o) => ({ value: o.value, label: o.label || o.value })),
+    ],
+    [amazonPiExtraOptions]
+  );
+
+  const aiPlaceholderChipsMerged = useMemo(
+    () => [...AMAZON_AI_PLACEHOLDER_CHIPS, ...(amazonPiExtraOptions || []).map((o) => `{${o.value}}`)],
+    [amazonPiExtraOptions]
+  );
+
+  useEffect(() => {
+    api
+      .get('/amazon-pi-source-columns/options')
+      .then((r) => setAmazonPiExtraOptions(r.data?.options || []))
+      .catch(() => setAmazonPiExtraOptions([]));
+  }, []);
+
   useEffect(() => {
     // Always start with base template configs to ensure nothing is lost
     const baseFieldConfigs = baseConfig?.fieldConfigs || [];
@@ -517,7 +539,7 @@ export default function AsinAutomationEditor({
                     Quick Insert Placeholders:
                   </Typography>
                   <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    {AMAZON_AI_PLACEHOLDER_CHIPS.map(ph => (
+                    {aiPlaceholderChipsMerged.map((ph) => (
                       <Chip
                         key={ph}
                         label={ph}
@@ -558,7 +580,7 @@ export default function AsinAutomationEditor({
                     label="Amazon Field"
                     onChange={(e) => setFieldForm({ ...fieldForm, amazonField: e.target.value })}
                   >
-                    {AMAZON_DIRECT_SOURCE_OPTIONS.map(field => (
+                    {amazonDirectMerged.map((field) => (
                       <MenuItem key={field.value} value={field.value}>
                         {field.label}
                       </MenuItem>

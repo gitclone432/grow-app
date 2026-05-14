@@ -109,6 +109,8 @@ import InternalMessagesAdminPage from '../pages/admin/InternalMessagesAdminPage.
 import ManageCreditCardsPage from '../pages/admin/ManageCreditCardsPage.jsx';
 import ExcludeOrderQtySkipsPage from '../pages/admin/ExcludeOrderQtySkipsPage.jsx';
 import CronJobsPage from '../pages/admin/CronJobsPage.jsx';
+import ScraperTesterPage from '../pages/admin/ScraperTesterPage.jsx';
+import AmazonPiSourceColumnsPage from '../pages/admin/AmazonPiSourceColumnsPage.jsx';
 import AffiliateOrdersPage from '../pages/admin/AffiliateOrdersPage.jsx';
 import LinkIcon from '@mui/icons-material/Link';
 import IdeasPage from '../pages/IdeasPage.jsx';
@@ -275,6 +277,7 @@ const COMPONENT_MAP = {
   'CompatibilityEditor': EditorDashboard,
   'AddCompatibilityEditor': AddListerPage,
   'ManageTemplates': ManageTemplatesPage,
+  'AmazonPiSourceColumns': AmazonPiSourceColumnsPage,
   'ListingsDatabase': TemplateDatabasePage,
   'SelectSeller': SelectSellerPage,
   'ListingDirectory': ListingDirectoryPage,
@@ -301,6 +304,7 @@ const COMPONENT_MAP = {
   'CreditCards': ManageCreditCardsPage,
   'ExcludeOrderQtySkips': ExcludeOrderQtySkipsPage,
   'CronJobs': CronJobsPage,
+  'ScraperTester': ScraperTesterPage,
   'AffiliateOrders': AffiliateOrdersPage,
   'SellingPrivileges': SellingPrivilegesPage,
   'EbayApiUsage': EbayApiUsagePage,

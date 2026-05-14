@@ -189,6 +189,7 @@ export default function ManageTemplatesPage() {
   const [highlightedId, setHighlightedId] = useState(null);
   const [columnDialog, setColumnDialog] = useState(false);
   const [editingColumnIndex, setEditingColumnIndex] = useState(null);
+  const [columnFormError, setColumnFormError] = useState('');
   const [columnFormData, setColumnFormData] = useState({
     name: '',
     displayName: '',
@@ -219,6 +220,7 @@ export default function ManageTemplatesPage() {
   const [formRanges, setFormRanges] = useState([]);  // filtered to selected category
   const [formProducts, setFormProducts] = useState([]);
   const [formCategoryId, setFormCategoryId] = useState(''); // UI-only, not saved
+  const [amazonPiSourceOptions, setAmazonPiSourceOptions] = useState([]);
 
   useEffect(() => {
     fetchTemplates();
@@ -230,6 +232,10 @@ export default function ManageTemplatesPage() {
       setFormCategories(catRes.data || []);
       setAllRanges(rangeRes.data || []);
     }).catch(() => {});
+    api
+      .get('/amazon-pi-source-columns/options')
+      .then((r) => setAmazonPiSourceOptions(r.data?.options || []))
+      .catch(() => setAmazonPiSourceOptions([]));
   }, []);
 
   // Filter ranges when formCategoryId changes
@@ -520,6 +526,8 @@ export default function ManageTemplatesPage() {
 
   const handleAddColumn = () => {
     setEditingColumnIndex(null);
+    setError('');
+    setColumnFormError('');
     setColumnFormData({
       name: '',
       displayName: '',
@@ -534,6 +542,8 @@ export default function ManageTemplatesPage() {
   const handleEditColumn = (columnIndex) => {
     const column = formData.customColumns[columnIndex];
     setEditingColumnIndex(columnIndex);
+    setError('');
+    setColumnFormError('');
     setColumnFormData({
       name: column.name,
       displayName: column.displayName,
@@ -547,7 +557,18 @@ export default function ManageTemplatesPage() {
 
   const handleSaveColumn = () => {
     if (!columnFormData.name || !columnFormData.displayName) {
-      setError('Column name and display name are required');
+      setColumnFormError('Column name and display name are required');
+      return;
+    }
+
+    const nameKey = String(columnFormData.name).trim().toLowerCase();
+    const duplicate = formData.customColumns.some(
+      (col, idx) =>
+        String(col.name || '').trim().toLowerCase() === nameKey &&
+        (editingColumnIndex === null || idx !== editingColumnIndex)
+    );
+    if (duplicate) {
+      setColumnFormError('A column with this CSV header already exists. Use a unique header.');
       return;
     }
 
@@ -581,6 +602,7 @@ export default function ManageTemplatesPage() {
       });
     }
 
+    setColumnFormError('');
     setColumnDialog(false);
     setEditingColumnIndex(null);
   };
@@ -995,6 +1017,7 @@ export default function ManageTemplatesPage() {
                       <FieldConfigList
                         configs={formData.asinAutomation.fieldConfigs}
                         customColumns={formData.customColumns}
+                        amazonPiSourceOptions={amazonPiSourceOptions}
                         onChange={(configs) => setFormData({
                           ...formData,
                           asinAutomation: {
@@ -1100,17 +1123,33 @@ export default function ManageTemplatesPage() {
       </Dialog>
 
       {/* Add/Edit Column Dialog */}
-      <Dialog open={columnDialog} onClose={() => { setColumnDialog(false); setEditingColumnIndex(null); }} maxWidth="sm" fullWidth>
+      <Dialog open={columnDialog} onClose={() => { setColumnDialog(false); setEditingColumnIndex(null); setColumnFormError(''); }} maxWidth="sm" fullWidth>
         <DialogTitle>{editingColumnIndex !== null ? 'Edit Custom Column' : 'Add Custom Column'}</DialogTitle>
         <DialogContent>
           <Box sx={{ mt: 1 }}>
+            {columnFormError ? (
+              <Alert severity="error" sx={{ mb: 2 }} onClose={() => setColumnFormError('')}>
+                {columnFormError}
+              </Alert>
+            ) : null}
             <Stack spacing={2}>
               <TextField
                 label="Column Name (CSV Header)"
                 required
                 fullWidth
                 value={columnFormData.name}
-                onChange={(e) => setColumnFormData({ ...columnFormData, name: e.target.value })}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setColumnFormData((prev) => {
+                    const displayStillSynced =
+                      prev.displayName === '' || prev.displayName === prev.name;
+                    return {
+                      ...prev,
+                      name: v,
+                      displayName: displayStillSynced ? v : prev.displayName,
+                    };
+                  });
+                }}
                 placeholder="e.g., C:Brand, C:Color, C:Material"
                 helperText="Exact column name as it will appear in CSV"
               />
@@ -1158,7 +1197,7 @@ export default function ManageTemplatesPage() {
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => { setColumnDialog(false); setEditingColumnIndex(null); }}>Cancel</Button>
+          <Button onClick={() => { setColumnDialog(false); setEditingColumnIndex(null); setColumnFormError(''); }}>Cancel</Button>
           <Button onClick={handleSaveColumn} variant="contained">
             {editingColumnIndex !== null ? 'Update Column' : 'Add Column'}
           </Button>

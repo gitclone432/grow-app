@@ -156,6 +156,36 @@ function extractIncludedComponents(data) {
   return normalizeValue(v);
 }
 
+function extractBestSellersRank(data) {
+  const ranks = data?.product_information?.best_sellers_rank;
+  if (!Array.isArray(ranks) || ranks.length === 0) return '';
+  return ranks
+    .map((r) => cleanText(String(r)))
+    .filter(Boolean)
+    .join(' | ');
+}
+
+function extractProductCategory(data) {
+  return cleanText(data?.product_category || '');
+}
+
+function extractItemDimensions(data) {
+  return cleanText(data?.product_information?.item_dimensions || '');
+}
+
+function extractWaterResistanceLevel(data) {
+  return cleanText(data?.product_information?.water_resistance_level || '');
+}
+
+function extractAvailabilityStatus(data) {
+  return cleanText(data?.availability_status || '');
+}
+
+function extractSoldBy(data) {
+  if (!data?.sold_by) return '';
+  return cleanText(String(data.sold_by).replace(/\s+/g, ' '));
+}
+
 /**
  * Extract compatibility from structured API response
  */
@@ -804,7 +834,24 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         const bandWidth = extractBandWidth(data);
         const bandColor = extractBandColor(data);
         const includedComponents = extractIncludedComponents(data);
-        
+        const productCategory = extractProductCategory(data);
+        const itemDimensions = extractItemDimensions(data);
+        const waterResistanceLevel = extractWaterResistanceLevel(data);
+        const availabilityStatus = extractAvailabilityStatus(data);
+        const soldBy = extractSoldBy(data);
+        const bestSellersRank = extractBestSellersRank(data);
+
+        // Full Amazon `product_information` block (deep-cloned plain object for templates / mapping)
+        const piSrc = data.product_information;
+        let productInformation = {};
+        if (piSrc != null && typeof piSrc === 'object' && !Array.isArray(piSrc)) {
+          try {
+            productInformation = JSON.parse(JSON.stringify(piSrc));
+          } catch {
+            productInformation = { ...piSrc };
+          }
+        }
+
         // Use high_res_images if available, otherwise fall back to regular images
         // Take ONLY first 6 images (main product images, not all variants)
         let images = [];
@@ -869,6 +916,13 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         if (bandWidth) extractedFields.push('bandWidth');
         if (bandColor) extractedFields.push('bandColor');
         if (includedComponents) extractedFields.push('includedComponents');
+        if (productCategory) extractedFields.push('productCategory');
+        if (itemDimensions) extractedFields.push('itemDimensions');
+        if (waterResistanceLevel) extractedFields.push('waterResistanceLevel');
+        if (availabilityStatus) extractedFields.push('availabilityStatus');
+        if (soldBy) extractedFields.push('soldBy');
+        if (bestSellersRank) extractedFields.push('bestSellersRank');
+        if (Object.keys(productInformation).length > 0) extractedFields.push('productInformation');
 
         trackApiUsage({
           service: 'ScraperAPI',
@@ -900,6 +954,13 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
           bandWidth: bandWidth || '',
           bandColor: bandColor || '',
           includedComponents: includedComponents || '',
+          productCategory: productCategory || '',
+          itemDimensions: itemDimensions || '',
+          waterResistanceLevel: waterResistanceLevel || '',
+          availabilityStatus: availabilityStatus || '',
+          soldBy: soldBy || '',
+          bestSellersRank: bestSellersRank || '',
+          productInformation,
           rawData: data // Store full response for debugging
         };
       } catch (error) {

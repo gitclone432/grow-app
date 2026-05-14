@@ -734,7 +734,14 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             bandMaterial: amazonData.bandMaterial,
             bandWidth: amazonData.bandWidth,
             bandColor: amazonData.bandColor,
-            includedComponents: amazonData.includedComponents
+            includedComponents: amazonData.includedComponents,
+            productCategory: amazonData.productCategory,
+            itemDimensions: amazonData.itemDimensions,
+            waterResistanceLevel: amazonData.waterResistanceLevel,
+            availabilityStatus: amazonData.availabilityStatus,
+            soldBy: amazonData.soldBy,
+            bestSellersRank: amazonData.bestSellersRank,
+            productInformation: amazonData.productInformation || {}
           },
           generatedListing: {
             ...mergedCoreFields,
@@ -1017,7 +1024,14 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             bandMaterial: amazonData.bandMaterial,
             bandWidth: amazonData.bandWidth,
             bandColor: amazonData.bandColor,
-            includedComponents: amazonData.includedComponents
+            includedComponents: amazonData.includedComponents,
+            productCategory: amazonData.productCategory,
+            itemDimensions: amazonData.itemDimensions,
+            waterResistanceLevel: amazonData.waterResistanceLevel,
+            availabilityStatus: amazonData.availabilityStatus,
+            soldBy: amazonData.soldBy,
+            bestSellersRank: amazonData.bestSellersRank,
+            productInformation: amazonData.productInformation || {}
           },
           generatedListing: {
             ...mergedCoreFields,
@@ -2386,6 +2400,13 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             bandWidth: amazonData.bandWidth,
             bandColor: amazonData.bandColor,
             includedComponents: amazonData.includedComponents,
+            productCategory: amazonData.productCategory,
+            itemDimensions: amazonData.itemDimensions,
+            waterResistanceLevel: amazonData.waterResistanceLevel,
+            availabilityStatus: amazonData.availabilityStatus,
+            soldBy: amazonData.soldBy,
+            bestSellersRank: amazonData.bestSellersRank,
+            productInformation: amazonData.productInformation || {},
             rawData: amazonData.rawData
           },
           generatedListing: {

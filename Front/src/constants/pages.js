@@ -29,7 +29,7 @@ export const SUBMENUS = {
     id: 'templateListing',
     name: 'Template Listing',
     category: 'listingResearch',
-    pages: ['ManageTemplates', 'ListingsDatabase', 'SelectSeller', 'ListingDirectory', 'TemplateDirectory'],
+    pages: ['ManageTemplates', 'AmazonPiSourceColumns', 'ListingsDatabase', 'SelectSeller', 'ListingDirectory', 'TemplateDirectory'],
   },
   asinImporter: {
     id: 'asinImporter',
@@ -71,6 +71,7 @@ export const PAGE_REGISTRY = [
   // ====== LISTING & RESEARCH ======
   // Template Listing submenu
   { id: 'ManageTemplates', name: 'Manage Templates', path: '/manage-templates', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin'] },
+  { id: 'AmazonPiSourceColumns', name: 'Amazon Product Info Columns', path: '/amazon-product-info-columns', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ListingsDatabase', name: 'Listings Database', path: '/listings-database', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin'] },
   { id: 'SelectSeller', name: 'Add Template Listings', path: '/select-seller', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'lister', 'advancelister', 'trainee'] },
   { id: 'ListingDirectory', name: 'Listing Directory', path: '/listing-directory', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'lister', 'advancelister', 'trainee'] },
@@ -104,6 +105,7 @@ export const PAGE_REGISTRY = [
   { id: 'CreditCards', name: 'Manage Credit Cards', path: '/credit-cards', category: 'settingsSection', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'ExcludeOrderQtySkips', name: 'Exclude <$3', path: '/exclude-order-qty-skips', category: 'settingsSection', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'CronJobs', name: 'Cron Jobs', path: '/cron-jobs', category: 'settingsSection', defaultRoles: ['superadmin'] },
+  { id: 'ScraperTester', name: 'Scraper Tester', path: '/scraper-tester', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'AffiliateOrders', name: 'Affiliate Orders', path: '/affiliate-orders', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
 
   // ====== EBAY PARAMETERS ======

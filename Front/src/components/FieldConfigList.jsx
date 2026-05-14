@@ -25,8 +25,16 @@ const TRANSFORM_OPTIONS = [
   { value: 'htmlFormat', label: 'Convert to HTML' }
 ];
 
-export default function FieldConfigList({ configs, customColumns, onChange }) {
+export default function FieldConfigList({ configs, customColumns, onChange, amazonPiSourceOptions = [] }) {
   const [expandedIndex, setExpandedIndex] = useState(null);
+
+  const amazonSelectOptions = useMemo(() => {
+    const extra = (amazonPiSourceOptions || []).map((o) => ({
+      value: o.value,
+      label: o.label || o.value,
+    }));
+    return [...AMAZON_DIRECT_SOURCE_OPTIONS, ...extra];
+  }, [amazonPiSourceOptions]);
   
   // Build dynamic field options: core fields + custom columns
   // Use useMemo to avoid rebuilding on every render
@@ -284,7 +292,7 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
                           helperText={
                             config.ebayField === 'description'
                               ? 'Use this prompt to generate ONLY feature bullets/HTML snippet. Insert it into Core Defaults > Description with {{AI_FEATURE_BULLETS}}.'
-                              : 'Available placeholders: {title}, {brand}, {description}, {price}, {asin}, {color}, {compatibility}, {model}, {material}, {specialFeatures}, {size}, {screenSize}, {formFactor}, {bandMaterial}, {bandWidth}, {bandColor}'
+                              : 'Placeholders: built-in Amazon fields plus any saved Product Info columns (same names as in the Direct Mapping dropdown).'
                           }
                           placeholder={
                             config.ebayField === 'description'
@@ -303,7 +311,7 @@ export default function FieldConfigList({ configs, customColumns, onChange }) {
                         onChange={(e) => handleUpdate(index, 'amazonField', e.target.value)}
                         fullWidth
                       >
-                        {AMAZON_DIRECT_SOURCE_OPTIONS.map(opt => (
+                        {amazonSelectOptions.map((opt) => (
                           <MenuItem key={opt.value} value={opt.value}>
                             {opt.label}
                           </MenuItem>

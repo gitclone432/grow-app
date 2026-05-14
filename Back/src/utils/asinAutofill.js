@@ -2,6 +2,11 @@ import { generateWithGemini, replacePlaceholders } from './gemini.js';
 import { calculateStartPrice } from './pricingCalculator.js';
 import { processImagePlaceholders } from './imageReplacer.js';
 import { scrapeAmazonProductWithScraperAPI } from './scraperApiProduct.js';
+import AmazonPiSourceColumn from '../models/AmazonPiSourceColumn.js';
+import { augmentAmazonDataWithPiColumns } from './amazonPiSourceColumnUtils.js';
+import { trackApiUsage } from './apiUsageTracker.js';
+import { getCachedAsinData, setCachedAsinData } from './asinCache.js';
+import { createEbayImageWithOverlay } from './imageProcessor.js';
 
 /** Long Amazon descriptions can break or silently fail LLM calls; truncate only inside AI prompts */
 const AI_PROMPT_DESCRIPTION_MAX_CHARS = Math.max(
@@ -14,9 +19,23 @@ function truncateForAiPrompt(description) {
   if (s.length <= AI_PROMPT_DESCRIPTION_MAX_CHARS) return s;
   return `${s.slice(0, AI_PROMPT_DESCRIPTION_MAX_CHARS)}\n\n[Truncated for AI prompt length (${s.length} chars total)]`;
 }
-import { trackApiUsage } from './apiUsageTracker.js';
-import { getCachedAsinData, setCachedAsinData } from './asinCache.js';
-import { createEbayImageWithOverlay } from './imageProcessor.js';
+
+const PI_SOURCE_COL_CACHE_MS = 60_000;
+let piSourceColCache = { t: 0, rows: null };
+
+async function loadAmazonPiSourceColumnsForAutofill() {
+  if (piSourceColCache.rows && Date.now() - piSourceColCache.t < PI_SOURCE_COL_CACHE_MS) {
+    return piSourceColCache.rows;
+  }
+  const rows = await AmazonPiSourceColumn.find({}).sort({ label: 1 }).lean();
+  piSourceColCache = { t: Date.now(), rows };
+  return rows;
+}
+
+/** Call after changing saved PI columns so the next autofill picks up new keys. */
+export function invalidateAmazonPiSourceColumnsAutofillCache() {
+  piSourceColCache = { t: 0, rows: null };
+}
 
 export async function applyOverlayToScrapedImages(imageUrls = []) {
   const watermarkEnabled = String(process.env.ENABLE_SCRAPER_IMAGE_WATERMARK || '').toLowerCase() === 'true';
@@ -89,7 +108,14 @@ export async function fetchAmazonData(asin, region = 'US') {
       bandMaterial,
       bandWidth,
       bandColor,
-      includedComponents
+      includedComponents,
+      productCategory,
+      itemDimensions,
+      waterResistanceLevel,
+      availabilityStatus,
+      soldBy,
+      bestSellersRank,
+      productInformation
     } = scrapedData;
     
     // Remove brand from title (maintain existing behavior)
@@ -126,6 +152,16 @@ export async function fetchAmazonData(asin, region = 'US') {
       bandWidth: bandWidth || '',
       bandColor: bandColor || '',
       includedComponents: includedComponents || '',
+      productCategory: productCategory || '',
+      itemDimensions: itemDimensions || '',
+      waterResistanceLevel: waterResistanceLevel || '',
+      availabilityStatus: availabilityStatus || '',
+      soldBy: soldBy || '',
+      bestSellersRank: bestSellersRank || '',
+      productInformation:
+        productInformation && typeof productInformation === 'object' && !Array.isArray(productInformation)
+          ? productInformation
+          : {},
       rawData: scrapedData // Store scraped data for debugging
     };
     
@@ -158,6 +194,10 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
   const coreFields = {};
   const customFields = {};
   let pricingCalculation = null;
+
+  const piSourceColumns = await loadAmazonPiSourceColumnsForAutofill();
+  const amazonDataForMapping =
+    piSourceColumns.length > 0 ? augmentAmazonDataWithPiColumns(amazonData, piSourceColumns) : amazonData;
   
   // DEBUG: Log all field configs received
   console.log(`\n🔍 [ASIN: ${amazonData.asin}] === FIELD CONFIG DEBUG START ===`);
@@ -172,32 +212,47 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
   })), null, 2));
   
   // Placeholder data for AI prompts ({key} tokens in replacePlaceholders)
-  const imagesJoined = Array.isArray(amazonData.images) ? amazonData.images.join(' | ') : '';
+  const imagesJoined = Array.isArray(amazonDataForMapping.images) ? amazonDataForMapping.images.join(' | ') : '';
+  const pi = amazonDataForMapping.productInformation;
+  const productInformationStr =
+    pi && typeof pi === 'object' && !Array.isArray(pi) && Object.keys(pi).length > 0
+      ? JSON.stringify(pi, null, 2)
+      : '';
   const placeholderData = {
-    title: amazonData.title || '',
-    brand: amazonData.brand || '',
-    description: amazonData.description || '',
-    price: amazonData.price || '',
-    asin: amazonData.asin || '',
+    title: amazonDataForMapping.title || '',
+    brand: amazonDataForMapping.brand || '',
+    description: amazonDataForMapping.description || '',
+    price: amazonDataForMapping.price || '',
+    asin: amazonDataForMapping.asin || '',
     images: imagesJoined,
-    color: amazonData.color || '',
-    compatibility: amazonData.compatibility || '',
-    model: amazonData.model || '',
-    material: amazonData.material || '',
-    specialFeatures: amazonData.specialFeatures || '',
-    size: amazonData.size || '',
-    screenSize: amazonData.screenSize || '',
-    formFactor: amazonData.formFactor || '',
-    bandMaterial: amazonData.bandMaterial || '',
-    bandWidth: amazonData.bandWidth || '',
-    bandColor: amazonData.bandColor || '',
-    includedComponents: amazonData.includedComponents || ''
+    color: amazonDataForMapping.color || '',
+    compatibility: amazonDataForMapping.compatibility || '',
+    model: amazonDataForMapping.model || '',
+    material: amazonDataForMapping.material || '',
+    specialFeatures: amazonDataForMapping.specialFeatures || '',
+    size: amazonDataForMapping.size || '',
+    screenSize: amazonDataForMapping.screenSize || '',
+    formFactor: amazonDataForMapping.formFactor || '',
+    bandMaterial: amazonDataForMapping.bandMaterial || '',
+    bandWidth: amazonDataForMapping.bandWidth || '',
+    bandColor: amazonDataForMapping.bandColor || '',
+    includedComponents: amazonDataForMapping.includedComponents || '',
+    productCategory: amazonDataForMapping.productCategory || '',
+    itemDimensions: amazonDataForMapping.itemDimensions || '',
+    waterResistanceLevel: amazonDataForMapping.waterResistanceLevel || '',
+    availabilityStatus: amazonDataForMapping.availabilityStatus || '',
+    soldBy: amazonDataForMapping.soldBy || '',
+    bestSellersRank: amazonDataForMapping.bestSellersRank || '',
+    productInformation: productInformationStr
   };
+  for (const col of piSourceColumns) {
+    placeholderData[col.key] = amazonDataForMapping[col.key] || '';
+  }
   
   console.log(`📝 Placeholder data:`, JSON.stringify(placeholderData, null, 2));
   
   // Images are already an array (same as PAAPI format)
-  const imagesArray = Array.isArray(amazonData.images) ? amazonData.images : [];
+  const imagesArray = Array.isArray(amazonDataForMapping.images) ? amazonDataForMapping.images : [];
   
   // Separate configs by processing type for parallel execution
   const directConfigs = [];
@@ -241,8 +296,13 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
     const targetObject = config.fieldType === 'custom' ? customFields : coreFields;
     
     try {
-      let value = amazonData[config.amazonField];
-      
+      let value = amazonDataForMapping[config.amazonField];
+
+      // Plain objects (e.g. full `productInformation`) → JSON text for eBay / custom fields
+      if (value != null && typeof value === 'object' && !Array.isArray(value)) {
+        value = JSON.stringify(value, null, 2);
+      }
+
       // Apply transformations
       value = applyTransform(value, config.transform);
       

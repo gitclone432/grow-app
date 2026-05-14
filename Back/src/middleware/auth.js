@@ -32,6 +32,7 @@ export const PAGE_DEFAULT_ROLES = {
 
   // Listing & Research
   'ManageTemplates': ['superadmin'],
+  'AmazonPiSourceColumns': ['superadmin', 'listingadmin'],
   'ListingsDatabase': ['superadmin'],
   'SelectSeller': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'SellerTemplates': ['superadmin', 'lister', 'advancelister', 'trainee'],
@@ -114,6 +115,7 @@ export const PAGE_DEFAULT_ROLES = {
   // Settings
   'SettingsPage': ['superadmin', 'listingadmin'],
   'DescriptionTemplates': ['superadmin', 'listingadmin'],
+  'ScraperTester': ['superadmin', 'listingadmin'],
 
   // Shared pages (accessible to all authenticated users)
   'AboutMe': ['_all_except_superadmin'],

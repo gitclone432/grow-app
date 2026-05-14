@@ -1,6 +1,7 @@
 /**
  * Keys on `amazonData` from the backend ScraperAPI scrape — use for ASIN Auto-Fill direct mapping.
  * Keep in sync with `Back/src/utils/asinAutofill.js` / `scraperApiProduct.js`.
+ * `productInformation` is the full structured `product_information` object from ScraperAPI (JSON when mapped).
  */
 export const AMAZON_DIRECT_SOURCE_OPTIONS = [
   { value: 'asin', label: 'Amazon ASIN' },
@@ -20,7 +21,14 @@ export const AMAZON_DIRECT_SOURCE_OPTIONS = [
   { value: 'bandMaterial', label: 'Amazon Band Material' },
   { value: 'bandWidth', label: 'Amazon Band Width' },
   { value: 'bandColor', label: 'Amazon Band Color' },
-  { value: 'includedComponents', label: 'Amazon Included Components' }
+  { value: 'includedComponents', label: 'Amazon Included Components' },
+  { value: 'productInformation', label: 'Amazon Product Information (full block)' },
+  { value: 'productCategory', label: 'Amazon Product Category' },
+  { value: 'itemDimensions', label: 'Amazon Item Dimensions' },
+  { value: 'waterResistanceLevel', label: 'Amazon Water Resistance' },
+  { value: 'availabilityStatus', label: 'Amazon Availability' },
+  { value: 'soldBy', label: 'Amazon Sold By' },
+  { value: 'bestSellersRank', label: 'Amazon Best Sellers Rank' }
 ];
 
 /** Placeholders supported in AI prompts (subset of amazonData + joined images). */
@@ -42,5 +50,12 @@ export const AMAZON_AI_PLACEHOLDER_CHIPS = [
   '{bandMaterial}',
   '{bandWidth}',
   '{bandColor}',
-  '{includedComponents}'
+  '{includedComponents}',
+  '{productInformation}',
+  '{productCategory}',
+  '{itemDimensions}',
+  '{waterResistanceLevel}',
+  '{availabilityStatus}',
+  '{soldBy}',
+  '{bestSellersRank}'
 ];
