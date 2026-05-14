@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -26,6 +26,7 @@ import {
   TableSortLabel,
   TextField,
   Typography,
+  Snackbar,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SearchIcon from '@mui/icons-material/Search';
@@ -83,6 +84,8 @@ export default function StoreListingsPage() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
+  const syncPollRef = useRef(null);
   const [sendingOfferEligible, setSendingOfferEligible] = useState(false);
   const [eligibleDialogOpen, setEligibleDialogOpen] = useState(false);
   const [eligibleItems, setEligibleItems] = useState([]);
@@ -202,14 +205,65 @@ export default function StoreListingsPage() {
     localStorage.setItem(STORAGE_KEY_VISIBLE, JSON.stringify(visibleColumns));
   }, [visibleColumns]);
 
+  useEffect(() => () => {
+    if (syncPollRef.current) {
+      clearInterval(syncPollRef.current);
+      syncPollRef.current = null;
+    }
+  }, []);
+
   const handleSyncAllStores = async () => {
     setSyncing(true);
     try {
-      await api.post('/ebay/sync-all-sellers-listings');
-      await loadListings();
+      const { data } = await api.post('/ebay/sync-all-sellers-listings');
+      if (!data?.success) {
+        setSnackbar({
+          open: true,
+          message: data?.message || 'Sync did not start',
+          severity: 'error',
+        });
+        setSyncing(false);
+        return;
+      }
+      setSnackbar({
+        open: true,
+        message: data?.message || `Sync started for ${data.sellersTotal} seller(s).`,
+        severity: 'info',
+      });
+
+      if (syncPollRef.current) {
+        clearInterval(syncPollRef.current);
+      }
+      syncPollRef.current = setInterval(async () => {
+        try {
+          const { data: status } = await api.get('/ebay/sync-all-sellers-status');
+          if (status?.running) return;
+          if (syncPollRef.current) {
+            clearInterval(syncPollRef.current);
+            syncPollRef.current = null;
+          }
+          setSyncing(false);
+          await loadListings();
+          const errCount = Array.isArray(status?.errors) ? status.errors.length : 0;
+          setSnackbar({
+            open: true,
+            message: errCount
+              ? `Sync finished with ${errCount} seller error(s). Table refreshed.`
+              : 'Sync finished. Table refreshed.',
+            severity: errCount ? 'warning' : 'success',
+          });
+        } catch (pollErr) {
+          console.error('Sync status poll failed:', pollErr);
+        }
+      }, 3000);
     } catch (error) {
       console.error('Failed to start all-store sync:', error);
-    } finally {
+      const msg =
+        error?.response?.data?.message
+        || error?.response?.data?.error
+        || error?.message
+        || 'Failed to start sync';
+      setSnackbar({ open: true, message: msg, severity: 'error' });
       setSyncing(false);
     }
   };
@@ -787,6 +841,22 @@ export default function StoreListingsPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <Snackbar
+        open={snackbar.open}
+        autoHideDuration={8000}
+        onClose={() => setSnackbar((s) => ({ ...s, open: false }))}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          onClose={() => setSnackbar((s) => ({ ...s, open: false }))}
+          severity={snackbar.severity}
+          variant="filled"
+          sx={{ width: '100%' }}
+        >
+          {snackbar.message}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 }

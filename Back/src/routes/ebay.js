@@ -20,6 +20,8 @@ import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
 import ActiveListing from '../models/ActiveListing.js';
+import SyncAllSellersLock from '../models/SyncAllSellersLock.js';
+import SyncAllSellersStatusCache from '../models/SyncAllSellersStatusCache.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import ChatAgent from '../models/ChatAgent.js';
@@ -32,6 +34,7 @@ import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
 import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
+import { getSellersMatchingAllRoute } from '../utils/sellersAllScope.js';
 import ItemCategoryMap from '../models/ItemCategoryMap.js';
 import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
 import AutoCompatibilityBatchItem from '../models/AutoCompatibilityBatchItem.js';
@@ -8405,8 +8408,11 @@ router.post('/sync-listings', requireAuth, async (req, res) => {
   }
 });
 
-// 1B. POLL ALL SELLERS — Background sync with status tracking
-// In-memory status object (resets on server restart, which is fine for this use case)
+// 1B. POLL ALL SELLERS — Status + Mongo lease so only one worker runs at a time (multi-instance safe).
+const SYNC_ALL_SELLERS_LOCK_ID = 'sync_all_sellers_listings';
+const SYNC_ALL_SELLERS_STATUS_ID = 'singleton';
+const SYNC_ALL_SELLERS_LEASE_MS = 4 * 60 * 60 * 1000;
+
 let syncAllStatus = {
   running: false,
   sellersTotal: 0,
@@ -8422,18 +8428,68 @@ let syncAllStatus = {
   completedAt: null
 };
 
+async function persistSyncAllStatusToDb() {
+  try {
+    const payload = JSON.parse(JSON.stringify(syncAllStatus));
+    await SyncAllSellersStatusCache.findByIdAndUpdate(
+      SYNC_ALL_SELLERS_STATUS_ID,
+      { $set: { payload, updatedAt: new Date() } },
+      { upsert: true }
+    );
+  } catch (e) {
+    console.error('[Sync All] persist status failed:', e?.message || e);
+  }
+}
+
+async function acquireSyncAllSellersLock() {
+  const now = new Date();
+  const holder = `${RUNNER_ID}:${process.pid}`;
+  const leaseUntil = new Date(Date.now() + SYNC_ALL_SELLERS_LEASE_MS);
+  try {
+    const updated = await SyncAllSellersLock.findOneAndUpdate(
+      {
+        _id: SYNC_ALL_SELLERS_LOCK_ID,
+        $or: [
+          { leaseUntil: { $lte: now } },
+          { leaseUntil: { $exists: false } },
+          { leaseUntil: null },
+        ],
+      },
+      { $set: { leaseUntil, holder } },
+      { new: true, upsert: true }
+    );
+    return !!updated;
+  } catch (e) {
+    if (e.code === 11000) return false;
+    throw e;
+  }
+}
+
+async function releaseSyncAllSellersLock() {
+  try {
+    await SyncAllSellersLock.findByIdAndUpdate(
+      SYNC_ALL_SELLERS_LOCK_ID,
+      { $set: { leaseUntil: new Date(0), holder: '' } },
+      { upsert: true }
+    );
+  } catch (e) {
+    console.error('[Sync All] release lock failed:', e?.message || e);
+  }
+}
+
 router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
-  if (syncAllStatus.running) {
+  const acquired = await acquireSyncAllSellersLock();
+  if (!acquired) {
     return res.status(409).json({
       success: false,
-      message: `Sync already in progress — currently on seller "${syncAllStatus.currentSeller}" (${syncAllStatus.sellersComplete}/${syncAllStatus.sellersTotal})`,
+      message:
+        'Sync already in progress on another worker or this server. Try again shortly or poll GET /ebay/sync-all-sellers-status.',
     });
   }
   try {
-    // Peek at seller count so we can include it in the immediate response,
-    // then hand off all real work to the shared cron function.
     const sellersTotal = await Seller.countDocuments({ 'ebayTokens.access_token': { $exists: true } });
     if (sellersTotal === 0) {
+      await releaseSyncAllSellersLock();
       return res.json({ success: true, message: 'No sellers with eBay tokens found', results: [] });
     }
     res.json({
@@ -8441,17 +8497,49 @@ router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
       message: `Sync started for ${sellersTotal} seller(s). Poll GET /ebay/sync-all-sellers-status for progress.`,
       sellersTotal,
     });
-    // Fire-and-forget — all logic lives in the shared function
-    scheduledSyncAllSellers();
+    void (async () => {
+      try {
+        await executeSyncAllSellersWork();
+      } catch (e) {
+        console.error('[Sync All] Background error:', e?.message || e);
+      } finally {
+        await releaseSyncAllSellersLock();
+        await persistSyncAllStatusToDb();
+      }
+    })();
   } catch (err) {
+    await releaseSyncAllSellersLock();
     console.error('[Sync All] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 
-// 1C. STATUS ENDPOINT for Poll All Sellers
 router.get('/sync-all-sellers-status', requireAuth, async (req, res) => {
-  res.json(syncAllStatus);
+  try {
+    const row = await SyncAllSellersStatusCache.findById(SYNC_ALL_SELLERS_STATUS_ID).lean();
+    const lock = await SyncAllSellersLock.findById(SYNC_ALL_SELLERS_LOCK_ID).lean();
+    const now = new Date();
+    let payload = row?.payload && typeof row.payload === 'object' ? row.payload : null;
+    if (!payload) {
+      return res.json(syncAllStatus);
+    }
+    if (payload.running) {
+      const lockValid = lock?.leaseUntil && new Date(lock.leaseUntil) > now;
+      if (!lockValid) {
+        payload = {
+          ...payload,
+          running: false,
+          staleAborted: true,
+          completedAt: payload.completedAt || new Date().toISOString(),
+        };
+      }
+    }
+    return res.json(payload);
+  } catch {
+    return res.json(syncAllStatus);
+  }
 });
 
 // 2. GET LISTINGS (With Search & Sort) - For Compatibility Dashboard (Uses Listing collection)
@@ -9547,19 +9635,17 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
     const limitNum = parseInt(limit, 10);
     const skip = (pageNum - 1) * limitNum;
 
-    const activeSellers = await Seller.find({ isStoreActive: { $ne: false } })
-      .select('_id user')
-      .populate('user', 'username')
-      .lean();
-
+    const activeSellers = await getSellersMatchingAllRoute(req);
     const activeSellerIds = activeSellers.map((s) => s._id);
+    // Match both ObjectId and legacy string `seller` values in Listing / ActiveListing.
+    const sellerInMatchList = [...new Set(activeSellerIds.flatMap((id) => [id, String(id)]))];
     const sellerNameById = new Map(
       activeSellers.map((s) => [String(s._id), s?.user?.username || String(s._id)])
     );
 
     let query = {
       listingStatus: 'Active',
-      seller: { $in: activeSellerIds },
+      seller: { $in: sellerInMatchList },
     };
 
     if (sellerId && String(sellerId).trim() !== '') {
@@ -9594,7 +9680,7 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
           },
         });
       }
-      query.seller = sellerObjectId;
+      query.seller = { $in: [sellerObjectId, String(sellerObjectId)] };
     }
 
     if (search && search.trim() !== '') {
@@ -9657,7 +9743,11 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
                     ],
                   },
                 },
-                sellerIds: { $addToSet: '$seller' },
+                sellerIds: {
+                  $addToSet: {
+                    $toString: { $ifNull: ['$seller', ''] },
+                  },
+                },
               },
             },
             {
@@ -9674,7 +9764,12 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
                     $filter: {
                       input: { $ifNull: ['$sellerIds', []] },
                       as: 'sid',
-                      cond: { $ne: ['$$sid', null] },
+                      cond: {
+                        $and: [
+                          { $ne: ['$$sid', null] },
+                          { $ne: ['$$sid', ''] },
+                        ],
+                      },
                     },
                   },
                 },
@@ -13609,16 +13704,27 @@ router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res)
 // ============================================
 
 // Core logic for "Poll All Sellers".
-// Called by: POST /sync-all-sellers-listings (button) and the 1:00 AM IST cron job.
-export async function scheduledSyncAllSellers() {
-  if (syncAllStatus.running) {
-    console.log('[Sync All] Already in progress, skipping.');
-    return;
-  }
+// Called by: POST /sync-all-sellers-listings (background) and the 1:00 AM IST cron job.
+async function executeSyncAllSellersWork() {
   const allSellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
     .populate('user', 'username email');
   if (allSellers.length === 0) {
     console.log('[Sync All] No sellers with eBay tokens found.');
+    syncAllStatus = {
+      running: false,
+      sellersTotal: 0,
+      sellersComplete: 0,
+      currentSeller: '',
+      currentPage: 0,
+      currentTotalPages: 0,
+      results: [],
+      errors: [],
+      totalProcessed: 0,
+      totalSkipped: 0,
+      startedAt: null,
+      completedAt: new Date().toISOString(),
+    };
+    await persistSyncAllStatusToDb();
     return;
   }
   syncAllStatus = {
@@ -13636,8 +13742,9 @@ export async function scheduledSyncAllSellers() {
     completedAt: null
   };
   console.log(`[Sync All] Started for ${allSellers.length} seller(s).`);
+  await persistSyncAllStatusToDb();
   const VALID_MOTORS_CATEGORIES = ["eBay Motors", "Parts & Accessories", "Automotive Tools", "Tools & Supplies"];
-  (async () => {
+  try {
     for (const seller of allSellers) {
       const sellerName = seller.user?.username || seller.user?.email || seller._id;
       syncAllStatus.currentSeller = sellerName;
@@ -13811,12 +13918,34 @@ export async function scheduledSyncAllSellers() {
         syncAllStatus.results.push({ sellerName, processedCount: 0, skippedCount: 0, error: sellerErr.message });
       }
       syncAllStatus.sellersComplete++;
+      await persistSyncAllStatusToDb();
     }
+    console.log(`[Sync All] Done: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.totalSkipped} skipped, ${syncAllStatus.errors.length} errors`);
+  } catch (fatal) {
+    console.error('[Sync All] Fatal error:', fatal?.message || fatal);
+    syncAllStatus.errors.push(`Fatal: ${fatal?.message || String(fatal)}`);
+  } finally {
     syncAllStatus.running = false;
     syncAllStatus.currentSeller = '';
     syncAllStatus.completedAt = new Date().toISOString();
-    console.log(`[Sync All] Done: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.totalSkipped} skipped, ${syncAllStatus.errors.length} errors`);
-  })();
+    await persistSyncAllStatusToDb();
+  }
+}
+
+export async function scheduledSyncAllSellers() {
+  const acquired = await acquireSyncAllSellersLock();
+  if (!acquired) {
+    console.log('[Sync All] Lock not acquired, skipping (cron or overlap).');
+    return;
+  }
+  try {
+    await executeSyncAllSellersWork();
+  } catch (e) {
+    console.error('[Sync All] scheduledSyncAllSellers:', e?.message || e);
+  } finally {
+    await releaseSyncAllSellersLock();
+    await persistSyncAllStatusToDb();
+  }
 }
 
 // Core logic for "Run All Sellers for Date".
