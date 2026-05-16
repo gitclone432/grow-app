@@ -12,6 +12,7 @@ import FormData from 'form-data';
 import { requireAuth, requirePageAccess, requireRole } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
 import BankAccount from '../models/BankAccount.js';
+import PayoneerFeedCache from '../models/PayoneerFeedCache.js';
 import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.js';
 import Order from '../models/Order.js';
 import Return from '../models/Return.js';
@@ -55,12 +56,148 @@ import {
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
 const activeAutoCompatBatchRuns = new Set();
-const PAYONEER_FEED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const PAYONEER_FEED_CACHE_ID = 'singleton';
+/** Shown in UI; page loads always read Mongo — no auto eBay call on open. */
+const PAYONEER_FEED_CACHE_TTL_MS = 30 * 60 * 1000;
+let payoneerFeedRefreshInFlight = null;
+const PAYONEER_FEED_MAX_PAGES_PER_SELLER = 12; // up to 2,400 payout rows scanned per store
+const PAYONEER_FEED_MAX_AGE_MS = 400 * 24 * 60 * 60 * 1000; // stop paging when payouts are older than ~13 months
+const PAYONEER_FEED_SELLER_CONCURRENCY = 4;
 let payoneerFeedCache = {
   rows: [],
   total: 0,
   cachedAt: 0,
 };
+
+async function readPayoneerFeedCacheFromDb() {
+  const row = await PayoneerFeedCache.findById(PAYONEER_FEED_CACHE_ID).lean();
+  if (!row?.cachedAt || !Array.isArray(row.rows)) return null;
+  return {
+    rows: row.rows,
+    total: Number(row.total) || row.rows.length,
+    cachedAt: new Date(row.cachedAt).getTime(),
+  };
+}
+
+async function writePayoneerFeedCache(rows) {
+  const cachedAt = new Date();
+  await PayoneerFeedCache.findByIdAndUpdate(
+    PAYONEER_FEED_CACHE_ID,
+    { $set: { rows, total: rows.length, cachedAt } },
+    { upsert: true }
+  );
+  payoneerFeedCache = { rows, total: rows.length, cachedAt: cachedAt.getTime() };
+}
+
+function payoneerFeedCacheResponse(rows, cachedAtMs, hit, source, extra = {}) {
+  const ageMs = cachedAtMs ? Date.now() - cachedAtMs : 0;
+  return {
+    rows,
+    total: rows.length,
+    cache: {
+      hit,
+      source,
+      cachedAt: cachedAtMs ? new Date(cachedAtMs).toISOString() : null,
+      ageMs,
+      ttlMs: PAYONEER_FEED_CACHE_TTL_MS,
+      ...extra,
+    },
+  };
+}
+
+/** Fetch from eBay and persist to MongoDB (button, cron, or first-time setup). */
+export async function refreshPayoneerFeedCache() {
+  if (payoneerFeedRefreshInFlight) return payoneerFeedRefreshInFlight;
+  payoneerFeedRefreshInFlight = (async () => {
+    try {
+      console.log('[Payoneer Feed] Refreshing SUCCEEDED payouts from eBay…');
+      const rows = await buildPayoneerSucceededPayoutFeedRows();
+      await writePayoneerFeedCache(rows);
+      console.log(`[Payoneer Feed] Saved ${rows.length} row(s) to MongoDB`);
+      return { total: rows.length, cachedAt: payoneerFeedCache.cachedAt };
+    } finally {
+      payoneerFeedRefreshInFlight = null;
+    }
+  })();
+  return payoneerFeedRefreshInFlight;
+}
+
+async function buildPayoneerSucceededPayoutFeedRows() {
+  const bankAccounts = await BankAccount.find().lean();
+  const sellers = await Seller.find({
+    'ebayTokens.access_token': { $exists: true, $ne: null },
+    'ebayTokens.refresh_token': { $exists: true, $ne: null },
+  }).populate('user', 'username email');
+
+  const bankForSeller = (seller) => {
+    for (const b of bankAccounts) {
+      if (!b.sellers?.trim()) continue;
+      if (sellerMatchesBankSellersField(b.sellers, seller)) {
+        return { bankId: b._id, bankName: b.name };
+      }
+    }
+    return { bankId: null, bankName: null };
+  };
+
+  const cutoff = Date.now() - PAYONEER_FEED_MAX_AGE_MS;
+  const rows = [];
+
+  for (let i = 0; i < sellers.length; i += PAYONEER_FEED_SELLER_CONCURRENCY) {
+    const chunk = sellers.slice(i, i + PAYONEER_FEED_SELLER_CONCURRENCY);
+    const chunkRows = await Promise.all(
+      chunk.map(async (seller) => {
+        const sellerRows = [];
+        try {
+          const accessToken = await ensureValidToken(seller);
+          const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller);
+          const { bankId, bankName } = bankForSeller(seller);
+          const limit = 200;
+          let offset = 0;
+          let guard = 0;
+          let hitAgeCutoff = false;
+
+          while (guard < PAYONEER_FEED_MAX_PAGES_PER_SELLER && !hitAgeCutoff) {
+            const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
+              headers: financesApiHeaders(accessToken, marketplaceId),
+              params: { sort: '-payoutDate', limit, offset },
+            });
+            const pageRows = payoutsRes.data?.payouts || [];
+            for (const p of pageRows) {
+              if (p.payoutStatus !== 'SUCCEEDED' || !p.payoutDate) continue;
+              const pd = new Date(p.payoutDate).getTime();
+              if (pd < cutoff) {
+                hitAgeCutoff = true;
+                break;
+              }
+              sellerRows.push({
+                payoutId: p.payoutId,
+                payoutDate: p.payoutDate,
+                payoutStatus: p.payoutStatus,
+                amount: parseFloat(p.amount?.value || 0),
+                currency: p.amount?.currency || 'USD',
+                sellerId: seller._id,
+                sellerName: seller.user?.username || seller.user?.email || seller._id.toString(),
+                suggestedBankAccountId: bankId,
+                suggestedBankName: bankName,
+                financesMarketplaceId: marketplaceId,
+              });
+            }
+            if (pageRows.length < limit || hitAgeCutoff) break;
+            offset += limit;
+            guard += 1;
+          }
+        } catch (e) {
+          console.warn('[payoneer-recent-completed-feed] seller', seller._id, e.response?.data || e.message);
+        }
+        return sellerRows;
+      })
+    );
+    for (const part of chunkRows) rows.push(...part);
+  }
+
+  rows.sort((a, b) => new Date(b.payoutDate) - new Date(a.payoutDate));
+  return rows;
+}
 
 function normalizeOAuthStateToken(state) {
   if (!state) return '';
@@ -13094,104 +13231,33 @@ router.get('/upcoming-payouts/:sellerId', requireAuth, requirePageAccess('Seller
 router.get('/payoneer-recent-completed-feed', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
   try {
     const forceRefresh = String(req.query.forceRefresh || '').toLowerCase() === 'true';
-    const nowMs = Date.now();
-    const cacheAgeMs = nowMs - Number(payoneerFeedCache.cachedAt || 0);
-    const cacheValid =
-      !forceRefresh
-      && Array.isArray(payoneerFeedCache.rows)
-      && payoneerFeedCache.cachedAt > 0
-      && cacheAgeMs < PAYONEER_FEED_CACHE_TTL_MS;
 
-    if (cacheValid) {
-      return res.json({
-        rows: payoneerFeedCache.rows,
-        total: payoneerFeedCache.total,
-        cache: {
-          hit: true,
-          cachedAt: new Date(payoneerFeedCache.cachedAt).toISOString(),
-          ageMs: cacheAgeMs,
-          ttlMs: PAYONEER_FEED_CACHE_TTL_MS,
-        },
-      });
+    if (forceRefresh) {
+      const result = await refreshPayoneerFeedCache();
+      const cachedAtMs = result?.cachedAt || payoneerFeedCache.cachedAt;
+      return res.json(
+        payoneerFeedCacheResponse(payoneerFeedCache.rows, cachedAtMs, false, 'ebay', { savedToDatabase: true })
+      );
     }
 
-    const bankAccounts = await BankAccount.find().lean();
-    const sellers = await Seller.find({
-      'ebayTokens.access_token': { $exists: true, $ne: null },
-      'ebayTokens.refresh_token': { $exists: true, $ne: null }
-    }).populate('user', 'username email');
-
-    const bankForSeller = (seller) => {
-      for (const b of bankAccounts) {
-        if (!b.sellers?.trim()) continue;
-        if (sellerMatchesBankSellersField(b.sellers, seller)) {
-          return { bankId: b._id, bankName: b.name };
-        }
-      }
-      return { bankId: null, bankName: null };
-    };
-
-    const rows = [];
-
-    for (const seller of sellers) {
-      try {
-        const accessToken = await ensureValidToken(seller);
-        const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller);
-        const allPayouts = [];
-        const limit = 200;
-        let offset = 0;
-        let hasMore = true;
-        let guard = 0;
-        while (hasMore && guard < 500) {
-          const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
-            headers: financesApiHeaders(accessToken, marketplaceId),
-            params: { sort: '-payoutDate', limit, offset }
-          });
-          const pageRows = payoutsRes.data?.payouts || [];
-          allPayouts.push(...pageRows);
-          if (pageRows.length < limit) hasMore = false;
-          else offset += limit;
-          guard += 1;
-        }
-
-        for (const p of allPayouts) {
-          if (p.payoutStatus !== 'SUCCEEDED' || !p.payoutDate) continue;
-
-          const { bankId, bankName } = bankForSeller(seller);
-          rows.push({
-            payoutId: p.payoutId,
-            payoutDate: p.payoutDate,
-            payoutStatus: p.payoutStatus,
-            amount: parseFloat(p.amount?.value || 0),
-            currency: p.amount?.currency || 'USD',
-            sellerId: seller._id,
-            sellerName: seller.user?.username || seller.user?.email || seller._id.toString(),
-            suggestedBankAccountId: bankId,
-            suggestedBankName: bankName,
-            financesMarketplaceId: marketplaceId
-          });
-        }
-      } catch (e) {
-        console.warn('[payoneer-recent-completed-feed] seller', seller._id, e.response?.data || e.message);
-      }
+    const dbCache = await readPayoneerFeedCacheFromDb();
+    if (dbCache) {
+      payoneerFeedCache = { rows: dbCache.rows, total: dbCache.total, cachedAt: dbCache.cachedAt };
+      return res.json(payoneerFeedCacheResponse(dbCache.rows, dbCache.cachedAt, true, 'mongodb', { savedToDatabase: true }));
     }
 
-    rows.sort((a, b) => new Date(b.payoutDate) - new Date(a.payoutDate));
-
-    payoneerFeedCache = {
-      rows,
-      total: rows.length,
-      cachedAt: Date.now(),
-    };
-
-    res.json({
-      rows,
-      total: rows.length,
+    return res.json({
+      rows: [],
+      total: 0,
       cache: {
         hit: false,
-        cachedAt: new Date(payoneerFeedCache.cachedAt).toISOString(),
-        ageMs: 0,
+        source: 'none',
+        empty: true,
+        cachedAt: null,
+        ageMs: null,
         ttlMs: PAYONEER_FEED_CACHE_TTL_MS,
+        savedToDatabase: false,
+        message: 'No cached eBay payouts in database. Use Refresh eBay payouts to fetch and save.',
       },
     });
   } catch (err) {

@@ -30,6 +30,7 @@ import {
 import AddIcon from '@mui/icons-material/Add';
 import SyncIcon from '@mui/icons-material/Sync';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
+import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
 import SaveIcon from '@mui/icons-material/Save';
@@ -63,7 +64,7 @@ const EMPTY_PAYONEER_FORM = () => ({
 });
 
 /** Max DB rows to merge with eBay feed (client-side sort + pagination). */
-const MERGE_FETCH_LIMIT = 5000;
+const MERGE_FETCH_LIMIT = 1500;
 
 /** First-paint ?bankAccount= so the initial /payoneer request matches the URL (avoids a wasted fetch). */
 function getInitialBankAccountQuery() {
@@ -93,13 +94,32 @@ function feedRowDedupeKey(f) {
 
 const formatUsd = (v) => (Number.isFinite(Number(v)) ? `$${Number(v).toFixed(2)}` : '—');
 const formatInr = (v, digits = 2) => (Number.isFinite(Number(v)) ? `₹${Number(v).toFixed(digits)}` : '—');
+/** Exchange rate is not currency — show up to 4 decimals (not ₹ with 2dp like bank deposit). */
+const formatExchangeRateInr = (v) => formatInr(v, 4);
+
+function buildPayoutFeedLookup(payoutFeedRows) {
+    const byExactKey = new Map();
+    const bySellerDay = new Map();
+    for (const f of payoutFeedRows || []) {
+        const k = feedRowDedupeKey(f);
+        if (k) byExactKey.set(k, f);
+        const sid = String(f.sellerId);
+        const day = formatYyyyMmDdPt(f.payoutDate);
+        if (sid && day) {
+            const sk = `${sid}|${day}`;
+            if (!bySellerDay.has(sk)) bySellerDay.set(sk, []);
+            bySellerDay.get(sk).push(f);
+        }
+    }
+    return { byExactKey, bySellerDay };
+}
 
 /**
  * Payout ID from DB, else match Recently completed feed (same store, local payment day, amount).
  * Handles legacy rows saved before ebayPayoutId existed.
  */
-function resolvePayoutIdFromFeed(record, payoutFeedRows) {
-    if (!record || record._fromEbay || !Array.isArray(payoutFeedRows)) return null;
+function resolvePayoutIdFromFeed(record, lookup) {
+    if (!record || record._fromEbay || !lookup) return null;
     if (record.ebayPayoutId) return record.ebayPayoutId;
 
     const sid = String(record.store?._id || '');
@@ -108,24 +128,16 @@ function resolvePayoutIdFromFeed(record, payoutFeedRows) {
     if (!sid || !day || Number.isNaN(amt)) return null;
 
     const exactKey = `${sid}|${day}|${amt.toFixed(2)}`;
-    for (const f of payoutFeedRows) {
-        const fk = feedRowDedupeKey(f);
-        if (fk === exactKey) return String(f.payoutId);
-    }
+    const exact = lookup.byExactKey.get(exactKey);
+    if (exact) return String(exact.payoutId);
 
-    const tol = payoutFeedRows.filter((f) => {
-        if (String(f.sellerId) !== sid) return false;
-        if (formatYyyyMmDdPt(f.payoutDate) !== day) return false;
-        return Math.abs(Number(f.amount) - amt) < 0.02;
-    });
+    const dayRows = lookup.bySellerDay.get(`${sid}|${day}`) || [];
+    const tol = dayRows.filter((f) => Math.abs(Number(f.amount) - amt) < 0.02);
     if (tol.length === 1) return String(tol[0].payoutId);
 
-    const sameDay = payoutFeedRows.filter(
-        (f) => String(f.sellerId) === sid && formatYyyyMmDdPt(f.payoutDate) === day
-    );
-    if (sameDay.length === 1) return String(sameDay[0].payoutId);
-    if (sameDay.length > 1) {
-        const best = sameDay.reduce((a, b) =>
+    if (dayRows.length === 1) return String(dayRows[0].payoutId);
+    if (dayRows.length > 1) {
+        const best = dayRows.reduce((a, b) =>
             Math.abs(Number(a.amount) - amt) <= Math.abs(Number(b.amount) - amt) ? a : b
         );
         if (Math.abs(Number(best.amount) - amt) <= 1) return String(best.payoutId);
@@ -300,6 +312,8 @@ const PayoneerSheetPage = () => {
     const [payoutFeedRows, setPayoutFeedRows] = useState([]);
     const [payoutFeedLoading, setPayoutFeedLoading] = useState(false);
     const [payoutFeedError, setPayoutFeedError] = useState('');
+    const [payoutFeedCachedAt, setPayoutFeedCachedAt] = useState(null);
+    const [payoutFeedCacheEmpty, setPayoutFeedCacheEmpty] = useState(false);
 
     /** Hint after auto-fill from Bank Accounts + Seller Funds / eBay APIs */
     const [autoFillHint, setAutoFillHint] = useState('');
@@ -320,28 +334,35 @@ const PayoneerSheetPage = () => {
         fetchBankAccounts();
     }, []);
 
-    useEffect(() => {
-        let cancelled = false;
-        (async () => {
-            setPayoutFeedLoading(true);
-            setPayoutFeedError('');
-            try {
-                const { data } = await api.get('/ebay/payoneer-recent-completed-feed');
-                if (!cancelled) setPayoutFeedRows(Array.isArray(data.rows) ? data.rows : []);
-            } catch (e) {
-                const msg =
-                    e.response?.status === 403
-                        ? 'Cannot load eBay payout feed (check page access).'
-                        : e.response?.data?.error || e.message;
-                if (!cancelled) setPayoutFeedError(msg);
-            } finally {
-                if (!cancelled) setPayoutFeedLoading(false);
+    const loadPayoutFeed = useCallback(async (forceRefresh = false) => {
+        setPayoutFeedLoading(true);
+        setPayoutFeedError('');
+        try {
+            const { data } = await api.get('/ebay/payoneer-recent-completed-feed', {
+                params: forceRefresh ? { forceRefresh: 'true' } : {},
+            });
+            setPayoutFeedRows(Array.isArray(data.rows) ? data.rows : []);
+            setPayoutFeedCachedAt(data?.cache?.cachedAt || null);
+            setPayoutFeedCacheEmpty(Boolean(data?.cache?.empty));
+            if (forceRefresh && data?.cache?.savedToDatabase) {
+                setAutoFillHint('eBay payouts fetched from eBay and saved to the database.');
             }
-        })();
-        return () => {
-            cancelled = true;
-        };
+        } catch (e) {
+            const msg =
+                e.response?.status === 403
+                    ? 'Cannot load eBay payout feed (check page access).'
+                    : e.response?.data?.error || e.message;
+            setPayoutFeedError(msg);
+        } finally {
+            setPayoutFeedLoading(false);
+        }
     }, []);
+
+    useEffect(() => {
+        loadPayoutFeed(false);
+    }, [loadPayoutFeed]);
+
+    const payoutFeedLookup = useMemo(() => buildPayoutFeedLookup(payoutFeedRows), [payoutFeedRows]);
 
     const filteredPayoutFeed = useMemo(() => {
         let rows = payoutFeedRows;
@@ -762,7 +783,7 @@ const PayoneerSheetPage = () => {
         if (!isEditing) {
             if (field === 'amount') return formatUsd(value);
             if (field === 'bankDeposit') return formatInr(value, 2);
-            if (field === 'exchangeRate') return formatInr(value, 2);
+            if (field === 'exchangeRate') return formatExchangeRateInr(value);
             if (field === 'actualExchangeRate') return formatInr(value, 4);
             if (field === 'paymentDate') return formatPaymentDateDisplayPt(value);
             if (field === 'periodStart' || field === 'periodEnd') return value ? formatPaymentDateDisplayPt(value) : '-';
@@ -805,13 +826,18 @@ const PayoneerSheetPage = () => {
             );
         }
 
+        const numberInputProps = field === 'exchangeRate'
+            ? { step: 'any', inputMode: 'decimal' }
+            : undefined;
+
         return (
             <TextField
                 type={type}
                 size="small"
                 value={value}
                 onChange={(e) => handleEditChange(field, e.target.value)}
-                sx={{ maxWidth: 100 }}
+                sx={{ maxWidth: field === 'exchangeRate' ? 120 : 100 }}
+                inputProps={numberInputProps}
             />
         );
     };
@@ -834,6 +860,15 @@ const PayoneerSheetPage = () => {
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
                     <Button
                         variant="outlined"
+                        startIcon={payoutFeedLoading ? <CircularProgress size={18} color="inherit" /> : <SyncIcon />}
+                        onClick={() => loadPayoutFeed(true)}
+                        disabled={payoutFeedLoading}
+                        fullWidth={isSmallMobile}
+                    >
+                        {payoutFeedLoading ? 'Refreshing eBay…' : 'Refresh eBay payouts'}
+                    </Button>
+                    <Button
+                        variant="outlined"
                         startIcon={<SyncIcon />}
                         onClick={handleSyncGmail}
                         disabled={gmailSyncLoading}
@@ -849,6 +884,19 @@ const PayoneerSheetPage = () => {
                         fullWidth={isSmallMobile}
                     >
                         Bank accounts
+                    </Button>
+                    <Button
+                        variant="outlined"
+                        startIcon={<ReceiptLongIcon />}
+                        component={RouterLink}
+                        to={
+                            filters.bankAccount
+                                ? `/admin/transactions?bankAccount=${filters.bankAccount}`
+                                : '/admin/transactions'
+                        }
+                        fullWidth={isSmallMobile}
+                    >
+                        Transactions
                     </Button>
                     <Button
                         variant="contained"
@@ -984,14 +1032,6 @@ const PayoneerSheetPage = () => {
                 </Stack>
             </Paper>
 
-            {payoutFeedLoading && (
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
-                    <CircularProgress size={22} />
-                    <Typography variant="body2" color="text.secondary">
-                        Loading eBay completed payouts…
-                    </Typography>
-                </Box>
-            )}
             {loading && (
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
                     <CircularProgress size={22} />
@@ -1000,14 +1040,36 @@ const PayoneerSheetPage = () => {
                     </Typography>
                 </Box>
             )}
+            {payoutFeedLoading && (
+                <Alert severity="info" sx={{ mb: 2 }}>
+                    {payoutFeedCacheEmpty
+                        ? 'Fetching from eBay and saving to database (first time or refresh)…'
+                        : 'Refreshing eBay payouts from eBay…'}
+                </Alert>
+            )}
             {payoutFeedError && (
                 <Alert severity="warning" sx={{ mb: 2 }}>
                     {payoutFeedError}
                 </Alert>
             )}
+            {payoutFeedCacheEmpty && !payoutFeedLoading && (
+                <Alert severity="warning" sx={{ mb: 2 }}>
+                    No eBay payout data in the database yet. Click <strong>Refresh eBay payouts</strong> once — results are saved to MongoDB and load instantly on future visits.
+                </Alert>
+            )}
 
             <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
                 eBay SUCCEEDED payouts appear here; use Save row to enter exchange rate and save to your book.
+                {payoutFeedCachedAt && !payoutFeedCacheEmpty ? (
+                    <>
+                        {' '}
+                        (Loaded from database
+                        {payoutFeedCachedAt
+                            ? ` · last saved ${formatPaymentDateDisplayPt(payoutFeedCachedAt)}`
+                            : ''}
+                        .)
+                    </>
+                ) : null}
             </Typography>
 
             {isMobile ? (
@@ -1076,7 +1138,7 @@ const PayoneerSheetPage = () => {
                                     key={record._id}
                                     record={record}
                                     isEditing={isEditing}
-                                    displayPayoutId={resolvePayoutIdFromFeed(record, payoutFeedRows)}
+                                    displayPayoutId={resolvePayoutIdFromFeed(record, payoutFeedLookup)}
                                     renderCell={renderCell}
                                     onEdit={() => startEditing(record)}
                                     onDelete={() => handleDelete(record._id)}
@@ -1208,7 +1270,7 @@ const PayoneerSheetPage = () => {
 
                                         <TableCell>
                                             {(() => {
-                                                const displayPid = resolvePayoutIdFromFeed(record, payoutFeedRows);
+                                                const displayPid = resolvePayoutIdFromFeed(record, payoutFeedLookup);
                                                 const inner = (
                                                     <Typography
                                                         variant="caption"
@@ -1424,6 +1486,8 @@ const PayoneerSheetPage = () => {
                                 fullWidth
                                 value={formData.exchangeRate}
                                 onChange={(e) => setFormData({ ...formData, exchangeRate: e.target.value })}
+                                inputProps={{ step: 'any', inputMode: 'decimal' }}
+                                helperText="Up to 4 decimal places (e.g. 85.1234)"
                             />
                         </Stack>
 

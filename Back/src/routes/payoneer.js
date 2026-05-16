@@ -78,7 +78,9 @@ router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => 
             }
         }
 
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+        const limitNum = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 2000);
+        const skip = (pageNum - 1) * limitNum;
 
         const [records, totalRecords] = await Promise.all([
             PayoneerRecord.find(query)
@@ -93,15 +95,16 @@ router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => 
                 .populate('bankAccount', 'name')
                 .sort({ paymentDate: -1 })
                 .skip(skip)
-                .limit(parseInt(limit)),
+                .limit(limitNum)
+                .lean(),
             PayoneerRecord.countDocuments(query)
         ]);
 
         res.json({
             records,
             totalRecords,
-            totalPages: Math.ceil(totalRecords / parseInt(limit)),
-            currentPage: parseInt(page)
+            totalPages: Math.ceil(totalRecords / limitNum) || 0,
+            currentPage: pageNum
         });
     } catch (err) {
         res.status(500).json({ error: err.message });

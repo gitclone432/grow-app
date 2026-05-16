@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams, Link as RouterLink } from 'react-router-dom';
 import {
     Box,
     Typography,
@@ -41,6 +42,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
+import PaymentsIcon from '@mui/icons-material/Payments';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import api from '../../lib/api';
 import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
@@ -134,6 +136,7 @@ const MobileTransactionCard = ({ txn, onEdit, onDelete }) => {
 };
 
 const TransactionPage = () => {
+    const [searchParams] = useSearchParams();
     const theme = useTheme();
     const isMobile = useMediaQuery(theme.breakpoints.down('md'));
     const isSmallMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -182,6 +185,12 @@ const TransactionPage = () => {
         fetchBalanceSummary();
         fetchCreditCardSummary(); // NEW
     }, []);
+
+    // Deep link from Payoneer / Bank Accounts: /admin/transactions?bankAccount=<id>
+    useEffect(() => {
+        const bid = searchParams.get('bankAccount') || '';
+        setFilterBankAccount((prev) => (prev === bid ? prev : bid));
+    }, [searchParams]);
 
     useEffect(() => {
         fetchTransactions();
@@ -420,6 +429,19 @@ const TransactionPage = () => {
             >
                 <Typography variant="h5">Transactions</Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
+                    <Button
+                        variant="outlined"
+                        startIcon={<PaymentsIcon />}
+                        component={RouterLink}
+                        to={
+                            filterBankAccount
+                                ? `/admin/payoneer?bankAccount=${filterBankAccount}`
+                                : '/admin/payoneer'
+                        }
+                        fullWidth={isMobile}
+                    >
+                        Payoneer Sheet
+                    </Button>
                     <Button
                         variant="outlined"
                         startIcon={<DownloadIcon />}

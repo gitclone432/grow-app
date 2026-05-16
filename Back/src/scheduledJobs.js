@@ -2,7 +2,12 @@ import cron from 'node-cron';
 import Attendance from './models/Attendance.js';
 import CronJobConfig from './models/CronJobConfig.js';
 import { runScheduledUploads } from './lib/ebayFeedUpload.js';
-import { scheduledSyncAllSellers, scheduledRunAutoCompatForDate, scheduledPollNewOrders } from './routes/ebay.js';
+import {
+  scheduledSyncAllSellers,
+  scheduledRunAutoCompatForDate,
+  scheduledPollNewOrders,
+  refreshPayoneerFeedCache,
+} from './routes/ebay.js';
 import { importTransactionsFromGmail } from './utils/gmailTransactionImporter.js';
 
 const scheduledTaskMap = new Map();
@@ -57,6 +62,14 @@ export const CRON_JOB_DEFINITIONS = [
     cronExpr: String(process.env.GMAIL_IMPORT_CRON || '*/5 * * * *').trim(),
     timezone: '',
     enabled: gmailImportEnabled,
+  },
+  {
+    jobKey: 'payoneerFeedRefresh',
+    label: 'Payoneer eBay payout cache',
+    description: 'Fetch SUCCEEDED payouts from eBay and save to MongoDB for Payoneer sheet.',
+    cronExpr: '30 2 * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: true,
   },
 ];
 
@@ -129,6 +142,12 @@ async function runGmailImport() {
   console.log(`[CRON] Gmail import scanned=${report.scanned} imported=${report.imported} skipped=${report.skipped}`);
 }
 
+async function runPayoneerFeedRefresh() {
+  console.log('[CRON] Payoneer eBay payout cache refresh starting…');
+  const result = await refreshPayoneerFeedCache();
+  console.log(`[CRON] Payoneer feed cache saved ${result?.total ?? 0} row(s)`);
+}
+
 const CRON_JOB_HANDLERS = {
   dailyTimerAutoStop: runDailyTimerAutoStop,
   csvAutoUpload: runCsvAutoUpload,
@@ -136,6 +155,7 @@ const CRON_JOB_HANDLERS = {
   pollNewOrders: runPollNewOrders,
   autoCompatRunForDate: runAutoCompatForDate,
   gmailImport: runGmailImport,
+  payoneerFeedRefresh: runPayoneerFeedRefresh,
 };
 
 function scheduleJob(config) {
