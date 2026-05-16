@@ -304,7 +304,7 @@ router.get('/export-csv', requireAuth, requirePageAccess('Transactions'), async 
             .sort(sortQuery)
             .lean();
 
-        const header = ['Date', 'Bank Account', 'Type', 'Amount (INR)', 'Remark', 'Source', 'Credit Card Name'];
+        const header = ['Date', 'Bank Account', 'Type', 'Amount (INR)', 'Remark', 'Source', 'Bank Account/Name'];
         const lines = [header.map(csvEscape).join(',')];
 
         for (const t of rows) {

@@ -10,6 +10,7 @@ import {
     TableCell,
     TableContainer,
     TableHead,
+    TableFooter,
     TableRow,
     Dialog,
     DialogTitle,
@@ -65,6 +66,15 @@ const EMPTY_PAYONEER_FORM = () => ({
 
 /** Max DB rows to merge with eBay feed (client-side sort + pagination). */
 const MERGE_FETCH_LIMIT = 1500;
+
+/** Desktop table: header fixed, body scrolls after this many data rows. */
+const PAYONEER_TABLE_VISIBLE_ROWS = 10;
+const PAYONEER_TABLE_ROW_HEIGHT_PX = 42;
+const PAYONEER_TABLE_HEADER_HEIGHT_PX = 41;
+/** Scroll area = header + up to 10 data rows only (TOTAL sits below, not inside scroll). */
+const PAYONEER_TABLE_BODY_MAX_HEIGHT =
+    PAYONEER_TABLE_HEADER_HEIGHT_PX
+    + PAYONEER_TABLE_VISIBLE_ROWS * PAYONEER_TABLE_ROW_HEIGHT_PX;
 
 /** First-paint ?bankAccount= so the initial /payoneer request matches the URL (avoids a wasted fetch). */
 function getInitialBankAccountQuery() {
@@ -508,16 +518,31 @@ const PayoneerSheetPage = () => {
         return mergedRows.slice(start, start + pagination.limit);
     }, [mergedRows, pagination.page, pagination.limit]);
 
+    /** Body scroll height: fits row count, max 10 data rows (footer excluded — prevents overlap). */
+    const tableBodyScrollHeight = useMemo(() => {
+        const rowCount = visibleRows.length;
+        if (rowCount === 0) {
+            return PAYONEER_TABLE_HEADER_HEIGHT_PX + PAYONEER_TABLE_ROW_HEIGHT_PX;
+        }
+        if (rowCount > PAYONEER_TABLE_VISIBLE_ROWS) {
+            return PAYONEER_TABLE_BODY_MAX_HEIGHT;
+        }
+        return PAYONEER_TABLE_HEADER_HEIGHT_PX + rowCount * PAYONEER_TABLE_ROW_HEIGHT_PX;
+    }, [visibleRows.length]);
+
     const totals = useMemo(() => {
         return mergedRows.reduce(
             (acc, row) => {
                 const amount = Number(row.amount);
-                const bankDeposit = Number(row.bankDeposit);
                 if (Number.isFinite(amount)) acc.amountUSD += amount;
-                if (Number.isFinite(bankDeposit)) acc.bankDepositINR += bankDeposit;
+                if (!row._fromEbay) {
+                    if (Number.isFinite(amount)) acc.amountUSDSaved += amount;
+                    const bankDeposit = Number(row.bankDeposit);
+                    if (Number.isFinite(bankDeposit)) acc.bankDepositINR += bankDeposit;
+                }
                 return acc;
             },
-            { amountUSD: 0, bankDepositINR: 0 }
+            { amountUSD: 0, amountUSDSaved: 0, bankDepositINR: 0 }
         );
     }, [mergedRows]);
 
@@ -843,7 +868,17 @@ const PayoneerSheetPage = () => {
     };
 
     return (
-        <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>
+        <Box
+            sx={{
+                p: { xs: 1.5, sm: 2, md: 3 },
+                height: { md: 'calc(100dvh - 112px)' },
+                maxHeight: { md: 'calc(100dvh - 112px)' },
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: { md: 'hidden' },
+                boxSizing: 'border-box',
+            }}
+        >
             <Box
                 sx={{
                     display: 'flex',
@@ -851,7 +886,8 @@ const PayoneerSheetPage = () => {
                     gap: { xs: 1, sm: 2 },
                     justifyContent: 'space-between',
                     alignItems: { xs: 'stretch', sm: 'center' },
-                    mb: { xs: 2, sm: 3 }
+                    mb: { xs: 2, sm: 3 },
+                    flexShrink: 0,
                 }}
             >
                 <Typography variant={isSmallMobile ? 'h6' : 'h5'} sx={{ fontWeight: 'bold' }}>
@@ -910,7 +946,7 @@ const PayoneerSheetPage = () => {
             </Box>
 
             {/* ADVANCED FILTERS */}
-            <Paper sx={{ p: 2, mb: 2 }}>
+            <Paper sx={{ p: 2, mb: 2, flexShrink: 0 }}>
                 <Stack spacing={2}>
                     <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="center" flexWrap="wrap">
                         {/* Store Filter */}
@@ -1033,7 +1069,7 @@ const PayoneerSheetPage = () => {
             </Paper>
 
             {loading && (
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2, flexShrink: 0 }}>
                     <CircularProgress size={22} />
                     <Typography variant="body2" color="text.secondary">
                         Loading saved Payoneer records…
@@ -1041,24 +1077,24 @@ const PayoneerSheetPage = () => {
                 </Box>
             )}
             {payoutFeedLoading && (
-                <Alert severity="info" sx={{ mb: 2 }}>
+                <Alert severity="info" sx={{ mb: 2, flexShrink: 0 }}>
                     {payoutFeedCacheEmpty
                         ? 'Fetching from eBay and saving to database (first time or refresh)…'
                         : 'Refreshing eBay payouts from eBay…'}
                 </Alert>
             )}
             {payoutFeedError && (
-                <Alert severity="warning" sx={{ mb: 2 }}>
+                <Alert severity="warning" sx={{ mb: 2, flexShrink: 0 }}>
                     {payoutFeedError}
                 </Alert>
             )}
             {payoutFeedCacheEmpty && !payoutFeedLoading && (
-                <Alert severity="warning" sx={{ mb: 2 }}>
+                <Alert severity="warning" sx={{ mb: 2, flexShrink: 0 }}>
                     No eBay payout data in the database yet. Click <strong>Refresh eBay payouts</strong> once — results are saved to MongoDB and load instantly on future visits.
                 </Alert>
             )}
 
-            <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+            <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1, flexShrink: 0 }}>
                 eBay SUCCEEDED payouts appear here; use Save row to enter exchange rate and save to your book.
                 {payoutFeedCachedAt && !payoutFeedCacheEmpty ? (
                     <>
@@ -1072,9 +1108,27 @@ const PayoneerSheetPage = () => {
                 ) : null}
             </Typography>
 
+            <Box
+                sx={{
+                    flex: 1,
+                    minHeight: 0,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    overflow: 'hidden',
+                    justifyContent: 'flex-start',
+                }}
+            >
             {isMobile ? (
                 // MOBILE CARD VIEW
-                <Box sx={{ mt: { xs: 1.5, sm: 2 } }}>
+                <Box
+                    sx={{
+                        flex: 1,
+                        minHeight: 0,
+                        overflow: 'auto',
+                        maxHeight: { xs: PAYONEER_TABLE_BODY_MAX_HEIGHT, md: 'none' },
+                        mt: { xs: 1.5, sm: 2 },
+                    }}
+                >
                     <Paper variant="outlined" sx={{ p: 1.5, mb: 1.5, bgcolor: 'action.hover' }}>
                         <Stack direction="row" justifyContent="space-between" spacing={2}>
                             <Typography variant="body2" sx={{ fontWeight: 700 }}>
@@ -1162,11 +1216,30 @@ const PayoneerSheetPage = () => {
                     </Stack>
                 </Box>
             ) : (
-                // DESKTOP TABLE VIEW
-                <TableContainer component={Paper}>
-                    <Table size="small">
+                // DESKTOP TABLE VIEW — scroll body only; TOTAL row fixed below (no sticky overlap)
+                <Paper sx={{ width: '100%', alignSelf: 'flex-start', flexShrink: 0, overflow: 'hidden' }}>
+                    <TableContainer
+                        sx={{
+                            height: tableBodyScrollHeight,
+                            maxHeight: PAYONEER_TABLE_BODY_MAX_HEIGHT,
+                            overflow: 'auto',
+                        }}
+                    >
+                    <Table size="small" stickyHeader sx={{ tableLayout: 'fixed', width: '100%' }}>
+                        <colgroup>
+                            <col style={{ width: '11%' }} />
+                            <col style={{ width: '10%' }} />
+                            <col style={{ width: '8%' }} />
+                            <col style={{ width: '8%' }} />
+                            <col style={{ width: '8%' }} />
+                            <col style={{ width: '9%' }} />
+                            <col style={{ width: '9%' }} />
+                            <col style={{ width: '11%' }} />
+                            <col style={{ width: '14%' }} />
+                            <col style={{ width: '12%' }} />
+                        </colgroup>
                         <TableHead>
-                            <TableRow>
+                            <TableRow sx={{ '& th': { bgcolor: 'background.paper', fontWeight: 700 } }}>
                                 <TableCell>Bank Account</TableCell>
                                 <TableCell>Payment Date</TableCell>
                                 <TableCell>Store</TableCell>
@@ -1342,31 +1415,65 @@ const PayoneerSheetPage = () => {
                                     </TableCell>
                                 </TableRow>
                             )}
-                            {mergedRows.length > 0 && (
-                                <TableRow sx={{ bgcolor: 'action.hover' }}>
-                                    <TableCell colSpan={3} sx={{ fontWeight: 700 }}>
-                                        TOTAL
-                                    </TableCell>
-                                    <TableCell sx={{ fontWeight: 700 }}>
-                                        {formatUsd(totals.amountUSD)}
-                                    </TableCell>
-                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
-                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
-                                    <TableCell sx={{ fontWeight: 700 }}>
-                                        {formatInr(totals.bankDepositINR)}
-                                    </TableCell>
-                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
-                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
-                                    <TableCell sx={{ color: 'text.secondary' }}>—</TableCell>
-                                </TableRow>
-                            )}
                         </TableBody>
                     </Table>
-                </TableContainer>
+                    </TableContainer>
+                    {mergedRows.length > 0 && (
+                        <Table
+                            size="small"
+                            sx={{
+                                tableLayout: 'fixed',
+                                width: '100%',
+                                borderTop: 1,
+                                borderColor: 'divider',
+                            }}
+                        >
+                            <colgroup>
+                                <col style={{ width: '11%' }} />
+                                <col style={{ width: '10%' }} />
+                                <col style={{ width: '8%' }} />
+                                <col style={{ width: '8%' }} />
+                                <col style={{ width: '8%' }} />
+                                <col style={{ width: '9%' }} />
+                                <col style={{ width: '9%' }} />
+                                <col style={{ width: '11%' }} />
+                                <col style={{ width: '14%' }} />
+                                <col style={{ width: '12%' }} />
+                            </colgroup>
+                            <TableFooter>
+                                <TableRow
+                                    sx={{
+                                        '& td': {
+                                            bgcolor: 'action.hover',
+                                            fontWeight: 700,
+                                            borderBottom: 'none',
+                                        },
+                                    }}
+                                >
+                                    <TableCell colSpan={3}>TOTAL</TableCell>
+                                    <TableCell>
+                                        <Tooltip title="All rows (includes unsaved eBay payouts)">
+                                            <span>{formatUsd(totals.amountUSD)}</span>
+                                        </Tooltip>
+                                    </TableCell>
+                                    <TableCell colSpan={2} sx={{ color: 'text.secondary' }}>
+                                        —
+                                    </TableCell>
+                                    <TableCell>
+                                        <Tooltip title="Saved Payoneer rows only (Save row lines excluded until saved)">
+                                            <span>{formatInr(totals.bankDepositINR, 2)}</span>
+                                        </Tooltip>
+                                    </TableCell>
+                                    <TableCell colSpan={3} />
+                                </TableRow>
+                            </TableFooter>
+                        </Table>
+                    )}
+                </Paper>
             )}
 
             {/* PAGINATION */}
-            <Box sx={{ mt: 2, display: 'flex', justifyContent: 'center' }}>
+            <Box sx={{ mt: 1.5, display: 'flex', justifyContent: 'center', flexShrink: 0 }}>
                 <Pagination
                     count={mergedTotalPages}
                     page={pagination.page}
@@ -1375,6 +1482,7 @@ const PayoneerSheetPage = () => {
                     showFirstButton
                     showLastButton
                 />
+            </Box>
             </Box>
 
             {/* CREATE DIALOG */}

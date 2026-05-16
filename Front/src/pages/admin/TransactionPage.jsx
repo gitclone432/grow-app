@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useSearchParams, Link as RouterLink } from 'react-router-dom';
 import {
     Box,
@@ -9,6 +9,7 @@ import {
     TableBody,
     TableCell,
     TableContainer,
+    TableFooter,
     TableHead,
     TablePagination,
     TableRow,
@@ -134,6 +135,13 @@ const MobileTransactionCard = ({ txn, onEdit, onDelete }) => {
         </Paper>
     );
 };
+
+/** Desktop table: header fixed, body scrolls after this many data rows; totals sit below scroll. */
+const TXN_TABLE_VISIBLE_ROWS = 10;
+const TXN_TABLE_ROW_HEIGHT_PX = 42;
+const TXN_TABLE_HEADER_HEIGHT_PX = 41;
+const TXN_TABLE_BODY_MAX_HEIGHT =
+    TXN_TABLE_HEADER_HEIGHT_PX + TXN_TABLE_VISIBLE_ROWS * TXN_TABLE_ROW_HEIGHT_PX;
 
 const TransactionPage = () => {
     const [searchParams] = useSearchParams();
@@ -412,6 +420,29 @@ const TransactionPage = () => {
         });
     };
 
+    const pageTotals = useMemo(() => {
+        const credit = transactions.reduce(
+            (acc, curr) => (curr.transactionType === 'Credit' ? acc + (curr.amount || 0) : acc),
+            0
+        );
+        const debit = transactions.reduce(
+            (acc, curr) => (curr.transactionType === 'Debit' ? acc + (curr.amount || 0) : acc),
+            0
+        );
+        return { credit, debit, net: credit - debit };
+    }, [transactions]);
+
+    const tableBodyScrollHeight = useMemo(() => {
+        const rowCount = transactions.length;
+        if (rowCount === 0) {
+            return TXN_TABLE_HEADER_HEIGHT_PX + TXN_TABLE_ROW_HEIGHT_PX;
+        }
+        if (rowCount > TXN_TABLE_VISIBLE_ROWS) {
+            return TXN_TABLE_BODY_MAX_HEIGHT;
+        }
+        return TXN_TABLE_HEADER_HEIGHT_PX + rowCount * TXN_TABLE_ROW_HEIGHT_PX;
+    }, [transactions.length]);
+
     if (pageLoading) return (
         <Box sx={{ display: 'flex', justifyContent: 'center', mt: 6 }}>
             <CircularProgress />
@@ -419,13 +450,24 @@ const TransactionPage = () => {
     );
 
     return (
-        <Box sx={{ p: { xs: 1.5, sm: 3 } }}>
+        <Box
+            sx={{
+                p: { xs: 1.5, sm: 2, md: 3 },
+                height: { md: 'calc(100dvh - 112px)' },
+                maxHeight: { md: 'calc(100dvh - 112px)' },
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: { md: 'hidden' },
+                boxSizing: 'border-box',
+            }}
+        >
             <Stack
                 direction={{ xs: 'column', sm: 'row' }}
                 spacing={1.5}
                 justifyContent="space-between"
                 alignItems={{ xs: 'stretch', sm: 'center' }}
                 mb={3}
+                sx={{ flexShrink: 0 }}
             >
                 <Typography variant="h5">Transactions</Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
@@ -463,7 +505,7 @@ const TransactionPage = () => {
             </Stack>
 
             {/* Filters Section */}
-            <Paper sx={{ p: 2, mb: 3 }}>
+            <Paper sx={{ p: 2, mb: 3, flexShrink: 0 }}>
                 <Grid container spacing={2} alignItems="center">
                     <Grid item xs={12} sm={6} md={2}>
                         <TextField
@@ -570,7 +612,7 @@ const TransactionPage = () => {
                 </Grid>
             </Paper>
 
-            <Accordion sx={{ mb: 3 }} defaultExpanded={false}>
+            <Accordion sx={{ mb: 3, flexShrink: 0 }} defaultExpanded={false}>
                 <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                     <Typography variant="h6">Bank Accounts & Credit Card Balance Summary</Typography>
                 </AccordionSummary>
@@ -712,11 +754,37 @@ const TransactionPage = () => {
                 )}
             </Box>
 
-            {/* DESKTOP TABLE VIEW */}
-            <TableContainer component={Paper} sx={{ display: { xs: 'none', md: 'block' }, overflowX: 'auto' }}>
-                <Table>
-                    <TableHead>
-                        <TableRow sx={{ bgcolor: '#f5f5f5' }}>
+            {/* DESKTOP TABLE VIEW — body scroll only; page total fixed below (no overlap) */}
+            <Box
+                sx={{
+                    display: { xs: 'none', md: 'flex' },
+                    flexDirection: 'column',
+                    flex: 1,
+                    minHeight: 0,
+                    overflow: 'hidden',
+                }}
+            >
+                <Paper sx={{ width: '100%', flexShrink: 0, overflow: 'hidden' }}>
+                    <TableContainer
+                        sx={{
+                            height: tableBodyScrollHeight,
+                            maxHeight: TXN_TABLE_BODY_MAX_HEIGHT,
+                            overflow: 'auto',
+                        }}
+                    >
+                        <Table size="small" stickyHeader sx={{ tableLayout: 'fixed', width: '100%' }}>
+                            <colgroup>
+                                <col style={{ width: '10%' }} />
+                                <col style={{ width: '14%' }} />
+                                <col style={{ width: '7%' }} />
+                                <col style={{ width: '9%' }} />
+                                <col style={{ width: '22%' }} />
+                                <col style={{ width: '10%' }} />
+                                <col style={{ width: '12%' }} />
+                                <col style={{ width: '16%' }} />
+                            </colgroup>
+                            <TableHead>
+                                <TableRow sx={{ '& th': { bgcolor: '#f5f5f5', fontWeight: 700 } }}>
                             <TableCell sortDirection={dateSortOrder}>
                                 <TableSortLabel
                                     active
@@ -795,48 +863,77 @@ const TransactionPage = () => {
                                 </TableCell>
                             </TableRow>
                         ))}
-                        {transactions.length > 0 && (
-                            <TableRow sx={{ backgroundColor: '#fafafa' }}>
-                                <TableCell colSpan={6} align="right">
-                                    <strong>Page Total:</strong>
-                                </TableCell>
-                                <TableCell align="right">
-                                    <Typography variant="body2" sx={{ fontWeight: 'bold', color: 'success.main', display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
-                                        <span>+</span> <span>₹{transactions.reduce((acc, curr) => curr.transactionType === 'Credit' ? acc + (curr.amount || 0) : acc, 0).toFixed(2)}</span>
-                                    </Typography>
-                                    <Typography variant="body2" sx={{ fontWeight: 'bold', color: 'error.main', display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
-                                        <span>-</span> <span>₹{transactions.reduce((acc, curr) => curr.transactionType === 'Debit' ? acc + (curr.amount || 0) : acc, 0).toFixed(2)}</span>
-                                    </Typography>
-                                    <Divider sx={{ my: 0.5 }} />
-                                    <Typography variant="body2" sx={{ fontWeight: 'bold', display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
-                                        <span>=</span> <span>₹{(
-                                            transactions.reduce((acc, curr) => curr.transactionType === 'Credit' ? acc + (curr.amount || 0) : acc, 0) -
-                                            transactions.reduce((acc, curr) => curr.transactionType === 'Debit' ? acc + (curr.amount || 0) : acc, 0)
-                                        ).toFixed(2)}</span>
-                                    </Typography>
-                                </TableCell>
-                                <TableCell></TableCell>
-                            </TableRow>
-                        )}
                         {transactions.length === 0 && (
                             <TableRow>
                                 <TableCell colSpan={8} align="center">No transactions found.</TableCell>
                             </TableRow>
                         )}
                     </TableBody>
-                </Table>
-            </TableContainer>
+                        </Table>
+                    </TableContainer>
+                    {transactions.length > 0 && (
+                        <Table
+                            size="small"
+                            sx={{
+                                tableLayout: 'fixed',
+                                width: '100%',
+                                borderTop: 1,
+                                borderColor: 'divider',
+                            }}
+                        >
+                            <colgroup>
+                                <col style={{ width: '10%' }} />
+                                <col style={{ width: '14%' }} />
+                                <col style={{ width: '7%' }} />
+                                <col style={{ width: '9%' }} />
+                                <col style={{ width: '22%' }} />
+                                <col style={{ width: '10%' }} />
+                                <col style={{ width: '12%' }} />
+                                <col style={{ width: '16%' }} />
+                            </colgroup>
+                            <TableFooter>
+                                <TableRow
+                                    sx={{
+                                        '& td': {
+                                            bgcolor: '#fafafa',
+                                            fontWeight: 700,
+                                            borderBottom: 'none',
+                                        },
+                                    }}
+                                >
+                                    <TableCell colSpan={6} align="right">
+                                        Page Total:
+                                    </TableCell>
+                                    <TableCell align="right">
+                                        <Typography variant="body2" sx={{ fontWeight: 'bold', color: 'success.main', display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
+                                            <span>+</span> <span>₹{pageTotals.credit.toFixed(2)}</span>
+                                        </Typography>
+                                        <Typography variant="body2" sx={{ fontWeight: 'bold', color: 'error.main', display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
+                                            <span>-</span> <span>₹{pageTotals.debit.toFixed(2)}</span>
+                                        </Typography>
+                                        <Divider sx={{ my: 0.5 }} />
+                                        <Typography variant="body2" sx={{ fontWeight: 'bold', display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
+                                            <span>=</span> <span>₹{pageTotals.net.toFixed(2)}</span>
+                                        </Typography>
+                                    </TableCell>
+                                    <TableCell />
+                                </TableRow>
+                            </TableFooter>
+                        </Table>
+                    )}
+                </Paper>
 
-            <TablePagination
-                component="div"
-                count={totalTransactions}
-                page={page}
-                onPageChange={handleChangePage}
-                rowsPerPage={rowsPerPage}
-                onRowsPerPageChange={handleChangeRowsPerPage}
-                rowsPerPageOptions={[]}
-                sx={{ display: { xs: 'none', md: 'block' } }}
-            />
+                <TablePagination
+                    component="div"
+                    count={totalTransactions}
+                    page={page}
+                    onPageChange={handleChangePage}
+                    rowsPerPage={rowsPerPage}
+                    onRowsPerPageChange={handleChangeRowsPerPage}
+                    rowsPerPageOptions={[]}
+                    sx={{ flexShrink: 0 }}
+                />
+            </Box>
             {/* Simple pagination for mobile */}
             <TablePagination
                 component="div"
@@ -892,7 +989,7 @@ const TransactionPage = () => {
                         {formData.transactionType === 'Debit' && editingSource !== 'PAYONEER' && (
                             <TextField
                                 select
-                                label="To (Credit Card Name)"
+                                label="To (Bank Account/Name)"
                                 fullWidth
                                 value={formData.creditCardName || ''}
                                 onChange={(e) => setFormData({ ...formData, creditCardName: e.target.value })}
