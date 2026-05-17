@@ -779,7 +779,7 @@ const TransactionPage = () => {
                             <TableCell>Source</TableCell>
                             <TableCell align="right">Amount</TableCell>
                             <TableCell align="right">
-                                <Tooltip title="Running balance for this bank account after each transaction (matches summary card when filtered to one account)">
+                                <Tooltip title="Running balance for that row's bank account (full history). Works with all banks or a single bank filter.">
                                     <span>Balance</span>
                                 </Tooltip>
                             </TableCell>

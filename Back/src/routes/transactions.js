@@ -66,10 +66,12 @@ function parseTransactionFilters(query) {
     if (transactionType) mongoQuery.transactionType = transactionType;
 
     const normalizedSortOrder = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
-    const sortQuery =
+    const dateSort =
         sortBy === 'date'
             ? { date: normalizedSortOrder, createdAt: normalizedSortOrder, _id: normalizedSortOrder }
             : { date: -1, createdAt: -1, _id: -1 };
+    // All banks: group by account so balance reads per bank; single bank: date only
+    const sortQuery = bankAccount ? dateSort : { bankAccount: 1, ...dateSort };
 
     return { mongoQuery, sortQuery };
 }
@@ -85,38 +87,12 @@ const SIGNED_AMOUNT_EXPR = {
 };
 
 function balanceScopeFromListQuery(listQuery = {}, bankObjectIds) {
-    const scope = { bankAccount: listQuery.bankAccount || { $in: bankObjectIds } };
-    if (listQuery.date) scope.date = listQuery.date;
-    return scope;
+    // Always use full account history (ignore list date/type filters) so balance is correct
+    // for both "all banks" and "single bank" views.
+    return { bankAccount: listQuery.bankAccount || { $in: bankObjectIds } };
 }
 
-async function openingBalanceByBankAccount(bankObjectIds, listQuery = {}) {
-    const periodStart = listQuery.date?.$gte;
-    if (!periodStart || !bankObjectIds.length) return new Map();
-
-    const accountMatch = listQuery.bankAccount
-        ? { bankAccount: listQuery.bankAccount }
-        : { bankAccount: { $in: bankObjectIds } };
-
-    const rows = await Transaction.aggregate([
-        {
-            $match: {
-                ...accountMatch,
-                date: { $lt: periodStart }
-            }
-        },
-        {
-            $group: {
-                _id: '$bankAccount',
-                opening: { $sum: SIGNED_AMOUNT_EXPR }
-            }
-        }
-    ]);
-
-    return new Map(rows.map((r) => [String(r._id), Math.round((r.opening || 0) * 100) / 100]));
-}
-
-/** Running balance per bank account after each transaction (respects list bank/date filters). */
+/** Running balance per bank account after each transaction (full history per account). */
 async function runningBalanceByTransactionId(transactions, listQuery = {}) {
     if (!transactions?.length) return new Map();
 
@@ -135,7 +111,6 @@ async function runningBalanceByTransactionId(transactions, listQuery = {}) {
 
     const bankObjectIds = [...accountIds].map((id) => new mongoose.Types.ObjectId(id));
     const scopeMatch = balanceScopeFromListQuery(listQuery, bankObjectIds);
-    const openingByAccount = await openingBalanceByBankAccount(bankObjectIds, listQuery);
 
     const windowRows = await Transaction.aggregate([
         { $match: scopeMatch },
@@ -158,11 +133,7 @@ async function runningBalanceByTransactionId(transactions, listQuery = {}) {
     ]);
 
     return new Map(
-        windowRows.map((r) => {
-            const opening = openingByAccount.get(String(r.bankAccount)) || 0;
-            const balance = (r.inScopeBalance || 0) + opening;
-            return [String(r._id), Math.round(balance * 100) / 100];
-        })
+        windowRows.map((r) => [String(r._id), Math.round((r.inScopeBalance || 0) * 100) / 100])
     );
 }
 
