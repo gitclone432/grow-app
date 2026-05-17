@@ -175,6 +175,24 @@ function attachRunningBalances(transactions, balanceMap) {
     });
 }
 
+/** CSV: group by bank, oldest first — running balance reads naturally top to bottom. */
+function sortRowsForCsvExport(rows) {
+    return [...rows].sort((a, b) => {
+        const bankCmp = String(a.bankAccount?.name || '').localeCompare(String(b.bankAccount?.name || ''));
+        if (bankCmp !== 0) return bankCmp;
+
+        const dateA = a.date ? new Date(a.date).getTime() : 0;
+        const dateB = b.date ? new Date(b.date).getTime() : 0;
+        if (dateA !== dateB) return dateA - dateB;
+
+        const createdA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const createdB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        if (createdA !== createdB) return createdA - createdB;
+
+        return String(a._id).localeCompare(String(b._id));
+    });
+}
+
 function csvEscape(cell) {
     if (cell === null || cell === undefined) return '';
     const s = String(cell);
@@ -402,12 +420,13 @@ router.get('/export-csv', requireAuth, requirePageAccess('Transactions'), async 
             console.error('Failed syncing Payoneer transactions before CSV export:', syncErr);
         }
 
-        const { mongoQuery, sortQuery } = parseTransactionFilters(req.query);
-        const rows = await Transaction.find(mongoQuery)
-            .populate('bankAccount', 'name')
-            .populate('creditCardName', 'name')
-            .sort(sortQuery)
-            .lean();
+        const { mongoQuery } = parseTransactionFilters(req.query);
+        const rows = sortRowsForCsvExport(
+            await Transaction.find(mongoQuery)
+                .populate('bankAccount', 'name')
+                .populate('creditCardName', 'name')
+                .lean()
+        );
 
         const balanceMap = await runningBalanceByTransactionId(rows, mongoQuery);
 
