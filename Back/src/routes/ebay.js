@@ -35,7 +35,7 @@ import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
 import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
-import { getSellersMatchingAllRoute } from '../utils/sellersAllScope.js';
+import { getSellersMatchingAllRoute, resolveStoreDisplayName } from '../utils/sellersAllScope.js';
 import ItemCategoryMap from '../models/ItemCategoryMap.js';
 import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
 import AutoCompatibilityBatchItem from '../models/AutoCompatibilityBatchItem.js';
@@ -11840,17 +11840,22 @@ router.get('/awaiting-sheet-summary', requireAuth, requirePageAccess('AwaitingSh
 // ============================================
 // GET ALL SELLING PRIVILEGES (BULK)
 // ============================================
-router.get('/selling/summary/all', requireAuth, async (req, res) => {
+router.get('/selling/summary/all', requireAuth, requirePageAccess('SellingPrivileges'), async (req, res) => {
   try {
-    const sellers = await Seller.find({}).populate('user');
-    console.log(`[Selling Limits] Fetching limits for ${sellers.length} sellers...`);
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email active')
+      : [];
+    console.log(`[Selling Limits] Fetching limits for ${sellers.length} stores...`);
 
     const results = await Promise.all(sellers.map(async (seller) => {
+      const sellerName = resolveStoreDisplayName(seller);
       try {
         if (!seller.ebayTokens?.access_token || !seller.ebayTokens?.refresh_token) {
           return {
             sellerId: seller._id,
-            sellerName: seller.user?.username || seller.sellerId || 'Unknown',
+            sellerName,
             notConnected: true,
           };
         }
@@ -11887,7 +11892,7 @@ router.get('/selling/summary/all', requireAuth, async (req, res) => {
         if (result.GetMyeBaySellingResponse.Ack === 'Failure') {
           return {
             sellerId: seller._id,
-            sellerName: seller.user?.username || seller.sellerId || 'Unknown',
+            sellerName,
             error: result.GetMyeBaySellingResponse.Errors?.LongMessage || 'eBay API Error'
           };
         }
@@ -11896,7 +11901,7 @@ router.get('/selling/summary/all', requireAuth, async (req, res) => {
 
         return {
           sellerId: seller._id,
-          sellerName: seller.user?.username || seller.sellerId || 'Unknown',
+          sellerName,
           quantityLimitRemaining: summary?.QuantityLimitRemaining,
           amountLimitRemaining: summary?.AmountLimitRemaining?._,
           amountLimitCurrency: summary?.AmountLimitRemaining?.$?.currencyID,
@@ -11911,11 +11916,13 @@ router.get('/selling/summary/all', requireAuth, async (req, res) => {
         console.error(`[Selling Limits] Failed for seller ${seller._id}:`, err.message);
         return {
           sellerId: seller._id,
-          sellerName: seller.user?.username || seller.sellerId || 'Unknown',
+          sellerName,
           error: err.message
         };
       }
     }));
+
+    results.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
 
     res.json({
       success: true,

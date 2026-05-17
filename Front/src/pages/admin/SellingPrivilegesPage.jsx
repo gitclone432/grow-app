@@ -50,8 +50,11 @@ export default function SellingPrivilegesPage() {
             setLoading(true);
             const res = await api.get('/ebay/selling/summary/all');
             if (res.data.success) {
-                setData(res.data.data);
-                setFilteredData(res.data.data);
+                const rows = (res.data.data || []).slice().sort((a, b) =>
+                    String(a.sellerName || '').localeCompare(String(b.sellerName || ''))
+                );
+                setData(rows);
+                setFilteredData(rows);
             }
         } catch (err) {
             console.error('Error fetching selling limits:', err);
@@ -147,11 +150,13 @@ export default function SellingPrivilegesPage() {
                             ) : (
                                 filteredData.map((row) => (
                                     <TableRow
-                                        key={row.sellerId || Math.random()}
+                                        key={String(row.sellerId)}
                                         sx={{ '&:last-child td, &:last-child th': { border: 0 } }}
                                     >
                                         <TableCell component="th" scope="row">
-                                            {row.sellerName}
+                                            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                                {row.sellerName || 'Unknown store'}
+                                            </Typography>
                                         </TableCell>
                                         <TableCell align="right">
                                             {formatNumber(row.quantityLimitRemaining)}

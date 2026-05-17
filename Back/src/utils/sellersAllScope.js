@@ -4,6 +4,18 @@ import UserSellerAssignment from '../models/UserSellerAssignment.js';
 
 const ORG_WIDE_SELLER_ROLES = new Set(['superadmin', 'listingadmin']);
 
+/** Display name for a store row (never use legacy/wrong sellerId fields). */
+export function resolveStoreDisplayName(seller) {
+    if (!seller) return 'Unknown store';
+    const u = seller.user;
+    if (u && typeof u === 'object') {
+        const name = String(u.username || u.email || '').trim();
+        if (name) return name;
+    }
+    if (seller._id) return `Store …${String(seller._id).slice(-6)}`;
+    return 'Unknown store';
+}
+
 /**
  * Same seller list as GET /api/sellers/all so Store Listings and the store
  * dropdown stay aligned.
