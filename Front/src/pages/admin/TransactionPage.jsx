@@ -35,7 +35,8 @@ import {
     Switch,
     useMediaQuery,
     useTheme,
-    CircularProgress
+    CircularProgress,
+    Alert
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -46,6 +47,35 @@ import PaymentsIcon from '@mui/icons-material/Payments';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import api from '../../lib/api';
 import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
+import { splitBankSellersField, isMongoIdString } from '../../lib/bankAccountSellers.js';
+
+function buildSellerOptions(sellersList) {
+    return (sellersList || [])
+        .map((s) => {
+            const username = (s.user?.username || '').trim();
+            const email = (s.user?.email || '').trim();
+            const label =
+                username && email && username.toLowerCase() !== email.toLowerCase()
+                    ? `${username} (${email})`
+                    : username || email;
+            if (!label) return null;
+            return { id: String(s._id), label };
+        })
+        .filter(Boolean);
+}
+
+function formatStoresOnBank(bankAccount, sellerOptions) {
+    if (!bankAccount?.sellers?.trim()) return '';
+    return splitBankSellersField(bankAccount.sellers)
+        .map((t) => {
+            if (isMongoIdString(t)) {
+                const o = sellerOptions.find((x) => x.id === t);
+                return o ? o.label : t;
+            }
+            return t;
+        })
+        .join(', ');
+}
 
 function formatBalance(value) {
     if (value == null || !Number.isFinite(value)) return '—';
@@ -58,7 +88,7 @@ function balanceColor(value) {
 }
 
 // Mobile Transaction Card Component
-const MobileTransactionCard = ({ txn, onEdit, onDelete }) => {
+const MobileTransactionCard = ({ txn, storesLabel, onEdit, onDelete }) => {
     const dateStr = txn.date ? new Date(txn.date).toLocaleDateString() : '-';
 
     return (
@@ -120,7 +150,12 @@ const MobileTransactionCard = ({ txn, onEdit, onDelete }) => {
                     <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
                         Bank Account
                     </Typography>
-                    <Typography variant="body2">{txn.bankAccount?.name || '-'}</Typography>
+                    <Typography variant="body2">{bankAccountMenuLabel(txn.bankAccount) || '-'}</Typography>
+                    {storesLabel ? (
+                        <Typography variant="caption" color="text.secondary" display="block">
+                            Stores: {storesLabel}
+                        </Typography>
+                    ) : null}
                 </Box>
 
                 <Box>
@@ -165,6 +200,7 @@ const TransactionPage = () => {
     const [creditCards, setCreditCards] = useState([]);
     const [balanceSummary, setBalanceSummary] = useState([]);
     const [creditCardSummary, setCreditCardSummary] = useState([]); // NEW
+    const [sellers, setSellers] = useState([]);
     const [openDialog, setOpenDialog] = useState(false);
     const [loading, setLoading] = useState(false);
     const [exportLoading, setExportLoading] = useState(false);
@@ -202,8 +238,13 @@ const TransactionPage = () => {
         fetchBankAccounts();
         fetchCreditCards();
         fetchBalanceSummary();
-        fetchCreditCardSummary(); // NEW
+        fetchCreditCardSummary();
+        api.get('/sellers/all')
+            .then(({ data }) => setSellers(Array.isArray(data) ? data : []))
+            .catch(() => setSellers([]));
     }, []);
+
+    const sellerOptions = useMemo(() => buildSellerOptions(sellers), [sellers]);
 
     // Deep link from Payoneer / Bank Accounts: /admin/transactions?bankAccount=<id>
     useEffect(() => {
@@ -445,7 +486,11 @@ const TransactionPage = () => {
 
     const visibleBalanceSummary = useMemo(() => {
         if (!filterBankAccount) return balanceSummary;
-        return balanceSummary.filter((item) => String(item._id) === String(filterBankAccount));
+        const fid = String(filterBankAccount);
+        return balanceSummary.filter(
+            (item) =>
+                item.bankAccountIds?.some((id) => String(id) === fid) || String(item._id) === fid
+        );
     }, [balanceSummary, filterBankAccount]);
 
     if (pageLoading) return (
@@ -497,6 +542,13 @@ const TransactionPage = () => {
                     </Button>
                 </Stack>
             </Stack>
+
+            <Alert severity="info" sx={{ mb: 2 }}>
+                One physical bank account should be one row in{' '}
+                <strong>Bank Accounts</strong> with multiple <strong>Stores</strong> selected there.
+                Same name + account number rows are merged for balance; add the account number to tell
+                same-name accounts apart.
+            </Alert>
 
             {/* Filters Section */}
             <Paper sx={{ p: 2, mb: 3 }}>
@@ -615,7 +667,7 @@ const TransactionPage = () => {
                     <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold' }}>Bank Accounts</Typography>
             <Grid container spacing={2} sx={{ mb: 3 }}>
                 {visibleBalanceSummary.map((item) => (
-                    <Grid item xs={12} sm={6} md={3} key={item._id}>
+                    <Grid item xs={12} sm={6} md={3} key={item.ledgerKey || item._id}>
                         <Card>
                             <CardContent sx={{ p: { xs: 1.5, sm: 2 } }}>
                                 <Stack direction="row" justifyContent="space-between" alignItems="center">
@@ -626,8 +678,24 @@ const TransactionPage = () => {
                                             noWrap
                                             sx={{ textOverflow: 'ellipsis', overflow: 'hidden' }}
                                         >
-                                            {item.bankName}
+                                            {item.label || item.bankName}
                                         </Typography>
+                                        {item.sellers ? (
+                                            <Typography
+                                                variant="caption"
+                                                color="text.secondary"
+                                                sx={{
+                                                    display: 'block',
+                                                    mt: 0.25,
+                                                    overflow: 'hidden',
+                                                    textOverflow: 'ellipsis',
+                                                    whiteSpace: 'nowrap'
+                                                }}
+                                            >
+                                                {formatStoresOnBank({ sellers: item.sellers }, sellerOptions) ||
+                                                    item.sellers}
+                                            </Typography>
+                                        ) : null}
                                         <Typography
                                             variant="h5"
                                             noWrap
@@ -740,6 +808,7 @@ const TransactionPage = () => {
                             <MobileTransactionCard
                                 key={txn._id}
                                 txn={txn}
+                                storesLabel={formatStoresOnBank(txn.bankAccount, sellerOptions)}
                                 onEdit={() => startEdit(txn)}
                                 onDelete={() => handleDelete(txn._id)}
                             />
@@ -779,7 +848,7 @@ const TransactionPage = () => {
                             <TableCell>Source</TableCell>
                             <TableCell align="right">Amount</TableCell>
                             <TableCell align="right">
-                                <Tooltip title="Running balance for that row's bank account (full history). Works with all banks or a single bank filter.">
+                                <Tooltip title="Running balance for this ledger (same bank name + account number merged). Full history per ledger.">
                                     <span>Balance</span>
                                 </Tooltip>
                             </TableCell>
@@ -790,7 +859,16 @@ const TransactionPage = () => {
                         {transactions.map((txn) => (
                             <TableRow key={txn._id}>
                                 <TableCell>{new Date(txn.date).toLocaleDateString()}</TableCell>
-                                <TableCell>{txn.bankAccount?.name}</TableCell>
+                                <TableCell>
+                                    <Typography variant="body2">
+                                        {bankAccountMenuLabel(txn.bankAccount)}
+                                    </Typography>
+                                    {formatStoresOnBank(txn.bankAccount, sellerOptions) ? (
+                                        <Typography variant="caption" color="text.secondary" display="block">
+                                            {formatStoresOnBank(txn.bankAccount, sellerOptions)}
+                                        </Typography>
+                                    ) : null}
+                                </TableCell>
                                 <TableCell>
                                     {txn.source === 'PAYONEER' ? (
                                         <Switch

@@ -244,6 +244,13 @@ const BankAccountsPage = () => {
                 </Stack>
             </Box>
 
+            <Alert severity="info" sx={{ mb: 2 }}>
+                Use <strong>one bank account row per real bank account</strong>. Link{' '}
+                <strong>multiple stores</strong> on that row (Stores dropdown). Do not create a
+                separate bank row for each store unless they are separate bank accounts — add the{' '}
+                <strong>account number</strong> so same-name accounts stay distinct in Transactions.
+            </Alert>
+
             <TableContainer component={Paper} sx={{ overflowX: 'auto' }}>
                 <Table>
                     <TableHead>

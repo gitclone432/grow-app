@@ -6,7 +6,9 @@ import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { createTransactionSchema, updateTransactionSchema } from '../schemas/index.js';
 import PayoneerRecord from '../models/PayoneerRecord.js';
+import BankAccount from '../models/BankAccount.js';
 import { importTransactionsFromGmail } from '../utils/gmailTransactionImporter.js';
+import { bankAccountLedgerKey, bankAccountDisplayLabel } from '../utils/bankAccountLedgerKey.js';
 
 const router = express.Router();
 
@@ -86,13 +88,73 @@ const SIGNED_AMOUNT_EXPR = {
     ]
 };
 
-function balanceScopeFromListQuery(listQuery = {}, bankObjectIds) {
-    // Always use full account history (ignore list date/type filters) so balance is correct
-    // for both "all banks" and "single bank" views.
-    return { bankAccount: listQuery.bankAccount || { $in: bankObjectIds } };
+function escapeRegex(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Running balance per bank account after each transaction (full history per account). */
+async function idsSharingLedgerKey(bank) {
+    if (!bank) return [];
+    const key = bankAccountLedgerKey(bank);
+    const byName = await BankAccount.find({
+        name: { $regex: new RegExp(`^${escapeRegex(String(bank.name || '').trim())}$`, 'i') }
+    }).lean();
+    return byName.filter((b) => bankAccountLedgerKey(b) === key).map((b) => b._id);
+}
+
+/** Include sibling rows (same name + account number) so balance is one ledger. */
+async function expandScopeBankAccountIds(listQuery, bankObjectIds) {
+    const seeds = listQuery.bankAccount
+        ? [await BankAccount.findById(listQuery.bankAccount).lean()].filter(Boolean)
+        : await BankAccount.find({ _id: { $in: bankObjectIds } }).lean();
+    const idSet = new Set();
+    for (const bank of seeds) {
+        const siblings = await idsSharingLedgerKey(bank);
+        for (const id of siblings) idSet.add(String(id));
+    }
+    return [...idSet].map((id) => new mongoose.Types.ObjectId(id));
+}
+
+/** One bank filter in UI includes all rows that share the same ledger (name + account #). */
+async function applyLedgerExpandedQuery(mongoQuery) {
+    const bankId = mongoQuery.bankAccount;
+    if (!bankId || bankId.$in) return mongoQuery;
+    const bank = await BankAccount.findById(bankId).lean();
+    if (!bank) return mongoQuery;
+    const ids = await idsSharingLedgerKey(bank);
+    const next = { ...mongoQuery };
+    next.bankAccount = { $in: ids };
+    return next;
+}
+
+const BALANCE_PARTITION_EXPR = {
+    $let: {
+        vars: {
+            n: { $toLower: { $trim: { input: { $ifNull: ['$ba.name', ''] } } } },
+            acct: { $ifNull: ['$ba.accountNumber', ''] }
+        },
+        in: {
+            $cond: [
+                { $gt: [{ $strLenCP: { $toString: '$$acct' } }, 0] },
+                {
+                    $concat: [
+                        '$$n',
+                        '::',
+                        {
+                            $replaceAll: {
+                                input: { $toString: '$$acct' },
+                                find: ' ',
+                                replacement: ''
+                            }
+                        }
+                    ]
+                },
+                { $concat: ['$$n', '::', { $toString: '$bankAccount' }] }
+            ]
+        }
+    }
+};
+
+/** Running balance per ledger (merged same name + account #); full history. */
 async function runningBalanceByTransactionId(transactions, listQuery = {}) {
     if (!transactions?.length) return new Map();
 
@@ -110,15 +172,30 @@ async function runningBalanceByTransactionId(transactions, listQuery = {}) {
     if (!txnIds.length || !accountIds.size) return new Map();
 
     const bankObjectIds = [...accountIds].map((id) => new mongoose.Types.ObjectId(id));
-    const scopeMatch = balanceScopeFromListQuery(listQuery, bankObjectIds);
+    const expandedIds = await expandScopeBankAccountIds(listQuery, bankObjectIds);
+    const scopeMatch = { bankAccount: { $in: expandedIds } };
 
     const windowRows = await Transaction.aggregate([
         { $match: scopeMatch },
+        {
+            $lookup: {
+                from: 'bankaccounts',
+                localField: 'bankAccount',
+                foreignField: '_id',
+                as: 'ba'
+            }
+        },
+        { $unwind: { path: '$ba', preserveNullAndEmptyArrays: true } },
+        {
+            $addFields: {
+                signedAmount: SIGNED_AMOUNT_EXPR,
+                balancePartition: BALANCE_PARTITION_EXPR
+            }
+        },
         { $sort: CHRONO_SORT },
-        { $addFields: { signedAmount: SIGNED_AMOUNT_EXPR } },
         {
             $setWindowFields: {
-                partitionBy: '$bankAccount',
+                partitionBy: '$balancePartition',
                 sortBy: CHRONO_SORT,
                 output: {
                     inScopeBalance: {
@@ -129,7 +206,7 @@ async function runningBalanceByTransactionId(transactions, listQuery = {}) {
             }
         },
         { $match: { _id: { $in: txnIds } } },
-        { $project: { _id: 1, bankAccount: 1, inScopeBalance: 1 } }
+        { $project: { _id: 1, inScopeBalance: 1 } }
     ]);
 
     return new Map(
@@ -146,10 +223,12 @@ function attachRunningBalances(transactions, balanceMap) {
     });
 }
 
-/** CSV: group by bank, oldest first — running balance reads naturally top to bottom. */
+/** CSV: group by ledger label, oldest first — running balance reads naturally top to bottom. */
 function sortRowsForCsvExport(rows) {
     return [...rows].sort((a, b) => {
-        const bankCmp = String(a.bankAccount?.name || '').localeCompare(String(b.bankAccount?.name || ''));
+        const bankCmp = bankAccountDisplayLabel(a.bankAccount).localeCompare(
+            bankAccountDisplayLabel(b.bankAccount)
+        );
         if (bankCmp !== 0) return bankCmp;
 
         const dateA = a.date ? new Date(a.date).getTime() : 0;
@@ -173,10 +252,10 @@ function csvEscape(cell) {
     return s;
 }
 
-// GET /api/transactions/balance-summary - Get balance per bank account
+// GET /api/transactions/balance-summary - Balance per ledger (merged same name + account #)
 router.get('/balance-summary', requireAuth, requirePageAccess('Transactions'), async (req, res) => {
     try {
-        const summary = await Transaction.aggregate([
+        const perAccount = await Transaction.aggregate([
             {
                 $group: {
                     _id: '$bankAccount',
@@ -200,19 +279,39 @@ router.get('/balance-summary', requireAuth, requirePageAccess('Transactions'), a
                     as: 'bankDetails'
                 }
             },
-            {
-                $unwind: '$bankDetails'
-            },
-            {
-                $project: {
-                    bankName: '$bankDetails.name',
-                    balance: { $subtract: ['$totalCredit', '$totalDebit'] }
-                }
-            },
-            {
-                $sort: { bankName: 1 }
-            }
+            { $unwind: '$bankDetails' }
         ]);
+
+        const groups = new Map();
+        for (const row of perAccount) {
+            const bank = row.bankDetails;
+            const ledgerKey = bankAccountLedgerKey(bank);
+            const balance = (row.totalCredit || 0) - (row.totalDebit || 0);
+            const existing = groups.get(ledgerKey) || {
+                _id: ledgerKey,
+                ledgerKey,
+                label: bankAccountDisplayLabel(bank),
+                bankName: bankAccountDisplayLabel(bank),
+                balance: 0,
+                bankAccountIds: [],
+                sellers: []
+            };
+            existing.balance += balance;
+            existing.bankAccountIds.push(String(row._id));
+            if (bank.sellers?.trim()) {
+                existing.sellers.push(bank.sellers.trim());
+            }
+            groups.set(ledgerKey, existing);
+        }
+
+        const summary = [...groups.values()]
+            .map((g) => ({
+                ...g,
+                balance: Math.round(g.balance * 100) / 100,
+                sellers: [...new Set(g.sellers)].join('; ')
+            }))
+            .sort((a, b) => a.label.localeCompare(b.label));
+
         res.json(summary);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -338,14 +437,15 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
         }
 
         const { page = 1, limit = 50 } = req.query;
-        const { mongoQuery: query, sortQuery } = parseTransactionFilters(req.query);
+        const { mongoQuery: rawQuery, sortQuery } = parseTransactionFilters(req.query);
+        const query = await applyLedgerExpandedQuery(rawQuery);
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
         const limitNum = parseInt(limit);
 
         const [transactions, totalTransactions, aggregateSum] = await Promise.all([
             Transaction.find(query)
-                .populate('bankAccount', 'name')
+                .populate('bankAccount', 'name accountNumber ifscCode sellers')
                 .populate('creditCardName', 'name')
                 .sort(sortQuery)
                 .skip(skip)
@@ -368,7 +468,7 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
         ]);
 
         const summary = aggregateSum[0] || { totalCredit: 0, totalDebit: 0 };
-        const balanceMap = await runningBalanceByTransactionId(transactions, query);
+        const balanceMap = await runningBalanceByTransactionId(transactions, rawQuery);
 
         res.json({
             transactions: attachRunningBalances(transactions, balanceMap),
@@ -391,19 +491,21 @@ router.get('/export-csv', requireAuth, requirePageAccess('Transactions'), async 
             console.error('Failed syncing Payoneer transactions before CSV export:', syncErr);
         }
 
-        const { mongoQuery } = parseTransactionFilters(req.query);
+        const { mongoQuery: rawQuery } = parseTransactionFilters(req.query);
+        const mongoQuery = await applyLedgerExpandedQuery(rawQuery);
         const rows = sortRowsForCsvExport(
             await Transaction.find(mongoQuery)
-                .populate('bankAccount', 'name')
+                .populate('bankAccount', 'name accountNumber ifscCode sellers')
                 .populate('creditCardName', 'name')
                 .lean()
         );
 
-        const balanceMap = await runningBalanceByTransactionId(rows, mongoQuery);
+        const balanceMap = await runningBalanceByTransactionId(rows, rawQuery);
 
         const header = [
             'Date',
             'Bank Account',
+            'Stores',
             'Type',
             'Amount (INR)',
             'Balance (INR)',
@@ -415,7 +517,8 @@ router.get('/export-csv', requireAuth, requirePageAccess('Transactions'), async 
 
         for (const t of rows) {
             const dateStr = t.date ? new Date(t.date).toISOString().slice(0, 10) : '';
-            const bank = t.bankAccount?.name || '';
+            const bank = bankAccountDisplayLabel(t.bankAccount) || t.bankAccount?.name || '';
+            const stores = (t.bankAccount?.sellers || '').replace(/\r?\n/g, ' ');
             const type = t.transactionType || '';
             const amount =
                 typeof t.amount === 'number' ? t.amount.toFixed(2) : String(t.amount ?? '');
@@ -426,7 +529,7 @@ router.get('/export-csv', requireAuth, requirePageAccess('Transactions'), async 
             const source =
                 t.source === 'PAYONEER' ? 'payoneer' : t.source === 'MANUAL' ? 'manual' : t.source || '';
             const card = t.creditCardName?.name || '';
-            lines.push([dateStr, bank, type, amount, balance, remark, source, card].map(csvEscape).join(','));
+            lines.push([dateStr, bank, stores, type, amount, balance, remark, source, card].map(csvEscape).join(','));
         }
 
         const csv = `\uFEFF${lines.join('\r\n')}`;
