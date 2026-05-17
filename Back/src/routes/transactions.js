@@ -73,12 +73,11 @@ function parseTransactionFilters(query) {
             ? { date: normalizedSortOrder, createdAt: normalizedSortOrder, _id: normalizedSortOrder }
             : { date: -1, createdAt: -1, _id: -1 };
 
-    return {
-        mongoQuery,
-        sortQuery: dateSort,
-        /** All-banks list: sort by merged ledger + date asc so balance column reads top→bottom. */
-        groupByLedger: !bankAccount
-    };
+    const groupByBank =
+        !bankAccount &&
+        (query.groupByBank === '1' || String(query.groupByBank).toLowerCase() === 'true');
+
+    return { mongoQuery, sortQuery: dateSort, groupByBank };
 }
 
 const CHRONO_SORT = { date: 1, createdAt: 1, _id: 1 };
@@ -252,8 +251,8 @@ function mapAggregateRowToTransaction(row) {
     return doc;
 }
 
-async function findTransactionsPage(query, { sortQuery, skip, limitNum, groupByLedger }) {
-    if (!groupByLedger) {
+async function findTransactionsPage(query, { sortQuery, skip, limitNum, groupByBank }) {
+    if (!groupByBank) {
         return Transaction.find(query)
             .populate('bankAccount', 'name accountNumber ifscCode sellers')
             .populate('creditCardName', 'name')
@@ -291,23 +290,38 @@ async function findTransactionsPage(query, { sortQuery, skip, limitNum, groupByL
     return rows.map(mapAggregateRowToTransaction);
 }
 
-/** CSV: group by ledger, oldest first — running balance reads naturally top to bottom. */
-function sortRowsForCsvExport(rows) {
-    return [...rows].sort((a, b) => {
-        const bankCmp = bankAccountLedgerKey(a.bankAccount).localeCompare(
-            bankAccountLedgerKey(b.bankAccount)
-        );
-        if (bankCmp !== 0) return bankCmp;
+/** Sort export rows by date (default) or by bank then date asc (readable balance). */
+function sortRowsForCsvExport(rows, sortQuery = { date: -1, createdAt: -1, _id: -1 }, groupByBank = false) {
+    if (groupByBank) {
+        return [...rows].sort((a, b) => {
+            const bankCmp = bankAccountLedgerKey(a.bankAccount).localeCompare(
+                bankAccountLedgerKey(b.bankAccount)
+            );
+            if (bankCmp !== 0) return bankCmp;
+            const dateA = a.date ? new Date(a.date).getTime() : 0;
+            const dateB = b.date ? new Date(b.date).getTime() : 0;
+            if (dateA !== dateB) return dateA - dateB;
+            const createdA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+            const createdB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+            if (createdA !== createdB) return createdA - createdB;
+            return String(a._id).localeCompare(String(b._id));
+        });
+    }
 
+    const dateDir = sortQuery.date === 1 ? 1 : -1;
+    const createdDir = sortQuery.createdAt === 1 ? 1 : -1;
+    const idDir = sortQuery._id === 1 ? 1 : -1;
+
+    return [...rows].sort((a, b) => {
         const dateA = a.date ? new Date(a.date).getTime() : 0;
         const dateB = b.date ? new Date(b.date).getTime() : 0;
-        if (dateA !== dateB) return dateA - dateB;
+        if (dateA !== dateB) return (dateA - dateB) * dateDir;
 
         const createdA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
         const createdB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-        if (createdA !== createdB) return createdA - createdB;
+        if (createdA !== createdB) return (createdA - createdB) * createdDir;
 
-        return String(a._id).localeCompare(String(b._id));
+        return String(a._id).localeCompare(String(b._id)) * idDir;
     });
 }
 
@@ -505,14 +519,14 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
         }
 
         const { page = 1, limit = 50 } = req.query;
-        const { mongoQuery: rawQuery, sortQuery, groupByLedger } = parseTransactionFilters(req.query);
+        const { mongoQuery: rawQuery, sortQuery, groupByBank } = parseTransactionFilters(req.query);
         const query = await applyLedgerExpandedQuery(rawQuery);
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
         const limitNum = parseInt(limit);
 
         const [transactions, totalTransactions, aggregateSum] = await Promise.all([
-            findTransactionsPage(query, { sortQuery, skip, limitNum, groupByLedger }),
+            findTransactionsPage(query, { sortQuery, skip, limitNum, groupByBank }),
             Transaction.countDocuments(query),
             Transaction.aggregate([
                 { $match: query },
@@ -539,7 +553,7 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
             currentPage: parseInt(page),
             totalTransactions,
             summary,
-            listSortMode: groupByLedger ? 'ledgerDateAsc' : 'date'
+            listGroupByBank: Boolean(groupByBank)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -555,13 +569,15 @@ router.get('/export-csv', requireAuth, requirePageAccess('Transactions'), async 
             console.error('Failed syncing Payoneer transactions before CSV export:', syncErr);
         }
 
-        const { mongoQuery: rawQuery } = parseTransactionFilters(req.query);
+        const { mongoQuery: rawQuery, sortQuery, groupByBank } = parseTransactionFilters(req.query);
         const mongoQuery = await applyLedgerExpandedQuery(rawQuery);
         const rows = sortRowsForCsvExport(
             await Transaction.find(mongoQuery)
                 .populate('bankAccount', 'name accountNumber ifscCode sellers')
                 .populate('creditCardName', 'name')
-                .lean()
+                .lean(),
+            sortQuery,
+            groupByBank
         );
 
         const balanceMap = await runningBalanceByTransactionId(rows, rawQuery);

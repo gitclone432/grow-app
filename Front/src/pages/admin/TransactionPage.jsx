@@ -36,7 +36,9 @@ import {
     useMediaQuery,
     useTheme,
     CircularProgress,
-    Alert
+    Alert,
+    FormControl,
+    FormLabel
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -220,7 +222,7 @@ const TransactionPage = () => {
     const [filterBankAccount, setFilterBankAccount] = useState('');
     const [filterType, setFilterType] = useState('');
     const [dateSortOrder, setDateSortOrder] = useState('desc');
-    const [listSortMode, setListSortMode] = useState('date');
+    const [groupByBank, setGroupByBank] = useState(false);
 
     // Editing state
     const [editingId, setEditingId] = useState(null);
@@ -255,7 +257,7 @@ const TransactionPage = () => {
 
     useEffect(() => {
         fetchTransactions();
-    }, [page, rowsPerPage, dateMode, filterSingleDate, filterStartDate, filterEndDate, filterBankAccount, filterType, dateSortOrder]);
+    }, [page, rowsPerPage, dateMode, filterSingleDate, filterStartDate, filterEndDate, filterBankAccount, filterType, dateSortOrder, groupByBank]);
 
     const fetchCreditCards = async () => {
         try {
@@ -282,7 +284,8 @@ const TransactionPage = () => {
         ...(filterBankAccount && { bankAccount: filterBankAccount }),
         ...(filterType && { transactionType: filterType }),
         sortBy: 'date',
-        sortOrder: dateSortOrder
+        sortOrder: dateSortOrder,
+        ...(!filterBankAccount && groupByBank ? { groupByBank: '1' } : {})
     });
 
     const fetchTransactions = async () => {
@@ -295,7 +298,6 @@ const TransactionPage = () => {
             const { data } = await api.get('/transactions', { params });
             setTransactions(data.transactions || []);
             setTotalTransactions(data.totalTransactions || 0);
-            setListSortMode(data.listSortMode || (filterBankAccount ? 'date' : 'ledgerDateAsc'));
             if (data.summary) {
                 setSummary(data.summary);
             }
@@ -321,6 +323,7 @@ const TransactionPage = () => {
         setFilterEndDate('');
         setFilterBankAccount('');
         setFilterType('');
+        setGroupByBank(false);
         setDateMode('range');
         setDateSortOrder('desc');
         setRowsPerPage(50);
@@ -328,12 +331,9 @@ const TransactionPage = () => {
     };
 
     const handleDateSortToggle = () => {
-        if (listSortMode === 'ledgerDateAsc') return;
         setDateSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
         setPage(0);
     };
-
-    const isLedgerDateAscList = listSortMode === 'ledgerDateAsc';
 
     const handleDownloadCsv = async () => {
         try {
@@ -498,6 +498,11 @@ const TransactionPage = () => {
         );
     }, [balanceSummary, filterBankAccount]);
 
+    const totalAllBanksBalance = useMemo(
+        () => balanceSummary.reduce((sum, item) => sum + (Number(item.balance) || 0), 0),
+        [balanceSummary]
+    );
+
     if (pageLoading) return (
         <Box sx={{ display: 'flex', justifyContent: 'center', mt: 6 }}>
             <CircularProgress />
@@ -552,15 +557,9 @@ const TransactionPage = () => {
                 One physical bank account should be one row in{' '}
                 <strong>Bank Accounts</strong> with multiple <strong>Stores</strong> selected there.
                 Same name + account number rows are merged for balance; add the account number to tell
-                same-name accounts apart.
-                {isLedgerDateAscList ? (
-                    <>
-                        {' '}
-                        With <strong>all banks</strong> shown, rows are sorted by bank then{' '}
-                        <strong>oldest date first</strong> so the Balance column reads correctly.
-                        Filter one bank to sort by newest/oldest date.
-                    </>
-                ) : null}
+                same-name accounts apart. <strong>Current balance</strong> for every bank is in the
+                summary below. Use <strong>Group by bank</strong> (all accounts) to read the Balance
+                column row by row; otherwise the list sorts by date.
             </Alert>
 
             {/* Filters Section */}
@@ -632,6 +631,27 @@ const TransactionPage = () => {
                             ))}
                         </TextField>
                     </Grid>
+                    {!filterBankAccount && (
+                        <Grid item xs={12} sm={6} md={3}>
+                            <FormControl fullWidth size="small">
+                                <FormLabel sx={{ fontSize: '0.75rem', mb: 0.5 }}>List layout</FormLabel>
+                                <ToggleButtonGroup
+                                    exclusive
+                                    fullWidth
+                                    size="small"
+                                    value={groupByBank ? 'bank' : 'date'}
+                                    onChange={(_, val) => {
+                                        if (!val) return;
+                                        setGroupByBank(val === 'bank');
+                                        setPage(0);
+                                    }}
+                                >
+                                    <ToggleButton value="date">By date</ToggleButton>
+                                    <ToggleButton value="bank">Group by bank</ToggleButton>
+                                </ToggleButtonGroup>
+                            </FormControl>
+                        </Grid>
+                    )}
                     <Grid item xs={12} sm={6} md={2}>
                         <TextField
                             select
@@ -678,6 +698,24 @@ const TransactionPage = () => {
                 <AccordionDetails>
                     {/* Balance Summary Cards */}
                     <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold' }}>Bank Accounts</Typography>
+            {!filterBankAccount && balanceSummary.length > 0 && (
+                <Card sx={{ mb: 2, bgcolor: 'primary.50', border: '1px solid', borderColor: 'primary.light' }}>
+                    <CardContent sx={{ py: 1.5 }}>
+                        <Typography variant="body2" color="text.secondary">
+                            Total balance (all bank accounts)
+                        </Typography>
+                        <Typography
+                            variant="h5"
+                            sx={{
+                                fontWeight: 800,
+                                color: totalAllBanksBalance >= 0 ? 'success.main' : 'error.main'
+                            }}
+                        >
+                            ₹{totalAllBanksBalance.toFixed(2)}
+                        </Typography>
+                    </CardContent>
+                </Card>
+            )}
             <Grid container spacing={2} sx={{ mb: 3 }}>
                 {visibleBalanceSummary.map((item) => (
                     <Grid item xs={12} sm={6} md={3} key={item.ledgerKey || item._id}>
@@ -845,9 +883,9 @@ const TransactionPage = () => {
                 <Table>
                     <TableHead>
                         <TableRow sx={{ bgcolor: '#f5f5f5' }}>
-                            <TableCell sortDirection={isLedgerDateAscList ? 'asc' : dateSortOrder}>
-                                {isLedgerDateAscList ? (
-                                    <Tooltip title="All banks: sorted by bank, then oldest first (for running balance)">
+                            <TableCell sortDirection={groupByBank && !filterBankAccount ? 'asc' : dateSortOrder}>
+                                {groupByBank && !filterBankAccount ? (
+                                    <Tooltip title="Grouped by bank: oldest first within each account (for Balance column)">
                                         <span>Date</span>
                                     </Tooltip>
                                 ) : (
@@ -867,7 +905,7 @@ const TransactionPage = () => {
                             <TableCell>Source</TableCell>
                             <TableCell align="right">Amount</TableCell>
                             <TableCell align="right">
-                                <Tooltip title="Running balance for this ledger (same bank name + account number merged). Full history per ledger.">
+                                <Tooltip title="Balance after this row's bank ledger (merged when same name + account #). Sorted by date, not bank.">
                                     <span>Balance</span>
                                 </Tooltip>
                             </TableCell>
