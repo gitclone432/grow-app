@@ -135,50 +135,6 @@ const MobileTransactionCard = ({ txn, onEdit, onDelete }) => {
     );
 };
 
-/** Desktop table: header fixed, body scrolls after this many data rows; totals sit below scroll. */
-const TXN_TABLE_VISIBLE_ROWS = 10;
-const TXN_TABLE_ROW_HEIGHT_PX = 42;
-const TXN_TABLE_HEADER_HEIGHT_PX = 41;
-const TXN_TABLE_BODY_MAX_HEIGHT =
-    TXN_TABLE_HEADER_HEIGHT_PX + TXN_TABLE_VISIBLE_ROWS * TXN_TABLE_ROW_HEIGHT_PX;
-
-/** Always-visible page totals (compact single row). */
-function TransactionPageTotalsBar({ credit, debit, net, sx = {} }) {
-    return (
-        <Box
-            sx={{
-                flexShrink: 0,
-                display: 'flex',
-                flexWrap: 'wrap',
-                alignItems: 'center',
-                justifyContent: 'flex-end',
-                gap: { xs: 1, sm: 2 },
-                px: 2,
-                py: 1,
-                bgcolor: '#fafafa',
-                borderLeft: 1,
-                borderRight: 1,
-                borderBottom: 1,
-                borderColor: 'divider',
-                ...sx,
-            }}
-        >
-            <Typography variant="body2" sx={{ fontWeight: 700, mr: { xs: 0, sm: 'auto' }, width: { xs: '100%', sm: 'auto' } }}>
-                Page Total
-            </Typography>
-            <Typography variant="body2" sx={{ fontWeight: 700, color: 'success.main' }}>
-                + ₹{credit.toFixed(2)}
-            </Typography>
-            <Typography variant="body2" sx={{ fontWeight: 700, color: 'error.main' }}>
-                − ₹{debit.toFixed(2)}
-            </Typography>
-            <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                = ₹{net.toFixed(2)}
-            </Typography>
-        </Box>
-    );
-}
-
 const TransactionPage = () => {
     const [searchParams] = useSearchParams();
     const theme = useTheme();
@@ -475,24 +431,13 @@ const TransactionPage = () => {
     );
 
     return (
-        <Box
-            sx={{
-                p: { xs: 1.5, sm: 2, md: 3 },
-                height: { md: 'calc(100dvh - 112px)' },
-                maxHeight: { md: 'calc(100dvh - 112px)' },
-                display: 'flex',
-                flexDirection: 'column',
-                overflow: { md: 'hidden' },
-                boxSizing: 'border-box',
-            }}
-        >
-            <Box sx={{ flexShrink: 0 }}>
+        <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>
             <Stack
                 direction={{ xs: 'column', sm: 'row' }}
                 spacing={1.5}
                 justifyContent="space-between"
                 alignItems={{ xs: 'stretch', sm: 'center' }}
-                mb={{ xs: 2, md: 1.5 }}
+                mb={2}
             >
                 <Typography variant="h5">Transactions</Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
@@ -530,7 +475,7 @@ const TransactionPage = () => {
             </Stack>
 
             {/* Filters Section */}
-            <Paper sx={{ p: { xs: 2, md: 1.5 }, mb: { xs: 2, md: 1 } }}>
+            <Paper sx={{ p: 2, mb: 3 }}>
                 <Grid container spacing={2} alignItems="center">
                     <Grid item xs={12} sm={6} md={2}>
                         <TextField
@@ -637,11 +582,9 @@ const TransactionPage = () => {
                 </Grid>
             </Paper>
 
-            <Accordion sx={{ mb: { xs: 2, md: 0 } }} defaultExpanded={false} disableGutters>
-                <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ minHeight: 44, '& .MuiAccordionSummary-content': { my: 0.5 } }}>
-                    <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-                        Bank Accounts & Credit Card Balance Summary
-                    </Typography>
+            <Accordion sx={{ mb: 3 }} defaultExpanded={false}>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                    <Typography variant="h6">Bank Accounts & Credit Card Balance Summary</Typography>
                 </AccordionSummary>
                 <AccordionDetails>
                     {/* Balance Summary Cards */}
@@ -758,19 +701,9 @@ const TransactionPage = () => {
             )}
             </AccordionDetails>
         </Accordion>
-            </Box>
 
             {/* MOBILE */}
-            <Box
-                sx={{
-                    display: { xs: 'flex', md: 'none' },
-                    flexDirection: 'column',
-                    flex: 1,
-                    minHeight: 0,
-                    overflow: 'hidden',
-                }}
-            >
-            <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', mb: 1 }}>
+            <Box sx={{ display: { xs: 'block', md: 'none' }, mb: 2 }}>
                 {transactions.length === 0 ? (
                     <Paper sx={{ p: 2, textAlign: 'center' }}>
                         <Typography variant="body2" color="text.secondary">
@@ -790,14 +723,6 @@ const TransactionPage = () => {
                     </Stack>
                 )}
             </Box>
-            {transactions.length > 0 && (
-                <TransactionPageTotalsBar
-                    credit={pageTotals.credit}
-                    debit={pageTotals.debit}
-                    net={pageTotals.net}
-                    sx={{ borderRadius: 1, border: 1, mb: 1 }}
-                />
-            )}
             <TablePagination
                 component="div"
                 count={totalTransactions}
@@ -806,43 +731,14 @@ const TransactionPage = () => {
                 rowsPerPage={rowsPerPage}
                 onRowsPerPageChange={handleChangeRowsPerPage}
                 rowsPerPageOptions={[]}
-                sx={{ flexShrink: 0, '.MuiTablePagination-actions': { ml: 0 } }}
+                sx={{ display: { xs: 'block', md: 'none' }, mb: 2, '.MuiTablePagination-actions': { ml: 0 } }}
                 labelRowsPerPage=""
             />
-            </Box>
 
-            {/* DESKTOP — grid: scrollable table + fixed totals + pagination */}
-            <Box
-                sx={{
-                    display: { xs: 'none', md: 'grid' },
-                    flex: 1,
-                    minHeight: 0,
-                    gridTemplateRows: 'auto auto auto',
-                    overflow: 'hidden',
-                }}
-            >
-                    <TableContainer
-                        component={Paper}
-                        sx={{
-                            minHeight: 0,
-                            overflow: 'auto',
-                            maxHeight: `min(${TXN_TABLE_BODY_MAX_HEIGHT}px, calc(100dvh - 300px))`,
-                            borderRadius: transactions.length > 0 ? '4px 4px 0 0' : 1,
-                        }}
-                    >
-                        <Table size="small" stickyHeader sx={{ tableLayout: 'fixed', width: '100%' }}>
-                            <colgroup>
-                                <col style={{ width: '10%' }} />
-                                <col style={{ width: '14%' }} />
-                                <col style={{ width: '7%' }} />
-                                <col style={{ width: '9%' }} />
-                                <col style={{ width: '22%' }} />
-                                <col style={{ width: '10%' }} />
-                                <col style={{ width: '12%' }} />
-                                <col style={{ width: '16%' }} />
-                            </colgroup>
-                            <TableHead>
-                                <TableRow sx={{ '& th': { bgcolor: '#f5f5f5', fontWeight: 700 } }}>
+            <TableContainer component={Paper} sx={{ display: { xs: 'none', md: 'block' }, overflowX: 'auto' }}>
+                <Table>
+                    <TableHead>
+                        <TableRow sx={{ bgcolor: '#f5f5f5' }}>
                             <TableCell sortDirection={dateSortOrder}>
                                 <TableSortLabel
                                     active
@@ -921,40 +817,45 @@ const TransactionPage = () => {
                                 </TableCell>
                             </TableRow>
                         ))}
+                        {transactions.length > 0 && (
+                            <TableRow sx={{ backgroundColor: '#fafafa' }}>
+                                <TableCell colSpan={6} align="right">
+                                    <strong>Page Total:</strong>
+                                </TableCell>
+                                <TableCell align="right">
+                                    <Typography variant="body2" sx={{ fontWeight: 'bold', color: 'success.main', display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
+                                        <span>+</span> <span>₹{pageTotals.credit.toFixed(2)}</span>
+                                    </Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 'bold', color: 'error.main', display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
+                                        <span>-</span> <span>₹{pageTotals.debit.toFixed(2)}</span>
+                                    </Typography>
+                                    <Divider sx={{ my: 0.5 }} />
+                                    <Typography variant="body2" sx={{ fontWeight: 'bold', display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
+                                        <span>=</span> <span>₹{pageTotals.net.toFixed(2)}</span>
+                                    </Typography>
+                                </TableCell>
+                                <TableCell />
+                            </TableRow>
+                        )}
                         {transactions.length === 0 && (
                             <TableRow>
                                 <TableCell colSpan={8} align="center">No transactions found.</TableCell>
                             </TableRow>
                         )}
                     </TableBody>
-                        </Table>
-                    </TableContainer>
+                </Table>
+            </TableContainer>
 
-                {transactions.length > 0 && (
-                    <TransactionPageTotalsBar
-                        credit={pageTotals.credit}
-                        debit={pageTotals.debit}
-                        net={pageTotals.net}
-                    />
-                )}
-
-                <TablePagination
-                    component="div"
-                    count={totalTransactions}
-                    page={page}
-                    onPageChange={handleChangePage}
-                    rowsPerPage={rowsPerPage}
-                    onRowsPerPageChange={handleChangeRowsPerPage}
-                    rowsPerPageOptions={[]}
-                    sx={{
-                        flexShrink: 0,
-                        border: 1,
-                        borderTop: 0,
-                        borderColor: 'divider',
-                        borderRadius: transactions.length > 0 ? '0 0 4px 4px' : 1,
-                    }}
-                />
-            </Box>
+            <TablePagination
+                component="div"
+                count={totalTransactions}
+                page={page}
+                onPageChange={handleChangePage}
+                rowsPerPage={rowsPerPage}
+                onRowsPerPageChange={handleChangeRowsPerPage}
+                rowsPerPageOptions={[]}
+                sx={{ display: { xs: 'none', md: 'block' } }}
+            />
 
             <Dialog
                 open={openDialog}
