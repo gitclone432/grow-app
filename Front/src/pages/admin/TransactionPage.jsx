@@ -443,6 +443,11 @@ const TransactionPage = () => {
         return { credit, debit, net: credit - debit };
     }, [transactions]);
 
+    const visibleBalanceSummary = useMemo(() => {
+        if (!filterBankAccount) return balanceSummary;
+        return balanceSummary.filter((item) => String(item._id) === String(filterBankAccount));
+    }, [balanceSummary, filterBankAccount]);
+
     if (pageLoading) return (
         <Box sx={{ display: 'flex', justifyContent: 'center', mt: 6 }}>
             <CircularProgress />
@@ -609,7 +614,7 @@ const TransactionPage = () => {
                     {/* Balance Summary Cards */}
                     <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold' }}>Bank Accounts</Typography>
             <Grid container spacing={2} sx={{ mb: 3 }}>
-                {balanceSummary.map((item) => (
+                {visibleBalanceSummary.map((item) => (
                     <Grid item xs={12} sm={6} md={3} key={item._id}>
                         <Card>
                             <CardContent sx={{ p: { xs: 1.5, sm: 2 } }}>
@@ -773,7 +778,11 @@ const TransactionPage = () => {
                             <TableCell>Remark</TableCell>
                             <TableCell>Source</TableCell>
                             <TableCell align="right">Amount</TableCell>
-                            <TableCell align="right">Balance</TableCell>
+                            <TableCell align="right">
+                                <Tooltip title="Running balance for this bank account after each transaction (matches summary card when filtered to one account)">
+                                    <span>Balance</span>
+                                </Tooltip>
+                            </TableCell>
                             <TableCell align="right">Actions</TableCell>
                         </TableRow>
                     </TableHead>

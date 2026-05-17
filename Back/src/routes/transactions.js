@@ -66,21 +66,58 @@ function parseTransactionFilters(query) {
     if (transactionType) mongoQuery.transactionType = transactionType;
 
     const normalizedSortOrder = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
-    const sortQuery = sortBy === 'date' ? { date: normalizedSortOrder } : { date: -1 };
+    const sortQuery =
+        sortBy === 'date'
+            ? { date: normalizedSortOrder, createdAt: normalizedSortOrder, _id: normalizedSortOrder }
+            : { date: -1, createdAt: -1, _id: -1 };
 
     return { mongoQuery, sortQuery };
 }
 
+const CHRONO_SORT = { date: 1, createdAt: 1, _id: 1 };
+
 const SIGNED_AMOUNT_EXPR = {
     $cond: [
         { $eq: ['$transactionType', 'Credit'] },
-        '$amount',
-        { $multiply: ['$amount', -1] }
+        { $toDouble: '$amount' },
+        { $multiply: [{ $toDouble: '$amount' }, -1] }
     ]
 };
 
-/** Running balance per bank account after each transaction (full account history). */
-async function runningBalanceByTransactionId(transactions) {
+function balanceScopeFromListQuery(listQuery = {}, bankObjectIds) {
+    const scope = { bankAccount: listQuery.bankAccount || { $in: bankObjectIds } };
+    if (listQuery.date) scope.date = listQuery.date;
+    return scope;
+}
+
+async function openingBalanceByBankAccount(bankObjectIds, listQuery = {}) {
+    const periodStart = listQuery.date?.$gte;
+    if (!periodStart || !bankObjectIds.length) return new Map();
+
+    const accountMatch = listQuery.bankAccount
+        ? { bankAccount: listQuery.bankAccount }
+        : { bankAccount: { $in: bankObjectIds } };
+
+    const rows = await Transaction.aggregate([
+        {
+            $match: {
+                ...accountMatch,
+                date: { $lt: periodStart }
+            }
+        },
+        {
+            $group: {
+                _id: '$bankAccount',
+                opening: { $sum: SIGNED_AMOUNT_EXPR }
+            }
+        }
+    ]);
+
+    return new Map(rows.map((r) => [String(r._id), Math.round((r.opening || 0) * 100) / 100]));
+}
+
+/** Running balance per bank account after each transaction (respects list bank/date filters). */
+async function runningBalanceByTransactionId(transactions, listQuery = {}) {
     if (!transactions?.length) return new Map();
 
     const txnIds = [];
@@ -91,38 +128,41 @@ async function runningBalanceByTransactionId(transactions) {
         const bankAccountId = t.bankAccount?._id || t.bankAccount;
         if (!bankAccountId) continue;
         txnIds.push(id instanceof mongoose.Types.ObjectId ? id : new mongoose.Types.ObjectId(String(id)));
-        accountIds.add(
-            bankAccountId instanceof mongoose.Types.ObjectId
-                ? String(bankAccountId)
-                : String(bankAccountId)
-        );
+        accountIds.add(String(bankAccountId));
     }
 
     if (!txnIds.length || !accountIds.size) return new Map();
 
     const bankObjectIds = [...accountIds].map((id) => new mongoose.Types.ObjectId(id));
+    const scopeMatch = balanceScopeFromListQuery(listQuery, bankObjectIds);
+    const openingByAccount = await openingBalanceByBankAccount(bankObjectIds, listQuery);
 
-    const rows = await Transaction.aggregate([
-        { $match: { bankAccount: { $in: bankObjectIds } } },
-        { $sort: { date: 1, _id: 1 } },
+    const windowRows = await Transaction.aggregate([
+        { $match: scopeMatch },
+        { $sort: CHRONO_SORT },
+        { $addFields: { signedAmount: SIGNED_AMOUNT_EXPR } },
         {
             $setWindowFields: {
                 partitionBy: '$bankAccount',
-                sortBy: { date: 1, _id: 1 },
+                sortBy: CHRONO_SORT,
                 output: {
-                    balance: {
-                        $sum: SIGNED_AMOUNT_EXPR,
+                    inScopeBalance: {
+                        $sum: '$signedAmount',
                         window: { documents: ['unbounded', 'current'] }
                     }
                 }
             }
         },
         { $match: { _id: { $in: txnIds } } },
-        { $project: { _id: 1, balance: 1 } }
+        { $project: { _id: 1, bankAccount: 1, inScopeBalance: 1 } }
     ]);
 
     return new Map(
-        rows.map((r) => [String(r._id), Math.round((r.balance || 0) * 100) / 100])
+        windowRows.map((r) => {
+            const opening = openingByAccount.get(String(r.bankAccount)) || 0;
+            const balance = (r.inScopeBalance || 0) + opening;
+            return [String(r._id), Math.round(balance * 100) / 100];
+        })
     );
 }
 
@@ -339,7 +379,7 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
         ]);
 
         const summary = aggregateSum[0] || { totalCredit: 0, totalDebit: 0 };
-        const balanceMap = await runningBalanceByTransactionId(transactions);
+        const balanceMap = await runningBalanceByTransactionId(transactions, query);
 
         res.json({
             transactions: attachRunningBalances(transactions, balanceMap),
@@ -369,7 +409,7 @@ router.get('/export-csv', requireAuth, requirePageAccess('Transactions'), async 
             .sort(sortQuery)
             .lean();
 
-        const balanceMap = await runningBalanceByTransactionId(rows);
+        const balanceMap = await runningBalanceByTransactionId(rows, mongoQuery);
 
         const header = [
             'Date',
