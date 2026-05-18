@@ -23,6 +23,7 @@ import {
     TableBody,
     TableCell,
     TableContainer,
+    TableFooter,
     TableHead,
     TableRow,
     TextField,
@@ -50,13 +51,13 @@ import {
     YAxis,
 } from 'recharts';
 import api from '../../lib/api';
-import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
 
 const PAYMENT_METHODS = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Payoneer', 'Other'];
 
 const CHART_COLORS = ['#1976d2', '#ed6c02', '#2e7d32', '#9c27b0', '#d32f2f', '#0288d1', '#6d4c41', '#455a64'];
 const EMPTY_FILTERS = {
-    date: '',
+    from: '',
+    to: '',
     paidBy: '',
     category: '',
     search: '',
@@ -70,17 +71,11 @@ const EMPTY_FORM = {
     category: '',
     remark: '',
     paymentMethod: '',
-    bankAccount: '',
 };
 
 function formatInr(value) {
     const n = Number(value) || 0;
     return n.toLocaleString('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 });
-}
-
-function bankLabel(account) {
-    if (!account) return '—';
-    return bankAccountMenuLabel(account);
 }
 
 function MonthSpendChart({ data, height = 280 }) {
@@ -273,7 +268,6 @@ const ExtraExpensePage = () => {
     });
     const [charts, setCharts] = useState({ byMonth: [], byCategory: [] });
     const [filterOptions, setFilterOptions] = useState({ paidByOptions: [], categoryOptions: [] });
-    const [bankAccounts, setBankAccounts] = useState([]);
     const [filters, setFilters] = useState(EMPTY_FILTERS);
 
     const [openDialog, setOpenDialog] = useState(false);
@@ -289,7 +283,8 @@ const ExtraExpensePage = () => {
 
     const queryParams = useMemo(() => {
         const p = {};
-        if (filters.date) p.date = filters.date;
+        if (filters.from) p.from = filters.from;
+        if (filters.to) p.to = filters.to;
         if (filters.paidBy) p.paidBy = filters.paidBy;
         if (filters.category) p.category = filters.category;
         if (filters.search.trim()) p.search = filters.search.trim();
@@ -323,18 +318,6 @@ const ExtraExpensePage = () => {
         fetchExpenses();
     }, [fetchExpenses]);
 
-    useEffect(() => {
-        const loadBanks = async () => {
-            try {
-                const { data } = await api.get('/bank-accounts');
-                setBankAccounts(Array.isArray(data) ? data : []);
-            } catch (error) {
-                console.error('Failed to load bank accounts:', error);
-            }
-        };
-        loadBanks();
-    }, []);
-
     const categoryFilterOptions = useMemo(() => {
         return (filterOptions.categoryOptions || []).filter(Boolean).sort();
     }, [filterOptions.categoryOptions]);
@@ -345,7 +328,7 @@ const ExtraExpensePage = () => {
             const payload = {
                 ...formData,
                 amount: parseFloat(formData.amount),
-                bankAccount: formData.bankAccount || null,
+                bankAccount: null,
             };
             if (editingId) {
                 await api.put(`/extra-expenses/${editingId}`, payload);
@@ -412,7 +395,6 @@ const ExtraExpensePage = () => {
             category: expense.category || '',
             remark: expense.remark || '',
             paymentMethod: expense.paymentMethod || '',
-            bankAccount: expense.bankAccount?._id || expense.bankAccount || '',
         });
         setOpenDialog(true);
     };
@@ -427,7 +409,12 @@ const ExtraExpensePage = () => {
     };
 
     const hasActiveFilters = Boolean(
-        filters.date || filters.paidBy || filters.category || filters.search.trim()
+        filters.from || filters.to || filters.paidBy || filters.category || filters.search.trim()
+    );
+
+    const listTotal = useMemo(
+        () => expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0),
+        [expenses]
     );
 
     const toggleChartsSection = () => {
@@ -531,13 +518,24 @@ const ExtraExpensePage = () => {
                 <Grid container spacing={1.5}>
                     <Grid item xs={12} sm={6} md={2}>
                         <TextField
-                            label="Date"
+                            label="From"
                             type="date"
                             size="small"
                             fullWidth
                             InputLabelProps={{ shrink: true }}
-                            value={filters.date}
-                            onChange={(e) => setFilters((f) => ({ ...f, date: e.target.value }))}
+                            value={filters.from}
+                            onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
+                        />
+                    </Grid>
+                    <Grid item xs={12} sm={6} md={2}>
+                        <TextField
+                            label="To"
+                            type="date"
+                            size="small"
+                            fullWidth
+                            InputLabelProps={{ shrink: true }}
+                            value={filters.to}
+                            onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
                         />
                     </Grid>
                     <Grid item xs={12} sm={6} md={2}>
@@ -758,6 +756,14 @@ const ExtraExpensePage = () => {
                                 onDelete={() => handleDelete(expense._id)}
                             />
                         ))}
+                        <Paper sx={{ p: 1.5, borderRadius: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                                Total ({expenses.length})
+                            </Typography>
+                            <Typography variant="subtitle1" sx={{ fontWeight: 800, color: 'error.main' }}>
+                                {formatInr(listTotal)}
+                            </Typography>
+                        </Paper>
                     </Stack>
                 )}
             </Box>
@@ -808,6 +814,38 @@ const ExtraExpensePage = () => {
                             </TableRow>
                         )}
                     </TableBody>
+                    {expenses.length > 0 ? (
+                        <TableFooter>
+                            <TableRow sx={{ bgcolor: 'grey.100' }}>
+                                <TableCell sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
+                                <TableCell sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
+                                <TableCell
+                                    align="right"
+                                    sx={{
+                                        fontWeight: 700,
+                                        borderTop: '2px solid',
+                                        borderColor: 'divider',
+                                        whiteSpace: 'nowrap',
+                                    }}
+                                >
+                                    Total ({expenses.length})
+                                </TableCell>
+                                <TableCell
+                                    align="right"
+                                    sx={{
+                                        fontWeight: 800,
+                                        color: 'error.main',
+                                        borderTop: '2px solid',
+                                        borderColor: 'divider',
+                                        whiteSpace: 'nowrap',
+                                    }}
+                                >
+                                    {formatInr(listTotal)}
+                                </TableCell>
+                                <TableCell colSpan={4} sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
+                            </TableRow>
+                        </TableFooter>
+                    ) : null}
                 </Table>
             </TableContainer>
 
@@ -866,19 +904,6 @@ const ExtraExpensePage = () => {
                                 <MenuItem value="">None</MenuItem>
                                 {PAYMENT_METHODS.map((m) => (
                                     <MenuItem key={m} value={m}>{m}</MenuItem>
-                                ))}
-                            </Select>
-                        </FormControl>
-                        <FormControl fullWidth>
-                            <InputLabel>Bank account</InputLabel>
-                            <Select
-                                label="Bank account"
-                                value={formData.bankAccount}
-                                onChange={(e) => setFormData({ ...formData, bankAccount: e.target.value })}
-                            >
-                                <MenuItem value="">None</MenuItem>
-                                {bankAccounts.map((b) => (
-                                    <MenuItem key={b._id} value={b._id}>{bankLabel(b)}</MenuItem>
                                 ))}
                             </Select>
                         </FormControl>
