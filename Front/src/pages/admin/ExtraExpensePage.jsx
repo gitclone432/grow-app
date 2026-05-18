@@ -52,27 +52,14 @@ import {
 import api from '../../lib/api';
 import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
 
-const EXPENSE_CATEGORIES = [
-    'Office & Supplies',
-    'Software & Tools',
-    'Marketing',
-    'Travel',
-    'Salaries & Contractors',
-    'Utilities',
-    'Shipping & Logistics',
-    'Other',
-];
-
 const PAYMENT_METHODS = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Payoneer', 'Other'];
 
 const CHART_COLORS = ['#1976d2', '#ed6c02', '#2e7d32', '#9c27b0', '#d32f2f', '#0288d1', '#6d4c41', '#455a64'];
 const EMPTY_FILTERS = {
-    from: '',
-    to: '',
+    date: '',
     paidBy: '',
     category: '',
     search: '',
-    bankAccount: '',
 };
 
 const EMPTY_FORM = {
@@ -250,7 +237,7 @@ const MobileExpenseCard = ({ expense, onEdit, onDelete }) => {
                     </Typography>
                 </Stack>
                 <Box>
-                    <Typography variant="caption" color="text.secondary">Expenditure</Typography>
+                    <Typography variant="caption" color="text.secondary">Name of Expenditure</Typography>
                     <Typography variant="body2" sx={{ fontWeight: 600 }}>{expense.name}</Typography>
                 </Box>
                 <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
@@ -258,7 +245,6 @@ const MobileExpenseCard = ({ expense, onEdit, onDelete }) => {
                     {expense.paymentMethod ? <Chip size="small" variant="outlined" label={expense.paymentMethod} /> : null}
                 </Stack>
                 <Typography variant="body2"><strong>Paid by:</strong> {expense.paidBy}</Typography>
-                <Typography variant="body2"><strong>Bank:</strong> {bankLabel(expense.bankAccount)}</Typography>
                 {expense.remark ? (
                     <Typography variant="caption" color="text.secondary">{expense.remark}</Typography>
                 ) : null}
@@ -303,12 +289,10 @@ const ExtraExpensePage = () => {
 
     const queryParams = useMemo(() => {
         const p = {};
-        if (filters.from) p.from = filters.from;
-        if (filters.to) p.to = filters.to;
+        if (filters.date) p.date = filters.date;
         if (filters.paidBy) p.paidBy = filters.paidBy;
         if (filters.category) p.category = filters.category;
         if (filters.search.trim()) p.search = filters.search.trim();
-        if (filters.bankAccount) p.bankAccount = filters.bankAccount;
         return p;
     }, [filters]);
 
@@ -352,9 +336,7 @@ const ExtraExpensePage = () => {
     }, []);
 
     const categoryFilterOptions = useMemo(() => {
-        const fromDb = filterOptions.categoryOptions || [];
-        const merged = new Set([...EXPENSE_CATEGORIES, ...fromDb]);
-        return Array.from(merged).filter(Boolean).sort();
+        return (filterOptions.categoryOptions || []).filter(Boolean).sort();
     }, [filterOptions.categoryOptions]);
 
     const handleSubmit = async () => {
@@ -445,7 +427,7 @@ const ExtraExpensePage = () => {
     };
 
     const hasActiveFilters = Boolean(
-        filters.from || filters.to || filters.paidBy || filters.category || filters.search.trim() || filters.bankAccount
+        filters.date || filters.paidBy || filters.category || filters.search.trim()
     );
 
     const toggleChartsSection = () => {
@@ -549,24 +531,13 @@ const ExtraExpensePage = () => {
                 <Grid container spacing={1.5}>
                     <Grid item xs={12} sm={6} md={2}>
                         <TextField
-                            label="From"
+                            label="Date"
                             type="date"
                             size="small"
                             fullWidth
                             InputLabelProps={{ shrink: true }}
-                            value={filters.from}
-                            onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
-                        />
-                    </Grid>
-                    <Grid item xs={12} sm={6} md={2}>
-                        <TextField
-                            label="To"
-                            type="date"
-                            size="small"
-                            fullWidth
-                            InputLabelProps={{ shrink: true }}
-                            value={filters.to}
-                            onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
+                            value={filters.date}
+                            onChange={(e) => setFilters((f) => ({ ...f, date: e.target.value }))}
                         />
                     </Grid>
                     <Grid item xs={12} sm={6} md={2}>
@@ -601,24 +572,8 @@ const ExtraExpensePage = () => {
                         </FormControl>
                     </Grid>
                     <Grid item xs={12} sm={6} md={2}>
-                        <FormControl size="small" fullWidth>
-                            <InputLabel>Bank account</InputLabel>
-                            <Select
-                                label="Bank account"
-                                value={filters.bankAccount}
-                                onChange={(e) => setFilters((f) => ({ ...f, bankAccount: e.target.value }))}
-                            >
-                                <MenuItem value="">All</MenuItem>
-                                <MenuItem value="__none__">None</MenuItem>
-                                {bankAccounts.map((b) => (
-                                    <MenuItem key={b._id} value={b._id}>{bankLabel(b)}</MenuItem>
-                                ))}
-                            </Select>
-                        </FormControl>
-                    </Grid>
-                    <Grid item xs={12} sm={6} md={2}>
                         <TextField
-                            label="Search name"
+                            label="Search expenditure name"
                             size="small"
                             fullWidth
                             value={filters.search}
@@ -812,12 +767,11 @@ const ExtraExpensePage = () => {
                     <TableHead>
                         <TableRow sx={{ bgcolor: '#f5f5f5' }}>
                             <TableCell>Date</TableCell>
-                            <TableCell>Name</TableCell>
+                            <TableCell>Name of Expenditure</TableCell>
                             <TableCell>Category</TableCell>
                             <TableCell align="right">Amount</TableCell>
                             <TableCell>Paid by</TableCell>
                             <TableCell>Payment</TableCell>
-                            <TableCell>Bank account</TableCell>
                             <TableCell>Remark</TableCell>
                             <TableCell align="right">Actions</TableCell>
                         </TableRow>
@@ -833,7 +787,6 @@ const ExtraExpensePage = () => {
                                 </TableCell>
                                 <TableCell>{expense.paidBy}</TableCell>
                                 <TableCell>{expense.paymentMethod || '—'}</TableCell>
-                                <TableCell>{bankLabel(expense.bankAccount)}</TableCell>
                                 <TableCell sx={{ maxWidth: 200 }}>
                                     <Typography variant="body2" noWrap title={expense.remark || ''}>
                                         {expense.remark || '—'}
@@ -851,7 +804,7 @@ const ExtraExpensePage = () => {
                         ))}
                         {expenses.length === 0 && (
                             <TableRow>
-                                <TableCell colSpan={9} align="center">No expenses found.</TableCell>
+                                <TableCell colSpan={8} align="center">No expenses found.</TableCell>
                             </TableRow>
                         )}
                     </TableBody>
@@ -877,7 +830,7 @@ const ExtraExpensePage = () => {
                             onChange={(e) => setFormData({ ...formData, date: e.target.value })}
                         />
                         <TextField
-                            label="Name of expenditure"
+                            label="Name of Expenditure"
                             fullWidth
                             value={formData.name}
                             onChange={(e) => setFormData({ ...formData, name: e.target.value })}
@@ -895,19 +848,14 @@ const ExtraExpensePage = () => {
                             value={formData.paidBy}
                             onChange={(e) => setFormData({ ...formData, paidBy: e.target.value })}
                         />
-                        <FormControl fullWidth>
-                            <InputLabel>Category</InputLabel>
-                            <Select
-                                label="Category"
-                                value={formData.category}
-                                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                            >
-                                <MenuItem value="">None</MenuItem>
-                                {EXPENSE_CATEGORIES.map((cat) => (
-                                    <MenuItem key={cat} value={cat}>{cat}</MenuItem>
-                                ))}
-                            </Select>
-                        </FormControl>
+                        <TextField
+                            label="Category"
+                            fullWidth
+                            value={formData.category}
+                            onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                            placeholder="Type category (e.g. Office, Marketing)"
+                            helperText="Enter any category name — saved expenses build the filter list"
+                        />
                         <FormControl fullWidth>
                             <InputLabel>Payment method</InputLabel>
                             <Select

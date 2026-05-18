@@ -4,8 +4,6 @@ import ExtraExpense from '../models/ExtraExpense.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { createExtraExpenseSchema, updateExtraExpenseSchema } from '../schemas/index.js';
-import { bankAccountDisplayLabel } from '../utils/bankAccountLedgerKey.js';
-
 const router = express.Router();
 
 function escapeCsvCell(value) {
@@ -24,25 +22,46 @@ function startOfYear(d = new Date()) {
 
 function buildListFilter(query) {
     const filter = {};
+    const dateBounds = {};
+
+    const dateOnly = String(query.date || '').trim();
+    if (dateOnly) {
+        const day = new Date(dateOnly);
+        if (!Number.isNaN(day.getTime())) {
+            const dayStart = new Date(day);
+            dayStart.setHours(0, 0, 0, 0);
+            const dayEnd = new Date(day);
+            dayEnd.setHours(23, 59, 59, 999);
+            dateBounds.$gte = dayStart;
+            dateBounds.$lte = dayEnd;
+        }
+    }
+
     const from = String(query.from || '').trim();
     const to = String(query.to || '').trim();
-    if (from || to) {
+    if (from) {
+        const fromDate = new Date(from);
+        if (!Number.isNaN(fromDate.getTime())) {
+            fromDate.setHours(0, 0, 0, 0);
+            dateBounds.$gte = dateBounds.$gte
+                ? new Date(Math.max(dateBounds.$gte.getTime(), fromDate.getTime()))
+                : fromDate;
+        }
+    }
+    if (to) {
+        const toDate = new Date(to);
+        if (!Number.isNaN(toDate.getTime())) {
+            toDate.setHours(23, 59, 59, 999);
+            dateBounds.$lte = dateBounds.$lte
+                ? new Date(Math.min(dateBounds.$lte.getTime(), toDate.getTime()))
+                : toDate;
+        }
+    }
+
+    if (dateBounds.$gte || dateBounds.$lte) {
         filter.date = {};
-        if (from) {
-            const fromDate = new Date(from);
-            if (!Number.isNaN(fromDate.getTime())) {
-                fromDate.setHours(0, 0, 0, 0);
-                filter.date.$gte = fromDate;
-            }
-        }
-        if (to) {
-            const toDate = new Date(to);
-            if (!Number.isNaN(toDate.getTime())) {
-                toDate.setHours(23, 59, 59, 999);
-                filter.date.$lte = toDate;
-            }
-        }
-        if (!Object.keys(filter.date).length) delete filter.date;
+        if (dateBounds.$gte) filter.date.$gte = dateBounds.$gte;
+        if (dateBounds.$lte) filter.date.$lte = dateBounds.$lte;
     }
 
     const paidBy = String(query.paidBy || '').trim();
@@ -60,18 +79,6 @@ function buildListFilter(query) {
     const search = String(query.search || '').trim();
     if (search) {
         filter.name = { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
-    }
-
-    const bankAccount = String(query.bankAccount || '').trim();
-    if (bankAccount) {
-        if (bankAccount === '__none__') {
-            filter.$and = filter.$and || [];
-            filter.$and.push({
-                $or: [{ bankAccount: null }, { bankAccount: { $exists: false } }],
-            });
-        } else if (mongoose.Types.ObjectId.isValid(bankAccount)) {
-            filter.bankAccount = bankAccount;
-        }
     }
 
     return filter;
@@ -192,19 +199,15 @@ router.get('/export-csv', requireAuth, requirePageAccess('ExtraExpenses'), async
 
         const header = [
             'Date',
-            'Name',
+            'Name of Expenditure',
             'Category',
             'Amount (INR)',
             'Paid By',
             'Payment Method',
-            'Bank Account',
             'Remark',
         ];
         const lines = [header.join(',')];
         for (const e of expenses) {
-            const bankLabel = e.bankAccount
-                ? bankAccountDisplayLabel(e.bankAccount)
-                : '';
             lines.push([
                 e.date ? new Date(e.date).toISOString().slice(0, 10) : '',
                 e.name,
@@ -212,7 +215,6 @@ router.get('/export-csv', requireAuth, requirePageAccess('ExtraExpenses'), async
                 Number(e.amount || 0).toFixed(2),
                 e.paidBy,
                 e.paymentMethod || '',
-                bankLabel,
                 e.remark || '',
             ].map(escapeCsvCell).join(','));
         }

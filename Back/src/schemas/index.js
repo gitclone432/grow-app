@@ -120,7 +120,7 @@ export const updateTransactionSchema = createTransactionSchema.partial();
 
 const extraExpenseFields = {
   date: z.string().min(1, 'Date is required'),
-  name: z.string().min(1, 'Name is required'),
+  name: z.string().min(1, 'Name of Expenditure is required'),
   amount: z.coerce.number({ invalid_type_error: 'Amount must be a number' }),
   paidBy: z.string().min(1, 'paidBy is required'),
   category: z.string().optional(),
