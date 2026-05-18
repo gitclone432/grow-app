@@ -20,6 +20,48 @@ function startOfYear(d = new Date()) {
     return new Date(d.getFullYear(), 0, 1);
 }
 
+function endOfMonth(d = new Date()) {
+    return new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+}
+
+function endOfYear(d = new Date()) {
+    return new Date(d.getFullYear(), 11, 31, 23, 59, 59, 999);
+}
+
+function sameCalendarMonth(a, b) {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+}
+
+function sameCalendarYear(a, b) {
+    return a.getFullYear() === b.getFullYear();
+}
+
+function summaryFromExpenses(expenses, rangeStart, rangeEnd) {
+    let total = 0;
+    let count = 0;
+    for (const e of expenses) {
+        const d = e.date ? new Date(e.date) : null;
+        if (!d || Number.isNaN(d.getTime())) continue;
+        if (rangeStart && d < rangeStart) continue;
+        if (rangeEnd && d > rangeEnd) continue;
+        total += Number(e.amount) || 0;
+        count += 1;
+    }
+    return {
+        total: Math.round(total * 100) / 100,
+        count,
+    };
+}
+
+function getFilterDateBounds(filter) {
+    const date = filter?.date;
+    if (!date) return null;
+    return {
+        start: date.$gte instanceof Date ? date.$gte : null,
+        end: date.$lte instanceof Date ? date.$lte : null,
+    };
+}
+
 function buildListFilter(query) {
     const filter = {};
     const dateBounds = {};
@@ -110,24 +152,6 @@ function aggregateByCategory(expenses) {
     return Array.from(map.values()).sort((a, b) => b.amount - a.amount);
 }
 
-async function periodSummary(startDate) {
-    const agg = await ExtraExpense.aggregate([
-        { $match: { date: { $gte: startDate } } },
-        {
-            $group: {
-                _id: null,
-                total: { $sum: '$amount' },
-                count: { $sum: 1 },
-            },
-        },
-    ]);
-    const row = agg[0] || { total: 0, count: 0 };
-    return {
-        total: Math.round((row.total || 0) * 100) / 100,
-        count: row.count || 0,
-    };
-}
-
 function normalizeExpensePayload(body) {
     const bankAccountRaw = body.bankAccount;
     let bankAccount = null;
@@ -156,10 +180,20 @@ router.get('/', requireAuth, requirePageAccess('ExtraExpenses'), async (req, res
             .lean();
 
         const filteredTotal = expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-        const [monthSummary, yearSummary] = await Promise.all([
-            periodSummary(startOfMonth()),
-            periodSummary(startOfYear()),
-        ]);
+
+        const now = new Date();
+        let monthSummary = summaryFromExpenses(expenses, startOfMonth(now), endOfMonth(now));
+        let yearSummary = summaryFromExpenses(expenses, startOfYear(now), endOfYear(now));
+
+        const dateBounds = getFilterDateBounds(filter);
+        if (dateBounds?.start && dateBounds?.end) {
+            if (sameCalendarMonth(dateBounds.start, dateBounds.end)) {
+                monthSummary = summaryFromExpenses(expenses, dateBounds.start, dateBounds.end);
+            }
+            if (sameCalendarYear(dateBounds.start, dateBounds.end)) {
+                yearSummary = summaryFromExpenses(expenses, dateBounds.start, dateBounds.end);
+            }
+        }
 
         const paidByOptions = await ExtraExpense.distinct('paidBy');
         const categoryOptions = await ExtraExpense.distinct('category');

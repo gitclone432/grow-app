@@ -473,6 +473,7 @@ const ExtraExpensePage = () => {
                         </Typography>
                         <Typography variant="caption" color="text.secondary">
                             {summary.monthCount} expense{summary.monthCount === 1 ? '' : 's'}
+                            {hasActiveFilters ? ' · matches filters' : ''}
                         </Typography>
                     </Paper>
                 </Grid>
@@ -484,6 +485,7 @@ const ExtraExpensePage = () => {
                         </Typography>
                         <Typography variant="caption" color="text.secondary">
                             {summary.yearCount} expense{summary.yearCount === 1 ? '' : 's'}
+                            {hasActiveFilters ? ' · matches filters' : ''}
                         </Typography>
                     </Paper>
                 </Grid>
@@ -817,10 +819,7 @@ const ExtraExpensePage = () => {
                     {expenses.length > 0 ? (
                         <TableFooter>
                             <TableRow sx={{ bgcolor: 'grey.100' }}>
-                                <TableCell sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
-                                <TableCell sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
                                 <TableCell
-                                    align="right"
                                     sx={{
                                         fontWeight: 700,
                                         borderTop: '2px solid',
@@ -830,6 +829,8 @@ const ExtraExpensePage = () => {
                                 >
                                     Total ({expenses.length})
                                 </TableCell>
+                                <TableCell sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
+                                <TableCell sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
                                 <TableCell
                                     align="right"
                                     sx={{
