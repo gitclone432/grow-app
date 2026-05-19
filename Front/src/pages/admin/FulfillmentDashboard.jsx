@@ -755,6 +755,28 @@ function getOrderEarnings(order) {
   return order.orderEarnings;
 }
 
+function isEbayAuOrder(order) {
+  const mp = String(order?.purchaseMarketplaceId || '').toUpperCase();
+  return mp === 'EBAY_AU' || mp === 'EBAY_AUS';
+}
+
+function formatMoneyAmount(value, prefix = '$') {
+  if (value === null || value === undefined || value === '') return '-';
+  const num = Number(value);
+  if (Number.isNaN(num)) return '-';
+  return `${prefix}${num.toFixed(2)}`;
+}
+
+/** AU line items (subtotal, fees, etc.) in AUD; other marketplaces use $. */
+function formatOrderLocalAmount(order, value) {
+  return formatMoneyAmount(value, isEbayAuOrder(order) ? 'AU$' : '$');
+}
+
+/** Ad fees and earnings are stored in USD for all marketplaces. */
+function formatOrderUsdAmount(order, value) {
+  return formatMoneyAmount(value, '$');
+}
+
 function formatFullShippingAddress(order, options = {}) {
   const { includePhone = true } = options;
   if (!order) return '';
@@ -778,7 +800,7 @@ function formatFullShippingAddress(order, options = {}) {
 }
 
 // --- MOBILE ORDER CARD COMPONENT ---
-function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages, formatCurrency, thumbnailImages }) {
+function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages, thumbnailImages }) {
   const [expanded, setExpanded] = useState(false);
 
   const productTitle = order.lineItems?.[0]?.title || order.productName || 'Unknown Product';
@@ -899,7 +921,7 @@ function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages, format
                 color: getOrderEarnings(order) >= 0 ? 'success.main' : 'error.main'
               }}
             >
-              {formatCurrency(getOrderEarnings(order))}
+              {formatOrderUsdAmount(order, getOrderEarnings(order))}
             </Typography>
           </Box>
           <Box>
@@ -926,23 +948,23 @@ function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages, format
             <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 1 }}>
               <Box>
                 <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>Subtotal</Typography>
-                <Typography variant="body2" sx={{ fontSize: '0.8rem' }}>{formatCurrency(order.subtotal)}</Typography>
+                <Typography variant="body2" sx={{ fontSize: '0.8rem' }}>{formatOrderLocalAmount(order, order.subtotal)}</Typography>
               </Box>
               <Box>
                 <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>Shipping</Typography>
-                <Typography variant="body2" sx={{ fontSize: '0.8rem' }}>{formatCurrency(order.shipping)}</Typography>
+                <Typography variant="body2" sx={{ fontSize: '0.8rem' }}>{formatOrderLocalAmount(order, order.shipping)}</Typography>
               </Box>
               <Box>
                 <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>Transaction Fees</Typography>
                 <Typography variant="body2" sx={{ fontSize: '0.8rem', color: 'error.main' }}>
-                  {formatCurrency(order.transactionFees)}
+                  {formatOrderLocalAmount(order, order.transactionFees)}
                 </Typography>
               </Box>
               {order.adFeeGeneral > 0 && (
                 <Box>
                   <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>Ad Fees</Typography>
                   <Typography variant="body2" sx={{ fontSize: '0.8rem', color: 'error.main' }}>
-                    {formatCurrency(order.adFeeGeneral)}
+                    {formatOrderUsdAmount(order, order.adFeeGeneral)}
                   </Typography>
                 </Box>
               )}
@@ -2346,7 +2368,7 @@ function FulfillmentDashboard() {
           setSnackbarMsg(
             skipped
               ? 'Poll skipped — last sync was less than 1 minute ago. Try again shortly or use Resync.'
-              : 'No orders returned from eBay for this date range. If your PC clock is set ahead (e.g. year 2026), fix system date/time and use Resync 30D.'
+              : 'No new orders from eBay for this window — you are likely already up to date. Poll only checks after your latest stored order (end time is ~5 minutes before now). Use Resync 30D if you expect missing orders. If polls never return anything, verify server/PC date and time are correct.'
           );
           setSnackbarSeverity('info');
         }
@@ -2521,12 +2543,13 @@ function FulfillmentDashboard() {
       )));
 
       const fee = data?.adFeeGeneral ?? data?.order?.adFeeGeneral;
+      const src = data?.lookupSource ? ` via ${data.lookupSource}` : '';
       if (fee > 0) {
-        setSnackbarMsg(`Ad fee $${Number(fee).toFixed(2)} loaded for ${order.orderId}`);
+        setSnackbarMsg(`Ad fee $${Number(fee).toFixed(2)} loaded for ${order.orderId}${src}`);
       } else if (data?.lookupSource === 'not_found') {
         setSnackbarMsg(`No promoted-listing (AD_FEE) charge found on eBay for ${order.orderId}.`);
       } else {
-        setSnackbarMsg(`Ad fee is $0 for ${order.orderId} (checked on eBay).`);
+        setSnackbarMsg(`Ad fee is $0 for ${order.orderId} (checked on eBay${src}).`);
       }
       setSnackbarSeverity('success');
       setSnackbarOpen(true);
@@ -2796,13 +2819,6 @@ function FulfillmentDashboard() {
   };
 
 
-  const formatCurrency = useCallback((value) => {
-    if (value === null || value === undefined || value === '') return '-';
-    const num = Number(value);
-    if (Number.isNaN(num)) return '-';
-    return `$${num.toFixed(2)}`;
-  }, []);
-
   const formatFieldName = (fieldName) => {
     // Convert camelCase to readable format
     return fieldName
@@ -2814,12 +2830,6 @@ function FulfillmentDashboard() {
   // Earnings Breakdown Modal Component
   const EarningsBreakdownModal = ({ open, order, onClose }) => {
     if (!order) return null;
-
-    const formatCurrency = (value) => {
-      if (value == null || value === '') return '-';
-      const num = parseFloat(value);
-      return isNaN(num) ? '-' : `$${num.toFixed(2)}`;
-    };
 
     return (
       <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
@@ -2842,30 +2852,30 @@ function FulfillmentDashboard() {
           <Stack spacing={1} sx={{ mb: 3 }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography>Subtotal</Typography>
-              <Typography fontWeight="medium">{formatCurrency(order.subtotal)}</Typography>
+              <Typography fontWeight="medium">{formatOrderLocalAmount(order, order.subtotal)}</Typography>
             </Box>
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography>Shipping</Typography>
-              <Typography fontWeight="medium">{formatCurrency(order.shipping)}</Typography>
+              <Typography fontWeight="medium">{formatOrderLocalAmount(order, order.shipping)}</Typography>
             </Box>
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography>Sales tax*</Typography>
-              <Typography fontWeight="medium">{formatCurrency(order.salesTax)}</Typography>
+              <Typography fontWeight="medium">{formatOrderLocalAmount(order, order.salesTax)}</Typography>
             </Box>
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography>Discount</Typography>
-              <Typography fontWeight="medium" color="success.main">{formatCurrency(order.discount)}</Typography>
+              <Typography fontWeight="medium" color="success.main">{formatOrderLocalAmount(order, order.discount)}</Typography>
             </Box>
             {order.refundTotalToBuyerUSD > 0 && (
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Typography>Refund</Typography>
-                <Typography fontWeight="medium" color="error.main">-{formatCurrency(order.refundTotalToBuyerUSD || order.refundTotalToBuyer)}</Typography>
+                <Typography fontWeight="medium" color="error.main">-{formatOrderUsdAmount(order, order.refundTotalToBuyerUSD || order.refundTotalToBuyer)}</Typography>
               </Box>
             )}
             <Divider sx={{ my: 1 }} />
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography fontWeight="bold">Order total**</Typography>
-              <Typography fontWeight="bold">{formatCurrency(order.orderTotalAfterRefund)}</Typography>
+              <Typography fontWeight="bold">{formatOrderLocalAmount(order, order.orderTotalAfterRefund)}</Typography>
             </Box>
           </Stack>
 
@@ -2876,12 +2886,12 @@ function FulfillmentDashboard() {
           <Stack spacing={1}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography>Order total</Typography>
-              <Typography fontWeight="medium">{formatCurrency(order.orderTotalAfterRefund)}</Typography>
+              <Typography fontWeight="medium">{formatOrderLocalAmount(order, order.orderTotalAfterRefund)}</Typography>
             </Box>
             {order.ebayPaidTaxRefundUSD > 0 && (
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Typography>Refund (eBay paid)</Typography>
-                <Typography fontWeight="medium" color="success.main">{formatCurrency(order.ebayPaidTaxRefundUSD || order.ebayPaidTaxRefund)}</Typography>
+                <Typography fontWeight="medium" color="success.main">{formatOrderUsdAmount(order, order.ebayPaidTaxRefundUSD || order.ebayPaidTaxRefund)}</Typography>
               </Box>
             )}
             <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 2 }}>
@@ -2890,7 +2900,7 @@ function FulfillmentDashboard() {
             </Box>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 4 }}>
               <Typography variant="body2">Sales tax</Typography>
-              <Typography variant="body2" color="error.main">-{formatCurrency(order.salesTax)}</Typography>
+              <Typography variant="body2" color="error.main">-{formatOrderLocalAmount(order, order.salesTax)}</Typography>
             </Box>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 2 }}>
               <Typography variant="body2" color="text.secondary">Selling costs</Typography>
@@ -2898,19 +2908,19 @@ function FulfillmentDashboard() {
             </Box>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 4 }}>
               <Typography variant="body2">Transaction fees</Typography>
-              <Typography variant="body2" color="error.main">-{formatCurrency(order.transactionFees)}</Typography>
+              <Typography variant="body2" color="error.main">-{formatOrderLocalAmount(order, order.transactionFees)}</Typography>
             </Box>
             {order.adFeeGeneral > 0 && (
               <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 4 }}>
                 <Typography variant="body2">Ad Fee General</Typography>
-                <Typography variant="body2" color="error.main">-{formatCurrency(order.adFeeGeneral)}</Typography>
+                <Typography variant="body2" color="error.main">-{formatOrderUsdAmount(order, order.adFeeGeneral)}</Typography>
               </Box>
             )}
             <Divider sx={{ my: 1 }} />
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography fontWeight="bold" color="success.main">Order earnings</Typography>
               <Typography fontWeight="bold" color={getOrderEarnings(order) >= 0 ? 'success.main' : 'error.main'}>
-                {formatCurrency(getOrderEarnings(order))}
+                {formatOrderUsdAmount(order, getOrderEarnings(order))}
               </Typography>
             </Box>
           </Stack>
@@ -3787,7 +3797,6 @@ function FulfillmentDashboard() {
                       onCopy={handleCopy}
                       onMessage={handleOpenMessageDialog}
                       onViewImages={handleViewImages}
-                      formatCurrency={formatCurrency}
                       thumbnailImages={thumbnailImages}
                     />
                   ))}
@@ -4290,33 +4299,33 @@ function FulfillmentDashboard() {
                             order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
                               <TableCell align="right">
                                 <Typography variant="body2" fontWeight="medium">
-                                  {formatCurrency(order.subtotal)}
+                                  {formatOrderLocalAmount(order, order.subtotal)}
                                 </Typography>
                               </TableCell>
                             ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
                           )}
                           {visibleColumnsSet.has('shipping') && (
                             order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">{formatCurrency(order.shipping)}</TableCell>
+                              <TableCell align="right">{formatOrderLocalAmount(order, order.shipping)}</TableCell>
                             ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
                           )}
                           {visibleColumnsSet.has('salesTax') && (
                             order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">{formatCurrency(order.salesTax)}</TableCell>
+                              <TableCell align="right">{formatOrderLocalAmount(order, order.salesTax)}</TableCell>
                             ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
                           )}
                           {visibleColumnsSet.has('discount') && (
                             order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
                               <TableCell align="right">
                                 <Typography variant="body2">
-                                  {formatCurrency(order.discount)}
+                                  {formatOrderLocalAmount(order, order.discount)}
                                 </Typography>
                               </TableCell>
                             ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
                           )}
                           {visibleColumnsSet.has('transactionFees') && (
                             order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">{formatCurrency(order.transactionFees)}</TableCell>
+                              <TableCell align="right">{formatOrderLocalAmount(order, order.transactionFees)}</TableCell>
                             ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
                           )}
                           {visibleColumnsSet.has('adFeeGeneral') && (
@@ -4329,7 +4338,7 @@ function FulfillmentDashboard() {
                                     color: order.adFeeGeneral ? 'error.main' : 'text.secondary'
                                   }}
                                 >
-                                  {order.adFeeGeneral ? formatCurrency(order.adFeeGeneral) : '-'}
+                                  {order.adFeeGeneral ? formatOrderUsdAmount(order, order.adFeeGeneral) : '-'}
                                 </Typography>
                               </TableCell>
                             ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
@@ -4398,7 +4407,7 @@ function FulfillmentDashboard() {
                             <TableCell align="right">
                               {order.refundItemAmount ? (
                                 <Typography variant="body2" sx={{ color: 'warning.main', fontWeight: 'medium' }}>
-                                  {formatCurrency(order.refundItemAmount)}
+                                  {formatOrderLocalAmount(order, order.refundItemAmount)}
                                 </Typography>
                               ) : (
                                 <Typography variant="body2" color="text.secondary">-</Typography>
@@ -4409,7 +4418,7 @@ function FulfillmentDashboard() {
                             <TableCell align="right">
                               {order.refundTaxAmount ? (
                                 <Typography variant="body2" sx={{ color: 'info.main', fontWeight: 'medium' }}>
-                                  {formatCurrency(order.refundTaxAmount)}
+                                  {formatOrderLocalAmount(order, order.refundTaxAmount)}
                                 </Typography>
                               ) : (
                                 <Typography variant="body2" color="text.secondary">-</Typography>
@@ -4426,7 +4435,7 @@ function FulfillmentDashboard() {
                                     color: 'error.main'
                                   }}
                                 >
-                                  {formatCurrency(order.adFeeGeneral)}
+                                  {formatOrderUsdAmount(order, order.adFeeGeneral)}
                                 </Typography>
                               ) : (
                                 <Button
@@ -4452,7 +4461,7 @@ function FulfillmentDashboard() {
                                     fontWeight: 'medium'
                                   }}
                                 >
-                                  {formatCurrency(order.orderTotalAfterRefund)}
+                                  {formatOrderLocalAmount(order, order.orderTotalAfterRefund)}
                                 </Typography>
                               ) : (
                                 <Typography variant="body2" color="text.secondary">-</Typography>
@@ -4472,9 +4481,7 @@ function FulfillmentDashboard() {
                               >
                                 {order.orderPaymentStatus === 'FULLY_REFUNDED'
                                   ? '$0.00'
-                                  : order.orderEarnings != null
-                                    ? `$${parseFloat(order.orderEarnings).toFixed(2)}`
-                                    : '-'}
+                                  : formatOrderUsdAmount(order, order.orderEarnings)}
                               </Typography>
                             </TableCell>
                           )}

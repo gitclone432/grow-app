@@ -1622,8 +1622,81 @@ async function fetchAllAdFees(accessToken, marketplaceIds = ['EBAY_US'], sinceDa
   }
 }
 
+/**
+ * AD_FEE for promoted listings often appears only under NON_SALE_CHARGE (not orderId filter).
+ * Paginate until the order is found or pages are exhausted (same data source as backfill).
+ */
+function nonSaleChargeFilterForOrder(creationDate) {
+  const base = 'transactionType:{NON_SALE_CHARGE}';
+  if (!creationDate) return base;
+  const d = new Date(creationDate);
+  if (Number.isNaN(d.getTime())) return base;
+  const start = new Date(d);
+  start.setUTCDate(start.getUTCDate() - 14);
+  const end = new Date(d);
+  end.setUTCDate(end.getUTCDate() + 120);
+  return `${base},transactionDate:[${start.toISOString()}..${end.toISOString()}]`;
+}
+
+async function fetchOrderAdFeeFromNonSaleCharges(accessToken, orderId, marketplaceIds, creationDate = null) {
+  const ids = [...new Set((marketplaceIds || ['EBAY_US']).map(normalizeFinancesMarketplaceId))];
+  const filterValue = nonSaleChargeFilterForOrder(creationDate);
+  let best = { adFeeGeneral: 0, marketplace: ids[0], source: 'non_sale_charge' };
+
+  for (const mp of ids) {
+    let offset = 0;
+    const limit = 200;
+    let runningTotal = 0;
+    let foundAnyForOrder = false;
+
+    while (offset < 10000) {
+      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+        headers: financesApiHeaders(accessToken, mp),
+        params: {
+          filter: filterValue,
+          limit,
+          offset,
+        },
+      });
+
+      const transactions = response.data?.transactions || [];
+      for (const txn of transactions) {
+        if (txn.feeType !== 'AD_FEE' || !txn.references) continue;
+        const orderRef = txn.references.find((ref) => ref.referenceType === 'ORDER_ID');
+        if (orderRef?.referenceId !== orderId) continue;
+
+        foundAnyForOrder = true;
+        const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
+        if (txn.bookingEntry === 'CREDIT') {
+          runningTotal -= feeAmount;
+        } else {
+          runningTotal += feeAmount;
+        }
+      }
+
+      if (transactions.length < limit) break;
+      offset += limit;
+    }
+
+    const adFeeGeneral = Math.max(0, parseFloat(runningTotal.toFixed(2)));
+    if (adFeeGeneral > 0) {
+      return {
+        success: true,
+        adFeeGeneral,
+        marketplace: mp,
+        source: 'non_sale_charge',
+      };
+    }
+    if (foundAnyForOrder && adFeeGeneral === 0) {
+      best = { adFeeGeneral: 0, marketplace: mp, source: 'non_sale_charge' };
+    }
+  }
+
+  return { success: true, ...best };
+}
+
 // Single order lookup (used when ad fee map is not available)
-async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplaceId = 'EBAY_US', marketplaceIds = null) {
+async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplaceId = 'EBAY_US', marketplaceIds = null, options = {}) {
   if (adFeeMap) {
     const adFee = adFeeMap.get(orderId) || 0;
     return { success: true, adFeeGeneral: adFee, source: 'map' };
@@ -1638,23 +1711,32 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
   if (!idsToTry.length) idsToTry.push('EBAY_US');
 
   let lastError = null;
+  let bestResult = null;
 
-  // Prefer orderId filter (paginated) — old code only read the first 200 NON_SALE_CHARGE rows.
+  // Step 1: orderId filter (paginated). Do not stop at first marketplace with sale txns but no AD_FEE.
   for (const mp of idsToTry) {
     try {
       const filter = `orderId:{${orderId}}`;
       const transactions = await fetchFinancesTransactionsAllPages(accessToken, mp, filter);
-      const adFeeCount = transactions.filter((t) => t.feeType === 'AD_FEE').length;
+      const adFeeGeneral = sumAdFeeFromTransactions(transactions);
 
-      if (adFeeCount > 0 || transactions.length > 0) {
-        const adFeeGeneral = sumAdFeeFromTransactions(transactions);
+      if (adFeeGeneral > 0) {
         return {
           success: true,
           adFeeGeneral,
           marketplace: mp,
           source: 'orderId_filter',
           transactionCount: transactions.length,
-          adFeeTransactionCount: adFeeCount,
+        };
+      }
+
+      if (transactions.length > 0 && !bestResult) {
+        bestResult = {
+          success: true,
+          adFeeGeneral: 0,
+          marketplace: mp,
+          source: 'orderId_filter',
+          transactionCount: transactions.length,
         };
       }
     } catch (error) {
@@ -1666,10 +1748,39 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
     }
   }
 
-  if (lastError) {
+  // Step 2: NON_SALE_CHARGE scan (matches backfill / what often works locally).
+  try {
+    const fromNonSale = await fetchOrderAdFeeFromNonSaleCharges(
+      accessToken,
+      orderId,
+      idsToTry,
+      options.creationDate
+    );
+    if (fromNonSale.adFeeGeneral > 0) {
+      return fromNonSale;
+    }
+    if (fromNonSale.source === 'non_sale_charge' && bestResult) {
+      return { ...bestResult, triedNonSaleCharge: true };
+    }
+    if (fromNonSale.adFeeGeneral === 0 && fromNonSale.source === 'non_sale_charge') {
+      return fromNonSale;
+    }
+  } catch (error) {
+    lastError = error;
+    if (error.response?.status === 403) {
+      return { success: false, error: 'missing_scope', adFeeGeneral: null };
+    }
+    console.warn(`[Finances API] NON_SALE_CHARGE scan for ${orderId}:`, error.message);
+  }
+
+  if (lastError && !bestResult) {
     const detail = lastError.response?.data?.errors?.[0]?.message || lastError.message;
     console.error(`[Finances API] Error fetching ad fee for ${orderId}:`, detail);
     return { success: false, error: detail, adFeeGeneral: null };
+  }
+
+  if (bestResult) {
+    return bestResult;
   }
 
   return { success: true, adFeeGeneral: 0, source: 'not_found', marketplace: idsToTry[0] };
@@ -1731,7 +1842,14 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
       // Fetch updated ad fee from Finances API
       const sellerDoc = await Seller.findById(existingOrder.seller).select('ebayMarketplaces').lean();
       const financeMpIds = resolveOrderFinancesMarketplaceIds(sellerDoc, existingOrder.purchaseMarketplaceId);
-      const adFeeResult = await fetchOrderAdFee(accessToken, existingOrder.orderId, null, financeMpIds[0], financeMpIds);
+      const adFeeResult = await fetchOrderAdFee(
+        accessToken,
+        existingOrder.orderId,
+        null,
+        financeMpIds[0],
+        financeMpIds,
+        { creationDate: existingOrder.creationDate }
+      );
       const adFeeGeneral = adFeeResult.success ? adFeeResult.adFeeGeneral : existingOrder.adFeeGeneral;
 
       // Calculate financial fields with $0 earnings while preserving order total for TDS
@@ -3482,7 +3600,14 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
 
     const accessToken = await ensureValidToken(seller);
     const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, order.purchaseMarketplaceId);
-    const adFeeResult = await fetchOrderAdFee(accessToken, order.orderId, null, financeMpIds[0], financeMpIds);
+    const adFeeResult = await fetchOrderAdFee(
+      accessToken,
+      order.orderId,
+      null,
+      financeMpIds[0],
+      financeMpIds,
+      { creationDate: order.creationDate }
+    );
 
     if (!adFeeResult.success) {
       const msg = adFeeResult.error === 'missing_scope'
@@ -4929,7 +5054,14 @@ export async function scheduledPollNewOrders() {
               // Fetch ad fee from eBay Finances API
               try {
                 const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, newOrder.purchaseMarketplaceId);
-                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financeMpIds[0], financeMpIds);
+                const adFeeResult = await fetchOrderAdFee(
+                  accessToken,
+                  ebayOrder.orderId,
+                  null,
+                  financeMpIds[0],
+                  financeMpIds,
+                  { creationDate: newOrder.creationDate || ebayOrder.creationDate }
+                );
                 if (adFeeResult.success) {
                   newOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                   newOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
@@ -5401,7 +5533,14 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
                 if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
                   try {
                     const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
-                    const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financeMpIds[0], financeMpIds);
+                    const adFeeResult = await fetchOrderAdFee(
+                      accessToken,
+                      ebayOrder.orderId,
+                      null,
+                      financeMpIds[0],
+                      financeMpIds,
+                      { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
+                    );
                     if (adFeeResult.success) {
                       existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                       existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
@@ -5707,7 +5846,14 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
             if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
               try {
                 const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
-                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financeMpIds[0], financeMpIds);
+                const adFeeResult = await fetchOrderAdFee(
+                  accessToken,
+                  ebayOrder.orderId,
+                  null,
+                  financeMpIds[0],
+                  financeMpIds,
+                  { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
+                );
                 if (adFeeResult.success) {
                   existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                   existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
