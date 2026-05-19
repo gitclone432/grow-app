@@ -77,6 +77,7 @@ import PayoneerSheetPage from '../pages/admin/PayoneerSheetPage.jsx';
 import BankAccountsPage from '../pages/admin/BankAccountsPage.jsx';
 import TransactionPage from '../pages/admin/TransactionPage.jsx';
 import ExtraExpensePage from '../pages/admin/ExtraExpensePage.jsx';
+import RevenueGrossNetPage from '../pages/admin/RevenueGrossNetPage.jsx';
 //import MessageReceivedPage from '../pages/admin/MessageReceivedPage.jsx';
 import AboutMePage from '../pages/AboutMePage.jsx';
 import EmployeeDetailsPage from '../pages/admin/EmployeeDetailsPage.jsx';
@@ -294,6 +295,7 @@ const COMPONENT_MAP = {
   'BankAccounts': BankAccountsPage,
   'Transactions': TransactionPage,
   'ExtraExpenses': ExtraExpensePage,
+  'RevenueGrossNet': RevenueGrossNetPage,
   'Salary': SalaryPage,
   'AllOrdersSheet': AllOrdersSheetPage,
   'PriceChangeHistory': PriceChangeHistoryPage,

@@ -1472,7 +1472,21 @@ function FulfillmentDashboard() {
   const [excludeClient, setExcludeClient] = useState(() => getInitialState('excludeClient', true));
   const [excludeLowValue, setExcludeLowValue] = useState(() => getInitialState('excludeLowValue', true));
   const [missingAmazonAccount, setMissingAmazonAccount] = useState(() => getInitialState('missingAmazonAccount', false));
-  const [dateFilter, setDateFilter] = useState(() => getInitialState('dateFilter', ''));
+  const [dateFilter, setDateFilter] = useState(() => {
+    try {
+      const stored = sessionStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed.dateFilter !== undefined) {
+          return normalizeDateFilter(parsed.dateFilter);
+        }
+      }
+    } catch (e) {
+      console.error('Error reading dateFilter from sessionStorage:', e);
+    }
+    return createEmptyDateFilter();
+  });
+  const [scopeWarning, setScopeWarning] = useState('');
 
   // Pagination state - restored from sessionStorage
   const [currentPage, setCurrentPage] = useState(() => getInitialState('currentPage', 1));
@@ -2067,6 +2081,7 @@ function FulfillmentDashboard() {
 
       const { data } = await api.get('/ebay/stored-orders', { params });
       setOrders(data?.orders || []);
+      setScopeWarning(data?.meta?.warning || '');
 
       // Update pagination metadata
       if (data?.pagination) {
@@ -2075,6 +2090,7 @@ function FulfillmentDashboard() {
       }
     } catch (e) {
       setOrders([]);
+      setScopeWarning('');
       setError(e?.response?.data?.error || 'Failed to load orders');
     } finally {
       setLoading(false);
@@ -2317,8 +2333,23 @@ function FulfillmentDashboard() {
         setSnackbarSeverity('success');
         setSnackbarOpen(true);
       } else if (data) {
-        setSnackbarMsg('No new orders found.');
-        setSnackbarSeverity('info');
+        const failures = (data.pollResults || []).filter((r) => !r.success && r.error);
+        const fetched = Number(data.totalEbayFetched) || 0;
+        if (failures.length > 0) {
+          setSnackbarMsg(`Poll failed: ${failures.map((f) => `${f.sellerName}: ${f.error}`).join('; ')}`);
+          setSnackbarSeverity('error');
+        } else if (fetched > 0) {
+          setSnackbarMsg(`eBay returned ${fetched} order(s) in range; all are already in the database.`);
+          setSnackbarSeverity('info');
+        } else {
+          const skipped = (data.pollResults || []).find((r) => r.skippedReason === 'poll_window_too_recent');
+          setSnackbarMsg(
+            skipped
+              ? 'Poll skipped — last sync was less than 1 minute ago. Try again shortly or use Resync.'
+              : 'No orders returned from eBay for this date range. If your PC clock is set ahead (e.g. year 2026), fix system date/time and use Resync 30D.'
+          );
+          setSnackbarSeverity('info');
+        }
         setSnackbarOpen(true);
       }
       publishOrderSyncEvent('FulfillmentDashboard', 'poll-new-orders');
@@ -2489,7 +2520,14 @@ function FulfillmentDashboard() {
           : existingOrder
       )));
 
-      setSnackbarMsg(`Ad fee updated for ${order.orderId}`);
+      const fee = data?.adFeeGeneral ?? data?.order?.adFeeGeneral;
+      if (fee > 0) {
+        setSnackbarMsg(`Ad fee $${Number(fee).toFixed(2)} loaded for ${order.orderId}`);
+      } else if (data?.lookupSource === 'not_found') {
+        setSnackbarMsg(`No promoted-listing (AD_FEE) charge found on eBay for ${order.orderId}.`);
+      } else {
+        setSnackbarMsg(`Ad fee is $0 for ${order.orderId} (checked on eBay).`);
+      }
       setSnackbarSeverity('success');
       setSnackbarOpen(true);
     } catch (e) {
@@ -3687,6 +3725,12 @@ function FulfillmentDashboard() {
           {error && (
             <Alert severity="error" sx={{ mt: 2 }}>
               {error}
+            </Alert>
+          )}
+
+          {scopeWarning && !error && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              {scopeWarning}
             </Alert>
           )}
 

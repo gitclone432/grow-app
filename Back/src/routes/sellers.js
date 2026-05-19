@@ -4,13 +4,9 @@ import jwt from 'jsonwebtoken';
 import Seller from '../models/Seller.js';
 import User from '../models/User.js';
 import { getSellersMatchingAllRoute } from '../utils/sellersAllScope.js';
+import { getActiveUserIds } from '../utils/activeSellerScope.js';
 
 const router = Router();
-
-async function getActiveUserIdsSet() {
-  const users = await User.find({ active: true }).select('_id').lean();
-  return users.map(u => u._id);
-}
 
 // List all sellers (for admin dashboard)
 // superadmin + listingadmin: all active-user stores; others: assignments (or full list if none).
@@ -28,8 +24,20 @@ router.get('/all', requireAuth, async (req, res) => {
 // All authenticated users can see all sellers
 router.get('/all-unfiltered', requireAuth, async (req, res) => {
   try {
-    const activeUserIds = await getActiveUserIdsSet();
-    const sellers = await Seller.find({ user: { $in: activeUserIds }, isStoreActive: { $ne: false } }).populate('user', 'username email active');
+    const activeUserIds = await getActiveUserIds();
+    const sellers = await Seller.find({
+      isStoreActive: { $ne: false },
+      $or: activeUserIds.length
+        ? [
+          { user: { $in: activeUserIds } },
+          { user: { $exists: false } },
+          { user: null },
+        ]
+        : [
+          { user: { $exists: false } },
+          { user: null },
+        ],
+    }).populate('user', 'username email active');
     res.json(sellers);
   } catch (err) {
     console.error('Error fetching sellers:', err);

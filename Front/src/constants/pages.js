@@ -91,6 +91,7 @@ export const PAGE_REGISTRY = [
   { id: 'BankAccounts', name: 'Bank Accounts', path: '/bank-accounts', category: 'finance', defaultRoles: ['superadmin'] },
   { id: 'Transactions', name: 'Transactions', path: '/transactions', category: 'finance', defaultRoles: ['superadmin'] },
   { id: 'ExtraExpenses', name: 'Extra Expenses', path: '/extra-expenses', category: 'finance', defaultRoles: ['superadmin'] },
+  { id: 'RevenueGrossNet', name: 'Revenue (Gross & Net)', path: '/revenue-gross-net', category: 'finance', defaultRoles: ['superadmin'] },
   { id: 'Salary', name: 'Salary Page', path: '/salary', category: 'finance', defaultRoles: ['superadmin'] },
   { id: 'AllOrdersSheet', name: 'All Orders USD', path: '/all-orders-sheet', category: 'finance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'PriceChangeHistory', name: 'Price Change History', path: '/price-change-history', category: 'finance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },

@@ -53,6 +53,7 @@ export const PAGE_DEFAULT_ROLES = {
   'BankAccounts': ['superadmin'],
   'Transactions': ['superadmin'],
   'ExtraExpenses': ['superadmin'],
+  'RevenueGrossNet': ['superadmin'],
   'Salary': ['superadmin'],
   'AllOrdersSheet': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'PriceChangeHistory': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],

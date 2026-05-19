@@ -14,6 +14,7 @@ import Seller from '../models/Seller.js';
 import BankAccount from '../models/BankAccount.js';
 import PayoneerFeedCache from '../models/PayoneerFeedCache.js';
 import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.js';
+import { applyActiveSellerScope } from '../utils/activeSellerScope.js';
 import Order from '../models/Order.js';
 import Return from '../models/Return.js';
 import Case from '../models/Case.js';
@@ -321,55 +322,6 @@ async function getExcludedClientSellerIds() {
   return Seller.find({
     user: { $in: excludedUsers.map((user) => user._id) }
   }).distinct('_id');
-}
-
-async function getActiveSellerIds() {
-  // Backward-compatible: many legacy users do not have `active` set.
-  // Treat missing/null as active, only exclude explicit `active: false`.
-  const activeUserIds = await User.find({
-    $or: [
-      { active: true },
-      { active: { $exists: false } },
-      { active: null }
-    ]
-  }).distinct('_id');
-  // Local/legacy safety: include sellers that are not linked to a User doc.
-  // This prevents empty dashboards when seller.user is null/missing in older data.
-  return Seller.find({
-    isStoreActive: { $ne: false },
-    $or: activeUserIds.length
-      ? [
-        { user: { $in: activeUserIds } },
-        { user: { $exists: false } },
-        { user: null }
-      ]
-      : [
-        { user: { $exists: false } },
-        { user: null }
-      ]
-  }).distinct('_id');
-}
-
-async function applyActiveSellerScope(query, requestedSellerId) {
-  const activeSellerIds = await getActiveSellerIds();
-  if (activeSellerIds.length === 0) {
-    query.seller = { $in: [] };
-    return;
-  }
-
-  if (requestedSellerId) {
-    if (!mongoose.Types.ObjectId.isValid(requestedSellerId)) {
-      query.seller = { $in: [] };
-      return;
-    }
-    const requestedObjectId = new mongoose.Types.ObjectId(requestedSellerId);
-    const isAllowed = activeSellerIds.some((id) => id.equals(requestedObjectId));
-    query.seller = isAllowed ? requestedObjectId : { $in: [] };
-    return;
-  }
-
-  query.$and = query.$and || [];
-  query.$and.push({ seller: { $in: activeSellerIds } });
 }
 
 function getInternalApiBaseUrl(req) {
@@ -1487,6 +1439,28 @@ function purchaseMarketplaceToFinancesId(purchaseMarketplaceId) {
   return normalizeFinancesMarketplaceId(purchaseMarketplaceId);
 }
 
+/** Marketplaces to query Finances API for an order (purchase site + seller regions). */
+function resolveOrderFinancesMarketplaceIds(seller, purchaseMarketplaceId) {
+  return [...new Set([
+    purchaseMarketplaceToFinancesId(purchaseMarketplaceId),
+    ...resolveFinancesMarketplaceIds(seller),
+  ])];
+}
+
+function sumAdFeeFromTransactions(transactions) {
+  let adFeeTotal = 0;
+  for (const txn of transactions) {
+    if (txn.feeType !== 'AD_FEE') continue;
+    const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
+    if (txn.bookingEntry === 'CREDIT') {
+      adFeeTotal -= feeAmount;
+    } else {
+      adFeeTotal += feeAmount;
+    }
+  }
+  return Math.max(0, parseFloat(adFeeTotal.toFixed(2)));
+}
+
 function financesApiHeaders(accessToken, marketplaceId) {
   return {
     Authorization: `Bearer ${accessToken}`,
@@ -1649,56 +1623,56 @@ async function fetchAllAdFees(accessToken, marketplaceIds = ['EBAY_US'], sinceDa
 }
 
 // Single order lookup (used when ad fee map is not available)
-async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplaceId = 'EBAY_US') {
-  // If we have a pre-built map, use it
+async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplaceId = 'EBAY_US', marketplaceIds = null) {
   if (adFeeMap) {
     const adFee = adFeeMap.get(orderId) || 0;
-    return { success: true, adFeeGeneral: adFee };
+    return { success: true, adFeeGeneral: adFee, source: 'map' };
   }
 
-  // Otherwise, we need to search through transactions
-  // This is less efficient but works for single lookups
-  try {
-    const mp = normalizeFinancesMarketplaceId(marketplaceId);
-    const response = await axios.get(
-      `https://apiz.ebay.com/sell/finances/v1/transaction`,
-      {
-        headers: financesApiHeaders(accessToken, mp),
-        params: {
-          filter: `transactionType:{NON_SALE_CHARGE}`,
-          limit: 200
-        }
+  const idsToTry = [...new Set(
+    [
+      ...(Array.isArray(marketplaceIds) ? marketplaceIds : []),
+      marketplaceId,
+    ].map(normalizeFinancesMarketplaceId).filter(Boolean)
+  )];
+  if (!idsToTry.length) idsToTry.push('EBAY_US');
+
+  let lastError = null;
+
+  // Prefer orderId filter (paginated) — old code only read the first 200 NON_SALE_CHARGE rows.
+  for (const mp of idsToTry) {
+    try {
+      const filter = `orderId:{${orderId}}`;
+      const transactions = await fetchFinancesTransactionsAllPages(accessToken, mp, filter);
+      const adFeeCount = transactions.filter((t) => t.feeType === 'AD_FEE').length;
+
+      if (adFeeCount > 0 || transactions.length > 0) {
+        const adFeeGeneral = sumAdFeeFromTransactions(transactions);
+        return {
+          success: true,
+          adFeeGeneral,
+          marketplace: mp,
+          source: 'orderId_filter',
+          transactionCount: transactions.length,
+          adFeeTransactionCount: adFeeCount,
+        };
       }
-    );
-
-    const transactions = response.data?.transactions || [];
-    let adFeeTotal = 0;
-
-    for (const txn of transactions) {
-      if (txn.feeType === 'AD_FEE' && txn.references) {
-        const matchingRef = txn.references.find(
-          ref => ref.referenceType === 'ORDER_ID' && ref.referenceId === orderId
-        );
-
-        if (matchingRef) {
-          const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
-          if (txn.bookingEntry === 'CREDIT') {
-            adFeeTotal -= feeAmount;
-          } else {
-            adFeeTotal += feeAmount;
-          }
-        }
+    } catch (error) {
+      lastError = error;
+      if (error.response?.status === 403) {
+        return { success: false, error: 'missing_scope', adFeeGeneral: null };
       }
+      console.warn(`[Finances API] orderId filter for ${orderId} on ${mp}:`, error.message);
     }
-
-    return { success: true, adFeeGeneral: Math.max(0, adFeeTotal) };
-  } catch (error) {
-    if (error.response?.status === 403) {
-      return { success: false, error: 'missing_scope', adFeeGeneral: null };
-    }
-    console.error(`[Finances API] Error fetching ad fee for ${orderId}:`, error.message);
-    return { success: false, error: error.message, adFeeGeneral: null };
   }
+
+  if (lastError) {
+    const detail = lastError.response?.data?.errors?.[0]?.message || lastError.message;
+    console.error(`[Finances API] Error fetching ad fee for ${orderId}:`, detail);
+    return { success: false, error: detail, adFeeGeneral: null };
+  }
+
+  return { success: true, adFeeGeneral: 0, source: 'not_found', marketplace: idsToTry[0] };
 }
 
 // ============================================
@@ -1755,8 +1729,9 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
 
     try {
       // Fetch updated ad fee from Finances API
-      const financesMp = purchaseMarketplaceToFinancesId(existingOrder.purchaseMarketplaceId);
-      const adFeeResult = await fetchOrderAdFee(accessToken, existingOrder.orderId, null, financesMp);
+      const sellerDoc = await Seller.findById(existingOrder.seller).select('ebayMarketplaces').lean();
+      const financeMpIds = resolveOrderFinancesMarketplaceIds(sellerDoc, existingOrder.purchaseMarketplaceId);
+      const adFeeResult = await fetchOrderAdFee(accessToken, existingOrder.orderId, null, financeMpIds[0], financeMpIds);
       const adFeeGeneral = adFeeResult.success ? adFeeResult.adFeeGeneral : existingOrder.adFeeGeneral;
 
       // Calculate financial fields with $0 earnings while preserving order total for TDS
@@ -2592,7 +2567,7 @@ router.get('/stored-orders', async (req, res) => {
 
   try {
     let query = {};
-    await applyActiveSellerScope(query, sellerId);
+    const { activeSellerCount } = await applyActiveSellerScope(query, sellerId);
 
     if (excludeClient === 'true') {
       const excludedSellerIds = await getExcludedClientSellerIds();
@@ -2918,8 +2893,12 @@ router.get('/stored-orders', async (req, res) => {
         totalOrders,
         ordersPerPage: limitNum,
         hasNextPage: pageNum < totalPages,
-        hasPrevPage: pageNum > 1
-      }
+        hasPrevPage: pageNum > 1,
+        activeSellerCount,
+      },
+      meta: activeSellerCount === 0
+        ? { warning: 'No active stores found. Mark users active or enable stores in Settings → Stores.' }
+        : undefined,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -3502,14 +3481,17 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
     }
 
     const accessToken = await ensureValidToken(seller);
-    const financesMp = purchaseMarketplaceToFinancesId(order.purchaseMarketplaceId);
-    const adFeeResult = await fetchOrderAdFee(accessToken, order.orderId, null, financesMp);
+    const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, order.purchaseMarketplaceId);
+    const adFeeResult = await fetchOrderAdFee(accessToken, order.orderId, null, financeMpIds[0], financeMpIds);
 
     if (!adFeeResult.success) {
-      return res.status(400).json({ error: adFeeResult.error || 'Failed to fetch ad fee from eBay' });
+      const msg = adFeeResult.error === 'missing_scope'
+        ? 'eBay token is missing sell.finances scope. Disconnect and reconnect the store with full OAuth scopes.'
+        : (adFeeResult.error || 'Failed to fetch ad fee from eBay');
+      return res.status(400).json({ error: msg });
     }
 
-    order.adFeeGeneral = parseFloat(adFeeResult.adFeeGeneral || 0);
+    order.adFeeGeneral = parseFloat(adFeeResult.adFeeGeneral ?? 0);
 
     if (order.orderPaymentStatus === 'FULLY_REFUNDED') {
       order.orderEarnings = 0;
@@ -3531,6 +3513,8 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
     res.json({
       success: true,
       adFeeGeneral: order.adFeeGeneral,
+      financesMarketplace: adFeeResult.marketplace,
+      lookupSource: adFeeResult.source,
       order: order.toObject()
     });
   } catch (err) {
@@ -4534,7 +4518,7 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
         const newOrders = [];
         const updatedOrders = [];
         // Use 5-second buffer for clock skew (UTC-based)
-        const currentTimeUTC = new Date(nowUTC - 5000);
+        const currentTimeUTC = getOrderPollEndDate(nowUTC);
 
         // ========== PHASE 1: FETCH NEW ORDERS ==========
         let newOrdersFilter = null;
@@ -4891,12 +4875,13 @@ export async function scheduledPollNewOrders() {
         const latestCreationDate = latestOrder ? latestOrder.creationDate : null;
         // Default initial sync date: Mar 1, 2026 00:00:00 UTC
         const initialSyncDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
-        // Use current time without buffer - Render's servers have accurate NTP sync
-        const currentTimeUTC = new Date(nowUTC);
+        const currentTimeUTC = getOrderPollEndDate(nowUTC);
 
         const newOrders = [];
         let newOrdersFilter = null;
         let newOrdersLimit = 15;
+        let ebayFetched = 0;
+        let skippedReason = null;
 
         if (orderCount === 0) {
           newOrdersFilter = `creationdate:[${initialSyncDate.toISOString()}..${currentTimeUTC.toISOString()}]`;
@@ -4912,6 +4897,7 @@ export async function scheduledPollNewOrders() {
             newOrdersLimit = 200;
             console.log(`[${sellerName}] Checking new orders after ${afterLatest.toISOString()}`);
           } else {
+            skippedReason = 'poll_window_too_recent';
             console.log(`[${sellerName}] Skipped (too recent: ${timeDiffMinutes.toFixed(2)} min)`);
           }
         }
@@ -4919,7 +4905,8 @@ export async function scheduledPollNewOrders() {
         if (newOrdersFilter) {
           // Use pagination to fetch ALL orders (handles >200 orders)
           const ebayNewOrders = await fetchAllOrdersWithPagination(accessToken, newOrdersFilter, sellerName);
-          console.log(`[${sellerName}] Found ${ebayNewOrders.length} new orders`);
+          ebayFetched = ebayNewOrders.length;
+          console.log(`[${sellerName}] Found ${ebayNewOrders.length} orders from eBay (${newOrders.length} new so far)`);
 
           for (const ebayOrder of ebayNewOrders) {
             const existingOrder = await Order.findOne({ orderId: ebayOrder.orderId });
@@ -4941,9 +4928,9 @@ export async function scheduledPollNewOrders() {
 
               // Fetch ad fee from eBay Finances API
               try {
-                const financesMp = purchaseMarketplaceToFinancesId(newOrder.purchaseMarketplaceId);
-                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financesMp);
-                if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
+                const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, newOrder.purchaseMarketplaceId);
+                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financeMpIds[0], financeMpIds);
+                if (adFeeResult.success) {
                   newOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                   newOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
 
@@ -4985,7 +4972,9 @@ export async function scheduledPollNewOrders() {
           sellerName,
           success: true,
           newOrders: newOrders.map(o => o.orderId),
-          totalNew: newOrders.length
+          totalNew: newOrders.length,
+          ebayFetched,
+          skippedReason,
         };
 
       } catch (sellerErr) {
@@ -4994,7 +4983,8 @@ export async function scheduledPollNewOrders() {
           sellerId: seller._id,
           sellerName,
           success: false,
-          error: sellerErr.message
+          error: sellerErr.message,
+          ebayFetched: 0,
         };
       }
     });
@@ -5002,12 +4992,14 @@ export async function scheduledPollNewOrders() {
     const results = await Promise.allSettled(pollingPromises);
     const pollResults = results.map(result => result.status === 'fulfilled' ? result.value : { success: false, error: result.reason?.message || 'Unknown error' });
     const totalNewOrders = pollResults.reduce((sum, r) => sum + (r.totalNew || 0), 0);
+    const totalEbayFetched = pollResults.reduce((sum, r) => sum + (r.ebayFetched || 0), 0);
 
     const responsePayload = {
       message: 'New orders polling complete',
       pollResults,
       totalPolled: sellers.length,
-      totalNewOrders
+      totalNewOrders,
+      totalEbayFetched,
     };
 
     // Trigger delayed policy messaging in background after polling
@@ -5408,9 +5400,9 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
                 // Fetch ad fee if not already set
                 if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
                   try {
-                    const financesMp = purchaseMarketplaceToFinancesId(existingOrder.purchaseMarketplaceId);
-                    const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financesMp);
-                    if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
+                    const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
+                    const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financeMpIds[0], financeMpIds);
+                    if (adFeeResult.success) {
                       existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                       existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
 
@@ -5617,7 +5609,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
         }
 
         // Fetch all orders created in last 10 days
-        const currentTimeUTC = new Date(nowUTC);
+        const currentTimeUTC = getOrderPollEndDate(nowUTC);
         const filter = `creationdate:[${sinceDate.toISOString()}..${currentTimeUTC.toISOString()}]`;
         console.log(`[${sellerName}] Filter: ${filter}`);
 
@@ -5714,9 +5706,9 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
             // Fetch ad fee if not already set or is $0
             if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
               try {
-                const financesMp = purchaseMarketplaceToFinancesId(existingOrder.purchaseMarketplaceId);
-                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financesMp);
-                if (adFeeResult.success && adFeeResult.adFeeGeneral > 0) {
+                const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
+                const adFeeResult = await fetchOrderAdFee(accessToken, ebayOrder.orderId, null, financeMpIds[0], financeMpIds);
+                if (adFeeResult.success) {
                   existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
                   existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
 
@@ -5842,6 +5834,35 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
 // ============================================
 // Helper function to fetch ALL orders with pagination
 // ============================================
+function isEbayFutureDateFilterError(err) {
+  const errors = err.response?.data?.errors;
+  if (!Array.isArray(errors)) return false;
+  return errors.some(
+    (e) => e.errorId === 30850 || /can't be in the future|cannot be in the future/i.test(String(e.message || ''))
+  );
+}
+
+/** Shift the end of a creationdate:[start..end] filter backward (negative shiftMs). */
+function shiftCreationDateFilterEnd(filter, shiftMs) {
+  const match = String(filter).match(/creationdate:\[([^\]]+)\]/i);
+  if (!match) return filter;
+  const parts = match[1].split('..');
+  if (parts.length !== 2) return filter;
+  const end = new Date(parts[1]);
+  if (Number.isNaN(end.getTime())) return filter;
+  const shiftedEnd = new Date(end.getTime() + shiftMs);
+  return `creationdate:[${parts[0]}..${shiftedEnd.toISOString()}]`;
+}
+
+function buildCreationDateFilter(fromDate, toDate) {
+  return `creationdate:[${fromDate.toISOString()}..${toDate.toISOString()}]`;
+}
+
+/** Poll window end — slightly before now to avoid clock-skew edge cases. */
+function getOrderPollEndDate(nowMs = Date.now()) {
+  return new Date(nowMs - 5 * 60 * 1000);
+}
+
 // This fetches orders in batches of 200 (eBay max) until all orders are retrieved
 async function fetchAllOrdersWithPagination(accessToken, filter, sellerName) {
   const allOrders = [];
@@ -5849,8 +5870,12 @@ async function fetchAllOrdersWithPagination(accessToken, filter, sellerName) {
   const limit = 200; // eBay max per request
   let hasMore = true;
   let totalOrders = 0;
+  const originalFilter = filter;
+  let activeFilter = filter;
+  let futureDateRetries = 0;
+  let lastError = null;
 
-  console.log(`[${sellerName}] Starting paginated fetch...`);
+  console.log(`[${sellerName}] Starting paginated fetch (filter: ${activeFilter})...`);
 
   while (hasMore) {
     let attempt = 1;
@@ -5860,11 +5885,10 @@ async function fetchAllOrdersWithPagination(accessToken, filter, sellerName) {
     while (attempt <= maxRetries && !success) {
       try {
         const params = {
-          filter: filter,
+          filter: activeFilter,
           limit: limit
         };
 
-        // Only add offset if it's greater than 0
         if (offset > 0) {
           params.offset = offset;
         }
@@ -5875,7 +5899,7 @@ async function fetchAllOrdersWithPagination(accessToken, filter, sellerName) {
             'Content-Type': 'application/json',
           },
           params,
-          timeout: 15000 // 15 second timeout
+          timeout: 15000
         });
 
         const orders = response.data.orders || [];
@@ -5885,32 +5909,50 @@ async function fetchAllOrdersWithPagination(accessToken, filter, sellerName) {
 
         console.log(`[${sellerName}] Fetched ${orders.length} orders at offset ${offset} (total so far: ${allOrders.length}/${totalOrders})`);
 
-        // Check if there are more orders to fetch
         if (allOrders.length >= totalOrders || orders.length < limit) {
           hasMore = false;
         } else {
           offset += limit;
-          // Small delay to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 300));
         }
 
-        success = true; // Mark as successful
+        success = true;
+        lastError = null;
       } catch (err) {
+        lastError = err;
         const status = err.response?.status;
         const isRetryable = status === 503 || status === 429 || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT';
 
+        if (offset === 0 && isEbayFutureDateFilterError(err) && futureDateRetries < 3) {
+          futureDateRetries += 1;
+          const shiftMs = -365 * 24 * 60 * 60 * 1000 * futureDateRetries;
+          activeFilter = shiftCreationDateFilterEnd(originalFilter, shiftMs);
+          console.warn(
+            `[${sellerName}] eBay rejected future date filter (error 30850). ` +
+            `Retry ${futureDateRetries}/3 with end shifted ${Math.abs(shiftMs / (86400000))}d — check PC system clock. ` +
+            `Filter: ${activeFilter}`
+          );
+          attempt = 1;
+          continue;
+        }
+
         if (isRetryable && attempt < maxRetries) {
-          const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 5000); // 1s, 2s, 4s (max 5s)
+          const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
           console.log(`[${sellerName}] ⚠️ Pagination attempt ${attempt} at offset ${offset} failed with ${status || err.code}, retrying in ${waitTime}ms...`);
           await new Promise(resolve => setTimeout(resolve, waitTime));
           attempt++;
         } else {
-          console.error(`[${sellerName}] ❌ Pagination error at offset ${offset} after ${attempt} attempts:`, err.message);
-          hasMore = false; // Stop on error after retries exhausted
-          success = true; // Exit retry loop
+          const detail = err.response?.data?.errors?.[0]?.message || err.message;
+          console.error(`[${sellerName}] ❌ Pagination error at offset ${offset}:`, detail);
+          throw new Error(detail || err.message);
         }
       }
     }
+  }
+
+  if (allOrders.length === 0 && lastError) {
+    const detail = lastError.response?.data?.errors?.[0]?.message || lastError.message;
+    throw new Error(detail || 'eBay order fetch failed');
   }
 
   console.log(`[${sellerName}] ✅ Pagination complete: ${allOrders.length} orders`);

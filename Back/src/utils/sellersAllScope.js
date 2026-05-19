@@ -1,6 +1,6 @@
-import User from '../models/User.js';
 import Seller from '../models/Seller.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
+import { getActiveUserIds } from './activeSellerScope.js';
 
 const ORG_WIDE_SELLER_ROLES = new Set(['superadmin', 'listingadmin']);
 
@@ -24,9 +24,20 @@ export function resolveStoreDisplayName(seller) {
  * - Everyone else: assigned sellers only, or full list if they have no assignments.
  */
 export async function getSellersMatchingAllRoute(req) {
-  const activeUsers = await User.find({ active: true }).select('_id').lean();
-  const activeUserIds = activeUsers.map((u) => u._id);
-  const baseFilter = { user: { $in: activeUserIds }, isStoreActive: { $ne: false } };
+  const activeUserIds = await getActiveUserIds();
+  const baseFilter = {
+    isStoreActive: { $ne: false },
+    $or: activeUserIds.length
+      ? [
+        { user: { $in: activeUserIds } },
+        { user: { $exists: false } },
+        { user: null },
+      ]
+      : [
+        { user: { $exists: false } },
+        { user: null },
+      ],
+  };
 
   if (ORG_WIDE_SELLER_ROLES.has(req.user?.role)) {
     return Seller.find(baseFilter).select('_id user').populate('user', 'username email active').lean();
