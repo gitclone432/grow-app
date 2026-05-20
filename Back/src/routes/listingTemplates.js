@@ -6,6 +6,29 @@ import { mergeDefaultCoreFieldDefaults } from '../constants/defaultDescriptionTe
 
 const router = express.Router();
 
+const CUSTOM_COLUMN_NAME_PREFIX = 'C:';
+
+function normalizeCustomColumnCsvName(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith(CUSTOM_COLUMN_NAME_PREFIX)) return trimmed;
+  if (trimmed.toLowerCase().startsWith('c:')) {
+    return `${CUSTOM_COLUMN_NAME_PREFIX}${trimmed.slice(2).trim()}`;
+  }
+  return `${CUSTOM_COLUMN_NAME_PREFIX}${trimmed}`;
+}
+
+function normalizeCustomColumnsList(customColumns = []) {
+  return (Array.isArray(customColumns) ? customColumns : []).map((column) => {
+    const name = normalizeCustomColumnCsvName(column?.name);
+    return {
+      ...column,
+      name,
+      displayName: String(column?.displayName || name || '').trim() || name
+    };
+  });
+}
+
 const DEFAULT_TEMPLATE_CUSTOM_COLUMNS = [
   { name: 'C:Brand', displayName: 'C:Brand', dataType: 'text', defaultValue: 'Does Not Apply', isRequired: false, placeholder: '' },
   { name: 'C:Shipping', displayName: 'C:Shipping', dataType: 'text', defaultValue: 'Free & Fast', isRequired: false, placeholder: '' },
@@ -60,7 +83,7 @@ const DEFAULT_TEMPLATE_PRICING_CONFIG = {
 };
 
 function mergeDefaultCustomColumns(customColumns = []) {
-  const incoming = Array.isArray(customColumns) ? customColumns : [];
+  const incoming = normalizeCustomColumnsList(customColumns);
   const normalized = incoming.map((column, idx) => ({
     name: column?.name || '',
     displayName: column?.displayName || column?.name || '',
@@ -495,6 +518,11 @@ router.post('/:id/columns', requireAuth, async (req, res) => {
     if (!name || !displayName) {
       return res.status(400).json({ error: 'Column name and display name are required' });
     }
+
+    const normalizedName = normalizeCustomColumnCsvName(name);
+    if (!normalizedName.startsWith(CUSTOM_COLUMN_NAME_PREFIX)) {
+      return res.status(400).json({ error: `Column name must start with "${CUSTOM_COLUMN_NAME_PREFIX}"` });
+    }
     
     const template = await ListingTemplate.findById(req.params.id);
     
@@ -508,7 +536,7 @@ router.post('/:id/columns', requireAuth, async (req, res) => {
       : 38;
     
     template.customColumns.push({
-      name,
+      name: normalizedName,
       displayName,
       dataType: dataType || 'text',
       defaultValue: defaultValue || '',

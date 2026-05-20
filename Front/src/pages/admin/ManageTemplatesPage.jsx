@@ -39,6 +39,18 @@ const MARKETPLACE_LABELS = {
   UK:        'eBay UK',
 };
 
+const CUSTOM_COLUMN_NAME_PREFIX = 'C:';
+
+function normalizeCustomColumnCsvName(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith(CUSTOM_COLUMN_NAME_PREFIX)) return trimmed;
+  if (trimmed.toLowerCase().startsWith('c:')) {
+    return `${CUSTOM_COLUMN_NAME_PREFIX}${trimmed.slice(2).trim()}`;
+  }
+  return `${CUSTOM_COLUMN_NAME_PREFIX}${trimmed}`;
+}
+
 const DEFAULT_TEMPLATE_CUSTOM_COLUMNS = [
   { name: 'C:Brand', displayName: 'C:Brand', dataType: 'text', defaultValue: 'Does Not Apply', isRequired: false, placeholder: '' },
   { name: 'C:Shipping', displayName: 'C:Shipping', dataType: 'text', defaultValue: 'Free & Fast', isRequired: false, placeholder: '' },
@@ -157,14 +169,76 @@ function mergeDefaultAsinFieldConfigs(fieldConfigs = []) {
   return merged;
 }
 
+function customColumnHasDefault(column) {
+  return String(column?.defaultValue ?? '').trim().length > 0;
+}
+
+function createCustomAsinFieldConfig(column) {
+  const label = column.displayName || column.name;
+  return {
+    fieldType: 'custom',
+    ebayField: column.name,
+    source: 'ai',
+    promptTemplate: `Write a concise value for the eBay custom field "${label}" using the Amazon product details.`,
+    amazonField: '',
+    transform: 'none',
+    enabled: true,
+    defaultValue: ''
+  };
+}
+
+/** Custom columns without a template default must be filled via ASIN Auto-Fill. */
+function syncAsinAutoFillFromCustomColumns(customColumns = [], fieldConfigs = []) {
+  const columns = Array.isArray(customColumns) ? customColumns : [];
+  const configs = Array.isArray(fieldConfigs) ? [...fieldConfigs] : [];
+
+  const columnKey = (name) => String(name || '').trim().toLowerCase();
+  const columnsByKey = new Map(
+    columns.filter((col) => col?.name).map((col) => [columnKey(col.name), col])
+  );
+
+  const filtered = configs.filter((config) => {
+    if (config?.fieldType !== 'custom') return true;
+    const key = columnKey(config.ebayField);
+    if (!key) return false;
+    const col = columnsByKey.get(key);
+    if (!col) return false;
+    return !customColumnHasDefault(col);
+  });
+
+  const existingCustomKeys = new Set(
+    filtered
+      .filter((config) => config?.fieldType === 'custom')
+      .map((config) => columnKey(config.ebayField))
+      .filter(Boolean)
+  );
+
+  for (const col of columns) {
+    if (!col?.name || customColumnHasDefault(col)) continue;
+    const key = columnKey(col.name);
+    if (existingCustomKeys.has(key)) continue;
+    filtered.push(createCustomAsinFieldConfig(col));
+    existingCustomKeys.add(key);
+  }
+
+  return filtered;
+}
+
+function buildAsinAutomationFromColumns(customColumns, fieldConfigs) {
+  const mergedColumns = mergeDefaultCustomColumns(customColumns);
+  const mergedConfigs = mergeDefaultAsinFieldConfigs(fieldConfigs);
+  return {
+    enabled: true,
+    fieldConfigs: syncAsinAutoFillFromCustomColumns(mergedColumns, mergedConfigs)
+  };
+}
+
 function createEmptyTemplateFormData() {
+  const customColumns = mergeDefaultCustomColumns([]);
   return {
     name: '',
-    customColumns: mergeDefaultCustomColumns([]),
-    asinAutomation: {
-      enabled: true,
-      fieldConfigs: mergeDefaultAsinFieldConfigs([])
-    },
+    customColumns,
+    asinAutomation: buildAsinAutomationFromColumns(customColumns, []),
     coreFieldDefaults: createDefaultCoreFieldDefaults(),
     customActionField: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
     rangeId: null,
@@ -350,12 +424,16 @@ export default function ManageTemplatesPage() {
       setFormRanges([]);
       setFormProducts([]);
     }
+    const customColumns = mergeDefaultCustomColumns(template.customColumns || []);
     setFormData({
       name: template.name,
-      customColumns: mergeDefaultCustomColumns(template.customColumns || []),
+      customColumns,
       asinAutomation: {
         enabled: template?.asinAutomation?.enabled !== false,
-        fieldConfigs: mergeDefaultAsinFieldConfigs(template?.asinAutomation?.fieldConfigs || [])
+        fieldConfigs: syncAsinAutoFillFromCustomColumns(
+          customColumns,
+          mergeDefaultAsinFieldConfigs(template?.asinAutomation?.fieldConfigs || [])
+        )
       },
       coreFieldDefaults: {
         ...createDefaultCoreFieldDefaults(),
@@ -395,11 +473,21 @@ export default function ManageTemplatesPage() {
 
     try {
       setLoading(true);
+      const payload = {
+        ...formData,
+        asinAutomation: {
+          ...formData.asinAutomation,
+          fieldConfigs: syncAsinAutoFillFromCustomColumns(
+            formData.customColumns,
+            formData.asinAutomation?.fieldConfigs || []
+          )
+        }
+      };
       if (editingTemplate?._id) {
-        await api.put(`/listing-templates/${editingTemplate._id}`, formData);
+        await api.put(`/listing-templates/${editingTemplate._id}`, payload);
         setSuccess('Template updated successfully!');
       } else {
-        await api.post('/listing-templates', formData);
+        await api.post('/listing-templates', payload);
         setSuccess('Template created successfully!');
       }
       setEditDialog(false);
@@ -556,12 +644,30 @@ export default function ManageTemplatesPage() {
   };
 
   const handleSaveColumn = () => {
-    if (!columnFormData.name || !columnFormData.displayName) {
+    const normalizedName = normalizeCustomColumnCsvName(columnFormData.name);
+    const normalizedDisplayName = String(columnFormData.displayName || '').trim();
+
+    if (!normalizedName || !normalizedDisplayName) {
       setColumnFormError('Column name and display name are required');
       return;
     }
 
-    const nameKey = String(columnFormData.name).trim().toLowerCase();
+    if (!normalizedName.startsWith(CUSTOM_COLUMN_NAME_PREFIX)) {
+      setColumnFormError(`Column name must start with "${CUSTOM_COLUMN_NAME_PREFIX}" (e.g. C:Brand, C:Color).`);
+      return;
+    }
+
+    const rawName = String(columnFormData.name || '').trim();
+    const columnPayload = {
+      ...columnFormData,
+      name: normalizedName,
+      displayName:
+        normalizedDisplayName === rawName || normalizedDisplayName === columnFormData.name
+          ? normalizedName
+          : normalizedDisplayName
+    };
+
+    const nameKey = normalizedName.toLowerCase();
     const duplicate = formData.customColumns.some(
       (col, idx) =>
         String(col.name || '').trim().toLowerCase() === nameKey &&
@@ -572,34 +678,42 @@ export default function ManageTemplatesPage() {
       return;
     }
 
+    const applyColumnChange = (updatedColumns) => {
+      setFormData((prev) => {
+        const nextColumns = updatedColumns;
+        return {
+          ...prev,
+          customColumns: nextColumns,
+          asinAutomation: {
+            ...prev.asinAutomation,
+            fieldConfigs: syncAsinAutoFillFromCustomColumns(
+              nextColumns,
+              prev.asinAutomation?.fieldConfigs || []
+            )
+          }
+        };
+      });
+    };
+
     if (editingColumnIndex !== null) {
-      // Edit existing column
       const updatedColumns = [...formData.customColumns];
       updatedColumns[editingColumnIndex] = {
         ...updatedColumns[editingColumnIndex],
-        ...columnFormData
+        ...columnPayload
       };
-      
-      setFormData({
-        ...formData,
-        customColumns: updatedColumns
-      });
+      applyColumnChange(updatedColumns);
     } else {
-      // Add new column
-      const maxOrder = formData.customColumns.length > 0 
+      const maxOrder = formData.customColumns.length > 0
         ? Math.max(...formData.customColumns.map(col => col.order))
         : 38;
 
-      setFormData({
-        ...formData,
-        customColumns: [
-          ...formData.customColumns,
-          {
-            ...columnFormData,
-            order: maxOrder + 1
-          }
-        ]
-      });
+      applyColumnChange([
+        ...formData.customColumns,
+        {
+          ...columnPayload,
+          order: maxOrder + 1
+        }
+      ]);
     }
 
     setColumnFormError('');
@@ -608,10 +722,22 @@ export default function ManageTemplatesPage() {
   };
 
   const handleRemoveColumn = (columnName) => {
-    setFormData({
-      ...formData,
-      customColumns: formData.customColumns.filter(col => col.name !== columnName)
-    });
+    const updatedColumns = formData.customColumns.filter(col => col.name !== columnName);
+    setFormData((prev) => ({
+      ...prev,
+      customColumns: updatedColumns,
+      asinAutomation: {
+        ...prev.asinAutomation,
+        fieldConfigs: syncAsinAutoFillFromCustomColumns(
+          updatedColumns,
+          (prev.asinAutomation?.fieldConfigs || []).filter(
+            (config) =>
+              config?.fieldType !== 'custom' ||
+              String(config.ebayField || '').trim() !== String(columnName || '').trim()
+          )
+        )
+      }
+    }));
   };
   
   const handleAddFieldConfig = () => {
@@ -944,7 +1070,12 @@ export default function ManageTemplatesPage() {
               {currentTab === 1 && (
                 <Box>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-                    <Typography variant="subtitle2">Custom Columns</Typography>
+                    <Box>
+                      <Typography variant="subtitle2">Custom Columns</Typography>
+                      <Typography variant="caption" color="text.secondary" display="block">
+                        Columns without a default value are added to ASIN Auto-Fill automatically.
+                      </Typography>
+                    </Box>
                     <Button size="small" startIcon={<AddIcon />} onClick={handleAddColumn}>
                       Add Column
                     </Button>
@@ -964,7 +1095,9 @@ export default function ManageTemplatesPage() {
                               <Typography variant="caption" color="text.secondary">
                                 {col.displayName} • {col.dataType}
                                 {col.isRequired && ' • Required'}
-                                {col.defaultValue && ` • Default: ${col.defaultValue}`}
+                                {customColumnHasDefault(col)
+                                  ? ` • Default: ${col.defaultValue}`
+                                  : ' • No default (ASIN Auto-Fill)'}
                               </Typography>
                             </Box>
                             <Stack direction="row" spacing={0.5}>
@@ -1151,7 +1284,7 @@ export default function ManageTemplatesPage() {
                   });
                 }}
                 placeholder="e.g., C:Brand, C:Color, C:Material"
-                helperText="Exact column name as it will appear in CSV"
+                helperText={`Must start with "${CUSTOM_COLUMN_NAME_PREFIX}" — exact CSV header (e.g. type Brand → saved as C:Brand)`}
               />
 
               <TextField
