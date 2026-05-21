@@ -5,6 +5,9 @@ import {
     Typography,
     Button,
     Paper,
+    Card,
+    CardContent,
+    Grid,
     Table,
     TableBody,
     TableCell,
@@ -1035,6 +1038,36 @@ const PayoneerSheetPage = () => {
                     </Stack>
                 </Stack>
             </Paper>
+
+            {/* Top summary cards: Total Records, Amount (USD), Bank Deposit (INR) */}
+            <Box sx={{ mb: 2 }}>
+                <Grid container spacing={2}>
+                    <Grid item xs={12} sm={4}>
+                        <Card sx={{ p: 1, borderRadius: 2, bgcolor: 'action.hover' }}>
+                            <CardContent>
+                                <Typography variant="caption" color="text.secondary">Total Records</Typography>
+                                <Typography variant="h5" sx={{ fontWeight: 800 }}>{mergedRows.length}</Typography>
+                            </CardContent>
+                        </Card>
+                    </Grid>
+                    <Grid item xs={12} sm={4}>
+                        <Card sx={{ p: 1, borderRadius: 2, bgcolor: 'primary.50' }}>
+                            <CardContent>
+                                <Typography variant="caption" color="text.secondary">Amount (USD)</Typography>
+                                <Typography variant="h5" sx={{ fontWeight: 800 }}>{formatUsd(totals.amountUSD)}</Typography>
+                            </CardContent>
+                        </Card>
+                    </Grid>
+                    <Grid item xs={12} sm={4}>
+                        <Card sx={{ p: 1, borderRadius: 2, bgcolor: 'success.50' }}>
+                            <CardContent>
+                                <Typography variant="caption" color="text.secondary">Bank Deposit (INR)</Typography>
+                                <Typography variant="h5" sx={{ fontWeight: 800, color: 'success.main' }}>{formatInr(totals.bankDepositINR, 2)}</Typography>
+                            </CardContent>
+                        </Card>
+                    </Grid>
+                </Grid>
+            </Box>
 
             {loading && (
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
