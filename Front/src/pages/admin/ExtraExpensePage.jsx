@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
     Alert,
     Box,
@@ -56,12 +56,40 @@ const PAYMENT_METHODS = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Payoneer', 'Ot
 
 const CHART_COLORS = ['#1976d2', '#ed6c02', '#2e7d32', '#9c27b0', '#d32f2f', '#0288d1', '#6d4c41', '#455a64'];
 const EMPTY_FILTERS = {
+    dateMode: 'None',
     date: '',
     from: '',
     to: '',
     paidBy: '',
     category: '',
     search: '',
+    searchSelect: '',
+};
+
+const CATEGORY_OPTIONS = ['Fixed Expenses', 'Variable Expenses', 'Other Expenses'];
+const NAME_FILTER_OPTIONS = ['Pantry & Refreshments', 'Puja Expense', 'Office Expense'];
+
+// Map old category names to new fixed categories for display
+const CATEGORY_MAP = {
+  'Salaries': 'Fixed Expenses',
+  'Office & Supplies': 'Fixed Expenses',
+  'Office Expense': 'Fixed Expenses',
+  'Utilities': 'Variable Expenses',
+  'Pantry & Refreshments': 'Variable Expenses',
+  'Puja Expense': 'Other Expenses',
+  'Uncategorized': 'Other Expenses',
+  '__uncategorized__': 'Other Expenses'
+};
+
+const mapOldCategoryToNew = (oldCategory) => {
+  if (!oldCategory) return 'Other Expenses';
+  return CATEGORY_MAP[oldCategory] || oldCategory;
+};
+
+// Reverse mapping: convert new category back to query array of old categories
+const getOldCategoriesForNewCategory = (newCategory) => {
+  if (!newCategory) return [];
+  return Object.keys(CATEGORY_MAP).filter(old => CATEGORY_MAP[old] === newCategory);
 };
 
 const EMPTY_FORM = {
@@ -104,7 +132,20 @@ function MonthSpendChart({ data, height = 280 }) {
 }
 
 function CategorySpendChart({ data, height = 280, yAxisWidth = 110, maxBars }) {
-    const rows = maxBars ? data.slice(0, maxBars) : data;
+    // Map old categories to new ones and aggregate
+    const mappedData = data.reduce((acc, item) => {
+      const newCat = mapOldCategoryToNew(item.category);
+      const existing = acc.find(d => d.category === newCat);
+      if (existing) {
+        existing.amount += item.amount;
+        existing.count += item.count || 1;
+      } else {
+        acc.push({ ...item, category: newCat });
+      }
+      return acc;
+    }, []);
+    
+    const rows = maxBars ? mappedData.slice(0, maxBars) : mappedData;
     if (!rows?.length) {
         return (
             <Typography variant="body2" color="text.secondary" sx={{ py: 8, textAlign: 'center' }}>
@@ -237,7 +278,7 @@ const MobileExpenseCard = ({ expense, onEdit, onDelete }) => {
                     <Typography variant="body2" sx={{ fontWeight: 600 }}>{expense.name}</Typography>
                 </Box>
                 <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    {expense.category ? <Chip size="small" label={expense.category} /> : null}
+                    {expense.category ? <Chip size="small" label={mapOldCategoryToNew(expense.category)} /> : null}
                     {expense.paymentMethod ? <Chip size="small" variant="outlined" label={expense.paymentMethod} /> : null}
                 </Stack>
                 <Typography variant="body2"><strong>Paid by:</strong> {expense.paidBy}</Typography>
@@ -270,6 +311,7 @@ const ExtraExpensePage = () => {
     const [charts, setCharts] = useState({ byMonth: [], byCategory: [] });
     const [filterOptions, setFilterOptions] = useState({ paidByOptions: [], categoryOptions: [] });
     const [filters, setFilters] = useState(EMPTY_FILTERS);
+    const [appliedFilters, setAppliedFilters] = useState(EMPTY_FILTERS);
 
     const [openDialog, setOpenDialog] = useState(false);
     const [loading, setLoading] = useState(false);
@@ -284,14 +326,27 @@ const ExtraExpensePage = () => {
 
     const queryParams = useMemo(() => {
         const p = {};
-        if (filters.date) p.date = filters.date;
-        if (filters.from) p.from = filters.from;
-        if (filters.to) p.to = filters.to;
-        if (filters.paidBy) p.paidBy = filters.paidBy;
-        if (filters.category) p.category = filters.category;
-        if (filters.search.trim()) p.search = filters.search.trim();
+        
+        // Handle date based on mode
+        if (appliedFilters.dateMode === 'Single Day' && appliedFilters.date) {
+            p.date = appliedFilters.date;
+        } else if (appliedFilters.dateMode === 'Date Range') {
+            if (appliedFilters.from) p.from = appliedFilters.from;
+            if (appliedFilters.to) p.to = appliedFilters.to;
+        }
+        // If dateMode is 'None', don't send any date params
+        
+        if (appliedFilters.paidBy) p.paidBy = appliedFilters.paidBy;
+        if (appliedFilters.category) {
+            // Convert new category to old categories for backend query
+            const oldCats = getOldCategoriesForNewCategory(appliedFilters.category);
+            if (oldCats.length > 0) {
+                p.categories = oldCats; // Pass array to backend to filter by multiple old categories
+            }
+        }
+        if (appliedFilters.search.trim()) p.search = appliedFilters.search.trim();
         return p;
-    }, [filters]);
+    }, [appliedFilters]);
 
     const fetchExpenses = useCallback(async () => {
         try {
@@ -316,9 +371,21 @@ const ExtraExpensePage = () => {
         }
     }, [queryParams]);
 
+    // Fetch on mount with empty filters
     useEffect(() => {
         fetchExpenses();
-    }, [fetchExpenses]);
+    }, []); // Empty dependency array - only run on mount
+
+    // Re-fetch when applied filters change
+    const isFirstRender = useRef(true);
+    useEffect(() => {
+        if (isFirstRender.current) {
+            isFirstRender.current = false;
+            return;
+        }
+        // Filters changed after mount, fetch new data
+        fetchExpenses();
+    }, [appliedFilters]);
 
     const categoryFilterOptions = useMemo(() => {
         return (filterOptions.categoryOptions || []).filter(Boolean).sort();
@@ -394,7 +461,7 @@ const ExtraExpensePage = () => {
             name: expense.name,
             amount: expense.amount,
             paidBy: expense.paidBy,
-            category: expense.category || '',
+            category: mapOldCategoryToNew(expense.category) || '',
             remark: expense.remark || '',
             paymentMethod: expense.paymentMethod || '',
         });
@@ -410,8 +477,17 @@ const ExtraExpensePage = () => {
         });
     };
 
+    const handleApplyFilters = () => {
+        setAppliedFilters(filters);
+    };
+
+    const handleClearFilters = () => {
+        setFilters(EMPTY_FILTERS);
+        setAppliedFilters(EMPTY_FILTERS);
+    };
+
     const hasActiveFilters = Boolean(
-        filters.date || filters.from || filters.to || filters.paidBy || filters.category || filters.search.trim()
+        appliedFilters.dateMode !== 'None' || appliedFilters.date || appliedFilters.from || appliedFilters.to || appliedFilters.paidBy || appliedFilters.category || appliedFilters.search.trim()
     );
 
     const listTotal = useMemo(
@@ -521,38 +597,70 @@ const ExtraExpensePage = () => {
                 <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>Filters</Typography>
                 <Grid container spacing={1.5}>
                     <Grid item xs={12} sm={6} md={2}>
-                        <TextField
-                            label="Date"
-                            type="date"
-                            size="small"
-                            fullWidth
-                            InputLabelProps={{ shrink: true }}
-                            value={filters.date}
-                            onChange={(e) => setFilters((f) => ({ ...f, date: e.target.value }))}
-                        />
+                        <FormControl size="small" fullWidth>
+                            <InputLabel>Date Mode</InputLabel>
+                            <Select
+                                label="Date Mode"
+                                value={filters.dateMode}
+                                onChange={(e) => {
+                                    const mode = e.target.value;
+                                    // Clear date fields when switching modes
+                                    setFilters((f) => ({
+                                        ...f,
+                                        dateMode: mode,
+                                        date: '',
+                                        from: '',
+                                        to: '',
+                                    }));
+                                }}
+                            >
+                                <MenuItem value="None">None</MenuItem>
+                                <MenuItem value="Single Day">Single Day</MenuItem>
+                                <MenuItem value="Date Range">Date Range</MenuItem>
+                            </Select>
+                        </FormControl>
                     </Grid>
-                    <Grid item xs={12} sm={6} md={2}>
-                        <TextField
-                            label="From"
-                            type="date"
-                            size="small"
-                            fullWidth
-                            InputLabelProps={{ shrink: true }}
-                            value={filters.from}
-                            onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
-                        />
-                    </Grid>
-                    <Grid item xs={12} sm={6} md={2}>
-                        <TextField
-                            label="To"
-                            type="date"
-                            size="small"
-                            fullWidth
-                            InputLabelProps={{ shrink: true }}
-                            value={filters.to}
-                            onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
-                        />
-                    </Grid>
+
+                    {filters.dateMode === 'Single Day' && (
+                        <Grid item xs={12} sm={6} md={2}>
+                            <TextField
+                                label="Date"
+                                type="date"
+                                size="small"
+                                fullWidth
+                                InputLabelProps={{ shrink: true }}
+                                value={filters.date}
+                                onChange={(e) => setFilters((f) => ({ ...f, date: e.target.value }))}
+                            />
+                        </Grid>
+                    )}
+
+                    {filters.dateMode === 'Date Range' && (
+                        <>
+                            <Grid item xs={12} sm={6} md={2}>
+                                <TextField
+                                    label="From"
+                                    type="date"
+                                    size="small"
+                                    fullWidth
+                                    InputLabelProps={{ shrink: true }}
+                                    value={filters.from}
+                                    onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
+                                />
+                            </Grid>
+                            <Grid item xs={12} sm={6} md={2}>
+                                <TextField
+                                    label="To"
+                                    type="date"
+                                    size="small"
+                                    fullWidth
+                                    InputLabelProps={{ shrink: true }}
+                                    value={filters.to}
+                                    onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
+                                />
+                            </Grid>
+                        </>
+                    )}
                     <Grid item xs={12} sm={6} md={2}>
                         <FormControl size="small" fullWidth>
                             <InputLabel>Paid by</InputLabel>
@@ -577,28 +685,62 @@ const ExtraExpensePage = () => {
                                 onChange={(e) => setFilters((f) => ({ ...f, category: e.target.value }))}
                             >
                                 <MenuItem value="">All</MenuItem>
-                                <MenuItem value="__uncategorized__">Uncategorized</MenuItem>
-                                {categoryFilterOptions.map((cat) => (
+                                {CATEGORY_OPTIONS.map((cat) => (
                                     <MenuItem key={cat} value={cat}>{cat}</MenuItem>
                                 ))}
                             </Select>
                         </FormControl>
                     </Grid>
                     <Grid item xs={12} sm={6} md={2}>
-                        <TextField
-                            label="Search expenditure name"
-                            size="small"
-                            fullWidth
-                            value={filters.search}
-                            onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
-                        />
+                        <FormControl size="small" fullWidth>
+                            <InputLabel>Search expenditure name</InputLabel>
+                            <Select
+                                label="Search expenditure name"
+                                value={filters.searchSelect || ''}
+                                onChange={(e) => {
+                                    const val = e.target.value;
+                                    if (val === '__custom__') {
+                                        // switch to custom search (clear existing search)
+                                        setFilters((f) => ({ ...f, searchSelect: val, search: '' }));
+                                    } else {
+                                        setFilters((f) => ({ ...f, searchSelect: val, search: val }));
+                                    }
+                                }}
+                            >
+                                <MenuItem value="">All</MenuItem>
+                                {NAME_FILTER_OPTIONS.map((name) => (
+                                    <MenuItem key={name} value={name}>{name}</MenuItem>
+                                ))}
+                                <MenuItem value="__custom__">Search by name...</MenuItem>
+                            </Select>
+                        </FormControl>
                     </Grid>
+                    {filters.searchSelect === '__custom__' && (
+                        <Grid item xs={12} sm={6} md={2}>
+                            <TextField
+                                label="Search expenditure name"
+                                size="small"
+                                fullWidth
+                                value={filters.search}
+                                onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+                            />
+                        </Grid>
+                    )}
                 </Grid>
-                {hasActiveFilters ? (
-                    <Button size="small" sx={{ mt: 1.5 }} onClick={() => setFilters(EMPTY_FILTERS)}>
-                        Clear filters
+                <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
+                    <Button 
+                        variant="contained" 
+                        size="small" 
+                        onClick={handleApplyFilters}
+                    >
+                        Apply Filters
                     </Button>
-                ) : null}
+                    {hasActiveFilters ? (
+                        <Button size="small" onClick={handleClearFilters}>
+                            Clear filters
+                        </Button>
+                    ) : null}
+                </Stack>
             </Paper>
 
             <Paper sx={{ borderRadius: 2, mb: 3, overflow: 'hidden' }}>
@@ -802,7 +944,7 @@ const ExtraExpensePage = () => {
                             <TableRow key={expense._id} hover>
                                 <TableCell>{new Date(expense.date).toLocaleDateString()}</TableCell>
                                 <TableCell sx={{ fontWeight: 600 }}>{expense.name}</TableCell>
-                                <TableCell>{expense.category || '—'}</TableCell>
+                                <TableCell>{expense.category ? mapOldCategoryToNew(expense.category) : '—'}</TableCell>
                                 <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>
                                     {formatInr(expense.amount)}
                                 </TableCell>
@@ -900,14 +1042,19 @@ const ExtraExpensePage = () => {
                             value={formData.paidBy}
                             onChange={(e) => setFormData({ ...formData, paidBy: e.target.value })}
                         />
-                        <TextField
-                            label="Category"
-                            fullWidth
-                            value={formData.category}
-                            onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                            placeholder="Type category (e.g. Office, Marketing)"
-                            helperText="Enter any category name — saved expenses build the filter list"
-                        />
+                        <FormControl fullWidth>
+                            <InputLabel>Category</InputLabel>
+                            <Select
+                                label="Category"
+                                value={formData.category}
+                                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                            >
+                                <MenuItem value="">None</MenuItem>
+                                {CATEGORY_OPTIONS.map((c) => (
+                                    <MenuItem key={c} value={c}>{c}</MenuItem>
+                                ))}
+                            </Select>
+                        </FormControl>
                         <FormControl fullWidth>
                             <InputLabel>Payment method</InputLabel>
                             <Select

@@ -109,8 +109,16 @@ function buildListFilter(query) {
     const paidBy = String(query.paidBy || '').trim();
     if (paidBy) filter.paidBy = paidBy;
 
+    // Handle category filtering - supports both old category names and new category groups
+    const categories = Array.isArray(query.categories) ? query.categories : 
+                      (query.categories ? [query.categories] : []);
     const category = String(query.category || '').trim();
-    if (category) {
+    
+    if (categories.length > 0) {
+        // Filter by multiple old category names (from new category group)
+        filter.category = { $in: categories };
+    } else if (category) {
+        // Legacy: filter by single category name
         if (category === '__uncategorized__') {
             filter.$or = [{ category: { $exists: false } }, { category: null }, { category: '' }];
         } else {
