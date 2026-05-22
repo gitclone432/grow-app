@@ -22,6 +22,7 @@ import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
 import ActiveListing from '../models/ActiveListing.js';
+import CashflowEntry from '../models/CashflowEntry.js';
 import SyncAllSellersLock from '../models/SyncAllSellersLock.js';
 import SyncAllSellersStatusCache from '../models/SyncAllSellersStatusCache.js';
 import FitmentCache from '../models/FitmentCache.js';
@@ -3425,7 +3426,60 @@ router.get('/all-orders-usd', async (req, res) => {
   }
 });
 
-// Test endpoint to check Finances API basic connectivity (no filter)
+// Test endpoint to debug cashflow data
+router.get('/debug/cashflow-orders', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+  try {
+    const { sellerId, from, to } = req.query;
+    
+    if (!sellerId) {
+      return res.status(400).json({ error: 'sellerId required' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const query = { seller: sellerId };
+    
+    if (from || to) {
+      query.dateSold = {};
+      if (from) query.dateSold.$gte = new Date(from);
+      if (to) query.dateSold.$lte = new Date(to);
+    }
+
+    // Get count and sample of orders
+    const totalCount = await Order.countDocuments(query);
+    const orders = await Order.find(query)
+      .select('orderId dateSold subtotal salesTax purchaseMarketplaceId orderPaymentStatus cancelState')
+      .limit(20);
+
+    // Get aggregation breakdown
+    const breakdown = await Order.aggregate([
+      { $match: { seller: new mongoose.Types.ObjectId(sellerId), ...query } },
+      {
+        $group: {
+          _id: '$purchaseMarketplaceId',
+          count: { $sum: 1 },
+          totalSubtotal: { $sum: '$subtotal' },
+          totalSalesTax: { $sum: '$salesTax' }
+        }
+      }
+    ]);
+
+    res.json({
+      totalOrders: totalCount,
+      query,
+      sampleOrders: orders,
+      breakdown,
+      sellerName: seller.user?.username || seller._id.toString()
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Test endpoint: Simple Finances API test
 router.get('/test-finances-basic', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId } = req.query;
 
@@ -13031,6 +13085,180 @@ router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'
   } catch (err) {
     console.error('[Seller Funds Summary] Error:', err.message);
     res.status(500).json({ error: 'Failed to fetch seller funds summary' });
+  }
+});
+
+// ============================================
+// GET SELLERS LIST (for dropdown filters)
+// ============================================
+router.get('/sellers-list', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+  try {
+    const sellers = await Seller.find({
+      'ebayTokens.access_token': { $exists: true, $ne: null },
+      'ebayTokens.refresh_token': { $exists: true, $ne: null }
+    }).populate('user', 'username email').select('_id user');
+    
+    res.json(sellers);
+  } catch (err) {
+    console.error('[Sellers List] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch sellers list' });
+  }
+});
+
+// ============================================
+// CASHFLOW - MANUALLY FILLED SHEET (No API calls)
+// ============================================
+// GET all cashflow entries for date range & optional seller/marketplace filter
+router.get('/cashflow', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+  try {
+    const { startDate, endDate, sellerId, marketplace } = req.query;
+
+    // Build query
+    const query = {};
+
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        query.date.$lte = end;
+      }
+    }
+
+    if (sellerId) {
+      query.seller = sellerId;
+    }
+
+    if (marketplace) {
+      query.marketplace = marketplace;
+    }
+
+    const entries = await CashflowEntry.find(query)
+      .populate({
+        path: 'seller',
+        select: '_id user',
+        populate: {
+          path: 'user',
+          select: 'username email'
+        }
+      })
+      .sort({ date: -1, seller: 1, marketplace: 1 })
+      .lean();
+
+    // Format response: group by seller
+    const sellerMap = new Map();
+
+    for (const entry of entries) {
+      const sid = entry.seller._id.toString();
+      if (!sellerMap.has(sid)) {
+        sellerMap.set(sid, {
+          sellerId: entry.seller._id,
+          sellerName: entry.seller.user?.username || entry.seller._id.toString(),
+          marketplaces: []
+        });
+      }
+
+      const sellerData = sellerMap.get(sid);
+      sellerData.marketplaces.push({
+        marketplace: entry.marketplace,
+        date: entry.date,
+        gross: { value: entry.gross.toFixed(2), currency: 'USD' },
+        taxesAndFees: { value: entry.taxesAndFees.toFixed(2), currency: 'USD' },
+        sellingCosts: { value: entry.sellingCosts.toFixed(2), currency: 'USD' },
+        net: { value: entry.net.toFixed(2), currency: 'USD' },
+        notes: entry.notes,
+        id: entry._id
+      });
+    }
+
+    // Convert to array and calculate totals
+    const results = Array.from(sellerMap.values()).map(seller => {
+      let totalGross = 0, totalTaxes = 0, totalSelling = 0, totalNet = 0;
+
+      for (const mp of seller.marketplaces) {
+        totalGross += parseFloat(mp.gross.value);
+        totalTaxes += parseFloat(mp.taxesAndFees.value);
+        totalSelling += parseFloat(mp.sellingCosts.value);
+        totalNet += parseFloat(mp.net.value);
+      }
+
+      return {
+        ...seller,
+        gross: { value: totalGross.toFixed(2), currency: 'USD' },
+        taxesAndFees: { value: totalTaxes.toFixed(2), currency: 'USD' },
+        sellingCosts: { value: totalSelling.toFixed(2), currency: 'USD' },
+        net: { value: totalNet.toFixed(2), currency: 'USD' }
+      };
+    });
+
+    res.json(results);
+  } catch (err) {
+    console.error('[Cashflow] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST - Create new cashflow entry
+router.post('/cashflow', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+  try {
+    const { sellerId, marketplace = 'EBAY_US', date, gross, taxesAndFees, sellingCosts, notes } = req.body;
+
+    if (!sellerId || !date) {
+      return res.status(400).json({ error: 'sellerId and date are required' });
+    }
+
+    const entry = new CashflowEntry({
+      seller: sellerId,
+      marketplace,
+      date: new Date(date),
+      gross: parseFloat(gross) || 0,
+      taxesAndFees: parseFloat(taxesAndFees) || 0,
+      sellingCosts: parseFloat(sellingCosts) || 0,
+      net: parseFloat(gross || 0) - parseFloat(taxesAndFees || 0) - parseFloat(sellingCosts || 0),
+      notes,
+      createdBy: req.user.userId,
+      updatedBy: req.user.userId
+    });
+
+    await entry.save();
+    res.json({ success: true, entry });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH - Update cashflow entry
+router.patch('/cashflow/:entryId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+  try {
+    const { gross, taxesAndFees, sellingCosts, notes } = req.body;
+
+    const entry = await CashflowEntry.findByIdAndUpdate(
+      req.params.entryId,
+      {
+        gross: parseFloat(gross) || 0,
+        taxesAndFees: parseFloat(taxesAndFees) || 0,
+        sellingCosts: parseFloat(sellingCosts) || 0,
+        net: parseFloat(gross || 0) - parseFloat(taxesAndFees || 0) - parseFloat(sellingCosts || 0),
+        notes,
+        updatedBy: req.user.userId
+      },
+      { new: true }
+    );
+
+    res.json({ success: true, entry });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE - Delete cashflow entry
+router.delete('/cashflow/:entryId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+  try {
+    await CashflowEntry.findByIdAndDelete(req.params.entryId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

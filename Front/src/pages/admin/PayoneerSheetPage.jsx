@@ -215,6 +215,8 @@ function MobilePayoneerCard({ record, isEditing, displayPayoutId, renderCell, on
                         <Box sx={{ mt: 0.5 }}>{renderCell(record, 'paymentDate', 'date')}</Box>
                     </Box>
 
+ 
+
                     <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
                         <Box sx={{ flex: 1 }}>
                             <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem', fontWeight: 'bold' }}>
@@ -832,6 +834,8 @@ const PayoneerSheetPage = () => {
                 </TextField>
             );
         }
+
+        
 
         const numberInputProps = field === 'exchangeRate'
             ? { step: 'any', inputMode: 'decimal' }
