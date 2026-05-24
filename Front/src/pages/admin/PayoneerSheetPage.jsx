@@ -29,7 +29,9 @@ import {
     useMediaQuery,
     Pagination,
     CircularProgress,
-    Alert
+    Alert,
+    Tabs,
+    Tab
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import SyncIcon from '@mui/icons-material/Sync';
@@ -64,7 +66,8 @@ const EMPTY_PAYONEER_FORM = () => ({
     periodStart: '',
     periodEnd: '',
     /** Finances payoutId from completed payouts feed / Save row */
-    ebayPayoutId: ''
+    ebayPayoutId: '',
+    marketplace: 'ebay'
 });
 
 /** Max DB rows to merge with eBay feed (client-side sort + pagination). */
@@ -288,6 +291,22 @@ const PayoneerSheetPage = () => {
     const isMobile = useMediaQuery(theme.breakpoints.down('md'));
     const isSmallMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
+    // Marketplace Tab State
+    const [marketplace, setMarketplace] = useState('ebay'); // 'ebay', 'etsy', 'walmart'
+    const handleMarketplaceChange = (event, newValue) => {
+        setMarketplace(newValue);
+        // Reset filters and pagination when switching tabs
+        setFilters({
+            store: '',
+            bankAccount: '',
+            dateMode: 'none',
+            singleDate: '',
+            dateRange: { start: '', end: '' }
+        });
+        setPagination({ page: 1, limit: 50 });
+        setSearchParams({}, { replace: true });
+    };
+
     const [records, setRecords] = useState([]);
     const [sellers, setSellers] = useState([]);
     const [bankAccounts, setBankAccounts] = useState([]);
@@ -411,14 +430,15 @@ const PayoneerSheetPage = () => {
         setPagination((p) => ({ ...p, page: 1 }));
         fetchRecords();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [filters]);
+    }, [filters, marketplace]);
 
     const fetchRecords = async () => {
         setLoading(true);
         try {
             const params = {
                 page: 1,
-                limit: MERGE_FETCH_LIMIT
+                limit: MERGE_FETCH_LIMIT,
+                marketplace: marketplace
             };
 
             // Add Store Filter
@@ -473,28 +493,31 @@ const PayoneerSheetPage = () => {
             if (r.ebayPayoutId) savedPayoutIds.add(String(r.ebayPayoutId));
         }
 
-        const ebayMapped = filteredPayoutFeed
-            .filter((f) => {
-                if (f.payoutId && savedPayoutIds.has(String(f.payoutId))) return false;
-                const k = feedRowDedupeKey(f);
-                return k && !savedKeys.has(k);
-            })
-            .map((f) => ({
-                _fromEbay: true,
-                _feedSource: f,
-                _id: `ebay-${f.payoutId}-${f.sellerId}`,
-                bankAccount: f.suggestedBankAccountId
-                    ? { _id: f.suggestedBankAccountId, name: f.suggestedBankName }
-                    : null,
-                paymentDate: f.payoutDate,
-                store: { _id: f.sellerId, user: { username: f.sellerName } },
-                amount: f.amount,
-                exchangeRate: null,
-                actualExchangeRate: null,
-                bankDeposit: null,
-                periodStart: null,
-                periodEnd: null
-            }));
+        // Only include eBay feed for eBay marketplace
+        const ebayMapped = marketplace === 'ebay'
+            ? filteredPayoutFeed
+                .filter((f) => {
+                    if (f.payoutId && savedPayoutIds.has(String(f.payoutId))) return false;
+                    const k = feedRowDedupeKey(f);
+                    return k && !savedKeys.has(k);
+                })
+                .map((f) => ({
+                    _fromEbay: true,
+                    _feedSource: f,
+                    _id: `ebay-${f.payoutId}-${f.sellerId}`,
+                    bankAccount: f.suggestedBankAccountId
+                        ? { _id: f.suggestedBankAccountId, name: f.suggestedBankName }
+                        : null,
+                    paymentDate: f.payoutDate,
+                    store: { _id: f.sellerId, user: { username: f.sellerName } },
+                    amount: f.amount,
+                    exchangeRate: null,
+                    actualExchangeRate: null,
+                    bankDeposit: null,
+                    periodStart: null,
+                    periodEnd: null
+                }))
+            : [];
 
         const combined = [...ebayMapped, ...records];
         combined.sort((a, b) => {
@@ -505,7 +528,7 @@ const PayoneerSheetPage = () => {
             return dbn - da;
         });
         return combined;
-    }, [filteredPayoutFeed, records]);
+    }, [filteredPayoutFeed, records, marketplace]);
 
     const mergedTotalPages = Math.max(1, Math.ceil(mergedRows.length / pagination.limit) || 1);
 
@@ -663,10 +686,11 @@ const PayoneerSheetPage = () => {
         setFormData({
             ...EMPTY_PAYONEER_FORM(),
             bankAccount: bid,
-            paymentDate: getTodayPtDateString()
+            paymentDate: getTodayPtDateString(),
+            marketplace: marketplace
         });
         setOpenDialog(true);
-    }, [searchParams, filters.bankAccount]);
+    }, [searchParams, filters.bankAccount, marketplace]);
 
     const openAddFromFeedRow = useCallback((row) => {
         setAutoFillHint('Prefilled from eBay Recently completed payout. Enter exchange rate, then save.');
@@ -681,12 +705,12 @@ const PayoneerSheetPage = () => {
         setOpenDialog(true);
     }, []);
 
-    // After Add dialog opens: auto-match store from Bank Accounts "Sellers" + pull payout/amount from Seller Funds APIs
+    // After Add dialog opens: auto-match store from Bank Accounts "Sellers" + pull payout/amount from Seller Funds APIs (eBay only)
     useEffect(() => {
-        if (!openDialog || !formData.bankAccount || !sellers.length) return;
+        if (!openDialog || !formData.bankAccount || !sellers.length || marketplace !== 'ebay') return;
         if (formData.ebayPayoutId) return;
         void runBankAccountLinkedAutoFill(formData.bankAccount);
-    }, [openDialog, formData.bankAccount, formData.ebayPayoutId, sellers.length, runBankAccountLinkedAutoFill]);
+    }, [openDialog, formData.bankAccount, formData.ebayPayoutId, sellers.length, runBankAccountLinkedAutoFill, marketplace]);
 
     // Update calculations when Amount or Rate changes (for Add Dialog)
     useEffect(() => {
@@ -855,6 +879,26 @@ const PayoneerSheetPage = () => {
 
     return (
         <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>
+            {/* MARKETPLACE TABS */}
+            <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
+                <Tabs 
+                    value={marketplace} 
+                    onChange={handleMarketplaceChange}
+                    aria-label="marketplace tabs"
+                    sx={{
+                        '& .MuiTab-root': {
+                            textTransform: 'capitalize',
+                            fontSize: '1rem',
+                            fontWeight: 500
+                        }
+                    }}
+                >
+                    <Tab label="eBay" value="ebay" />
+                    <Tab label="Etsy" value="etsy" />
+                    <Tab label="Walmart" value="walmart" />
+                </Tabs>
+            </Box>
+
             <Box
                 sx={{
                     display: 'flex',
@@ -866,27 +910,31 @@ const PayoneerSheetPage = () => {
                 }}
             >
                 <Typography variant={isSmallMobile ? 'h6' : 'h5'} sx={{ fontWeight: 'bold' }}>
-                    Payoneer Sheet
+                    {marketplace === 'ebay' ? 'eBay' : marketplace === 'etsy' ? 'Etsy' : 'Walmart'} Payoneer Records
                 </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
-                    <Button
-                        variant="outlined"
-                        startIcon={payoutFeedLoading ? <CircularProgress size={18} color="inherit" /> : <SyncIcon />}
-                        onClick={() => loadPayoutFeed(true)}
-                        disabled={payoutFeedLoading}
-                        fullWidth={isSmallMobile}
-                    >
-                        {payoutFeedLoading ? 'Refreshing eBay…' : 'Refresh eBay payouts'}
-                    </Button>
-                    <Button
-                        variant="outlined"
-                        startIcon={<SyncIcon />}
-                        onClick={handleSyncGmail}
-                        disabled={gmailSyncLoading}
-                        fullWidth={isSmallMobile}
-                    >
-                        {gmailSyncLoading ? 'Syncing Gmail…' : 'Sync Gmail'}
-                    </Button>
+                    {marketplace === 'ebay' && (
+                        <>
+                            <Button
+                                variant="outlined"
+                                startIcon={payoutFeedLoading ? <CircularProgress size={18} color="inherit" /> : <SyncIcon />}
+                                onClick={() => loadPayoutFeed(true)}
+                                disabled={payoutFeedLoading}
+                                fullWidth={isSmallMobile}
+                            >
+                                {payoutFeedLoading ? 'Refreshing eBay…' : 'Refresh eBay payouts'}
+                            </Button>
+                            <Button
+                                variant="outlined"
+                                startIcon={<SyncIcon />}
+                                onClick={handleSyncGmail}
+                                disabled={gmailSyncLoading}
+                                fullWidth={isSmallMobile}
+                            >
+                                {gmailSyncLoading ? 'Syncing Gmail…' : 'Sync Gmail'}
+                            </Button>
+                        </>
+                    )}
                     <Button
                         variant="outlined"
                         startIcon={<AccountBalanceIcon />}
@@ -1081,37 +1129,46 @@ const PayoneerSheetPage = () => {
                     </Typography>
                 </Box>
             )}
-            {payoutFeedLoading && (
-                <Alert severity="info" sx={{ mb: 2 }}>
-                    {payoutFeedCacheEmpty
-                        ? 'Fetching from eBay and saving to database (first time or refresh)…'
-                        : 'Refreshing eBay payouts from eBay…'}
-                </Alert>
-            )}
-            {payoutFeedError && (
-                <Alert severity="warning" sx={{ mb: 2, flexShrink: 0 }}>
-                    {payoutFeedError}
-                </Alert>
-            )}
-            {payoutFeedCacheEmpty && !payoutFeedLoading && (
-                <Alert severity="warning" sx={{ mb: 2, flexShrink: 0 }}>
-                    No eBay payout data in the database yet. Click <strong>Refresh eBay payouts</strong> once — results are saved to MongoDB and load instantly on future visits.
-                </Alert>
-            )}
+            {marketplace === 'ebay' && (
+                <>
+                    {payoutFeedLoading && (
+                        <Alert severity="info" sx={{ mb: 2 }}>
+                            {payoutFeedCacheEmpty
+                                ? 'Fetching from eBay and saving to database (first time or refresh)…'
+                                : 'Refreshing eBay payouts from eBay…'}
+                        </Alert>
+                    )}
+                    {payoutFeedError && (
+                        <Alert severity="warning" sx={{ mb: 2, flexShrink: 0 }}>
+                            {payoutFeedError}
+                        </Alert>
+                    )}
+                    {payoutFeedCacheEmpty && !payoutFeedLoading && (
+                        <Alert severity="warning" sx={{ mb: 2, flexShrink: 0 }}>
+                            No eBay payout data in the database yet. Click <strong>Refresh eBay payouts</strong> once — results are saved to MongoDB and load instantly on future visits.
+                        </Alert>
+                    )}
 
-            <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
-                eBay SUCCEEDED payouts appear here; use Save row to enter exchange rate and save to your book.
-                {payoutFeedCachedAt && !payoutFeedCacheEmpty ? (
-                    <>
-                        {' '}
-                        (Loaded from database
-                        {payoutFeedCachedAt
-                            ? ` · last saved ${formatPaymentDateDisplayPt(payoutFeedCachedAt)}`
-                            : ''}
-                        .)
-                    </>
-                ) : null}
-            </Typography>
+                    <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+                        eBay SUCCEEDED payouts appear here; use Save row to enter exchange rate and save to your book.
+                        {payoutFeedCachedAt && !payoutFeedCacheEmpty ? (
+                            <>
+                                {' '}
+                                (Loaded from database
+                                {payoutFeedCachedAt
+                                    ? ` · last saved ${formatPaymentDateDisplayPt(payoutFeedCachedAt)}`
+                                    : ''}
+                                .)
+                            </>
+                        ) : null}
+                    </Typography>
+                </>
+            )}
+            {marketplace !== 'ebay' && (
+                <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+                    Manually enter {marketplace === 'etsy' ? 'Etsy' : 'Walmart'} payment records below.
+                </Typography>
+            )}
 
             {isMobile ? (
                 // MOBILE CARD VIEW
@@ -1441,14 +1498,11 @@ const PayoneerSheetPage = () => {
                 maxWidth="sm"
                 fullWidth
                 fullScreen={isSmallMobile}
-                slotProps={{
-                    paper: { sx: { overflow: 'visible' } },
-                }}
             >
-                <DialogTitle>Add Payoneer Record</DialogTitle>
-                <DialogContent sx={{ overflow: 'visible' }}>
+                <DialogTitle>Add {marketplace === 'ebay' ? 'eBay' : marketplace === 'etsy' ? 'Etsy' : 'Walmart'} Payoneer Record</DialogTitle>
+                <DialogContent>
                     <Box display="flex" flexDirection="column" gap={2} mt={1}>
-                        {autoFillHint && (
+                        {marketplace === 'ebay' && autoFillHint && (
                             <Alert severity="info" onClose={() => setAutoFillHint('')}>
                                 {autoFillHint}
                             </Alert>
@@ -1489,7 +1543,8 @@ const PayoneerSheetPage = () => {
                                 const v = e.target.value;
                                 setFormData((prev) => ({ ...prev, store: v, ebayPayoutId: '' }));
                                 setAutoFillHint('');
-                                if (v) void fillFromSellerFunds(v);
+                                // Only auto-fill from Seller Funds for eBay
+                                if (v && marketplace === 'ebay') void fillFromSellerFunds(v);
                             }}
                         >
                             {(formData.bankAccount
@@ -1516,7 +1571,8 @@ const PayoneerSheetPage = () => {
                             helperText="Calendar date is US Pacific (America/Los_Angeles)."
                         />
 
-                        {formData.ebayPayoutId ? (
+                        {/* eBay: Read-only payout ID from feed */}
+                        {marketplace === 'ebay' && formData.ebayPayoutId ? (
                             <TextField
                                 label="eBay payout ID (Recently completed)"
                                 fullWidth
@@ -1525,6 +1581,17 @@ const PayoneerSheetPage = () => {
                                 helperText="From eBay Finances; stored with this row."
                             />
                         ) : null}
+
+                        {/* Etsy/Walmart: Manual payout ID entry */}
+                        {marketplace !== 'ebay' && (
+                            <TextField
+                                label={`${marketplace === 'etsy' ? 'Etsy' : 'Walmart'} Payout/Transaction ID (optional)`}
+                                fullWidth
+                                value={formData.ebayPayoutId || ''}
+                                onChange={(e) => setFormData({ ...formData, ebayPayoutId: e.target.value })}
+                                helperText={`Reference number or transaction ID for tracking (optional)`}
+                            />
+                        )}
 
                         <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
                             <TextField

@@ -14,7 +14,9 @@ const PayoneerRecordSchema = new mongoose.Schema(
         ebayPayoutId: { type: String, trim: true, sparse: true },
         periodStart: { type: Date },
         periodEnd: { type: Date },
-        profit: { type: Number }
+        profit: { type: Number },
+        /** Marketplace: 'ebay', 'etsy', or 'walmart' — defaults to 'ebay' for backward compatibility */
+        marketplace: { type: String, enum: ['ebay', 'etsy', 'walmart'], default: 'ebay', index: true }
     },
     { timestamps: true }
 );
