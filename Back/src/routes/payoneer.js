@@ -41,9 +41,30 @@ const calculateFields = (amount, exchangeRate) => {
 // GET /api/payoneer - List all records with pagination and filtering
 router.get('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
-        const { page = 1, limit = 50, startDate, endDate, store, bankAccount } = req.query;
+        const { page = 1, limit = 50, startDate, endDate, store, bankAccount, marketplace } = req.query;
 
         const query = {};
+
+        // Marketplace filter ('ebay', 'etsy', 'walmart') — default to 'ebay' for backward compatibility
+        // Match records where marketplace is the specified value OR (for eBay) records with no marketplace field (legacy data)
+        if (marketplace && ['ebay', 'etsy', 'walmart'].includes(marketplace)) {
+            if (marketplace === 'ebay') {
+                // For eBay: match 'ebay' or records with no marketplace field (backward compatibility)
+                query.$or = [
+                    { marketplace: 'ebay' },
+                    { marketplace: { $exists: false } }
+                ];
+            } else {
+                // For Etsy/Walmart: only match specific marketplace
+                query.marketplace = marketplace;
+            }
+        } else if (!marketplace) {
+            // Default to eBay if marketplace not specified (backward compatibility)
+            query.$or = [
+                { marketplace: 'ebay' },
+                { marketplace: { $exists: false } }
+            ];
+        }
 
         // Bank account filter (links Bank Accounts page → Payoneer sheet)
         if (bankAccount) {
@@ -125,11 +146,13 @@ router.post('/import-gmail', requireAuth, requirePageAccess('Payoneer'), async (
 // POST /api/payoneer - Create new record
 router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
-        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit, ebayPayoutId } = req.body;
+        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit, ebayPayoutId, marketplace } = req.body;
 
         if (!bankAccount || !paymentDate || !amount || !exchangeRate || !store) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
+
+        const marketplaceValue = marketplace && ['ebay', 'etsy', 'walmart'].includes(marketplace) ? marketplace : 'ebay';
 
         const payoutIdTrim = typeof ebayPayoutId === 'string' && ebayPayoutId.trim() ? ebayPayoutId.trim() : null;
         if (payoutIdTrim) {
@@ -145,6 +168,7 @@ router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) =>
             bankAccount,
             paymentDate: normalizePaymentDateInput(paymentDate),
             store,
+            marketplace: marketplaceValue,
             ...calcs,
             ...(payoutIdTrim && { ebayPayoutId: payoutIdTrim }),
             ...(periodStart && { periodStart }),
@@ -192,7 +216,7 @@ router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) =>
 router.put('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) => {
     try {
         const { id } = req.params;
-        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit, ebayPayoutId } = req.body;
+        const { bankAccount, paymentDate, amount, exchangeRate, store, periodStart, periodEnd, profit, ebayPayoutId, marketplace } = req.body;
 
         const record = await PayoneerRecord.findById(id);
         if (!record) return res.status(404).json({ error: 'Record not found' });
@@ -201,6 +225,9 @@ router.put('/:id', requireAuth, requirePageAccess('Payoneer'), async (req, res) 
         if (bankAccount) record.bankAccount = bankAccount;
         if (paymentDate) record.paymentDate = normalizePaymentDateInput(paymentDate);
         if (store) record.store = store;
+        if (marketplace && ['ebay', 'etsy', 'walmart'].includes(marketplace)) {
+            record.marketplace = marketplace;
+        }
         if (ebayPayoutId !== undefined) {
             const payoutIdTrim = typeof ebayPayoutId === 'string' && ebayPayoutId.trim() ? ebayPayoutId.trim() : null;
             if (payoutIdTrim) {
