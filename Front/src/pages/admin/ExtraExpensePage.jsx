@@ -27,6 +27,7 @@ import {
     TableHead,
     TableRow,
     TextField,
+    Autocomplete,
     Tooltip as MuiTooltip,
     Typography,
     useMediaQuery,
@@ -52,7 +53,7 @@ import {
 } from 'recharts';
 import api from '../../lib/api';
 
-const PAYMENT_METHODS = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Payoneer', 'Other'];
+const PAYMENT_METHODS = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Payoneer', 'Other', 'Growmentality'];
 
 const CHART_COLORS = ['#1976d2', '#ed6c02', '#2e7d32', '#9c27b0', '#d32f2f', '#0288d1', '#6d4c41', '#455a64'];
 const EMPTY_FILTERS = {
@@ -1023,11 +1024,20 @@ const ExtraExpensePage = () => {
                             value={formData.date}
                             onChange={(e) => setFormData({ ...formData, date: e.target.value })}
                         />
-                        <TextField
-                            label="Name of Expenditure"
-                            fullWidth
-                            value={formData.name}
-                            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                        <Autocomplete
+                            freeSolo
+                            options={NAME_FILTER_OPTIONS}
+                            value={formData.name || ''}
+                            onChange={(e, newVal) => setFormData({ ...formData, name: newVal || '' })}
+                            onInputChange={(e, newInput) => setFormData({ ...formData, name: newInput })}
+                            renderInput={(params) => (
+                                <TextField
+                                    {...params}
+                                    label="Name of Expenditure"
+                                    fullWidth
+                                    placeholder="Select or type custom name"
+                                />
+                            )}
                         />
                         <TextField
                             label="Amount (INR)"
