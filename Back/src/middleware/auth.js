@@ -118,6 +118,7 @@ export const PAGE_DEFAULT_ROLES = {
   'SettingsPage': ['superadmin', 'listingadmin'],
   'DescriptionTemplates': ['superadmin', 'listingadmin'],
   'ScraperTester': ['superadmin', 'listingadmin'],
+  'ImageOverlaySettings': ['superadmin', 'listingadmin'],
 
   // Shared pages (accessible to all authenticated users)
   'AboutMe': ['_all_except_superadmin'],

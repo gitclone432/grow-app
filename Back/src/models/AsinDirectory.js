@@ -33,6 +33,7 @@ const asinDirectorySchema = new mongoose.Schema({
   price: { type: String, default: '' },
   images: { type: [String], default: [] },
   description: { type: String, default: '' },
+  review: { type: String, default: '' },
   color: { type: String, default: '' },
   compatibility: { type: String, default: '' },
   model: { type: String, default: '' },

@@ -7,6 +7,7 @@ import { augmentAmazonDataWithPiColumns } from './amazonPiSourceColumnUtils.js';
 import { trackApiUsage } from './apiUsageTracker.js';
 import { getCachedAsinData, setCachedAsinData } from './asinCache.js';
 import { createEbayImageWithOverlay } from './imageProcessor.js';
+import { getImageOverlayRuntimeConfig } from './overlaySettings.js';
 
 /** Long Amazon descriptions can break or silently fail LLM calls; truncate only inside AI prompts */
 const AI_PROMPT_DESCRIPTION_MAX_CHARS = Math.max(
@@ -38,16 +39,20 @@ export function invalidateAmazonPiSourceColumnsAutofillCache() {
 }
 
 export async function applyOverlayToScrapedImages(imageUrls = []) {
-  const watermarkEnabled = String(process.env.ENABLE_SCRAPER_IMAGE_WATERMARK || '').toLowerCase() === 'true';
-  if (!watermarkEnabled || !Array.isArray(imageUrls) || imageUrls.length === 0) {
+  const overlayConfig = await getImageOverlayRuntimeConfig();
+  if (!overlayConfig.enabled || !Array.isArray(imageUrls) || imageUrls.length === 0) {
     return Array.isArray(imageUrls) ? imageUrls : [];
   }
 
-  const badgeName = String(process.env.SCRAPER_IMAGE_OVERLAY_BADGE || 'usa-seller').trim() || 'usa-seller';
-  const maxImages = Math.min(
-    imageUrls.length,
-    Math.max(1, Number(process.env.SCRAPER_IMAGE_OVERLAY_MAX_IMAGES || 3))
-  );
+  if (!overlayConfig.imgbbConfigured) {
+    console.warn(
+      '[applyOverlayToScrapedImages] Overlay enabled but IMGBB_API_KEY is missing — skipping watermark.'
+    );
+    return imageUrls;
+  }
+
+  const badgeName = overlayConfig.activeBadge || 'usa-seller';
+  const maxImages = Math.min(imageUrls.length, overlayConfig.maxImages || 3);
 
   const processed = [...imageUrls];
   const candidates = imageUrls.slice(0, maxImages);
@@ -115,6 +120,8 @@ export async function fetchAmazonData(asin, region = 'US') {
       availabilityStatus,
       soldBy,
       bestSellersRank,
+      review,
+      customerReviewCount,
       productInformation
     } = scrapedData;
     
@@ -131,6 +138,11 @@ export async function fetchAmazonData(asin, region = 'US') {
     console.log(`[fetchAmazonData] 📊 Extracted fields: Title="${title.substring(0, 40)}...", Brand="${brand}", Price="${price}", Images=${imagesArray.length} URLs, Description=${description.split('\n').length} features`);
     if (color) console.log(`[fetchAmazonData] 🎨 Color: "${color}"`);
     if (compatibility) console.log(`[fetchAmazonData] 📱 Compatibility: "${compatibility}"`);
+    if (review) {
+      console.log(
+        `[fetchAmazonData] ⭐ Customer reviews: ${customerReviewCount || 0} row(s), ${review.length} chars`
+      );
+    }
     console.log(`[fetchAmazonData] 🖼️ First image: ${imagesArray[0] || 'none'}`);
     
     const result = {
@@ -158,6 +170,8 @@ export async function fetchAmazonData(asin, region = 'US') {
       availabilityStatus: availabilityStatus || '',
       soldBy: soldBy || '',
       bestSellersRank: bestSellersRank || '',
+      review: review || '',
+      customerReviewCount: customerReviewCount || 0,
       productInformation:
         productInformation && typeof productInformation === 'object' && !Array.isArray(productInformation)
           ? productInformation
@@ -243,6 +257,8 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
     availabilityStatus: amazonDataForMapping.availabilityStatus || '',
     soldBy: amazonDataForMapping.soldBy || '',
     bestSellersRank: amazonDataForMapping.bestSellersRank || '',
+    review: amazonDataForMapping.review || '',
+    customerReviews: amazonDataForMapping.review || '',
     productInformation: productInformationStr
   };
   for (const col of piSourceColumns) {
@@ -338,17 +354,73 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
       try {
         console.log(`\n  🔹 Processing AI field: ${config.ebayField} (${config.fieldType})`);
         console.log(`    📝 Original prompt template: "${config.promptTemplate}"`);
-        const aiPlaceholderData =
-          config.ebayField === 'description' || String(config.ebayField || '').toLowerCase().includes('description')
-            ? { ...placeholderData, description: truncateForAiPrompt(placeholderData.description) }
-            : placeholderData;
+        const fieldKeyLower = String(config.ebayField || '').toLowerCase();
+        const customColumnWantsReviewExtract =
+          config.fieldType === 'custom'
+          && /model|year|compat|series|size|fit|watch/i.test(String(config.ebayField || ''));
+        let aiPlaceholderData = placeholderData;
+        if (fieldKeyLower === 'description' || fieldKeyLower.includes('description')) {
+          aiPlaceholderData = {
+            ...placeholderData,
+            description: truncateForAiPrompt(placeholderData.description),
+          };
+        } else if (
+          fieldKeyLower === 'review'
+          || fieldKeyLower.includes('review')
+          || /\{review\}|\{customerreviews\}/i.test(config.promptTemplate || '')
+          || customColumnWantsReviewExtract
+        ) {
+          const reviewText = truncateForAiPrompt(placeholderData.review);
+          aiPlaceholderData = {
+            ...placeholderData,
+            review: reviewText,
+            customerReviews: reviewText,
+          };
+        }
 
-        let processedPrompt = replacePlaceholders(config.promptTemplate || '', aiPlaceholderData);
-
+        const templateRaw = String(config.promptTemplate || '').trim();
+        let processedPrompt = replacePlaceholders(templateRaw, aiPlaceholderData);
+        const usesReviewInPrompt =
+          /\{review\}|\{customerreviews\}/i.test(processedPrompt)
+          || /\{review\}|\{customerreviews\}/i.test(templateRaw);
         // Empty prompts produce empty/low-quality GPT output; defaults keep bulk preview usable.
-        const fieldKey = String(config.ebayField || '').trim().toLowerCase();
         if (
-          fieldKey === 'description'
+          config.fieldType === 'custom'
+          && !templateRaw
+          && (usesReviewInPrompt || customColumnWantsReviewExtract)
+          && String(aiPlaceholderData.review || '').trim()
+        ) {
+          const targetField = String(config.ebayField || 'custom field');
+          const DEFAULT_EXTRACT_FROM_REVIEWS_PROMPT = [
+            `Read the Amazon customer reviews and extract ONLY the value for eBay custom column "${targetField}" (e.g. model, size, series, years, compatibility).`,
+            'Use facts stated in reviews; if unclear, output "Does Not Apply".',
+            'Output plain text only — one short line or phrase, no markdown.',
+            '',
+            'Product title: {title}',
+            'Brand: {brand}',
+            'Listing description excerpt: {description}',
+            '',
+            'Customer reviews:',
+            '{review}',
+          ].join('\n');
+          processedPrompt = replacePlaceholders(DEFAULT_EXTRACT_FROM_REVIEWS_PROMPT, aiPlaceholderData);
+          console.log(`    ⚠️ Empty AI prompt for ${targetField} — using review extraction default.`);
+        } else if (fieldKeyLower === 'review' && !String(processedPrompt || '').trim()) {
+          const DEFAULT_REVIEW_AI_PROMPT = [
+            'Rephrase the Amazon customer review content below for an eBay listing.',
+            'Write 2–4 short paragraphs in plain English. Do not mention Amazon, star ratings as "on Amazon", or "verified purchase".',
+            'Keep claims factual and based only on the source text.',
+            '',
+            'Product: {title}',
+            'Brand: {brand}',
+            '',
+            'Source reviews:',
+            '{review}',
+          ].join('\n');
+          processedPrompt = replacePlaceholders(DEFAULT_REVIEW_AI_PROMPT, aiPlaceholderData);
+          console.log('    ⚠️ Empty review AI prompt — using built-in default.');
+        } else if (
+          fieldKeyLower === 'description'
           && !String(processedPrompt || '').trim()
         ) {
           const DEFAULT_DESCRIPTION_AI_PROMPT = [
@@ -376,7 +448,13 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
         console.log(`    ✏️  Processed prompt (after placeholders): "${processedPrompt.substring(0, 500)}${processedPrompt.length > 500 ? '…' : ''}"`);
         
         // Use higher token limit for description field to avoid truncation
-        const maxTokens = config.ebayField === 'description' ? 2000 : 150;
+        const maxTokens =
+          config.ebayField === 'description'
+          || config.ebayField === 'review'
+          || usesReviewInPrompt
+          || customColumnWantsReviewExtract
+            ? 2000
+            : 150;
         console.log(`    🎯 Token limit: ${maxTokens}`);
         
         let generatedValue = await generateWithGemini(processedPrompt, { maxTokens });
@@ -391,7 +469,14 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
         if (config.ebayField === 'title' && generatedValue.length > 80) {
           generatedValue = generatedValue.substring(0, 80);
           console.log(`    ✂️  Truncated title: ${originalLength} → 80 chars`);
-        } else if (config.ebayField !== 'description' && config.ebayField !== 'title' && generatedValue.length > 60) {
+        } else if (
+          config.ebayField !== 'description'
+          && config.ebayField !== 'review'
+          && config.ebayField !== 'title'
+          && !usesReviewInPrompt
+          && !customColumnWantsReviewExtract
+          && generatedValue.length > 60
+        ) {
           generatedValue = generatedValue.substring(0, 60);
           console.log(`    ✂️  Truncated field: ${originalLength} → 60 chars`);
         }

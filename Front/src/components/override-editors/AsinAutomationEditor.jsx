@@ -44,6 +44,7 @@ import api from '../../lib/api.js';
 const CORE_EBAY_FIELDS = [
   { value: 'title', label: 'Title' },
   { value: 'description', label: 'Description' },
+  { value: 'review', label: 'Review' },
   { value: 'startPrice', label: 'Start Price' },
   { value: 'quantity', label: 'Quantity' },
   { value: 'conditionId', label: 'Condition ID' },

@@ -11,6 +11,7 @@ const AVAILABLE_EBAY_FIELDS = [
   { value: 'startPrice', label: 'Start Price', supportsAI: false },
   { value: 'buyItNowPrice', label: 'Buy It Now Price', supportsAI: false },
   { value: 'description', label: 'Description', supportsAI: true },
+  { value: 'review', label: 'Review', supportsAI: true },
   { value: 'itemPhotoUrl', label: 'Item Photo URL', supportsAI: false },
   { value: 'categoryName', label: 'Category Name', supportsAI: true },
   { value: 'brand', label: 'Brand', supportsAI: false },
@@ -292,12 +293,20 @@ export default function FieldConfigList({ configs, customColumns, onChange, amaz
                           helperText={
                             config.ebayField === 'description'
                               ? 'Use this prompt to generate ONLY feature bullets/HTML snippet. Insert it into Core Defaults > Description with {{AI_FEATURE_BULLETS}}.'
-                              : 'Placeholders: built-in Amazon fields plus any saved Product Info columns (same names as in the Direct Mapping dropdown).'
+                              : config.ebayField === 'review'
+                                ? 'Use {review} from the scraper. For CSV export, add a custom column C:Review and set Field Type to Custom with ebayField C:Review.'
+                                : isCustomField
+                                  ? 'Use {review} or {customerReviews} for ScrapingDog customer_reviews. Good for extracting model, size, year, compatibility into this custom column.'
+                                  : 'Placeholders: built-in Amazon fields plus any saved Product Info columns (same names as in the Direct Mapping dropdown).'
                           }
                           placeholder={
                             config.ebayField === 'description'
                               ? "Example: Rephrase {description} into 5 concise HTML <li> bullets for eBay. Exclude Amazon/returns/warranty claims."
-                              : "Example: Generate an 80-character eBay title for {title} by {brand}..."
+                              : config.ebayField === 'review'
+                                ? 'Example: Rephrase {review} into 2–3 short paragraphs for eBay. Do not mention Amazon.'
+                                : isCustomField
+                                  ? 'Example: From {review}, output ONLY watch size (e.g. 44mm) and Apple Watch series/years. One line. Title: {title}'
+                                  : "Example: Generate an 80-character eBay title for {title} by {brand}..."
                           }
                         />
                       )}

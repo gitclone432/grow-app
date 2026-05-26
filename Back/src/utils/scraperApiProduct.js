@@ -12,12 +12,264 @@ import { scrapeAmazonPriceWithScraperAPI } from './scraperApiPrice.js';
  */
 
 const SCRAPER_API_BASE = 'https://api.scraperapi.com/structured/amazon/product/v1';
+const SCRAPINGDOG_PRODUCT_BASE = 'https://api.scrapingdog.com/amazon/product';
 
 // Concurrency limiter - use 15 of 20 available concurrent requests
 const CONCURRENT_REQUESTS = parseInt(process.env.SCRAPER_API_CONCURRENT) || 15;
 const limit = pLimit(CONCURRENT_REQUESTS);
 
-console.log(`[ScraperAPI] 🚀 Initialized with ${CONCURRENT_REQUESTS} concurrent request limit`);
+export function getScraperProvider() {
+  const provider = String(process.env.SCRAPER_PROVIDER || 'scraperapi').trim().toLowerCase();
+  return provider === 'scrapingdog' ? 'scrapingdog' : 'scraperapi';
+}
+
+/** Safe debug info for admin UI (never exposes the key). */
+export function getScraperRuntimeInfo() {
+  const key = String(process.env.SCRAPER_API_KEY || '').trim();
+  return {
+    provider: getScraperProvider(),
+    service: scraperServiceLabel(),
+    keyConfigured: Boolean(key && key !== 'your_api_key_here_after_signup'),
+    keyLen: key.length,
+  };
+}
+
+function enrichScraperHttpError(err, provider) {
+  const status = err?.response?.status;
+  if (status !== 401) return err;
+  const hint =
+    provider === 'scraperapi'
+      ? '401 from ScraperAPI: this key is not a ScraperAPI key. Set SCRAPER_PROVIDER=scrapingdog for ScrapingDog keys, or use a ScraperAPI key.'
+      : '401 from ScrapingDog: check SCRAPER_API_KEY on the server and restart the API.';
+  const wrapped = new Error(`${err.message} — ${hint}`);
+  wrapped.response = err.response;
+  wrapped.status = status;
+  return wrapped;
+}
+
+function scraperServiceLabel() {
+  return getScraperProvider() === 'scrapingdog' ? 'ScrapingDog' : 'ScraperAPI';
+}
+
+function regionToTld(region) {
+  if (region === 'UK') return '.co.uk';
+  if (region === 'CA') return '.ca';
+  if (region === 'AU') return '.com.au';
+  return '.com';
+}
+
+function regionToScrapingDogDomain(region) {
+  if (region === 'UK') return 'co.uk';
+  if (region === 'CA') return 'ca';
+  if (region === 'AU') return 'com.au';
+  return 'com';
+}
+
+function regionToScrapingDogCountry(region) {
+  if (region === 'UK') return 'gb';
+  if (region === 'CA') return 'ca';
+  if (region === 'AU') return 'au';
+  return 'us';
+}
+
+function parseMoneyString(raw) {
+  if (raw == null || raw === '') return '';
+  const cleaned = String(raw).replace(/[^\d.,]/g, '').replace(/,/g, '');
+  const num = parseFloat(cleaned);
+  return Number.isFinite(num) ? num.toFixed(2) : '';
+}
+
+const MAX_CUSTOMER_REVIEWS_FOR_AI = Math.max(
+  1,
+  Number.parseInt(process.env.SCRAPER_MAX_CUSTOMER_REVIEWS || '15', 10) || 15
+);
+
+/** One ScrapingDog / ScraperAPI customer review object → plain text block. */
+function formatSingleCustomerReview(item, index) {
+  if (typeof item === 'string') {
+    const s = cleanText(item);
+    return s ? `--- Customer review ${index + 1} ---\n${s}` : '';
+  }
+  if (!item || typeof item !== 'object') return '';
+
+  const author = item.customer_name || item.author || item.name || '';
+  const rating = item.rating || item.stars || '';
+  const title = item.review_title || item.headline || '';
+  const date = item.date || item.review_date || '';
+  const body =
+    item.review_snippet
+    || item.review
+    || item.text
+    || item.body
+    || item.content
+    || '';
+
+  const lines = [];
+  if (author) lines.push(`Reviewer: ${cleanText(author)}`);
+  if (rating) lines.push(`Rating: ${cleanText(rating)}`);
+  if (title) lines.push(`Title: ${cleanText(title)}`);
+  if (date) lines.push(`Date: ${cleanText(date)}`);
+  if (body) lines.push(cleanText(body));
+  if (!lines.length) return '';
+  return `--- Customer review ${index + 1} ---\n${lines.join('\n')}`;
+}
+
+/**
+ * Build customer-review text for ASIN auto-fill / OpenAI ({review} placeholder).
+ * ScrapingDog: `customer_reviews[]` with review_snippet, review_title, rating, date.
+ */
+export function extractReviewsFromStructured(data) {
+  if (!data || typeof data !== 'object') return '';
+
+  const parts = [];
+  const pi = data.product_information && typeof data.product_information === 'object'
+    ? data.product_information
+    : {};
+
+  if (data.average_rating != null && data.average_rating !== '') {
+    parts.push(`Average rating: ${data.average_rating} out of 5 stars`);
+  }
+  if (data.total_reviews != null && data.total_reviews !== '') {
+    parts.push(`Total reviews: ${data.total_reviews}`);
+  }
+
+  const piSummary =
+    pi.CustomerReviews
+    || pi['Customer Reviews']
+    || pi.reviews;
+  if (piSummary && typeof piSummary === 'string') {
+    parts.push(cleanText(piSummary));
+  }
+
+  const customerBlocks = [];
+  const customerArr = Array.isArray(data.customer_reviews) ? data.customer_reviews : [];
+  const limit = Math.min(customerArr.length, MAX_CUSTOMER_REVIEWS_FOR_AI);
+  for (let i = 0; i < limit; i++) {
+    const block = formatSingleCustomerReview(customerArr[i], i);
+    if (block) customerBlocks.push(block);
+  }
+  if (customerBlocks.length) {
+    parts.push(customerBlocks.join('\n\n'));
+  }
+
+  const otherArrays = [
+    data.reviews,
+    data.top_reviews,
+    data.featured_reviews,
+    data.review_snippets,
+  ];
+
+  for (const arr of otherArrays) {
+    if (!Array.isArray(arr)) continue;
+    for (let i = 0; i < arr.length; i++) {
+      const block = formatSingleCustomerReview(arr[i], customerBlocks.length + i);
+      if (block) customerBlocks.push(block);
+      if (customerBlocks.length >= MAX_CUSTOMER_REVIEWS_FOR_AI) break;
+    }
+    if (customerBlocks.length >= MAX_CUSTOMER_REVIEWS_FOR_AI) break;
+  }
+
+  const seen = new Set();
+  return parts
+    .map((p) => cleanText(p))
+    .filter((p) => {
+      if (!p || seen.has(p)) return false;
+      seen.add(p);
+      return true;
+    })
+    .join('\n\n')
+    .trim();
+}
+
+/** Count of structured customer review rows (for UI/debug). */
+export function countCustomerReviews(data) {
+  if (!data || typeof data !== 'object') return 0;
+  if (Array.isArray(data.customer_reviews)) return data.customer_reviews.length;
+  return 0;
+}
+
+/** Map ScrapingDog product JSON → shape expected by existing extractors (ScraperAPI-like). */
+function normalizeScrapingDogProduct(sd) {
+  const price = parseMoneyString(sd?.price);
+  const listPrice = parseMoneyString(sd?.list_price);
+  return {
+    ...sd,
+    name: sd?.title || sd?.name || '',
+    brand: sd?.brand || '',
+    feature_bullets: sd?.feature_bullets || [],
+    product_information: sd?.product_information || {},
+    images: sd?.images || [],
+    high_res_images: sd?.images || [],
+    pricing: price,
+    list_price: listPrice || price,
+    price,
+    small_description: sd?.description || sd?.small_description || '',
+    full_description: sd?.full_description || sd?.description || '',
+    customization_options: sd?.customization_options || {},
+    product_category: sd?.product_category || '',
+    availability_status: sd?.availability_status || '',
+    sold_by: sd?.sold_by || sd?.merchant_info || '',
+    average_rating: sd?.average_rating,
+    total_reviews: sd?.total_reviews,
+    review: extractReviewsFromStructured(sd),
+    customerReviewCount: countCustomerReviews(sd),
+  };
+}
+
+/**
+ * Fetch raw structured Amazon product JSON (ScraperAPI or ScrapingDog).
+ */
+export async function fetchStructuredAmazonProduct(asin, region = 'US') {
+  const apiKey = getApiKey();
+  const timeout = parseInt(process.env.SCRAPER_API_TIMEOUT_MS, 10) || 30000;
+  const provider = getScraperProvider();
+
+  try {
+    if (provider === 'scrapingdog') {
+      const response = await axios.get(SCRAPINGDOG_PRODUCT_BASE, {
+        params: {
+          api_key: apiKey,
+          domain: regionToScrapingDogDomain(region),
+          asin,
+          country: regionToScrapingDogCountry(region),
+        },
+        timeout,
+        validateStatus: (s) => s < 500,
+      });
+      if (response.status !== 200) {
+        const err = new Error(`ScrapingDog returned status ${response.status}`);
+        err.response = response;
+        throw enrichScraperHttpError(err, provider);
+      }
+      return normalizeScrapingDogProduct(response.data);
+    }
+
+    const response = await axios.get(SCRAPER_API_BASE, {
+      params: {
+        api_key: apiKey,
+        asin,
+        tld: regionToTld(region),
+      },
+      timeout,
+      validateStatus: (s) => s < 500,
+    });
+    if (response.status !== 200) {
+      const err = new Error(`ScraperAPI returned status ${response.status}`);
+      err.response = response;
+      throw enrichScraperHttpError(err, provider);
+    }
+    return response.data;
+  } catch (err) {
+    if (err?.response?.status === 401 && !err.message.includes('SCRAPER_PROVIDER')) {
+      throw enrichScraperHttpError(err, provider);
+    }
+    throw err;
+  }
+}
+
+console.log(
+  `[Amazon Scraper] Provider: ${getScraperProvider()} | ${CONCURRENT_REQUESTS} concurrent max`
+);
 
 /**
  * Get API key from environment
@@ -105,22 +357,13 @@ function extractStructuredBrand(data) {
  * Extract price from structured API response
  */
 function extractPriceFromStructured(data) {
-  // Try pricing field first
-  if (data.pricing) {
-    const price = data.pricing.replace(/^\$/, '');
+  const candidates = [data.pricing, data.price, data.list_price];
+  for (const raw of candidates) {
+    const price = parseMoneyString(raw) || String(raw || '').replace(/^\$/, '').trim();
     if (price && !isNaN(parseFloat(price))) {
       return price;
     }
   }
-  
-  // Try list_price as fallback
-  if (data.list_price) {
-    const price = data.list_price.replace(/^\$/, '');
-    if (price && !isNaN(parseFloat(price))) {
-      return price;
-    }
-  }
-  
   return '';
 }
 
@@ -769,31 +1012,16 @@ function extractProductDataFromHTML(html, asin) {
  */
 export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', retries = 2) {
   return limit(async () => {
-    const SCRAPER_API_KEY = getApiKey();
-    const timeout = parseInt(process.env.SCRAPER_API_TIMEOUT_MS) || 30000;
     const maxRetries = parseInt(process.env.SCRAPER_API_MAX_RETRIES) || retries;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const startTime = Date.now();
       
       try {
-        console.log(`[ScraperAPI] 🔍 Scraping ASIN: ${asin}${attempt > 1 ? ` (attempt ${attempt}/${maxRetries})` : ''}`);
+        const label = scraperServiceLabel();
+        console.log(`[${label}] 🔍 Scraping ASIN: ${asin}${attempt > 1 ? ` (attempt ${attempt}/${maxRetries})` : ''}`);
 
-        // Use Structured Data API endpoint for clean JSON extraction
-        const response = await axios.get(SCRAPER_API_BASE, {
-          params: {
-            api_key: SCRAPER_API_KEY,
-            asin: asin,
-            tld: region === 'UK' ? '.co.uk' : region === 'CA' ? '.ca' : region === 'AU' ? '.com.au' : '.com'
-          },
-          timeout
-        });
-
-        if (response.status !== 200) {
-          throw new Error(`ScraperAPI returned status ${response.status}`);
-        }
-
-        const data = response.data;
+        const data = await fetchStructuredAmazonProduct(asin, region);
         const responseTime = Date.now() - startTime;
 
         // Extract product data from structured JSON
@@ -840,6 +1068,8 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         const availabilityStatus = extractAvailabilityStatus(data);
         const soldBy = extractSoldBy(data);
         const bestSellersRank = extractBestSellersRank(data);
+        const review = extractReviewsFromStructured(data);
+        const customerReviewCount = countCustomerReviews(data);
 
         // Full Amazon `product_information` block (deep-cloned plain object for templates / mapping)
         const piSrc = data.product_information;
@@ -866,14 +1096,14 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         // Validate critical fields
         // Some structured responses omit pricing fields; fall back to HTML price scraper.
         let resolvedPrice = price;
-        if (!resolvedPrice) {
+        if (!resolvedPrice && getScraperProvider() === 'scraperapi') {
           try {
             resolvedPrice = await scrapeAmazonPriceWithScraperAPI(asin, region, 2);
             if (resolvedPrice) {
-              console.log(`[ScraperAPI] ℹ️ Price fallback succeeded for ${asin}: ${resolvedPrice}`);
+              console.log(`[${scraperServiceLabel()}] ℹ️ Price fallback succeeded for ${asin}: ${resolvedPrice}`);
             }
           } catch (fallbackErr) {
-            console.warn(`[ScraperAPI] ⚠️ Price fallback failed for ${asin}: ${fallbackErr.message}`);
+            console.warn(`[${scraperServiceLabel()}] ⚠️ Price fallback failed for ${asin}: ${fallbackErr.message}`);
           }
         }
 
@@ -895,6 +1125,11 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         console.log(`[ScraperAPI] ✅ Images found for ${asin}: ${images.length} images`);
         if (color) console.log(`[ScraperAPI] ✅ Color found for ${asin}: "${color}"`);
         if (compatibility) console.log(`[ScraperAPI] ✅ Compatibility found for ${asin}: "${compatibility}"`);
+        if (review) {
+          console.log(
+            `[${scraperServiceLabel()}] ✅ Customer reviews for ${asin}: ${customerReviewCount} row(s), ${review.length} chars text`
+          );
+        }
         if (images.length > 0) {
           console.log(`[ScraperAPI] 🖼️ First image: ${images[0].substring(0, 80)}...`);
           if (images.length > 1) {
@@ -922,10 +1157,11 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         if (availabilityStatus) extractedFields.push('availabilityStatus');
         if (soldBy) extractedFields.push('soldBy');
         if (bestSellersRank) extractedFields.push('bestSellersRank');
+        if (review) extractedFields.push('review');
         if (Object.keys(productInformation).length > 0) extractedFields.push('productInformation');
 
         trackApiUsage({
-          service: 'ScraperAPI',
+          service: scraperServiceLabel(),
           asin,
           creditsUsed: 1,
           success: true,
@@ -933,7 +1169,7 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
           extractedFields
         }).catch(err => console.error('[Usage Tracker] Failed to track:', err.message));
 
-        console.log(`[ScraperAPI] ✅ Successfully scraped all data for ${asin} in ${responseTime}ms`);
+        console.log(`[${scraperServiceLabel()}] ✅ Successfully scraped all data for ${asin} in ${responseTime}ms`);
         
         return {
           asin,
@@ -960,6 +1196,8 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
           availabilityStatus: availabilityStatus || '',
           soldBy: soldBy || '',
           bestSellersRank: bestSellersRank || '',
+          review: review || '',
+          customerReviewCount,
           productInformation,
           rawData: data // Store full response for debugging
         };
@@ -980,7 +1218,7 @@ export async function scrapeAmazonProductWithScraperAPI(asin, region = 'US', ret
         
         // Track failed usage
         trackApiUsage({
-          service: 'ScraperAPI',
+          service: scraperServiceLabel(),
           asin,
           creditsUsed: 1,
           success: false,

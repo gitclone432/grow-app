@@ -4,6 +4,7 @@ import AmazonProduct from '../models/AmazonProduct.js';
 import ProductUmbrella from '../models/ProductUmbrella.js';
 import { generateWithGemini, replacePlaceholders } from '../utils/gemini.js';
 import { createEbayImageWithOverlay, deleteEbayImage } from '../utils/imageProcessor.js';
+import { getImageOverlayRuntimeConfig } from '../utils/overlaySettings.js';
 
 const router = express.Router();
 
@@ -167,10 +168,14 @@ router.post('/', requireAuth, async (req, res) => {
 
       // Process eBay image with overlay if we have images
       let ebayImagePath = null;
-      if (allImages.length > 0) {
+      const overlayConfig = await getImageOverlayRuntimeConfig();
+      if (allImages.length > 0 && overlayConfig.enabled && overlayConfig.imgbbConfigured) {
         try {
           console.log(`Processing eBay image overlay for ASIN ${asin}...`);
-          ebayImagePath = await createEbayImageWithOverlay(allImages[0], 'usa-seller');
+          ebayImagePath = await createEbayImageWithOverlay(
+            allImages[0],
+            overlayConfig.activeBadge || 'usa-seller'
+          );
           amazonProductData.ebayImage = ebayImagePath;
           console.log(`eBay image created: ${ebayImagePath}`);
         } catch (error) {

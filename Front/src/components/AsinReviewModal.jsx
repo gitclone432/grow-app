@@ -1192,6 +1192,20 @@ export default function AsinReviewModal({
                   </Typography>
                 </Box>
 
+                {currentItem.sourceData?.review ? (
+                  <Box>
+                    <Typography variant="caption" color="text.secondary" gutterBottom>
+                      Reviews (from scraper)
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      sx={{ whiteSpace: 'pre-wrap', fontSize: '0.875rem', lineHeight: 1.6 }}
+                    >
+                      {currentItem.sourceData.review}
+                    </Typography>
+                  </Box>
+                ) : null}
+
                 {currentItem.sourceData?.images?.length > 0 && (
                   <Box>
                     <Typography variant="caption" color="text.secondary" gutterBottom>

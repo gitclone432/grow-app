@@ -87,6 +87,17 @@ function getImageCount(images) {
   return 0;
 }
 
+/** If template has C:Review, copy coreFields.review into that custom column for CSV export. */
+function mergeReviewIntoCustomFields(customFields = {}, coreFields = {}, customColumns = []) {
+  const reviewCol = (Array.isArray(customColumns) ? customColumns : []).find(
+    (col) => String(col?.name || '').trim().toLowerCase() === 'c:review'
+  );
+  if (!reviewCol?.name) return customFields;
+  const reviewText = String(coreFields?.review || customFields[reviewCol.name] || '').trim();
+  if (!reviewText) return customFields;
+  return { ...customFields, [reviewCol.name]: reviewText };
+}
+
 function getOrderedUniqueCustomColumns(customColumns = []) {
   const seen = new Set();
   return (Array.isArray(customColumns) ? customColumns : [])
@@ -678,22 +689,27 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         
         // Fetch and process ASIN (new listing case)
         const amazonData = await fetchAmazonData(asin, region);
-        const { coreFields, customFields, pricingCalculation } = 
+        const { coreFields, customFields, pricingCalculation } =
           await applyFieldConfigs(amazonData, fieldConfigs, pricingConfig);
-        
+        let customFieldsMerged = mergeReviewIntoCustomFields(
+          customFields,
+          coreFields,
+          template.customColumns
+        );
+
         const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
-        
+
         if (template?.customColumns && template.customColumns.length > 0) {
           template.customColumns.forEach(col => {
-            if (col.defaultValue && !customFields[col.name]) {
-              customFields[col.name] = col.defaultValue;
+            if (col.defaultValue && !customFieldsMerged[col.name]) {
+              customFieldsMerged[col.name] = col.defaultValue;
             }
           });
         }
-        
+
         const warnings = [];
         const validationErrors = [];
-        
+
         if (!mergedCoreFields.title) {
           validationErrors.push('Missing required field: title');
         }
@@ -741,12 +757,13 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             availabilityStatus: amazonData.availabilityStatus,
             soldBy: amazonData.soldBy,
             bestSellersRank: amazonData.bestSellersRank,
+            review: amazonData.review || '',
             productInformation: amazonData.productInformation || {}
           },
           generatedListing: {
             ...mergedCoreFields,
             customLabel: finalSKU,
-            customFields,
+            customFields: customFieldsMerged,
             _asinReference: asin
           },
           pricingCalculation,
@@ -950,6 +967,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           brand: doc.brand || '',
           price: doc.price || '',
           description: doc.description || '',
+          review: doc.review || '',
           images: processedDirectoryImages,
           color: doc.color || '',
           compatibility: doc.compatibility || '',
@@ -968,13 +986,18 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
 
         const { coreFields, customFields, pricingCalculation } =
           await applyFieldConfigs(amazonData, fieldConfigs, pricingConfig);
+        let customFieldsMerged = mergeReviewIntoCustomFields(
+          customFields,
+          coreFields,
+          template.customColumns
+        );
 
         const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
 
         if (template?.customColumns && template.customColumns.length > 0) {
           template.customColumns.forEach(col => {
-            if (col.defaultValue && !customFields[col.name]) {
-              customFields[col.name] = col.defaultValue;
+            if (col.defaultValue && !customFieldsMerged[col.name]) {
+              customFieldsMerged[col.name] = col.defaultValue;
             }
           });
         }
@@ -1031,12 +1054,13 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             availabilityStatus: amazonData.availabilityStatus,
             soldBy: amazonData.soldBy,
             bestSellersRank: amazonData.bestSellersRank,
+            review: amazonData.review || '',
             productInformation: amazonData.productInformation || {}
           },
           generatedListing: {
             ...mergedCoreFields,
             customLabel: finalSKU,
-            customFields,
+            customFields: customFieldsMerged,
             _asinReference: asin
           },
           pricingCalculation,
@@ -2321,6 +2345,11 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         // Apply field configurations
         const { coreFields, customFields, pricingCalculation } = 
           await applyFieldConfigs(amazonData, fieldConfigs, pricingConfig);
+        let customFieldsMerged = mergeReviewIntoCustomFields(
+          customFields,
+          coreFields,
+          template.customColumns
+        );
         
         // Apply template core field defaults as base layer (autofilled fields override these)
         const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
@@ -2328,8 +2357,8 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         // Apply custom column default values for missing fields
         if (template?.customColumns && template.customColumns.length > 0) {
           template.customColumns.forEach(col => {
-            if (col.defaultValue && !customFields[col.name]) {
-              customFields[col.name] = col.defaultValue;
+            if (col.defaultValue && !customFieldsMerged[col.name]) {
+              customFieldsMerged[col.name] = col.defaultValue;
               console.log(`✨ Applied column default for ${col.name}: ${col.defaultValue}`);
             }
           });
@@ -2406,13 +2435,14 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             availabilityStatus: amazonData.availabilityStatus,
             soldBy: amazonData.soldBy,
             bestSellersRank: amazonData.bestSellersRank,
+            review: amazonData.review || '',
             productInformation: amazonData.productInformation || {},
             rawData: amazonData.rawData
           },
           generatedListing: {
             ...mergedCoreFields,
             customLabel: sku,
-            customFields,
+            customFields: customFieldsMerged,
             _asinReference: asin
           },
           pricingCalculation,

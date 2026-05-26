@@ -7,12 +7,19 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import mongoSanitize from 'express-mongo-sanitize';
-import { setServers } from 'dns';
-// Set DNS to use Google's DNS servers to resolve MongoDB Atlas
-setServers(['8.8.8.8', '8.8.4.4']);
-// Load environment variables FIRST before any other imports
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.join(__dirname, '..', '.env') });
+
+// Load Back/.env regardless of current working directory (e.g. repo root vs Back/)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const serverRoot = path.join(__dirname, '..');
+// override: true — Windows user env had an old SCRAPER_API_KEY that blocked Back/.env
+dotenv.config({ path: path.join(serverRoot, '.env'), override: true });
+
+const scraperProvider = String(process.env.SCRAPER_PROVIDER || 'scraperapi').trim().toLowerCase();
+const scraperKeyLen = String(process.env.SCRAPER_API_KEY || '').trim().length;
+console.log(
+  `[env] Loaded ${path.join(serverRoot, '.env')} | scraper=${scraperProvider} keyLen=${scraperKeyLen}`
+);
 
 import { connectToDatabase } from './lib/db.js';
 import User from './models/User.js';
@@ -46,6 +53,7 @@ import creditCardNameRoutes from './routes/creditCardNames.js';
 import orderQtyExcludeLegacyRoutes from './routes/orderQtyExcludeLegacy.js';
 import cronJobsRoutes from './routes/cronJobs.js';
 import scraperTestRoutes from './routes/scraperTest.js';
+import imageOverlaySettingsRoutes from './routes/imageOverlaySettings.js';
 import descriptionTemplateGalleryRoutes from './routes/descriptionTemplateGallery.js';
 import resolutionOptionsRoutes from './routes/resolutionOptions.js';
 import exchangeRatesRoutes from './routes/exchangeRates.js';
@@ -173,6 +181,7 @@ app.use('/api/order-qty-exclude-legacy', orderQtyExcludeLegacyRoutes);
 app.use('/api/cron-jobs', cronJobsRoutes);
 // Intentionally not named *scraper* — some browser extensions block those URLs as false positives.
 app.use('/api/amazon-debug-scrape', scraperTestRoutes);
+app.use('/api/image-overlay-settings', imageOverlaySettingsRoutes);
 app.use('/api/description-template-gallery', descriptionTemplateGalleryRoutes);
 app.use('/api/resolution-options', resolutionOptionsRoutes);
 app.use('/api/exchange-rates', exchangeRatesRoutes);
