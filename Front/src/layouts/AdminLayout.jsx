@@ -94,6 +94,7 @@ import FeedUploadStatsPage from '../pages/admin/FeedUploadStatsPage.jsx';
 import SalaryPage from '../pages/admin/SalaryPage.jsx';
 import SellerFundsPage from '../pages/admin/SellerFundsPage.jsx';
 import FinanceCashflowPage from '../pages/admin/FinanceCashflowPage.jsx';
+import AffiliateBalancePage from '../pages/admin/AffiliateBalancePage.jsx';
 
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
@@ -298,6 +299,7 @@ const COMPONENT_MAP = {
   'ExtraExpenses': ExtraExpensePage,
   'RevenueGrossNet': RevenueGrossNetPage,
   'Cashflow': FinanceCashflowPage,
+  'Affiliate': AffiliateBalancePage,
   'Salary': SalaryPage,
   'AllOrdersSheet': AllOrdersSheetPage,
   'PriceChangeHistory': PriceChangeHistoryPage,
