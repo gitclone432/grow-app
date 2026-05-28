@@ -469,6 +469,7 @@ export default function SellerAnalyticsPage() {
                 <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#e1f5fe', position: 'sticky', top: 0, zIndex: 100 }}>P.Balance (INR)</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#e8f5e9', position: 'sticky', top: 0, zIndex: 100 }}>A_total-inr</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fce4ec', position: 'sticky', top: 0, zIndex: 100 }}>Credit Card Fees</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3cd', position: 'sticky', top: 0, zIndex: 100 }}>Total (A_total-inr + CC Fees)</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#c8e6c9', position: 'sticky', top: 0, zIndex: 100 }}>Profit (INR)</TableCell>
               </TableRow>
             </TableHead>
@@ -505,6 +506,7 @@ export default function SellerAnalyticsPage() {
                   </TableCell>
                   <TableCell align="right">{formatINR(row.totalAmazonCosts)}</TableCell>
                   <TableCell align="right">{formatINR(row.totalCreditCardFees)}</TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff9e6' }}>{formatINR(row.totalAmazonCosts + row.totalCreditCardFees)}</TableCell>
                   <TableCell align="right">
                     <Typography 
                       variant="body2" 
@@ -549,6 +551,7 @@ export default function SellerAnalyticsPage() {
                     <TableCell align="right" sx={{ ...cellSx, color: 'info.main' }}>{formatINR(parseFloat(totals.totalPBalanceINR.toFixed(2)))}</TableCell>
                     <TableCell align="right" sx={cellSx}>{formatINR(parseFloat(totals.totalAmazonCosts.toFixed(2)))}</TableCell>
                     <TableCell align="right" sx={cellSx}>{formatINR(parseFloat(totals.totalCreditCardFees.toFixed(2)))}</TableCell>
+                    <TableCell align="right" sx={{ ...cellSx, bgcolor: '#fff9e6' }}>{formatINR(parseFloat((totals.totalAmazonCosts + totals.totalCreditCardFees).toFixed(2)))}</TableCell>
                     <TableCell align="right" sx={{ ...cellSx, color: totals.totalProfit >= 0 ? 'success.main' : 'error.main' }}>{formatINR(parseFloat(totals.totalProfit.toFixed(2)))}</TableCell>
                   </TableRow>
                 );
