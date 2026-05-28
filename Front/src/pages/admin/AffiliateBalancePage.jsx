@@ -318,12 +318,12 @@ const AffiliateBalancePage = () => {
         <Box sx={{ pb: 4 }}>
             <Breadcrumbs sx={{ mb: 1.5, fontSize: '0.875rem' }}>
                 <Typography color="text.secondary">Finance & Cash Flow</Typography>
-                <Typography color="text.primary" fontWeight={600}>Affiliate Balance</Typography>
+                <Typography color="text.primary" fontWeight={600}>Daily Card Expenses</Typography>
             </Breadcrumbs>
 
             <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 3 }}>
                 <Typography variant="h5" sx={{ fontWeight: 700, flex: 1 }}>
-                    Affiliate Account Balance
+                    Daily Card Expenses
                 </Typography>
                 <Button startIcon={<RefreshIcon />} size="small" onClick={fetchRecords} disabled={loading}>
                     Refresh
