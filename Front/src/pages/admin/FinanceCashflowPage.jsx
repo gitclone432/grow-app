@@ -450,6 +450,18 @@ export default function FinanceCashflowPage() {
               onChange={(e) => setSummaryTo(e.target.value)}
               sx={{ minWidth: 150 }}
             />
+            
+            {selectedAccounts.length > 0 && (
+              <Button 
+                variant="outlined" 
+                color="error" 
+                size="small"
+                onClick={() => setSelectedAccounts([])}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Clear
+              </Button>
+            )}
           </Stack>
 
           {selectedAccounts.length > 0 && (

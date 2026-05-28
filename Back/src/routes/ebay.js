@@ -13107,7 +13107,7 @@ router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'
 // ============================================
 // GET SELLERS LIST (for dropdown filters)
 // ============================================
-router.get('/sellers-list', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+router.get('/sellers-list', requireAuth, requirePageAccess('Cashflow'), async (req, res) => {
   try {
     const sellers = await Seller.find({
       'ebayTokens.access_token': { $exists: true, $ne: null },
