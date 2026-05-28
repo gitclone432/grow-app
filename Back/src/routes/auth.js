@@ -9,10 +9,10 @@ import { loginSchema } from '../schemas/index.js';
 
 const router = Router();
 
-// Rate limit login attempts: max 15 requests per 15 minutes per IP
+// Rate limit login attempts: max 20 requests per 15 minutes per IP
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 15,
+  max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login attempts. Please try again after 15 minutes.' }
