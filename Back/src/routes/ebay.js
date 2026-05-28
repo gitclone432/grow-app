@@ -13125,7 +13125,7 @@ router.get('/sellers-list', requireAuth, requirePageAccess('SellerFunds'), async
 // CASHFLOW - MANUALLY FILLED SHEET (No API calls)
 // ============================================
 // GET all cashflow entries for date range & optional seller/marketplace filter
-router.get('/cashflow', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+router.get('/cashflow', requireAuth, requirePageAccess('Cashflow'), async (req, res) => {
   try {
     const { startDate, endDate, sellerId, marketplace } = req.query;
 
@@ -13216,7 +13216,7 @@ router.get('/cashflow', requireAuth, requirePageAccess('SellerFunds'), async (re
 });
 
 // POST - Create new cashflow entry
-router.post('/cashflow', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+router.post('/cashflow', requireAuth, requirePageAccess('Cashflow'), async (req, res) => {
   try {
     const { sellerId, marketplace = 'EBAY_US', date, gross, taxesAndFees, sellingCosts, notes } = req.body;
 
@@ -13245,7 +13245,7 @@ router.post('/cashflow', requireAuth, requirePageAccess('SellerFunds'), async (r
 });
 
 // PATCH - Update cashflow entry
-router.patch('/cashflow/:entryId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+router.patch('/cashflow/:entryId', requireAuth, requirePageAccess('Cashflow'), async (req, res) => {
   try {
     const { gross, taxesAndFees, sellingCosts, notes } = req.body;
 
@@ -13269,7 +13269,7 @@ router.patch('/cashflow/:entryId', requireAuth, requirePageAccess('SellerFunds')
 });
 
 // DELETE - Delete cashflow entry
-router.delete('/cashflow/:entryId', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+router.delete('/cashflow/:entryId', requireAuth, requirePageAccess('Cashflow'), async (req, res) => {
   try {
     await CashflowEntry.findByIdAndDelete(req.params.entryId);
     res.json({ success: true });
