@@ -29,7 +29,8 @@ import {
   Tab,
   Chip,
   Card,
-  CardContent
+  CardContent,
+  TablePagination
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import AddIcon from '@mui/icons-material/Add';
@@ -105,6 +106,10 @@ export default function FinanceCashflowPage() {
   const [chartData, setChartData] = useState([]);
   const [accountChartData, setAccountChartData] = useState([]);
   const [marketplaceChartData, setMarketplaceChartData] = useState([]);
+  
+  // Pagination state
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
 
   // Chart color schemes
   const CHART_COLORS = {
@@ -373,15 +378,65 @@ export default function FinanceCashflowPage() {
 
   const { totalGross, totalNet } = calculateSummaryTotals();
 
+  // Reset pagination when rows change
+  useEffect(() => {
+    setPage(0);
+  }, [rows]);
+
+  const handleChangePage = (event, newPage) => {
+    setPage(newPage);
+  };
+
+  const handleChangeRowsPerPage = (event) => {
+    setRowsPerPage(parseInt(event.target.value, 10));
+    setPage(0);
+  };
+
+  // Generate paginated rows data
+  const getPaginatedData = () => {
+    let allRows = [];
+    rows.forEach((seller) => {
+      // Add seller header
+      allRows.push({
+        type: 'seller-header',
+        id: `seller-${seller.sellerId}`,
+        data: seller
+      });
+      // Add individual entries
+      if (seller.marketplaces && seller.marketplaces.length > 0) {
+        seller.marketplaces.forEach((mp) => {
+          allRows.push({
+            type: 'entry',
+            id: `entry-${mp.id}`,
+            seller,
+            mp
+          });
+        });
+      }
+    });
+    
+    const startIdx = page * rowsPerPage;
+    const endIdx = startIdx + rowsPerPage;
+    return allRows.slice(startIdx, endIdx);
+  };
+
+  const getTotalRows = () => {
+    return rows.reduce((sum, seller) => {
+      const sellerHeaderCount = 1;
+      const entriesCount = seller.marketplaces?.length || 0;
+      return sum + sellerHeaderCount + entriesCount;
+    }, 0);
+  };
+
   return (
     <Box sx={{ pb: 4 }}>
       <Breadcrumbs sx={{ mb: 1.5, fontSize: '0.875rem' }}>
         <Typography color="text.secondary">Finance & Cash Flow</Typography>
-        <Typography color="text.primary" fontWeight={600}>Cashflow</Typography>
+        <Typography color="text.primary" fontWeight={600}></Typography>
       </Breadcrumbs>
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
-        <Typography variant="h5" sx={{ fontWeight: 700 }}>Cashflow — Gross & Net</Typography>
+        <Typography variant="h5" sx={{ fontWeight: 700 }}>Gross & Net</Typography>
         <Button startIcon={<RefreshIcon />} size="small" onClick={load}>Refresh</Button>
         <Button startIcon={<AddIcon />} variant="contained" size="small" onClick={() => handleOpenDialog()}>
           Add Entry
@@ -607,62 +662,76 @@ export default function FinanceCashflowPage() {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  rows.flatMap((seller) => {
-                    const rows = [];
-                    
-                    // Show seller header with totals
-                    rows.push(
-                      <TableRow key={`seller-${seller.sellerId}`} sx={{ bgcolor: 'grey.50', fontWeight: 700 }}>
-                        <TableCell sx={{ fontWeight: 700 }}>{seller.sellerName}</TableCell>
-                        <TableCell sx={{ fontWeight: 700, color: 'text.secondary' }}>TOTAL</TableCell>
-                        <TableCell></TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(seller.gross.value)}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(seller.taxesAndFees.value)}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(seller.sellingCosts.value)}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(seller.net.value)}</TableCell>
-                        <TableCell></TableCell>
-                      </TableRow>
-                    );
-
-                    // Show individual entries
-                    if (seller.marketplaces && seller.marketplaces.length > 0) {
-                      seller.marketplaces.forEach((mp) => {
-                        rows.push(
-                          <TableRow key={`entry-${mp.id}`} hover>
-                            <TableCell sx={{ pl: 4, color: 'text.secondary', fontSize: '0.9rem' }}>→ {seller.sellerName}</TableCell>
-                            <TableCell sx={{ color: 'text.secondary', fontSize: '0.9rem' }}>{mp.marketplace}</TableCell>
-                            <TableCell sx={{ fontSize: '0.9rem' }}>{new Date(mp.date).toLocaleDateString()}</TableCell>
-                            <TableCell align="right" sx={{ fontSize: '0.9rem' }}>{formatCurrency(mp.gross.value)}</TableCell>
-                            <TableCell align="right" sx={{ fontSize: '0.9rem' }}>{formatCurrency(mp.taxesAndFees.value)}</TableCell>
-                            <TableCell align="right" sx={{ fontSize: '0.9rem' }}>{formatCurrency(mp.sellingCosts.value)}</TableCell>
-                            <TableCell align="right" sx={{ fontSize: '0.9rem' }}>{formatCurrency(mp.net.value)}</TableCell>
-                            <TableCell align="center" sx={{ fontSize: '0.9rem' }}>
-                              <IconButton
-                                size="small"
-                                onClick={() => handleOpenDialog(mp, seller)}
-                                title="Edit"
-                              >
-                                <EditIcon fontSize="small" />
-                              </IconButton>
-                              <IconButton
-                                size="small"
-                                onClick={() => handleDeleteEntry(mp.id)}
-                                title="Delete"
-                                color="error"
-                              >
-                                <DeleteIcon fontSize="small" />
-                              </IconButton>
-                            </TableCell>
-                          </TableRow>
-                        );
-                      });
+                  getPaginatedData().map((item) => {
+                    if (item.type === 'seller-header') {
+                      const seller = item.data;
+                      return (
+                        <TableRow key={item.id} sx={{ bgcolor: 'grey.50', fontWeight: 700 }}>
+                          <TableCell sx={{ fontWeight: 700 }}>{seller.sellerName}</TableCell>
+                          <TableCell sx={{ fontWeight: 700, color: 'text.secondary' }}>TOTAL</TableCell>
+                          <TableCell></TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(seller.gross.value)}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(seller.taxesAndFees.value)}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(seller.sellingCosts.value)}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(seller.net.value)}</TableCell>
+                          <TableCell></TableCell>
+                        </TableRow>
+                      );
+                    } else if (item.type === 'entry') {
+                      const { seller, mp } = item;
+                      return (
+                        <TableRow key={item.id} hover>
+                          <TableCell sx={{ pl: 4, color: 'text.secondary', fontSize: '0.9rem' }}>→ {seller.sellerName}</TableCell>
+                          <TableCell sx={{ color: 'text.secondary', fontSize: '0.9rem' }}>{mp.marketplace}</TableCell>
+                          <TableCell sx={{ fontSize: '0.9rem' }}>{new Date(mp.date).toLocaleDateString()}</TableCell>
+                          <TableCell align="right" sx={{ fontSize: '0.9rem' }}>{formatCurrency(mp.gross.value)}</TableCell>
+                          <TableCell align="right" sx={{ fontSize: '0.9rem' }}>{formatCurrency(mp.taxesAndFees.value)}</TableCell>
+                          <TableCell align="right" sx={{ fontSize: '0.9rem' }}>{formatCurrency(mp.sellingCosts.value)}</TableCell>
+                          <TableCell align="right" sx={{ fontSize: '0.9rem' }}>{formatCurrency(mp.net.value)}</TableCell>
+                          <TableCell align="center" sx={{ fontSize: '0.9rem' }}>
+                            <IconButton
+                              size="small"
+                              onClick={() => handleOpenDialog(mp, seller)}
+                              title="Edit"
+                            >
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton
+                              size="small"
+                              onClick={() => handleDeleteEntry(mp.id)}
+                              title="Delete"
+                              color="error"
+                            >
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </TableCell>
+                        </TableRow>
+                      );
                     }
-
-                    return rows;
                   })
                 )}
               </TableBody>
             </Table>
+            <TablePagination
+              rowsPerPageOptions={[5, 10, 15, 25]}
+              component="div"
+              count={getTotalRows()}
+              rowsPerPage={rowsPerPage}
+              page={page}
+              onPageChange={handleChangePage}
+              onRowsPerPageChange={handleChangeRowsPerPage}
+              sx={{
+                '.MuiTablePagination-toolbar': {
+                  bgcolor: 'grey.50',
+                  borderTop: 1,
+                  borderColor: 'divider'
+                },
+                '.MuiTablePagination-selectLabel, .MuiTablePagination-displayedRows': {
+                  margin: 1,
+                  fontSize: '0.875rem'
+                }
+              }}
+            />
           </TableContainer>
         </Paper>
       )}
