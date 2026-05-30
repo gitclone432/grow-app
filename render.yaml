@@ -16,3 +16,11 @@ services:
         value: production
       - key: RUNNER_ID
         value: render
+      # Set in Render dashboard (Secrets) — required for Image Overlay / listing watermarks
+      - key: IMGBB_API_KEY
+        sync: false
+      # Amazon ASIN scrape — ScrapingDog key requires SCRAPER_PROVIDER=scrapingdog
+      - key: SCRAPER_PROVIDER
+        sync: false
+      - key: SCRAPER_API_KEY
+        sync: false

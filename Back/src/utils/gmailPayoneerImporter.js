@@ -2,6 +2,12 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import PayoneerRecord from '../models/PayoneerRecord.js';
 import GmailProcessedPayoneerMail from '../models/GmailProcessedPayoneerMail.js';
+import {
+    getConfiguredAllowedSenders,
+    getConfiguredAllowedSubjects,
+    senderAllowed,
+    subjectAllowed,
+} from './gmailTransactionImporter.js';
 
 const PAYOUT_ID_REGEX = /(?:payout\s*id|payoutid)\s*[:#-]?\s*([A-Za-z0-9-]{6,})/i;
 const EXCHANGE_RATE_REGEX = /(?:exchange\s*rate|fx\s*rate|rate)\s*[:=]?\s*([0-9][0-9,]*(?:\.\d+)?)/i;
@@ -10,20 +16,6 @@ const BANK_DEPOSIT_REGEX = /(?:bank\s*deposit|deposit(?:ed)?\s*amount|credited\s
 function normalizeNumber(raw) {
     const n = Number(String(raw || '').replace(/,/g, '').trim());
     return Number.isFinite(n) ? n : null;
-}
-
-function getConfiguredAllowedSenders() {
-    const raw = String(process.env.GMAIL_IMPORT_ALLOWED_SENDERS || '');
-    return raw
-        .split(',')
-        .map((s) => s.trim().toLowerCase())
-        .filter(Boolean);
-}
-
-function senderAllowed(fromText, allowedSenders) {
-    if (!allowedSenders.length) return true;
-    const from = String(fromText || '').toLowerCase();
-    return allowedSenders.some((s) => from.includes(s));
 }
 
 function parseMailForPayoneer({ subject = '', text = '' }) {
@@ -51,6 +43,7 @@ export async function importPayoneerFieldsFromGmail({ limit = 50 } = {}) {
     }
 
     const allowedSenders = getConfiguredAllowedSenders();
+    const allowedSubjects = getConfiguredAllowedSubjects();
     const client = new ImapFlow({ host, port, secure, auth: { user, pass } });
     const report = {
         scanned: 0,
@@ -75,7 +68,13 @@ export async function importPayoneerFieldsFromGmail({ limit = 50 } = {}) {
                 .map((f) => `${f.name || ''} <${f.address || ''}>`.trim())
                 .join(', ');
 
+            const resolvedSubject = subject || '';
+
             if (!senderAllowed(fromText, allowedSenders)) {
+                report.skipped += 1;
+                continue;
+            }
+            if (!subjectAllowed(resolvedSubject, allowedSubjects)) {
                 report.skipped += 1;
                 continue;
             }

@@ -111,6 +111,7 @@ export const PAGE_REGISTRY = [
   { id: 'CronJobs', name: 'Cron Jobs', path: '/cron-jobs', category: 'settingsSection', defaultRoles: ['superadmin'] },
   { id: 'ScraperTester', name: 'Scraper Tester', path: '/scraper-tester', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ImageOverlaySettings', name: 'Image Overlay', path: '/image-overlay', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'GmailTester', name: 'Gmail Tester', path: '/gmail-tester', category: 'settingsSection', defaultRoles: ['superadmin'] },
   { id: 'AffiliateOrders', name: 'Affiliate Orders', path: '/affiliate-orders', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
 
   // ====== EBAY PARAMETERS ======

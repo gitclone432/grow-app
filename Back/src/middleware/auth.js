@@ -121,6 +121,7 @@ export const PAGE_DEFAULT_ROLES = {
   'DescriptionTemplates': ['superadmin', 'listingadmin'],
   'ScraperTester': ['superadmin', 'listingadmin'],
   'ImageOverlaySettings': ['superadmin', 'listingadmin'],
+  'GmailTester': ['superadmin'],
 
   // Shared pages (accessible to all authenticated users)
   'AboutMe': ['_all_except_superadmin'],

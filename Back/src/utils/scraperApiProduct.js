@@ -34,17 +34,59 @@ export function getScraperRuntimeInfo() {
   };
 }
 
+function scraperErrorDetail(data) {
+  if (!data) return '';
+  if (typeof data === 'string') return data.slice(0, 200);
+  if (typeof data.message === 'string') return data.message;
+  if (typeof data.title === 'string' && typeof data.detail === 'string') {
+    return `${data.title}: ${data.detail}`.slice(0, 240);
+  }
+  if (typeof data.title === 'string') return data.title;
+  return '';
+}
+
 function enrichScraperHttpError(err, provider) {
   const status = err?.response?.status;
-  if (status !== 401) return err;
-  const hint =
-    provider === 'scraperapi'
-      ? '401 from ScraperAPI: this key is not a ScraperAPI key. Set SCRAPER_PROVIDER=scrapingdog for ScrapingDog keys, or use a ScraperAPI key.'
-      : '401 from ScrapingDog: check SCRAPER_API_KEY on the server and restart the API.';
-  const wrapped = new Error(`${err.message} — ${hint}`);
-  wrapped.response = err.response;
-  wrapped.status = status;
-  return wrapped;
+  const detail = scraperErrorDetail(err?.response?.data);
+  const suffix = detail ? ` — ${detail}` : '';
+
+  if (status === 401) {
+    const hint =
+      provider === 'scraperapi'
+        ? '401 from ScraperAPI: this key is not a ScraperAPI key. On Render set SCRAPER_PROVIDER=scrapingdog for ScrapingDog keys, then redeploy.'
+        : '401 from ScrapingDog: check SCRAPER_API_KEY on the API host and restart.';
+    const wrapped = new Error(`${err.message} — ${hint}${suffix}`);
+    wrapped.response = err.response;
+    wrapped.status = status;
+    return wrapped;
+  }
+
+  if (status === 404 && provider === 'scrapingdog') {
+    const wrapped = new Error(
+      `Amazon product not found for this ASIN/region (ScrapingDog 404). Try another ASIN or region.${suffix}`
+    );
+    wrapped.response = err.response;
+    wrapped.status = status;
+    return wrapped;
+  }
+
+  if (status === 502 || status === 503) {
+    const wrapped = new Error(
+      `${provider === 'scrapingdog' ? 'ScrapingDog' : 'ScraperAPI'} gateway error (${status}). Retry in a minute.${suffix}`
+    );
+    wrapped.response = err.response;
+    wrapped.status = status;
+    return wrapped;
+  }
+
+  if (status && status >= 400) {
+    const wrapped = new Error(`${err.message}${suffix}`);
+    wrapped.response = err.response;
+    wrapped.status = status;
+    return wrapped;
+  }
+
+  return err;
 }
 
 function scraperServiceLabel() {
@@ -241,7 +283,13 @@ export async function fetchStructuredAmazonProduct(asin, region = 'US') {
         err.response = response;
         throw enrichScraperHttpError(err, provider);
       }
-      return normalizeScrapingDogProduct(response.data);
+      const body = response.data;
+      if (body && typeof body === 'object' && !body.title && !body.asin) {
+        const err = new Error('ScrapingDog returned an empty product payload');
+        err.response = response;
+        throw enrichScraperHttpError(err, provider);
+      }
+      return normalizeScrapingDogProduct(body);
     }
 
     const response = await axios.get(SCRAPER_API_BASE, {

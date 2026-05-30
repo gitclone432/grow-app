@@ -43,17 +43,22 @@ Vercel serverless is a poor fit for this Express app as‑is; use **Render Web S
 3. After deploy, copy the service URL, e.g. `https://grow-api-xxxx.onrender.com`.
 4. In Render → your service → **Environment**, add (values are examples):
 
-  | Key                  | Value                                                                                      |
-  | -------------------- | ------------------------------------------------------------------------------------------ |
-  | `MONGODB_URI`        | Atlas SRV connection string                                                                |
-  | `JWT_SECRET`         | Long random string (32+ characters)                                                        |
-  | `NODE_ENV`           | `production`                                                                               |
-  | `CLIENT_ORIGIN`      | Your Vercel URL(s), comma‑separated, no trailing slash, e.g. `https://your-app.vercel.app` |
-  | `EBAY_CLIENT_ID`     | From eBay Developer Portal                                                                 |
-  | `EBAY_CLIENT_SECRET` | From eBay Developer Portal                                                                 |
-  | `EBAY_RU_NAME`       | RuName string (User Tokens)                                                                |
-  | `RUNNER_ID`          | e.g. `render` (distinct from your laptop’s `local`)                                        |
+  | Key                  | Value                                                                                                                                            |
+  | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+  | `MONGODB_URI`        | Atlas SRV connection string                                                                                                                      |
+  | `JWT_SECRET`         | Long random string (32+ characters)                                                                                                              |
+  | `NODE_ENV`           | `production`                                                                                                                                     |
+  | `CLIENT_ORIGIN`      | Your Vercel URL(s), comma‑separated, no trailing slash, e.g. `https://your-app.vercel.app`                                                       |
+  | `EBAY_CLIENT_ID`     | From eBay Developer Portal                                                                                                                       |
+  | `EBAY_CLIENT_SECRET` | From eBay Developer Portal                                                                                                                       |
+  | `EBAY_RU_NAME`       | RuName string (User Tokens)                                                                                                                      |
+  | `RUNNER_ID`          | e.g. `render` (distinct from your laptop’s `local`)                                                                                              |
+  | `IMGBB_API_KEY`      | From [api.imgbb.com](https://api.imgbb.com/) — required for **Settings → Image Overlay** (processed listing images upload to ImgBB)              |
+  | `SCRAPER_PROVIDER`   | `**scrapingdog`** if your key is from [ScrapingDog](https://www.scrapingdog.com/) (default on server is `scraperapi` — wrong provider = **401**) |
+  | `SCRAPER_API_KEY`    | Your ScrapingDog API key (same variable name for both providers)                                                                                 |
 
+  After changing scraper env vars, **Save** and **Manual Deploy** the API service. On startup, logs should show: `[env] ... | gmail=...` and `[Amazon Scraper] Provider: scrapingdog`.
+  In the app: **Settings → Scraper Tester** — banner should say `SCRAPER_PROVIDER=scrapingdog` and key length > 0.
 5. **eBay RuName** → set **Your auth accepted URL** to:
   `https://YOUR-RENDER-HOST.onrender.com/api/ebay/callback`
 6. Redeploy after changing env vars. Open `https://YOUR-RENDER-HOST.onrender.com/health` — you should see `{"ok":true}`.
@@ -83,7 +88,7 @@ Vercel serverless is a poor fit for this Express app as‑is; use **Render Web S
 ## 5. Checklist before going live
 
 - Atlas user + network `0.0.0.0/0` (or documented restrictions).
-- Render: `MONGODB_URI`, `JWT_SECRET`, `CLIENT_ORIGIN`, eBay vars.
+- Render: `MONGODB_URI`, `JWT_SECRET`, `CLIENT_ORIGIN`, eBay vars, `IMGBB_API_KEY` (image overlays).
 - Vercel: `VITE_API_URL`, `VITE_SERVER_URL` point to the **same** Render base URL.
 - eBay RuName **auth accepted URL** = `https://<render-host>/api/ebay/callback`.
 - First‑time admin: use your existing seed flow or create user in DB as you do locally.

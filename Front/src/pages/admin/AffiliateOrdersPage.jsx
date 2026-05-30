@@ -178,7 +178,7 @@ function hasAffiliateLinks(order) {
 
 function normalizeAffiliateOrder(order) {
     const carryOverDays = Math.max(0, Number(order?.carryOverDays) || 0);
-    const isCarryOver = order?.sourcingStatus === 'Not Yet' && (Boolean(order?.isCarryOver) || carryOverDays > 0);
+    const isCarryOver = isNotYetStatus(order) && (Boolean(order?.isCarryOver) || carryOverDays > 0);
 
     return {
         ...order,
@@ -248,13 +248,23 @@ function summarizeActualSpendByAccount(rowList) {
     }, {})).sort((left, right) => left.amazonAccount.localeCompare(right.amazonAccount));
 }
 
-function sortAffiliateOrders(orderList) {
+function isNotYetStatus(order) {
+    return (order?.sourcingStatus || 'Not Yet') === 'Not Yet';
+}
+
+function sortAffiliateOrders(orderList, showNotYetFirst = false) {
     return [...orderList].sort((leftOrder, rightOrder) => {
         const left = normalizeAffiliateOrder(leftOrder);
         const right = normalizeAffiliateOrder(rightOrder);
 
         const sellerCompare = left.sellerGroupName.localeCompare(right.sellerGroupName);
         if (sellerCompare !== 0) return sellerCompare;
+
+        if (showNotYetFirst) {
+            const leftRank = isNotYetStatus(left) ? 0 : 1;
+            const rightRank = isNotYetStatus(right) ? 0 : 1;
+            if (leftRank !== rightRank) return leftRank - rightRank;
+        }
 
         const leftDate = new Date(left.dateSold || left.creationDate || 0).getTime();
         const rightDate = new Date(right.dateSold || right.creationDate || 0).getTime();
@@ -265,12 +275,18 @@ function sortAffiliateOrders(orderList) {
 }
 
 function buildOrderSections(orderList, showNotYetFirst) {
+    const sorted = sortAffiliateOrders(orderList, showNotYetFirst);
+
     if (!showNotYetFirst) {
-        return [{ key: 'all', label: '', orders: orderList }];
+        return [{ key: 'all', label: '', orders: sorted }];
     }
 
-    const notYetOrders = orderList.filter((order) => order.sourcingStatus === 'Not Yet');
-    const remainingOrders = orderList.filter((order) => order.sourcingStatus !== 'Not Yet');
+    const notYetOrders = sorted.filter(isNotYetStatus);
+    const remainingOrders = sorted.filter((order) => !isNotYetStatus(order));
+
+    if (!remainingOrders.length) {
+        return [{ key: 'not-yet', label: 'Not Yet Orders', orders: notYetOrders }];
+    }
 
     return [
         { key: 'not-yet', label: 'Not Yet Orders', orders: notYetOrders },
@@ -1099,7 +1115,7 @@ export default function AffiliateOrdersPage() {
         } catch (err) {
             setSellerOptions([]);
             setOrders([]);
-            setOrdersError(err?.response?.data?.error || 'Failed to load seller options');
+            setOrdersError(err?.response?.data?.error || err?.message || 'Failed to load seller options');
         } finally {
             setSellerOptionsLoading(false);
         }
@@ -1110,6 +1126,7 @@ export default function AffiliateOrdersPage() {
         setOrdersError('');
         try {
             const { data } = await api.get('/affiliate-orders/daily', {
+                timeout: 120000,
                 params: {
                     ...(dateFilter.mode === 'single'
                         ? { date: dateFilter.single }
@@ -1124,7 +1141,7 @@ export default function AffiliateOrdersPage() {
             });
             setOrders((data || []).map(normalizeAffiliateOrder));
         } catch (err) {
-            setOrdersError(err?.response?.data?.error || 'Failed to load orders');
+            setOrdersError(err?.response?.data?.error || err?.message || 'Failed to load orders');
         } finally {
             setOrdersLoading(false);
         }
@@ -1419,14 +1436,17 @@ export default function AffiliateOrdersPage() {
 
     const isColVisible = (id) => visibleColumns.includes(id);
     const visibleColumnCount = DAILY_ORDER_ALL_COLUMNS.filter((c) => visibleColumns.includes(c.id)).length;
-    const displayedOrders = useMemo(() => sortAffiliateOrders(orders), [orders]);
+    const displayedOrders = useMemo(
+        () => sortAffiliateOrders(orders, showNotYetFirst),
+        [orders, showNotYetFirst]
+    );
     const isDailyOrdersLoading = ordersLoading || sellerOptionsLoading;
-    const orderSections = buildOrderSections(displayedOrders, showNotYetFirst);
+    const orderSections = buildOrderSections(orders, showNotYetFirst);
     const exportOrders = orderSections.flatMap((section) => section.orders);
     const exportEligibleOrders = useMemo(() => (
-        exportOrders.filter((order) => order.sourcingStatus === 'Not Yet' && hasAffiliateLinks(order))
+        exportOrders.filter((order) => isNotYetStatus(order) && hasAffiliateLinks(order))
     ), [exportOrders]);
-    const notYetCount = displayedOrders.filter((order) => order.sourcingStatus === 'Not Yet').length;
+    const notYetCount = displayedOrders.filter(isNotYetStatus).length;
     const carryOverCount = displayedOrders.filter((order) => order.isCarryOver).length;
     const sellerGroupStats = getSellerGroupStats(displayedOrders);
     const sellerGroupCount = sellerOptions.length;

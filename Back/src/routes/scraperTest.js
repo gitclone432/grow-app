@@ -1,21 +1,18 @@
 import express from 'express';
-import axios from 'axios';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import { trackApiUsage } from '../utils/apiUsageTracker.js';
+import {
+  fetchStructuredAmazonProduct,
+  getScraperRuntimeInfo,
+} from '../utils/scraperApiProduct.js';
 
 const router = express.Router();
 
-/** Same endpoint as listing pipeline (`scraperApiProduct.js`). */
-const SCRAPER_STRUCTURED_BASE = 'https://api.scraperapi.com/structured/amazon/product/v1';
-
 const REGIONS = new Set(['US', 'UK', 'CA', 'AU']);
 
-function getScraperApiKey() {
-  const key = process.env.SCRAPER_API_KEY;
-  if (!key || key === 'your_api_key_here_after_signup') {
-    throw new Error('SCRAPER_API_KEY environment variable not set. Please add it to .env file.');
-  }
-  return key;
+function scraperServiceLabel() {
+  const provider = String(process.env.SCRAPER_PROVIDER || 'scraperapi').trim().toLowerCase();
+  return provider === 'scrapingdog' ? 'ScrapingDog' : 'ScraperAPI';
 }
 
 function normalizeAsin(raw) {
@@ -30,15 +27,13 @@ function normalizeRegion(raw) {
   return REGIONS.has(r) ? r : 'US';
 }
 
-function regionToTld(region) {
-  if (region === 'UK') return '.co.uk';
-  if (region === 'CA') return '.ca';
-  if (region === 'AU') return '.com.au';
-  return '.com';
-}
+/** Which scraper + whether a key is loaded (for debugging 401s). */
+router.get('/status', requireAuth, requirePageAccess('ScraperTester'), (req, res) => {
+  res.json(getScraperRuntimeInfo());
+});
 
 /**
- * Raw ScraperAPI structured Amazon product JSON only (no app-side parsing / fallbacks).
+ * Raw structured Amazon product JSON (ScraperAPI or ScrapingDog per SCRAPER_PROVIDER).
  */
 router.post('/raw', requireAuth, requirePageAccess('ScraperTester'), async (req, res) => {
   const startTime = Date.now();
@@ -49,21 +44,11 @@ router.post('/raw', requireAuth, requirePageAccess('ScraperTester'), async (req,
     return res.status(400).json({ error: 'ASIN must be exactly 10 alphanumeric characters' });
   }
 
-  const timeout = parseInt(process.env.SCRAPER_API_TIMEOUT_MS, 10) || 30000;
-
   try {
-    const response = await axios.get(SCRAPER_STRUCTURED_BASE, {
-      params: {
-        api_key: getScraperApiKey(),
-        asin,
-        tld: regionToTld(region)
-      },
-      timeout
-    });
-
+    const raw = await fetchStructuredAmazonProduct(asin, region);
     const responseTime = Date.now() - startTime;
     trackApiUsage({
-      service: 'ScraperAPI',
+      service: scraperServiceLabel(),
       asin,
       creditsUsed: 1,
       success: true,
@@ -75,8 +60,9 @@ router.post('/raw', requireAuth, requirePageAccess('ScraperTester'), async (req,
       ok: true,
       asin,
       region,
-      httpStatus: response.status,
-      raw: response.data
+      provider: scraperServiceLabel(),
+      httpStatus: 200,
+      raw
     });
   } catch (err) {
     const responseTime = Date.now() - startTime;
@@ -84,7 +70,7 @@ router.post('/raw', requireAuth, requirePageAccess('ScraperTester'), async (req,
     const body = err.response?.data;
 
     trackApiUsage({
-      service: 'ScraperAPI',
+      service: scraperServiceLabel(),
       asin,
       creditsUsed: 1,
       success: false,
@@ -106,11 +92,14 @@ router.post('/raw', requireAuth, requirePageAccess('ScraperTester'), async (req,
       });
     }
 
-    return res.status(500).json({
+    return res.status(status === 401 ? 401 : 500).json({
       ok: false,
       asin,
       region,
-      error: err.message || 'ScraperAPI request failed'
+      httpStatus: status || null,
+      error: err.message || 'Amazon scraper request failed',
+      provider: scraperServiceLabel(),
+      runtime: getScraperRuntimeInfo(),
     });
   }
 });

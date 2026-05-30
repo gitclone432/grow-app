@@ -42,6 +42,7 @@ import {
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DownloadIcon from '@mui/icons-material/Download';
+import MailOutlineIcon from '@mui/icons-material/MailOutline';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
@@ -206,6 +207,8 @@ const TransactionPage = () => {
     const [openDialog, setOpenDialog] = useState(false);
     const [loading, setLoading] = useState(false);
     const [exportLoading, setExportLoading] = useState(false);
+    const [gmailImportLoading, setGmailImportLoading] = useState(false);
+    const [gmailImportMessage, setGmailImportMessage] = useState('');
     const [sendToggleLoadingId, setSendToggleLoadingId] = useState('');
     const [pageLoading, setPageLoading] = useState(true);
 
@@ -335,6 +338,23 @@ const TransactionPage = () => {
     const handleDateSortToggle = () => {
         setDateSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
         setPage(0);
+    };
+
+    const handleImportGmail = async () => {
+        setGmailImportLoading(true);
+        setGmailImportMessage('');
+        try {
+            const { data } = await api.post('/transactions/import-gmail', { limit: 25 });
+            setGmailImportMessage(
+                `Gmail import: scanned ${data?.scanned ?? 0}, imported ${data?.imported ?? 0}, skipped ${data?.skipped ?? 0}` +
+                    (data?.bankAccount ? ` → ${data.bankAccount}` : '')
+            );
+            await Promise.all([fetchTransactions(), fetchBalanceSummary()]);
+        } catch (error) {
+            setGmailImportMessage(error.response?.data?.error || error.message || 'Gmail import failed');
+        } finally {
+            setGmailImportLoading(false);
+        }
     };
 
     const handleDownloadCsv = async () => {
@@ -537,6 +557,15 @@ const TransactionPage = () => {
                     </Button>
                     <Button
                         variant="outlined"
+                        startIcon={gmailImportLoading ? <CircularProgress size={18} color="inherit" /> : <MailOutlineIcon />}
+                        onClick={handleImportGmail}
+                        disabled={gmailImportLoading}
+                        fullWidth={isMobile}
+                    >
+                        {gmailImportLoading ? 'Importing Gmail…' : 'Import from Gmail'}
+                    </Button>
+                    <Button
+                        variant="outlined"
                         startIcon={<DownloadIcon />}
                         onClick={handleDownloadCsv}
                         disabled={exportLoading}
@@ -554,6 +583,16 @@ const TransactionPage = () => {
                     </Button>
                 </Stack>
             </Stack>
+
+            {gmailImportMessage ? (
+                <Alert
+                    severity={gmailImportMessage.toLowerCase().includes('failed') || gmailImportMessage.toLowerCase().includes('required') ? 'warning' : 'success'}
+                    sx={{ mb: 2 }}
+                    onClose={() => setGmailImportMessage('')}
+                >
+                    {gmailImportMessage}
+                </Alert>
+            ) : null}
 
             <Alert severity="info" sx={{ mb: 2 }}>
                 One physical bank account should be one row in{' '}

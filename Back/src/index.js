@@ -22,8 +22,10 @@ dotenv.config({ path: path.join(serverRoot, '.env'), override: true });
 
 const scraperProvider = String(process.env.SCRAPER_PROVIDER || 'scraperapi').trim().toLowerCase();
 const scraperKeyLen = String(process.env.SCRAPER_API_KEY || '').trim().length;
+const gmailUser = String(process.env.GMAIL_IMAP_USER || '').trim();
+const gmailPassLen = String(process.env.GMAIL_IMAP_APP_PASSWORD || '').trim().length;
 console.log(
-  `[env] Loaded ${path.join(serverRoot, '.env')} | scraper=${scraperProvider} keyLen=${scraperKeyLen}`
+  `[env] Loaded ${path.join(serverRoot, '.env')} | scraper=${scraperProvider} keyLen=${scraperKeyLen} | gmail=${gmailUser && gmailPassLen ? 'configured' : 'missing'}`
 );
 
 import { connectToDatabase } from './lib/db.js';
@@ -59,6 +61,7 @@ import orderQtyExcludeLegacyRoutes from './routes/orderQtyExcludeLegacy.js';
 import cronJobsRoutes from './routes/cronJobs.js';
 import scraperTestRoutes from './routes/scraperTest.js';
 import imageOverlaySettingsRoutes from './routes/imageOverlaySettings.js';
+import gmailTestRoutes from './routes/gmailTest.js';
 import descriptionTemplateGalleryRoutes from './routes/descriptionTemplateGallery.js';
 import resolutionOptionsRoutes from './routes/resolutionOptions.js';
 import exchangeRatesRoutes from './routes/exchangeRates.js';
@@ -188,6 +191,7 @@ app.use('/api/cron-jobs', cronJobsRoutes);
 // Intentionally not named *scraper* — some browser extensions block those URLs as false positives.
 app.use('/api/amazon-debug-scrape', scraperTestRoutes);
 app.use('/api/image-overlay-settings', imageOverlaySettingsRoutes);
+app.use('/api/gmail-test', gmailTestRoutes);
 app.use('/api/description-template-gallery', descriptionTemplateGalleryRoutes);
 app.use('/api/resolution-options', resolutionOptionsRoutes);
 app.use('/api/exchange-rates', exchangeRatesRoutes);

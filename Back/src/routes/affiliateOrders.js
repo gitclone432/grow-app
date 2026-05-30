@@ -17,6 +17,58 @@ const PT_TIMEZONE = 'America/Los_Angeles';
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const CARRY_OVER_START_DATE = '2026-03-10';
 const MAX_ORDERS_PER_AMAZON_ACCOUNT = 9;
+const AFFILIATE_DAILY_SELECT = [
+    'orderId',
+    'dateSold',
+    'creationDate',
+    'itemNumber',
+    'productName',
+    'affiliateLink',
+    'affiliateLinks',
+    'affiliatePrice',
+    'amazonAccount',
+    'arrivingDate',
+    'beforeTax',
+    'estimatedTax',
+    'azOrderId',
+    'sourcingStatus',
+    'sourcingCompletedAt',
+    'purchaser',
+    'sourcingMessageStatus',
+    'fulfillmentNotes',
+    'shippingFullName',
+    'buyer',
+    'lineItems',
+    'seller',
+    'subtotal',
+    'subtotalUSD',
+    'sku',
+].join(' ');
+
+function slimLineItems(lineItems) {
+    const first = Array.isArray(lineItems) ? lineItems[0] : null;
+    if (!first) return [];
+    return [{
+        title: first.title || '',
+        legacyItemId: first.legacyItemId || first.itemId || '',
+        sku: first.sku || first.SKU || '',
+    }];
+}
+
+function slimAffiliateOrderResponse(order) {
+    const seller = order?.seller;
+    return {
+        ...order,
+        lineItems: slimLineItems(order?.lineItems),
+        buyer: order?.buyer?.username != null ? { username: order.buyer.username } : order?.buyer,
+        seller: seller && typeof seller === 'object'
+            ? {
+                _id: seller._id,
+                user: seller.user?.username != null ? { username: seller.user.username } : seller.user,
+            }
+            : seller,
+    };
+}
 
 /**
  * Builds UTC day bounds for a given YYYY-MM-DD in Pacific timezone (PST/PDT aware)
@@ -437,7 +489,8 @@ router.get('/daily', async (req, res) => {
         );
 
         const orders = await Order.find(query)
-            .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+            .select(AFFILIATE_DAILY_SELECT)
+            .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
             .sort({ dateSold: 1 })
             .lean();
 
@@ -451,14 +504,14 @@ router.get('/daily', async (req, res) => {
                 const carryOverDays = Math.max(0, Math.round((selectedDayUtc - sourceDayUtc) / DAY_IN_MS));
                 const sellerName = order.seller?.user?.username || order.sellerId || 'Unknown Seller';
 
-                return {
+                return slimAffiliateOrderResponse({
                     ...order,
                     sellerGroupName: sellerName,
                     isCarryOver: carryOverDays > 0 && order.sourcingStatus === 'Not Yet',
                     carryOverDays,
                     sourceDate: sourceDay,
                     carryOverLabel: getCarryOverLabel(carryOverDays),
-                };
+                });
             })
             .sort((left, right) => {
                 if (left.sellerGroupName !== right.sellerGroupName) {
@@ -488,7 +541,8 @@ router.get('/spend', async (req, res) => {
         const { query } = buildAffiliateSpendQuery(date, excludeLowValue);
 
         const orders = await Order.find(query)
-            .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+            .select(AFFILIATE_DAILY_SELECT)
+            .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
             .sort({ sourcingCompletedAt: 1, dateSold: 1 })
             .lean();
 
@@ -498,12 +552,12 @@ router.get('/spend', async (req, res) => {
             .map((order) => {
                 const sellerName = order.seller?.user?.username || order.sellerId || 'Unknown Seller';
 
-                return {
+                return slimAffiliateOrderResponse({
                     ...order,
                     sellerGroupName: sellerName,
                     sourceDate: getPlatformDayString(order.dateSold || order.creationDate || new Date()),
                     spendDate: getPlatformDayString(order.sourcingCompletedAt || order.dateSold || order.creationDate || new Date()),
-                };
+                });
             })
             .sort((left, right) => {
                 if (left.sellerGroupName !== right.sellerGroupName) {

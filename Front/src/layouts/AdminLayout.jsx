@@ -115,6 +115,7 @@ import ExcludeOrderQtySkipsPage from '../pages/admin/ExcludeOrderQtySkipsPage.js
 import CronJobsPage from '../pages/admin/CronJobsPage.jsx';
 import ScraperTesterPage from '../pages/admin/ScraperTesterPage.jsx';
 import ImageOverlaySettingsPage from '../pages/admin/ImageOverlaySettingsPage.jsx';
+import GmailTesterPage from '../pages/admin/GmailTesterPage.jsx';
 import AmazonPiSourceColumnsPage from '../pages/admin/AmazonPiSourceColumnsPage.jsx';
 import AffiliateOrdersPage from '../pages/admin/AffiliateOrdersPage.jsx';
 import LinkIcon from '@mui/icons-material/Link';
@@ -315,6 +316,7 @@ const COMPONENT_MAP = {
   'CronJobs': CronJobsPage,
   'ScraperTester': ScraperTesterPage,
   'ImageOverlaySettings': ImageOverlaySettingsPage,
+  'GmailTester': GmailTesterPage,
   'AffiliateOrders': AffiliateOrdersPage,
   'SellingPrivileges': SellingPrivilegesPage,
   'EbayApiUsage': EbayApiUsagePage,

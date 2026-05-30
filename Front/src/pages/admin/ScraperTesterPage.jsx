@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import {
   Alert,
@@ -30,10 +30,18 @@ export default function ScraperTesterPage() {
   const [error, setError] = useState('');
   const [responseText, setResponseText] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
+  const [serverScraper, setServerScraper] = useState(null);
   const copyTimerRef = useRef(null);
 
+  useEffect(() => {
+    api
+      .get('/amazon-debug-scrape/status')
+      .then(({ data }) => setServerScraper(data))
+      .catch(() => setServerScraper(null));
+  }, []);
+
   const prettyResponse = useMemo(
-    () => responseText || 'Run a request to see the raw ScraperAPI JSON.',
+    () => responseText || 'Run a request to see the raw scraper JSON.',
     [responseText]
   );
 
@@ -60,16 +68,29 @@ export default function ScraperTesterPage() {
       );
       setResponseText(JSON.stringify(data, null, 2));
     } catch (e) {
+      const httpStatus = e?.response?.status;
+      const apiError = e?.response?.data?.error || e?.message || 'Request failed';
+      const runtime = e?.response?.data?.runtime;
       const isNetwork =
         e?.code === 'ERR_NETWORK' ||
         String(e?.message || '').toLowerCase().includes('network error');
-      const hint = isNetwork
-        ? ' No response from the server. Confirm the API is running and VITE_API_URL is correct. If other admin pages work, try pausing ad blockers for this site (they sometimes block scrape-related paths).'
-        : '';
-      setError((e?.response?.data?.error || e?.message || 'Request failed') + hint);
+      let hint = '';
+      if (isNetwork) {
+        hint =
+          ' No response from the server. Confirm the API is running and VITE_API_URL is correct. If other admin pages work, try pausing ad blockers for this site (they sometimes block scrape-related paths).';
+      } else if (httpStatus === 401) {
+        hint =
+          ' A ScrapingDog API key returns 401 when the server still uses ScraperAPI. On Render (API service): set SCRAPER_PROVIDER=scrapingdog and SCRAPER_API_KEY=your ScrapingDog key, then Manual Deploy. Redeploy the latest backend if you do not see a blue “Server scraper” banner above.';
+        if (runtime?.provider) {
+          hint += ` Live server reports SCRAPER_PROVIDER=${runtime.provider}, key length ${runtime.keyLen}.`;
+        } else if (serverScraper) {
+          hint += ` Live server reports SCRAPER_PROVIDER=${serverScraper.provider}, key length ${serverScraper.keyLen}.`;
+        }
+      }
+      setError(apiError + hint);
       setResponseText(
         JSON.stringify(
-          e?.response?.data || { error: e.message, code: e.code },
+          e?.response?.data || { error: e.message, code: e.code, status: httpStatus },
           null,
           2
         )
@@ -97,16 +118,36 @@ export default function ScraperTesterPage() {
         Scraper Tester
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Fetches the raw JSON from ScraperAPI&apos;s structured Amazon product endpoint (same URL as
-        the listing pipeline). Each run uses API credits—use for debugging only.
+        Fetches raw Amazon product JSON from the server scraper (ScraperAPI or ScrapingDog per{' '}
+        <code>SCRAPER_PROVIDER</code>). Same pipeline as ASIN auto-fill. Each run uses API credits.
       </Typography>
 
-      <Alert severity="warning" sx={{ mb: 2 }}>
-        Requires <code>SCRAPER_API_KEY</code> on the server. Superadmin and listing admin only
-        (page access <code>ScraperTester</code>). If you see a generic network error while other
-        admin pages load, check ad blockers and that this environment can reach the API (see{' '}
-        <code>VITE_API_URL</code>).
-      </Alert>
+      {serverScraper ? (
+        <Alert
+          severity={
+            serverScraper.provider === 'scrapingdog' && serverScraper.keyConfigured
+              ? 'info'
+              : 'warning'
+          }
+          sx={{ mb: 2 }}
+        >
+          Server scraper: <strong>{serverScraper.service}</strong> (
+          <code>SCRAPER_PROVIDER={serverScraper.provider}</code>, key length{' '}
+          {serverScraper.keyLen}).{' '}
+          {serverScraper.provider !== 'scrapingdog' ? (
+            <>
+              <strong>401 with a ScrapingDog key?</strong> Set{' '}
+              <code>SCRAPER_PROVIDER=scrapingdog</code> on the API host and restart.
+            </>
+          ) : null}
+        </Alert>
+      ) : (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Set <code>SCRAPER_API_KEY</code> and <code>SCRAPER_PROVIDER=scrapingdog</code> on the API
+          server, then restart. A ScrapingDog key returns <strong>401</strong> if the server still
+          defaults to ScraperAPI.
+        </Alert>
+      )}
 
       <Paper sx={{ p: 2, mb: 2 }}>
         <Stack spacing={2} direction={{ xs: 'column', md: 'row' }} alignItems={{ md: 'flex-end' }}>
