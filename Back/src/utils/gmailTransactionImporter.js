@@ -182,7 +182,6 @@ function maskEmail(user) {
 
 export async function getGmailImportStatus() {
   const { user, pass, host, port, secure } = getImapConfig();
-  const bankAccount = await resolveBankAccount();
   return {
     imapConfigured: Boolean(user && pass),
     imapHost: host,
@@ -191,9 +190,6 @@ export async function getGmailImportStatus() {
     imapUserMasked: maskEmail(user),
     allowedSenders: getConfiguredAllowedSenders(),
     allowedSubjects: getConfiguredAllowedSubjects(),
-    bankAccount: bankAccount
-      ? { id: String(bankAccount._id), name: bankAccount.name }
-      : null,
     cronEnabled: String(process.env.GMAIL_IMPORT_ENABLED || '').toLowerCase() === 'true',
     cronExpr: String(process.env.GMAIL_IMPORT_CRON || '*/5 * * * *').trim(),
     importLimit: Math.max(1, Math.min(100, Number(process.env.GMAIL_IMPORT_LIMIT || 25))),
@@ -393,9 +389,6 @@ async function processScannedMessage(msg, { allowedSenders, allowedSubjects, ban
     parsedGreetingName: fields.greetingName || null,
     parsedAmount: fields.amount,
     parsedDate: fields.date ? new Date(fields.date).toISOString() : null,
-    resolvedBankAccount: importBank
-      ? { id: String(importBank._id), name: importBank.name }
-      : null,
     status,
     skipReason,
     wouldImport: status === 'ready' && Boolean(importBank?._id),
@@ -422,7 +415,6 @@ async function scanGmailMessages({ limit = 25, mode = 'unread' } = {}) {
     matchingInboxTotal: null,
     allowedSenders,
     allowedSubjects,
-    bankAccount: bankAccount ? { id: String(bankAccount._id), name: bankAccount.name } : null,
     messages: [],
     errors: [],
   };
@@ -536,12 +528,12 @@ export async function importTransactionsFromGmail({ limit = 25 } = {}) {
   }
 
   const scan = await scanGmailMessages({ limit, mode: 'unread' });
+  const bankByPayoneerId = await loadBankAccountsByPayoneerId();
   const importResult = {
     scanned: scan.scanned,
     imported: 0,
     skipped: 0,
     errors: [...scan.errors],
-    bankAccount: bankAccount.name,
     messages: [],
   };
 
@@ -551,13 +543,16 @@ export async function importTransactionsFromGmail({ limit = 25 } = {}) {
       continue;
     }
 
-    const targetBankId = row.resolvedBankAccount?.id || bankAccount._id;
-    const targetBankName = row.resolvedBankAccount?.name || bankAccount.name;
+    const targetBank = resolveBankForCustomer(row.parsedCustomerId, bankAccount, bankByPayoneerId);
+    if (!targetBank?._id) {
+      importResult.skipped += 1;
+      continue;
+    }
 
     try {
       const transaction = await Transaction.create({
         date: new Date(row.parsedDate),
-        bankAccount: targetBankId,
+        bankAccount: targetBank._id,
         transactionType: 'Credit',
         amount: row.parsedAmount,
         remark: `Gmail import: ${row.subject}`.slice(0, 280),
@@ -570,7 +565,7 @@ export async function importTransactionsFromGmail({ limit = 25 } = {}) {
         subject: row.subject,
         parsedDate: new Date(row.parsedDate),
         parsedAmount: row.parsedAmount,
-        parsedBankAccountName: targetBankName,
+        parsedBankAccountName: targetBank.name,
         transactionId: transaction._id,
       });
       importResult.imported += 1;

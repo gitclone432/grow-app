@@ -5,6 +5,8 @@ import BankAccount from '../models/BankAccount.js';
 import Seller from '../models/Seller.js';
 import Transaction from '../models/Transaction.js';
 import GmailProcessedPayoneerMail from '../models/GmailProcessedPayoneerMail.js';
+import PayoneerFeedCache from '../models/PayoneerFeedCache.js';
+import { sellerMatchesBankSellersField } from './bankAccountSellerMatch.js';
 import {
     getConfiguredAllowedSenders,
     getConfiguredAllowedSubjects,
@@ -14,6 +16,7 @@ import {
 } from './gmailTransactionImporter.js';
 
 const AMOUNT_TOLERANCE = 0.02;
+const PAYONEER_FEED_CACHE_ID = 'singleton';
 
 function getImapConfig() {
     const host = String(process.env.GMAIL_IMAP_HOST || 'imap.gmail.com').trim();
@@ -39,7 +42,7 @@ function amountsEqual(a, b, tolerance = AMOUNT_TOLERANCE) {
 }
 
 /** Match store from Payoneer greeting, e.g. "Ultimate Vision DEBAJYOTI PARIDA" → username "Ultimate Vision". */
-export function resolveSellerFromGreeting(greetingName, sellers) {
+export function resolveSellerFromGreeting(greetingName, sellers, bankAccount = null) {
     const greeting = normalizeMatchText(greetingName);
     if (!greeting || !Array.isArray(sellers) || !sellers.length) return null;
 
@@ -47,10 +50,7 @@ export function resolveSellerFromGreeting(greetingName, sellers) {
     let bestLen = 0;
 
     for (const seller of sellers) {
-        const candidates = [
-            seller.user?.username,
-            seller.user?.email,
-        ].filter(Boolean);
+        const candidates = [seller.user?.username, seller.user?.email].filter(Boolean);
 
         for (const raw of candidates) {
             const candidate = normalizeMatchText(raw);
@@ -64,7 +64,20 @@ export function resolveSellerFromGreeting(greetingName, sellers) {
         }
     }
 
-    return best;
+    if (best || !bankAccount) return best;
+
+    const bankName = normalizeMatchText(bankAccount.name);
+    if (!bankName || !greeting.includes(bankName)) return null;
+
+    const linked = sellers.filter((s) => sellerMatchesBankSellersField(bankAccount.sellers, s));
+    if (!linked.length) return null;
+    if (linked.length === 1) return linked[0];
+
+    const inGreeting = linked.filter((s) => {
+        const u = normalizeMatchText(s.user?.username || s.user?.email);
+        return u && greeting.includes(u);
+    });
+    return inGreeting[0] || linked[0];
 }
 
 async function loadSellersWithUsers() {
@@ -77,22 +90,63 @@ async function loadSellersWithUsers() {
 async function resolveBankAccountFromCustomerId(customerId) {
     const key = String(customerId || '').trim();
     if (!key) return null;
-    return BankAccount.findOne({ payoneerId: key }).select('_id name payoneerId').lean();
+    return BankAccount.findOne({ payoneerId: key }).select('_id name payoneerId sellers').lean();
+}
+
+async function findMatchingFeedRow({ amountUsd, sellerId, bankAccountId }) {
+    const cache = await PayoneerFeedCache.findById(PAYONEER_FEED_CACHE_ID).lean();
+    const rows = Array.isArray(cache?.rows) ? cache.rows : [];
+
+    const matches = rows.filter((row) => {
+        if (!amountsEqual(row.amount, amountUsd)) return false;
+        if (sellerId && String(row.sellerId) !== String(sellerId)) return false;
+        if (bankAccountId && String(row.suggestedBankAccountId || '') !== String(bankAccountId)) {
+            return false;
+        }
+        return true;
+    });
+
+    if (!matches.length) return null;
+
+    if (bankAccountId) {
+        const byBank = matches.filter(
+            (r) => String(r.suggestedBankAccountId || '') === String(bankAccountId)
+        );
+        if (byBank.length) return byBank[0];
+    }
+
+    return matches[0];
 }
 
 async function findMatchingPayoneerRecord({ amountUsd, sellerId, bankAccountId }) {
-    if (!sellerId || amountUsd == null) return null;
+    if (amountUsd == null) return null;
 
-    const query = {
-        store: sellerId,
-        amount: {
-            $gte: Number(amountUsd) - AMOUNT_TOLERANCE,
-            $lte: Number(amountUsd) + AMOUNT_TOLERANCE,
-        },
+    const amountRange = {
+        $gte: Number(amountUsd) - AMOUNT_TOLERANCE,
+        $lte: Number(amountUsd) + AMOUNT_TOLERANCE,
     };
-    if (bankAccountId) query.bankAccount = bankAccountId;
 
-    const records = await PayoneerRecord.find(query).sort({ paymentDate: -1 }).lean();
+    const queries = [];
+    if (sellerId && bankAccountId) {
+        queries.push({ store: sellerId, bankAccount: bankAccountId, amount: amountRange });
+    }
+    if (sellerId) {
+        queries.push({ store: sellerId, amount: amountRange });
+    }
+    if (bankAccountId) {
+        queries.push({ bankAccount: bankAccountId, amount: amountRange });
+    }
+
+    for (const query of queries) {
+        const records = await PayoneerRecord.find(query).sort({ paymentDate: -1 }).lean();
+        const picked = await pickUnprocessedPayoneerRecord(records);
+        if (picked) return picked;
+    }
+
+    return null;
+}
+
+async function pickUnprocessedPayoneerRecord(records) {
     if (!records.length) return null;
 
     const recordIds = records.map((r) => r._id);
@@ -139,6 +193,62 @@ async function syncPayoneerTransaction(record) {
     );
 }
 
+async function createPayoneerRecordFromGmail({
+    fields,
+    seller,
+    bankAccount,
+    feedRow,
+}) {
+    const bankId = bankAccount?._id || feedRow?.suggestedBankAccountId;
+    const storeId = seller?._id || feedRow?.sellerId;
+    if (!bankId || !storeId) {
+        return { ok: false, reason: 'Missing bank account or store for new Payoneer row' };
+    }
+
+    const payoutIdTrim =
+        feedRow?.payoutId != null && String(feedRow.payoutId).trim()
+            ? String(feedRow.payoutId).trim()
+            : null;
+    if (payoutIdTrim) {
+        const dup = await PayoneerRecord.findOne({ ebayPayoutId: payoutIdTrim }).select('_id').lean();
+        if (dup) {
+            const existing = await PayoneerRecord.findById(dup._id);
+            if (existing) {
+                const calcs = applyPayoneerCalcs(existing, fields);
+                if (!calcs.ok) return { ok: false, reason: calcs.reason };
+                await existing.save();
+                await syncPayoneerTransaction(existing);
+                return { ok: true, record: existing, created: false };
+            }
+        }
+    }
+
+    const paymentDate =
+        (feedRow?.payoutDate && new Date(feedRow.payoutDate)) ||
+        (fields.date && new Date(fields.date)) ||
+        new Date();
+
+    const record = new PayoneerRecord({
+        bankAccount: bankId,
+        store: storeId,
+        paymentDate,
+        amount: fields.amountUsd,
+        exchangeRate: fields.exchangeRate,
+        actualExchangeRate: Number((fields.exchangeRate * 1.02).toFixed(4)),
+        bankDeposit: fields.bankDepositInr,
+        marketplace: 'ebay',
+        ...(payoutIdTrim && { ebayPayoutId: payoutIdTrim }),
+    });
+
+    if (record.exchangeRate == null || record.bankDeposit == null) {
+        return { ok: false, reason: 'Could not parse exchange rate or bank deposit from email' };
+    }
+
+    await record.save();
+    await syncPayoneerTransaction(record);
+    return { ok: true, record, created: true };
+}
+
 /**
  * Apply parsed Payoneer withdrawal email fields to a matching Payoneer sheet row.
  * Match: USD amount + store name from greeting ("Dear …,").
@@ -179,7 +289,8 @@ export async function applyParsedMailToPayoneerSheet({
     }
 
     const sellerList = sellers || (await loadSellersWithUsers());
-    const seller = resolveSellerFromGreeting(fields.greetingName, sellerList);
+    const bankAccount = await resolveBankAccountFromCustomerId(fields.customerId);
+    const seller = resolveSellerFromGreeting(fields.greetingName, sellerList, bankAccount);
     if (!seller) {
         report.skipReason = `No store matched greeting "${fields.greetingName}"`;
         return report;
@@ -187,15 +298,64 @@ export async function applyParsedMailToPayoneerSheet({
 
     report.storeUsername = seller.user?.username || seller.user?.email || '';
 
-    const bankAccount = await resolveBankAccountFromCustomerId(fields.customerId);
-    const recordDoc = await findMatchingPayoneerRecord({
+    const bankId = bankAccount?._id || null;
+    let recordDoc = await findMatchingPayoneerRecord({
         amountUsd: fields.amountUsd,
         sellerId: seller._id,
-        bankAccountId: bankAccount?._id || null,
+        bankAccountId: bankId,
     });
 
-    if (!recordDoc) {
-        report.skipReason = `No Payoneer row for store "${report.storeUsername}" with amount $${fields.amountUsd}`;
+    const feedRow =
+        !recordDoc &&
+        (await findMatchingFeedRow({
+            amountUsd: fields.amountUsd,
+            sellerId: seller._id,
+            bankAccountId: bankId,
+        }));
+
+    if (!recordDoc && !feedRow) {
+        report.skipReason =
+            `No Payoneer row or eBay payout for store "${report.storeUsername}" with amount $${fields.amountUsd}. ` +
+            'Click Refresh eBay payouts on Payoneer Sheet, or Save row first.';
+        return report;
+    }
+
+    if (preview) {
+        report.matched = true;
+        report.status = feedRow && !recordDoc ? 'ready_create' : 'ready';
+        report.wouldCreate = Boolean(feedRow && !recordDoc);
+        return report;
+    }
+
+    if (!recordDoc && feedRow) {
+        const created = await createPayoneerRecordFromGmail({
+            fields,
+            seller,
+            bankAccount,
+            feedRow,
+        });
+        if (!created.ok) {
+            report.skipReason = created.reason;
+            return report;
+        }
+
+        await GmailProcessedPayoneerMail.create({
+            messageId,
+            from,
+            subject,
+            amountUsd: fields.amountUsd,
+            greetingName: fields.greetingName,
+            sellerUsername: report.storeUsername,
+            exchangeRate: fields.exchangeRate ?? undefined,
+            bankDeposit: fields.bankDepositInr ?? undefined,
+            payoneerRecordId: created.record._id,
+        });
+
+        report.matched = true;
+        report.payoneerRecordId = String(created.record._id);
+        report.status = created.created ? 'created' : 'updated';
+        report.updated = true;
+        report.created = Boolean(created.created);
         return report;
     }
 
@@ -204,11 +364,6 @@ export async function applyParsedMailToPayoneerSheet({
 
     if (!amountsEqual(recordDoc.amount, fields.amountUsd)) {
         report.skipReason = 'Payoneer row amount did not match email USD amount';
-        return report;
-    }
-
-    if (preview) {
-        report.status = 'ready';
         return report;
     }
 
@@ -241,6 +396,7 @@ export async function applyParsedMailToPayoneerSheet({
 
     report.status = 'updated';
     report.updated = true;
+    report.created = false;
     report.skipReason = '';
     return report;
 }

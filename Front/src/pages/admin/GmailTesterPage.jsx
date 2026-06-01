@@ -215,7 +215,7 @@ export default function GmailTesterPage() {
   const runImport = async () => {
     if (
       !window.confirm(
-        `Import up to ${importLimit} unread Payoneer emails as Credit transactions on “${status?.bankAccount?.name || 'bank account'}”? Already-imported mail is skipped.`
+        `Import up to ${importLimit} unread Payoneer emails as Credit transactions? Already-imported mail is skipped.`
       )
     ) {
       return;
@@ -228,8 +228,7 @@ export default function GmailTesterPage() {
         limit: Number(importLimit) || 25,
       });
       setSuccess(
-        `Import done: scanned ${data?.scanned ?? 0}, imported ${data?.imported ?? 0}, skipped ${data?.skipped ?? 0}` +
-          (data?.bankAccount ? ` → ${data.bankAccount}` : '')
+        `Import done: scanned ${data?.scanned ?? 0}, imported ${data?.imported ?? 0}, skipped ${data?.skipped ?? 0}`
       );
       await runPreview();
     } catch (e) {
@@ -258,11 +257,13 @@ export default function GmailTesterPage() {
     setSuccess('');
     try {
       const { data } = await api.post('/gmail-test/sync-payoneer', { uid: selectedMessage.uid });
-      if (data?.status === 'updated') {
+      if (data?.status === 'updated' || data?.status === 'created') {
         setSuccess(
-          `Payoneer sheet updated for ${data.storeUsername || 'store'} — ` +
-            `rate ${data.exchangeRate}, deposit ₹${data.bankDepositInr}. ` +
-            `View on Payoneer Sheet.`
+          (data.status === 'created'
+            ? `Payoneer row created and saved for ${data.storeUsername || 'store'}`
+            : `Payoneer sheet updated for ${data.storeUsername || 'store'}`) +
+            ` — rate ${data.exchangeRate}, deposit ₹${data.bankDepositInr}. ` +
+            `Open Payoneer Sheet to view.`
         );
       } else {
         setError(data?.skipReason || 'Could not match this email to a Payoneer row.');
@@ -323,11 +324,7 @@ export default function GmailTesterPage() {
             Gmail Tester
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Preview Payoneer withdrawal emails before they become bank credits on{' '}
-            <Link component={RouterLink} to="/admin/transactions">
-              Transactions
-            </Link>
-            {' '}or update{' '}
+            Preview Payoneer withdrawal emails and update{' '}
             <Link component={RouterLink} to="/admin/payoneer">
               Payoneer Sheet
             </Link>{' '}
@@ -426,11 +423,11 @@ export default function GmailTesterPage() {
               variant="outlined"
               color="secondary"
               onClick={runImport}
-              disabled={importing || !status?.imapConfigured || !status?.bankAccount}
+              disabled={importing || !status?.imapConfigured}
             >
               {importing ? 'Importing…' : 'Import credits (unread)'}
             </Button>
-            {status?.imapConfigured && status?.bankAccount && payoneerReadyCount > 0 && !report ? (
+            {status?.imapConfigured && payoneerReadyCount > 0 && !report ? (
               <Typography variant="caption" color="text.secondary">
                 Fetch mail first to see how many rows are ready.
               </Typography>
@@ -599,9 +596,6 @@ export default function GmailTesterPage() {
             <Chip color="success" label={`Ready: ${report.ready ?? 0}`} />
             <Chip label={`Skipped: ${report.skipped ?? 0}`} />
             <Chip variant="outlined" label={`Scan: ${report.mode}`} />
-            {report.bankAccount?.name ? (
-              <Chip variant="outlined" label={`Bank: ${report.bankAccount.name}`} />
-            ) : null}
             {dateFilterActive ? (
               <Chip
                 size="small"
@@ -676,22 +670,6 @@ function StatusPanel({ status, apiBase }) {
           <Typography variant="body2">
             <strong>{status.imapUserMasked}</strong> @ {status.imapHost}:{status.imapPort}
           </Typography>
-        </Stack>
-        <Stack direction="row" flexWrap="wrap" gap={1}>
-          {status.bankAccount ? (
-            <Chip
-              size="small"
-              color="primary"
-              variant="outlined"
-              label={`Credits → ${status.bankAccount.name}`}
-            />
-          ) : (
-            <Chip
-              size="small"
-              color="warning"
-              label="No bank account — set GMAIL_IMPORT_BANK_ACCOUNT_NAME"
-            />
-          )}
           <Chip
             size="small"
             variant="outlined"
@@ -947,12 +925,6 @@ function MailResultsLayout({
                 <Box component="span" sx={{ fontFamily: 'ui-monospace, monospace' }}>
                   {selectedMessage.parsedCustomerId}
                 </Box>
-              </Typography>
-            ) : null}
-            {selectedMessage.resolvedBankAccount ? (
-              <Typography variant="caption" color="text.secondary">
-                Import target bank: <strong>{selectedMessage.resolvedBankAccount.name}</strong>
-                {selectedMessage.parsedCustomerId ? ' (Payoneer Customer ID → Bank Accounts Payoneer ID)' : ''}
               </Typography>
             ) : null}
             <Typography variant="caption" color="text.secondary" display="block">
