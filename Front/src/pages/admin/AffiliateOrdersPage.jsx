@@ -29,6 +29,7 @@ import {
     TableCell,
     TableContainer,
     TableHead,
+    Pagination,
     TableRow,
     Tabs,
     Tab,
@@ -73,6 +74,7 @@ const MESSAGE_STATUSES = [
 const AMAZON_ACCOUNT_DAILY_LIMIT = 9;
 const AFFILIATE_MARKUP_RATE = 0.035;
 const AFFILIATE_IGST_RATE = 0.18;
+const AFFILIATE_ORDERS_PER_PAGE = 50;
 
 const SOURCING_STATUS_COLORS = {
     'Done': 'success',
@@ -1031,6 +1033,9 @@ export default function AffiliateOrdersPage() {
     // Tab 1 state
     const [orders, setOrders] = useState([]);
     const [ordersLoading, setOrdersLoading] = useState(false);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
+    const [totalOrders, setTotalOrders] = useState(0);
     const [supplierBackfillLoading, setSupplierBackfillLoading] = useState(false);
     const [ordersError, setOrdersError] = useState('');
     const [sellerOptions, setSellerOptions] = useState([]);
@@ -1097,9 +1102,9 @@ export default function AffiliateOrdersPage() {
 
     const fetchSellerOptions = useCallback(async () => {
         setSellerOptionsLoading(true);
-        setOrdersError('');
         try {
             const { data } = await api.get('/affiliate-orders/daily/sellers', {
+                timeout: 90000,
                 params: {
                     ...(dateFilter.mode === 'single'
                         ? { date: dateFilter.single }
@@ -1114,8 +1119,7 @@ export default function AffiliateOrdersPage() {
             setSellerOptions(data || []);
         } catch (err) {
             setSellerOptions([]);
-            setOrders([]);
-            setOrdersError(err?.response?.data?.error || err?.message || 'Failed to load seller options');
+            console.error('Failed to load affiliate seller options:', err);
         } finally {
             setSellerOptionsLoading(false);
         }
@@ -1125,9 +1129,11 @@ export default function AffiliateOrdersPage() {
         setOrdersLoading(true);
         setOrdersError('');
         try {
-            const { data } = await api.get('/affiliate-orders/daily', {
-                timeout: 120000,
+            const response = await api.get('/affiliate-orders/daily', {
+                timeout: 90000,
                 params: {
+                    page: currentPage,
+                    limit: AFFILIATE_ORDERS_PER_PAGE,
                     ...(dateFilter.mode === 'single'
                         ? { date: dateFilter.single }
                         : {
@@ -1139,13 +1145,23 @@ export default function AffiliateOrdersPage() {
                     ...(selectedSeller ? { sellerId: selectedSeller } : {}),
                 }
             });
-            setOrders((data || []).map(normalizeAffiliateOrder));
+            const payload = response.data || {};
+            const rows = Array.isArray(payload) ? payload : (payload.orders || []);
+            const pagination = payload.pagination || null;
+            setOrders(rows.map(normalizeAffiliateOrder));
+            if (pagination) {
+                setTotalPages(pagination.totalPages || 1);
+                setTotalOrders(pagination.totalOrders ?? rows.length);
+            } else {
+                setTotalPages(1);
+                setTotalOrders(rows.length);
+            }
         } catch (err) {
             setOrdersError(err?.response?.data?.error || err?.message || 'Failed to load orders');
         } finally {
             setOrdersLoading(false);
         }
-    }, [dateFilter, excludeLowValue, selectedSeller, showDoneEntries]);
+    }, [currentPage, dateFilter, excludeLowValue, selectedSeller, showDoneEntries]);
 
     const fetchAmazonAccounts = useCallback(async () => {
         try {
@@ -1223,16 +1239,21 @@ export default function AffiliateOrdersPage() {
     }, [dateFilter, excludeLowValue, showDoneEntries, fetchSellerOptions, fetchAmazonAccounts, fetchBalances, fetchSummary, fetchSpendOrders]);
 
     useEffect(() => {
+        setCurrentPage(1);
+    }, [dateFilter, excludeLowValue, showDoneEntries, selectedSeller]);
+
+    useEffect(() => {
+        fetchOrders();
+    }, [fetchOrders]);
+
+    useEffect(() => {
         if (sellerOptionsLoading) {
             return;
         }
         if (selectedSeller && !sellerOptions.some((option) => option.value === selectedSeller)) {
             setSelectedSeller('');
-            return;
         }
-
-        fetchOrders();
-    }, [fetchOrders, selectedSeller, sellerOptions, sellerOptionsLoading]);
+    }, [selectedSeller, sellerOptions, sellerOptionsLoading]);
 
     useEffect(() => {
         const unsubscribe = subscribeOrderSyncEvent(() => {
@@ -1440,7 +1461,7 @@ export default function AffiliateOrdersPage() {
         () => sortAffiliateOrders(orders, showNotYetFirst),
         [orders, showNotYetFirst]
     );
-    const isDailyOrdersLoading = ordersLoading || sellerOptionsLoading;
+    const isDailyOrdersLoading = ordersLoading;
     const orderSections = buildOrderSections(orders, showNotYetFirst);
     const exportOrders = orderSections.flatMap((section) => section.orders);
     const exportEligibleOrders = useMemo(() => (
@@ -1577,11 +1598,11 @@ export default function AffiliateOrdersPage() {
                             sx={{ fontWeight: 600 }}
                         />
                     )}
-                    {!isDailyOrdersLoading && sellerGroupCount > 0 && (
+                    {!isDailyOrdersLoading && totalOrders > 0 && (
                         <Chip
                             size="small"
                             variant="outlined"
-                            label={`${sellerGroupCount} seller group${sellerGroupCount !== 1 ? 's' : ''}`}
+                            label={`${totalOrders} order${totalOrders !== 1 ? 's' : ''} total`}
                         />
                     )}
                     {!isDailyOrdersLoading && notYetCount > 0 && (
@@ -1636,7 +1657,7 @@ export default function AffiliateOrdersPage() {
                         onReset={() => setVisibleColumns(DEFAULT_DAILY_VISIBLE_COLUMNS)}
                         page="affiliate-orders"
                     />
-                    <Button size="small" startIcon={<RefreshIcon />} onClick={fetchSellerOptions}>Refresh</Button>
+                    <Button size="small" startIcon={<RefreshIcon />} onClick={() => { fetchSellerOptions(); fetchOrders(); }}>Refresh</Button>
                     <Button
                         size="small"
                         variant="outlined"
@@ -1716,7 +1737,11 @@ export default function AffiliateOrdersPage() {
                                             )}
                                             <TableRow hover sx={{ bgcolor: order.isCarryOver ? '#fffdf4' : undefined, '&:nth-of-type(even)': { bgcolor: order.isCarryOver ? '#fff8e1' : '#fafafa' } }}>
                                                 {/* # */}
-                                                {isColVisible('index') && <TableCell sx={{ fontSize: '0.78rem', color: 'text.secondary' }}>{idx + 1}</TableCell>}
+                                                {isColVisible('index') && (
+                                                    <TableCell sx={{ fontSize: '0.78rem', color: 'text.secondary' }}>
+                                                        {(currentPage - 1) * AFFILIATE_ORDERS_PER_PAGE + idx + 1}
+                                                    </TableCell>
+                                                )}
 
                                                 {/* Order ID */}
                                                 {isColVisible('orderId') && <TableCell sx={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>
@@ -2074,6 +2099,34 @@ export default function AffiliateOrdersPage() {
                         </TableBody>
                     </Table>
                 </TableContainer>
+            )}
+            {!isDailyOrdersLoading && orders.length > 0 && totalPages > 1 && (
+                <Box
+                    sx={{
+                        py: 1,
+                        px: 1,
+                        display: 'flex',
+                        flexDirection: { xs: 'column', sm: 'row' },
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        gap: 1,
+                        borderTop: 1,
+                        borderColor: 'divider',
+                    }}
+                >
+                    <Typography variant="body2" color="text.secondary">
+                        Showing {(currentPage - 1) * AFFILIATE_ORDERS_PER_PAGE + 1}–
+                        {Math.min(currentPage * AFFILIATE_ORDERS_PER_PAGE, totalOrders)} of {totalOrders} orders
+                    </Typography>
+                    <Pagination
+                        count={totalPages}
+                        page={currentPage}
+                        onChange={(_e, page) => setCurrentPage(page)}
+                        color="primary"
+                        showFirstButton
+                        showLastButton
+                    />
+                </Box>
             )}
         </>
     );

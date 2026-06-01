@@ -16,6 +16,22 @@ router.use(requireAuth);
 const PT_TIMEZONE = 'America/Los_Angeles';
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const CARRY_OVER_START_DATE = '2026-03-10';
+const MAX_CARRY_OVER_DAYS = Math.max(
+    7,
+    Math.min(120, Number(process.env.AFFILIATE_CARRY_OVER_MAX_DAYS || 45))
+);
+const MAX_DAILY_ORDERS = Math.max(
+    500,
+    Math.min(10000, Number(process.env.AFFILIATE_DAILY_MAX_ROWS || 4000))
+);
+const DEFAULT_AFFILIATE_PAGE_SIZE = Math.max(
+    10,
+    Math.min(200, Number(process.env.AFFILIATE_DAILY_PAGE_SIZE || 50))
+);
+const MAX_DAILY_RANGE_DAYS = Math.max(
+    1,
+    Math.min(90, Number(process.env.AFFILIATE_DAILY_MAX_RANGE_DAYS || 14))
+);
 const MAX_ORDERS_PER_AMAZON_ACCOUNT = 9;
 const AFFILIATE_DAILY_SELECT = [
     'orderId',
@@ -118,12 +134,31 @@ function resolveDateWindowFromQuery({ date, startDate, endDate }) {
     if (startDate || endDate) {
         const resolvedStart = startDate || endDate;
         const resolvedEnd = endDate || startDate;
+        const startUtc = Date.parse(`${resolvedStart}T00:00:00Z`);
+        const endUtc = Date.parse(`${resolvedEnd}T00:00:00Z`);
+        if (!Number.isFinite(startUtc) || !Number.isFinite(endUtc)) {
+            return null;
+        }
+        const spanDays = Math.round(Math.abs(endUtc - startUtc) / DAY_IN_MS) + 1;
+        if (spanDays > MAX_DAILY_RANGE_DAYS) {
+            const err = new Error(
+                `Date range too large (${spanDays} days). Maximum is ${MAX_DAILY_RANGE_DAYS} days.`
+            );
+            err.statusCode = 400;
+            throw err;
+        }
         return { startDate: resolvedStart, endDate: resolvedEnd };
     }
     if (date) {
         return { startDate: date, endDate: date };
     }
     return null;
+}
+
+function getEffectiveCarryOverStart(rangeStart) {
+    const carryOverStart = buildDayRange(CARRY_OVER_START_DATE).start;
+    const cappedStart = new Date(rangeStart.getTime() - MAX_CARRY_OVER_DAYS * DAY_IN_MS);
+    return new Date(Math.max(carryOverStart.getTime(), cappedStart.getTime()));
 }
 
 function extractOrderSku(order) {
@@ -153,6 +188,20 @@ function buildAmazonLinkFromAsin(asin) {
 
 async function applySupplierLinksFromSavedAsins(orders = []) {
     if (!Array.isArray(orders) || orders.length === 0) return orders;
+
+    const missingLink = orders.filter((order) => !String(order?.affiliateLink || '').trim());
+    if (!missingLink.length) return orders;
+
+    const enrichedMissing = await enrichSupplierLinksForOrders(missingLink);
+    const enrichedById = new Map(
+        enrichedMissing.map((order) => [String(order._id), order])
+    );
+
+    return orders.map((order) => enrichedById.get(String(order._id)) || order);
+}
+
+async function enrichSupplierLinksForOrders(orders = []) {
+    if (!orders.length) return orders;
 
     const rawLookupRows = orders
         .map((order) => ({
@@ -221,6 +270,40 @@ async function applySupplierLinksFromSavedAsins(orders = []) {
     });
 }
 
+async function attachSellersToOrders(orders = []) {
+    if (!orders.length) return orders;
+
+    const sellerIds = [
+        ...new Set(
+            orders
+                .map((order) => {
+                    const seller = order?.seller;
+                    if (seller && typeof seller === 'object' && seller._id) {
+                        return String(seller._id);
+                    }
+                    if (seller) return String(seller);
+                    return '';
+                })
+                .filter(Boolean)
+        ),
+    ];
+
+    if (!sellerIds.length) return orders;
+
+    const sellers = await Seller.find({ _id: { $in: sellerIds } })
+        .select('_id user')
+        .populate({ path: 'user', select: 'username' })
+        .lean();
+
+    const sellerById = new Map(sellers.map((seller) => [String(seller._id), seller]));
+
+    return orders.map((order) => {
+        const sellerId = String(order?.seller?._id || order?.seller || '');
+        const seller = sellerById.get(sellerId);
+        return seller ? { ...order, seller } : order;
+    });
+}
+
 // Persist supplier links for old orders by matching seller+SKU with saved template ASINs.
 router.post('/backfill-supplier-links', async (req, res) => {
     try {
@@ -267,19 +350,19 @@ router.post('/backfill-supplier-links', async (req, res) => {
 
 function buildAffiliateQueueQuery(dateStr, excludeLowValue, extraFilters = [], options = {}) {
     const { start, end } = buildDayRange(dateStr);
-    const carryOverStart = buildDayRange(CARRY_OVER_START_DATE).start;
+    const effectiveCarryOverStart = getEffectiveCarryOverStart(start);
     const { includeCompletedCarryOver = false } = options;
     const queueScopes = [{ dateSold: { $gte: start, $lte: end } }];
 
-    if (start.getTime() > carryOverStart.getTime()) {
+    if (start.getTime() > effectiveCarryOverStart.getTime()) {
         queueScopes.push({
-            dateSold: { $gte: carryOverStart, $lt: start },
+            dateSold: { $gte: effectiveCarryOverStart, $lt: start },
             sourcingStatus: 'Not Yet',
         });
 
         if (includeCompletedCarryOver) {
             queueScopes.push({
-                dateSold: { $gte: carryOverStart, $lt: start },
+                dateSold: { $gte: effectiveCarryOverStart, $lt: start },
                 sourcingStatus: 'Done',
                 sourcingCompletedAt: { $gte: start, $lte: end },
             });
@@ -312,19 +395,19 @@ function buildAffiliateQueueQueryForRange(startDateStr, endDateStr, excludeLowVa
         start: buildDayRange(startDateStr).start,
         end: buildDayRange(endDateStr).end,
     };
-    const carryOverStart = buildDayRange(CARRY_OVER_START_DATE).start;
+    const effectiveCarryOverStart = getEffectiveCarryOverStart(start);
     const { includeCompletedCarryOver = false } = options;
     const queueScopes = [{ dateSold: { $gte: start, $lte: end } }];
 
-    if (start.getTime() > carryOverStart.getTime()) {
+    if (start.getTime() > effectiveCarryOverStart.getTime()) {
         queueScopes.push({
-            dateSold: { $gte: carryOverStart, $lt: start },
+            dateSold: { $gte: effectiveCarryOverStart, $lt: start },
             sourcingStatus: 'Not Yet',
         });
 
         if (includeCompletedCarryOver) {
             queueScopes.push({
-                dateSold: { $gte: carryOverStart, $lt: start },
+                dateSold: { $gte: effectiveCarryOverStart, $lt: start },
                 sourcingStatus: 'Done',
                 sourcingCompletedAt: { $gte: start, $lte: end },
             });
@@ -425,7 +508,7 @@ router.get('/daily/sellers', async (req, res) => {
                     count: { $sum: 1 },
                 },
             },
-        ]);
+        ]).option({ maxTimeMS: 60000 });
 
         const activeUserIds = await User.find({ active: true }).distinct('_id');
         const sellers = await Seller.find({
@@ -452,7 +535,7 @@ router.get('/daily/sellers', async (req, res) => {
         res.json(sellerOptions);
     } catch (err) {
         console.error('GET /affiliate-orders/daily/sellers error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(err.statusCode || 500).json({ error: err.message });
     }
 });
 
@@ -488,15 +571,30 @@ router.get('/daily', async (req, res) => {
             }
         );
 
-        const orders = await Order.find(query)
-            .select(AFFILIATE_DAILY_SELECT)
-            .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
-            .sort({ dateSold: 1 })
-            .lean();
+        const pageNum = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limitNum = Math.min(
+            200,
+            Math.max(10, parseInt(req.query.limit, 10) || DEFAULT_AFFILIATE_PAGE_SIZE)
+        );
+        const skip = (pageNum - 1) * limitNum;
 
-        const ordersWithSupplierLink = await applySupplierLinksFromSavedAsins(orders);
+        const [totalOrders, orders] = await Promise.all([
+            Order.countDocuments(query).maxTimeMS(60000),
+            Order.find(query)
+                .select(`${AFFILIATE_DAILY_SELECT} seller`)
+                .sort({ dateSold: 1, _id: 1 })
+                .skip(skip)
+                .limit(limitNum)
+                .maxTimeMS(90000)
+                .lean(),
+        ]);
 
-        const selectedDayUtc = Date.parse(`${resolvedWindow.startDate}T00:00:00Z`);
+        const totalPages = Math.max(1, Math.ceil(totalOrders / limitNum) || 1);
+
+        const ordersWithSellers = await attachSellersToOrders(orders);
+        const ordersWithSupplierLink = await applySupplierLinksFromSavedAsins(ordersWithSellers);
+
+        const selectedDayUtc = Date.parse(`${resolvedWindow.endDate}T00:00:00Z`);
         const enrichedOrders = ordersWithSupplierLink
             .map((order) => {
                 const sourceDay = getPlatformDayString(order.dateSold || order.creationDate || new Date());
@@ -521,10 +619,18 @@ router.get('/daily', async (req, res) => {
                 return new Date(left.dateSold || left.creationDate || 0) - new Date(right.dateSold || right.creationDate || 0);
             });
 
-        res.json(enrichedOrders);
+        res.json({
+            orders: enrichedOrders,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                totalOrders,
+                totalPages,
+            },
+        });
     } catch (err) {
         console.error('GET /affiliate-orders/daily error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(err.statusCode || 500).json({ error: err.message });
     }
 });
 
