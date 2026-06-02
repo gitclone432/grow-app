@@ -94,7 +94,6 @@ const MSG_STATUS_COLORS = {
 const DAILY_ORDER_ALL_COLUMNS = [
     { id: 'index', label: '#' },
     { id: 'orderId', label: 'Order ID' },
-    { id: 'orderDate', label: 'Order Date' },
     { id: 'productName', label: 'Product Name' },
     { id: 'seller', label: 'Seller' },
     { id: 'supplierLink', label: 'Supplier Link' },
@@ -112,7 +111,7 @@ const DAILY_ORDER_ALL_COLUMNS = [
     { id: 'notes', label: 'Notes' },
 ];
 
-const DEFAULT_DAILY_VISIBLE_COLUMNS = DAILY_ORDER_ALL_COLUMNS.map((c) => c.id);
+const DEFAULT_DAILY_VISIBLE_COLUMNS = DAILY_ORDER_ALL_COLUMNS.map((c) => c.id).filter((id) => id !== 'orderDate');
 
 const AFFILIATE_EXPORT_COLUMNS = [
     ...DAILY_ORDER_ALL_COLUMNS,
@@ -172,6 +171,10 @@ function getCarryOverLabel(carryOverDays) {
 
 function getSellerGroupName(order) {
     return order?.sellerGroupName || order?.seller?.user?.username || order?.sellerId || 'Unknown Seller';
+}
+
+function getDefaultSellerOption(sellerOptions) {
+    return sellerOptions.find((option) => String(option.label || '').toLowerCase().includes('actus')) || sellerOptions[0] || null;
 }
 
 function hasAffiliateLinks(order) {
@@ -1016,6 +1019,7 @@ export default function AffiliateOrdersPage() {
     const [tab, setTab] = useState(0);
     const [selectedSeller, setSelectedSeller] = useState('');
     const [excludeLowValue, setExcludeLowValue] = useState(true);
+    const [excludeCarryForwards, setExcludeCarryForwards] = useState(true);
     const [showDoneEntries, setShowDoneEntries] = useState(false);
     const [showNotYetFirst, setShowNotYetFirst] = useState(true);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
@@ -1091,10 +1095,11 @@ export default function AffiliateOrdersPage() {
     }, [visibleColumns]);
 
     useEffect(() => {
-        if (sellerOptionsLoading) return;
-        // Keep empty selection as "All Sellers".
-        if (selectedSeller && !sellerOptions.some((option) => option.value === selectedSeller)) {
-            setSelectedSeller('');
+        if (sellerOptionsLoading || selectedSeller || sellerOptions.length === 0) return;
+
+        const defaultSeller = getDefaultSellerOption(sellerOptions);
+        if (defaultSeller) {
+            setSelectedSeller(defaultSeller.value);
         }
     }, [selectedSeller, sellerOptions, sellerOptionsLoading]);
 
@@ -1113,6 +1118,7 @@ export default function AffiliateOrdersPage() {
                             ...(dateFilter.to ? { endDate: dateFilter.to } : {}),
                         }),
                     excludeLowValue: excludeLowValue ? 'true' : 'false',
+                    excludeCarryForwards: excludeCarryForwards ? 'true' : 'false',
                     includeDone: showDoneEntries ? 'true' : 'false',
                 }
             });
@@ -1123,7 +1129,7 @@ export default function AffiliateOrdersPage() {
         } finally {
             setSellerOptionsLoading(false);
         }
-    }, [dateFilter, excludeLowValue, showDoneEntries]);
+    }, [dateFilter, excludeLowValue, excludeCarryForwards, showDoneEntries]);
 
     const fetchOrders = useCallback(async () => {
         setOrdersLoading(true);
@@ -1141,6 +1147,7 @@ export default function AffiliateOrdersPage() {
                             ...(dateFilter.to ? { endDate: dateFilter.to } : {}),
                         }),
                     excludeLowValue: excludeLowValue ? 'true' : 'false',
+                    excludeCarryForwards: excludeCarryForwards ? 'true' : 'false',
                     includeDone: showDoneEntries ? 'true' : 'false',
                     ...(selectedSeller ? { sellerId: selectedSeller } : {}),
                 }
@@ -1161,7 +1168,7 @@ export default function AffiliateOrdersPage() {
         } finally {
             setOrdersLoading(false);
         }
-    }, [currentPage, dateFilter, excludeLowValue, selectedSeller, showDoneEntries]);
+    }, [currentPage, dateFilter, excludeLowValue, excludeCarryForwards, selectedSeller, showDoneEntries]);
 
     const fetchAmazonAccounts = useCallback(async () => {
         try {
@@ -1236,11 +1243,11 @@ export default function AffiliateOrdersPage() {
         fetchBalances();
         fetchSummary();
         fetchSpendOrders();
-    }, [dateFilter, excludeLowValue, showDoneEntries, fetchSellerOptions, fetchAmazonAccounts, fetchBalances, fetchSummary, fetchSpendOrders]);
+    }, [dateFilter, excludeLowValue, excludeCarryForwards, showDoneEntries, fetchSellerOptions, fetchAmazonAccounts, fetchBalances, fetchSummary, fetchSpendOrders]);
 
     useEffect(() => {
         setCurrentPage(1);
-    }, [dateFilter, excludeLowValue, showDoneEntries, selectedSeller]);
+    }, [dateFilter, excludeLowValue, excludeCarryForwards, showDoneEntries, selectedSeller]);
 
     useEffect(() => {
         fetchOrders();
@@ -1544,7 +1551,6 @@ export default function AffiliateOrdersPage() {
         const exportFieldMap = {
             index: 'exportIndex',
             orderId: 'orderId',
-            orderDate: (order) => formatOrderDate(order),
             productName: (order) => order.lineItems?.[0]?.title || order.productName || '',
             seller: (order) => order.sellerGroupName || '',
             supplierLink: 'affiliateLink',
@@ -1629,9 +1635,11 @@ export default function AffiliateOrdersPage() {
                             labelId="affiliate-seller-filter-label"
                             value={selectedSeller}
                             label="Seller"
+                            displayEmpty
+                            renderValue={(value) => (value ? sellerOptions.find((option) => option.value === value)?.label || value : 'Select Seller')}
                             onChange={(e) => setSelectedSeller(e.target.value)}
                         >
-                            <MenuItem value="">All Sellers</MenuItem>
+                            <MenuItem value="" disabled>Select Seller</MenuItem>
                             {sellerOptions.map((option) => (
                                 <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
                             ))}
@@ -1756,12 +1764,6 @@ export default function AffiliateOrdersPage() {
                                                 </TableCell>}
 
                                                 {/* Order Date */}
-                                                {isColVisible('orderDate') && (
-                                                    <TableCell sx={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>
-                                                        {formatOrderDate(order)}
-                                                    </TableCell>
-                                                )}
-
                                                 {/* Product Name */}
                                                 {isColVisible('productName') && <TableCell sx={{ minWidth: 300, maxWidth: 360 }}>
                                                     <Stack direction="row" spacing={1} alignItems="flex-start">
@@ -2586,7 +2588,6 @@ export default function AffiliateOrdersPage() {
                                                 <TableRow key={row._id} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#fafafa' } }}>
                                                     <TableCell sx={{ fontSize: '0.78rem', color: 'text.secondary' }}>{row.rowIndex}</TableCell>
                                                     <TableCell sx={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>{row.orderId || '—'}</TableCell>
-                                                    <TableCell sx={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>{formatOrderDate(row)}</TableCell>
                                                     <TableCell sx={{ minWidth: 260 }}>
                                                         {itemId ? (
                                                             <Link
@@ -2658,6 +2659,11 @@ export default function AffiliateOrdersPage() {
                     <FormControlLabel
                         control={<Switch checked={excludeLowValue} onChange={(e) => setExcludeLowValue(e.target.checked)} />}
                         label="Exclude < $3"
+                        sx={{ m: 0 }}
+                    />
+                    <FormControlLabel
+                        control={<Switch checked={excludeCarryForwards} onChange={(e) => setExcludeCarryForwards(e.target.checked)} />}
+                        label="Exclude Carry Over"
                         sx={{ m: 0 }}
                     />
                     <FormControl size="small" sx={{ minWidth: 140 }}>

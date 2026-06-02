@@ -396,10 +396,10 @@ function buildAffiliateQueueQueryForRange(startDateStr, endDateStr, excludeLowVa
         end: buildDayRange(endDateStr).end,
     };
     const effectiveCarryOverStart = getEffectiveCarryOverStart(start);
-    const { includeCompletedCarryOver = false } = options;
+    const { includeCompletedCarryOver = false, excludeCarryForwards = false } = options;
     const queueScopes = [{ dateSold: { $gte: start, $lte: end } }];
 
-    if (start.getTime() > effectiveCarryOverStart.getTime()) {
+    if (start.getTime() > effectiveCarryOverStart.getTime() && !excludeCarryForwards) {
         queueScopes.push({
             dateSold: { $gte: effectiveCarryOverStart, $lt: start },
             sourcingStatus: 'Not Yet',
@@ -478,12 +478,13 @@ function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
 // ---------------------------------------------------------------------------
 router.get('/daily/sellers', async (req, res) => {
     try {
-        const { date, startDate, endDate, excludeLowValue, includeDone } = req.query;
+        const { date, startDate, endDate, excludeLowValue, includeDone, excludeCarryForwards } = req.query;
         const resolvedWindow = resolveDateWindowFromQuery({ date, startDate, endDate });
         if (!resolvedWindow) {
             return res.status(400).json({ error: 'date or startDate/endDate query params required (YYYY-MM-DD)' });
         }
         const shouldIncludeDone = includeDone === 'true';
+        const shouldExcludeCarryForwards = excludeCarryForwards === 'true';
 
         const extraFilters = [];
         if (!shouldIncludeDone) {
@@ -497,6 +498,7 @@ router.get('/daily/sellers', async (req, res) => {
             extraFilters,
             {
             includeCompletedCarryOver: shouldIncludeDone,
+            excludeCarryForwards: shouldExcludeCarryForwards,
             }
         );
 
@@ -546,12 +548,13 @@ router.get('/daily/sellers', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/daily', async (req, res) => {
     try {
-        const { date, startDate, endDate, excludeLowValue, includeDone, sellerId } = req.query;
+        const { date, startDate, endDate, excludeLowValue, includeDone, sellerId, excludeCarryForwards } = req.query;
         const resolvedWindow = resolveDateWindowFromQuery({ date, startDate, endDate });
         if (!resolvedWindow) {
             return res.status(400).json({ error: 'date or startDate/endDate query params required (YYYY-MM-DD)' });
         }
         const shouldIncludeDone = includeDone === 'true';
+        const shouldExcludeCarryForwards = excludeCarryForwards === 'true';
 
         const extraFilters = [];
         if (!shouldIncludeDone) {
@@ -568,6 +571,7 @@ router.get('/daily', async (req, res) => {
             extraFilters,
             {
             includeCompletedCarryOver: shouldIncludeDone,
+            excludeCarryForwards: shouldExcludeCarryForwards,
             }
         );
 
