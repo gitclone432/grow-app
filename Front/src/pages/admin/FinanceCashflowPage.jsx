@@ -350,11 +350,13 @@ export default function FinanceCashflowPage() {
   // Calculate summary totals for selected accounts
   const calculateSummaryTotals = useCallback(() => {
     if (!selectedAccounts.length) {
-      return { totalGross: 0, totalNet: 0 };
+      return { totalGross: 0, totalNet: 0, totalTaxesAndFees: 0, totalSellingCosts: 0 };
     }
 
     let totalGross = 0;
     let totalNet = 0;
+    let totalTaxesAndFees = 0;
+    let totalSellingCosts = 0;
 
     rows.forEach(seller => {
       if (selectedAccounts.includes(seller.sellerId)) {
@@ -368,20 +370,23 @@ export default function FinanceCashflowPage() {
             if (mpDate >= summaryFromDate && mpDate <= summaryToDate) {
               totalGross += parseFloat(mp.gross.value || 0);
               totalNet += parseFloat(mp.net.value || 0);
+              totalTaxesAndFees += parseFloat(mp.taxesAndFees.value || 0);
+              totalSellingCosts += parseFloat(mp.sellingCosts.value || 0);
             }
           });
         } else {
           // If no date filter, use all data for this account
           totalGross += parseFloat(seller.gross.value || 0);
-          totalNet += parseFloat(seller.net.value || 0);
+            totalNet += parseFloat(seller.net.value || 0);
+            totalTaxesAndFees += parseFloat(seller.taxesAndFees.value || 0);
+            totalSellingCosts += parseFloat(seller.sellingCosts.value || 0);
         }
       }
     });
 
-    return { totalGross, totalNet };
+      return { totalGross, totalNet, totalTaxesAndFees, totalSellingCosts };
   }, [rows, selectedAccounts, summaryFrom, summaryTo]);
-
-  const { totalGross, totalNet } = calculateSummaryTotals();
+    const { totalGross, totalNet, totalTaxesAndFees, totalSellingCosts } = calculateSummaryTotals();
 
   // Reset pagination when rows change
   useEffect(() => {
@@ -437,7 +442,7 @@ export default function FinanceCashflowPage() {
     <Box sx={{ pb: 4 }}>
       <Breadcrumbs sx={{ mb: 1.5, fontSize: '0.875rem' }}>
         <Typography color="text.secondary">Finance & Cash Flow</Typography>
-        <Typography color="text.primary" fontWeight={600}>Cashflow</Typography>
+        <Typography color="text.primary" fontWeight={600}>Gross & Net</Typography>
       </Breadcrumbs>
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
@@ -526,7 +531,7 @@ export default function FinanceCashflowPage() {
 
           {selectedAccounts.length > 0 && (
             <Grid container spacing={2}>
-              <Grid item xs={12} sm={6}>
+              <Grid item xs={12} sm={3}>
                 <Card sx={{ 
                   background: 'linear-gradient(135deg, #3B82F6 0%, #1E40AF 100%)',
                   color: '#fff',
@@ -543,11 +548,11 @@ export default function FinanceCashflowPage() {
                       {selectedAccounts.length} account{selectedAccounts.length !== 1 ? 's' : ''} selected
                     </Typography>
                   </CardContent>
-                </Card>
-              </Grid>
+                    </Card>
+                  </Grid>
 
-              <Grid item xs={12} sm={6}>
-                <Card sx={{ 
+                  <Grid item xs={12} sm={3}>
+                    <Card sx={{ 
                   background: 'linear-gradient(135deg, #10B981 0%, #059669 100%)',
                   color: '#fff',
                   boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)'
@@ -565,6 +570,46 @@ export default function FinanceCashflowPage() {
                   </CardContent>
                 </Card>
               </Grid>
+              
+                  <Grid item xs={12} sm={3}>
+                    <Card sx={{ 
+                      background: 'linear-gradient(135deg, #F59E0B 0%, #D97706 100%)',
+                      color: '#fff',
+                      boxShadow: '0 4px 12px rgba(245, 158, 11, 0.2)'
+                    }}>
+                      <CardContent>
+                        <Typography color="rgba(255, 255, 255, 0.9)" sx={{ fontSize: '0.875rem', fontWeight: 600, mb: 0.5 }}>
+                          Total Taxes & Fees
+                        </Typography>
+                        <Typography sx={{ fontSize: '2rem', fontWeight: 700, letterSpacing: '-0.5px' }}>
+                          {formatCurrency(totalTaxesAndFees)}
+                        </Typography>
+                        <Typography color="rgba(255, 255, 255, 0.8)" sx={{ fontSize: '0.75rem', mt: 1 }}>
+                          {summaryFrom || summaryTo ? `${summaryFrom || 'Start'} to ${summaryTo || 'End'}` : 'All dates'}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+
+                  <Grid item xs={12} sm={3}>
+                    <Card sx={{ 
+                      background: 'linear-gradient(135deg, #EF4444 0%, #B91C1C 100%)',
+                      color: '#fff',
+                      boxShadow: '0 4px 12px rgba(239, 68, 68, 0.2)'
+                    }}>
+                      <CardContent>
+                        <Typography color="rgba(255, 255, 255, 0.9)" sx={{ fontSize: '0.875rem', fontWeight: 600, mb: 0.5 }}>
+                          Total Selling Costs
+                        </Typography>
+                        <Typography sx={{ fontSize: '2rem', fontWeight: 700, letterSpacing: '-0.5px' }}>
+                          {formatCurrency(totalSellingCosts)}
+                        </Typography>
+                        <Typography color="rgba(255, 255, 255, 0.8)" sx={{ fontSize: '0.75rem', mt: 1 }}>
+                          {summaryFrom || summaryTo ? `${summaryFrom || 'Start'} to ${summaryTo || 'End'}` : 'All dates'}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
             </Grid>
           )}
 
@@ -1103,7 +1148,7 @@ export default function FinanceCashflowPage() {
       {/* Add/Edit Dialog */}
       <Dialog open={openDialog} onClose={handleCloseDialog} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ fontWeight: 700, color: 'text.primary' }}>
-          {editingId ? 'Edit Cashflow Entry' : 'Add Cashflow Entry'}
+          {editingId ? 'Edit Gross & Net Entry' : 'Add Gross & Net Entry'}
         </DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
           <Stack spacing={2}>
