@@ -471,6 +471,20 @@ function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
     };
 }
 
+function marketplaceToRegex(marketplace) {
+    if (!marketplace) return null;
+    const code = String(marketplace || '').toLowerCase();
+    const map = {
+        us: ['US'],
+        aus: ['AUS', 'AU'],
+        uk: ['UK', 'GB'],
+        ca: ['CANADA', 'CA'],
+    };
+    const candidates = map[code] || [marketplace];
+    const pattern = candidates.map((s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    return new RegExp(pattern, 'i');
+}
+
 // ---------------------------------------------------------------------------
 // TAB 1 — Daily Order Sellers
 // GET /api/affiliate-orders/daily/sellers?date=YYYY-MM-DD
@@ -478,7 +492,7 @@ function buildAffiliateSpendQuery(dateStr, excludeLowValue, extraFilters = []) {
 // ---------------------------------------------------------------------------
 router.get('/daily/sellers', async (req, res) => {
     try {
-        const { date, startDate, endDate, excludeLowValue, includeDone, excludeCarryForwards } = req.query;
+        const { date, startDate, endDate, excludeLowValue, includeDone, excludeCarryForwards, marketplace } = req.query;
         const resolvedWindow = resolveDateWindowFromQuery({ date, startDate, endDate });
         if (!resolvedWindow) {
             return res.status(400).json({ error: 'date or startDate/endDate query params required (YYYY-MM-DD)' });
@@ -489,6 +503,10 @@ router.get('/daily/sellers', async (req, res) => {
         const extraFilters = [];
         if (!shouldIncludeDone) {
             extraFilters.push({ sourcingStatus: { $ne: 'Done' } });
+        }
+        if (marketplace) {
+            const re = marketplaceToRegex(marketplace);
+            if (re) extraFilters.push({ purchaseMarketplaceId: { $regex: re } });
         }
 
         const { query } = buildAffiliateQueueQueryForRange(
@@ -548,7 +566,7 @@ router.get('/daily/sellers', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/daily', async (req, res) => {
     try {
-        const { date, startDate, endDate, excludeLowValue, includeDone, sellerId, excludeCarryForwards } = req.query;
+        const { date, startDate, endDate, excludeLowValue, includeDone, sellerId, excludeCarryForwards, marketplace } = req.query;
         const resolvedWindow = resolveDateWindowFromQuery({ date, startDate, endDate });
         if (!resolvedWindow) {
             return res.status(400).json({ error: 'date or startDate/endDate query params required (YYYY-MM-DD)' });
@@ -562,6 +580,10 @@ router.get('/daily', async (req, res) => {
         }
         if (sellerId) {
             extraFilters.push({ seller: sellerId });
+        }
+        if (marketplace) {
+            const re = marketplaceToRegex(marketplace);
+            if (re) extraFilters.push({ purchaseMarketplaceId: { $regex: re } });
         }
 
         const { query } = buildAffiliateQueueQueryForRange(
@@ -645,10 +667,16 @@ router.get('/daily', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/spend', async (req, res) => {
     try {
-        const { date, excludeLowValue } = req.query;
+        const { date, excludeLowValue, marketplace } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
-        const { query } = buildAffiliateSpendQuery(date, excludeLowValue);
+        const extraFilters = [];
+        if (marketplace) {
+            const re = marketplaceToRegex(marketplace);
+            if (re) extraFilters.push({ purchaseMarketplaceId: { $regex: re } });
+        }
+
+        const { query } = buildAffiliateSpendQuery(date, excludeLowValue, extraFilters);
 
         const orders = await Order.find(query)
             .select(AFFILIATE_DAILY_SELECT)
@@ -761,15 +789,18 @@ router.patch('/:id/sourcing', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/balances', async (req, res) => {
     try {
-        const { date, excludeLowValue } = req.query;
+        const { date, excludeLowValue, marketplace } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
         // All Amazon accounts
         const accounts = await AmazonAccount.find().sort({ name: 1 }).lean();
 
-        const { query: matchQuery } = buildAffiliateSpendQuery(date, excludeLowValue, [
-            { amazonAccount: { $exists: true, $ne: '' } },
-        ]);
+        const extraMatch = [{ amazonAccount: { $exists: true, $ne: '' } }];
+        if (marketplace) {
+            const re = marketplaceToRegex(marketplace);
+            if (re) extraMatch.push({ purchaseMarketplaceId: { $regex: re } });
+        }
+        const { query: matchQuery } = buildAffiliateSpendQuery(date, excludeLowValue, extraMatch);
 
         // Aggregate expense per account for this day from orders
         const expenseAgg = await Order.aggregate([
@@ -862,13 +893,23 @@ router.put('/balances', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/summary', async (req, res) => {
     try {
-        const { date, excludeLowValue } = req.query;
+        const { date, excludeLowValue, marketplace } = req.query;
         if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
 
-        const { start, end, query: queueQuery } = buildAffiliateQueueQuery(date, excludeLowValue, [], {
+        const extra = [];
+        const extraSpend = [];
+        if (marketplace) {
+            const re = marketplaceToRegex(marketplace);
+            if (re) {
+                extra.push({ purchaseMarketplaceId: { $regex: re } });
+                extraSpend.push({ purchaseMarketplaceId: { $regex: re } });
+            }
+        }
+
+        const { start, end, query: queueQuery } = buildAffiliateQueueQuery(date, excludeLowValue, extra, {
             includeCompletedCarryOver: true,
         });
-        const { query: spendQuery } = buildAffiliateSpendQuery(date, excludeLowValue);
+        const { query: spendQuery } = buildAffiliateSpendQuery(date, excludeLowValue, extraSpend);
 
         // All orders in the active sourcing queue for the selected day
         const [orders, spendOrders, balances] = await Promise.all([

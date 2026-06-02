@@ -1017,9 +1017,10 @@ export default function AffiliateOrdersPage() {
     };
     const [dateFilter, setDateFilter] = useState(initialDateFilter);
     const [tab, setTab] = useState(0);
-    const [selectedSeller, setSelectedSeller] = useState('');
+    const [selectedSeller, setSelectedSeller] = useState(null);
     const [excludeLowValue, setExcludeLowValue] = useState(true);
     const [excludeCarryForwards, setExcludeCarryForwards] = useState(true);
+    const [marketplace, setMarketplace] = useState('');
     const [showDoneEntries, setShowDoneEntries] = useState(false);
     const [showNotYetFirst, setShowNotYetFirst] = useState(true);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
@@ -1095,7 +1096,8 @@ export default function AffiliateOrdersPage() {
     }, [visibleColumns]);
 
     useEffect(() => {
-        if (sellerOptionsLoading || selectedSeller || sellerOptions.length === 0) return;
+        // Only auto-select default seller on initial load (when selectedSeller === null)
+        if (sellerOptionsLoading || selectedSeller !== null || sellerOptions.length === 0) return;
 
         const defaultSeller = getDefaultSellerOption(sellerOptions);
         if (defaultSeller) {
@@ -1120,6 +1122,7 @@ export default function AffiliateOrdersPage() {
                     excludeLowValue: excludeLowValue ? 'true' : 'false',
                     excludeCarryForwards: excludeCarryForwards ? 'true' : 'false',
                     includeDone: showDoneEntries ? 'true' : 'false',
+                    ...(marketplace ? { marketplace } : {}),
                 }
             });
             setSellerOptions(data || []);
@@ -1129,7 +1132,8 @@ export default function AffiliateOrdersPage() {
         } finally {
             setSellerOptionsLoading(false);
         }
-    }, [dateFilter, excludeLowValue, excludeCarryForwards, showDoneEntries]);
+    }, [dateFilter, excludeLowValue, excludeCarryForwards, showDoneEntries, marketplace]);
+
 
     const fetchOrders = useCallback(async () => {
         setOrdersLoading(true);
@@ -1150,6 +1154,7 @@ export default function AffiliateOrdersPage() {
                     excludeCarryForwards: excludeCarryForwards ? 'true' : 'false',
                     includeDone: showDoneEntries ? 'true' : 'false',
                     ...(selectedSeller ? { sellerId: selectedSeller } : {}),
+                    ...(marketplace ? { marketplace } : {}),
                 }
             });
             const payload = response.data || {};
@@ -1163,12 +1168,87 @@ export default function AffiliateOrdersPage() {
                 setTotalPages(1);
                 setTotalOrders(rows.length);
             }
+
+            // If viewing all sellers (no single seller filter), fetch missing orders per seller
+            // so each seller section can show all their orders instead of only the paginated subset.
+            if (!selectedSeller) {
+                (async () => {
+                    try {
+                        // Build current counts per seller id from returned rows
+                        const currentCountsById = rows.reduce((acc, o) => {
+                            const sid = String(o.seller?._id || o.seller || '');
+                            if (!sid) return acc;
+                            acc[sid] = (acc[sid] || 0) + 1;
+                            return acc;
+                        }, {});
+
+                        // For each seller option present, fetch remaining orders if any
+                        for (const opt of sellerOptions || []) {
+                            const sellerId = String(opt.value || '');
+                            const totalForSeller = opt.count || 0;
+                            const have = currentCountsById[sellerId] || 0;
+                            if (totalForSeller > have) {
+                                // fetch all orders for this seller (limit pages of 200)
+                                const fetched = [];
+                                let page = 1;
+                                const pageSize = 200;
+                                while (true) {
+                                    const resp = await api.get('/affiliate-orders/daily', {
+                                        params: {
+                                            page,
+                                            limit: pageSize,
+                                            ...(dateFilter.mode === 'single'
+                                                ? { date: dateFilter.single }
+                                                : {
+                                                    ...(dateFilter.from ? { startDate: dateFilter.from } : {}),
+                                                    ...(dateFilter.to ? { endDate: dateFilter.to } : {}),
+                                                }),
+                                            excludeLowValue: excludeLowValue ? 'true' : 'false',
+                                            excludeCarryForwards: excludeCarryForwards ? 'true' : 'false',
+                                            includeDone: showDoneEntries ? 'true' : 'false',
+                                            sellerId: sellerId,
+                                            ...(marketplace ? { marketplace } : {}),
+                                        }
+                                    });
+                                    const data = resp.data || {};
+                                    const pageRows = Array.isArray(data) ? data : (data.orders || []);
+                                    if (!pageRows.length) break;
+                                    for (const r of pageRows) fetched.push(r);
+                                    const pag = data.pagination || null;
+                                    if (pag) {
+                                        if (page >= (pag.totalPages || 1)) break;
+                                    } else {
+                                        break;
+                                    }
+                                    page += 1;
+                                }
+
+                                if (fetched.length) {
+                                    // Merge into orders state, avoiding duplicates
+                                    setOrders((prev) => {
+                                        const byId = new Map(prev.map((p) => [String(p._id), p]));
+                                        for (const fr of fetched) {
+                                            if (!byId.has(String(fr._id))) {
+                                                byId.set(String(fr._id), normalizeAffiliateOrder(fr));
+                                            }
+                                        }
+                                        return Array.from(byId.values()).sort((a, b) => new Date(a.dateSold || a.creationDate || 0) - new Date(b.dateSold || b.creationDate || 0));
+                                    });
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // non-fatal
+                        console.error('Failed to fetch full seller orders:', e);
+                    }
+                })();
+            }
         } catch (err) {
             setOrdersError(err?.response?.data?.error || err?.message || 'Failed to load orders');
         } finally {
             setOrdersLoading(false);
         }
-    }, [currentPage, dateFilter, excludeLowValue, excludeCarryForwards, selectedSeller, showDoneEntries]);
+    }, [currentPage, dateFilter, excludeLowValue, excludeCarryForwards, selectedSeller, showDoneEntries, marketplace, sellerOptions]);
 
     const fetchAmazonAccounts = useCallback(async () => {
         try {
@@ -1181,40 +1261,40 @@ export default function AffiliateOrdersPage() {
         setBalancesLoading(true);
         setBalancesError('');
         try {
-            const { data } = await api.get('/affiliate-orders/balances', { params: { date: singleDate, excludeLowValue: excludeLowValue ? 'true' : 'false' } });
+            const { data } = await api.get('/affiliate-orders/balances', { params: { date: singleDate, excludeLowValue: excludeLowValue ? 'true' : 'false', ...(marketplace ? { marketplace } : {}) } });
             setBalances(data);
         } catch (err) {
             setBalancesError(err?.response?.data?.error || 'Failed to load balances');
         } finally {
             setBalancesLoading(false);
         }
-    }, [singleDate, excludeLowValue]);
+    }, [singleDate, excludeLowValue, marketplace]);
 
     const fetchSummary = useCallback(async () => {
         setSummaryLoading(true);
         setSummaryError('');
         try {
-            const { data } = await api.get('/affiliate-orders/summary', { params: { date: singleDate, excludeLowValue: excludeLowValue ? 'true' : 'false' } });
+            const { data } = await api.get('/affiliate-orders/summary', { params: { date: singleDate, excludeLowValue: excludeLowValue ? 'true' : 'false', ...(marketplace ? { marketplace } : {}) } });
             setSummary(data);
         } catch (err) {
             setSummaryError(err?.response?.data?.error || 'Failed to load summary');
         } finally {
             setSummaryLoading(false);
         }
-    }, [singleDate, excludeLowValue]);
+    }, [singleDate, excludeLowValue, marketplace]);
 
     const fetchSpendOrders = useCallback(async () => {
         setSpendOrdersLoading(true);
         setSpendOrdersError('');
         try {
-            const { data } = await api.get('/affiliate-orders/spend', { params: { date: singleDate, excludeLowValue: excludeLowValue ? 'true' : 'false' } });
+            const { data } = await api.get('/affiliate-orders/spend', { params: { date: singleDate, excludeLowValue: excludeLowValue ? 'true' : 'false', ...(marketplace ? { marketplace } : {}) } });
             setSpendOrders((data || []).map(normalizeAffiliateOrder));
         } catch (err) {
             setSpendOrdersError(err?.response?.data?.error || 'Failed to load spend orders');
         } finally {
             setSpendOrdersLoading(false);
         }
-    }, [singleDate, excludeLowValue]);
+    }, [singleDate, excludeLowValue, marketplace]);
 
     const backfillSupplierLinks = useCallback(async () => {
         const confirmed = window.confirm(
@@ -1245,9 +1325,17 @@ export default function AffiliateOrdersPage() {
         fetchSpendOrders();
     }, [dateFilter, excludeLowValue, excludeCarryForwards, showDoneEntries, fetchSellerOptions, fetchAmazonAccounts, fetchBalances, fetchSummary, fetchSpendOrders]);
 
+    const sellerCountMap = useMemo(() => {
+        const m = new Map();
+        (sellerOptions || []).forEach((o) => {
+            if (o && o.label) m.set(o.label, o.count || 0);
+        });
+        return m;
+    }, [sellerOptions]);
+
     useEffect(() => {
         setCurrentPage(1);
-    }, [dateFilter, excludeLowValue, excludeCarryForwards, showDoneEntries, selectedSeller]);
+    }, [dateFilter, excludeLowValue, excludeCarryForwards, showDoneEntries, selectedSeller, marketplace]);
 
     useEffect(() => {
         fetchOrders();
@@ -1636,10 +1724,15 @@ export default function AffiliateOrdersPage() {
                             value={selectedSeller}
                             label="Seller"
                             displayEmpty
-                            renderValue={(value) => (value ? sellerOptions.find((option) => option.value === value)?.label || value : 'Select Seller')}
+                            sx={{ minWidth: 220 }}
+                            renderValue={(value) => (
+                                <Box sx={{ minWidth: 160, pl: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {value ? sellerOptions.find((option) => option.value === value)?.label || value : 'All Sellers'}
+                                </Box>
+                            )}
                             onChange={(e) => setSelectedSeller(e.target.value)}
                         >
-                            <MenuItem value="" disabled>Select Seller</MenuItem>
+                            <MenuItem value="">All Sellers</MenuItem>
                             {sellerOptions.map((option) => (
                                 <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
                             ))}
@@ -1732,13 +1825,39 @@ export default function AffiliateOrdersPage() {
                                                 <TableRow>
                                                     <TableCell colSpan={visibleColumnCount || 1} sx={{ bgcolor: '#eef6ff', py: 1.25 }}>
                                                         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                                                            <Typography variant="subtitle2" sx={{ fontWeight: 700, color: '#0d47a1' }}>
-                                                                {sellerName}
-                                                            </Typography>
-                                                            <Chip size="small" label={`${sectionSellerGroupStats[sellerName]?.total || 0} order${(sectionSellerGroupStats[sellerName]?.total || 0) !== 1 ? 's' : ''}`} variant="outlined" />
-                                                            {(sectionSellerGroupStats[sellerName]?.carryOver || 0) > 0 && (
-                                                                <Chip size="small" color="warning" label={`${sectionSellerGroupStats[sellerName].carryOver} carried over`} />
-                                                            )}
+                                                            <Stack direction="row" alignItems="center" spacing={1}>
+                                                                <Typography variant="subtitle2" sx={{ fontWeight: 700, color: '#0d47a1' }}>
+                                                                    {sellerName}
+                                                                </Typography>
+                                                                {
+                                                                    // Prefer aggregated seller counts from sellerOptions when available (All Sellers view).
+                                                                    (() => {
+                                                                        const aggregated = sellerCountMap.get(sellerName);
+                                                                        const total = Number.isFinite(aggregated) ? aggregated : (sectionSellerGroupStats[sellerName]?.total || 0);
+                                                                        return (
+                                                                            <Chip size="small" label={`${total} order${total !== 1 ? 's' : ''}`} variant="outlined" />
+                                                                        );
+                                                                    })()
+                                                                }
+                                                                {(sectionSellerGroupStats[sellerName]?.carryOver || 0) > 0 && (
+                                                                    <Chip size="small" color="warning" label={`${sectionSellerGroupStats[sellerName].carryOver} carried over`} />
+                                                                )}
+                                                                {/* View all link: filter to this seller to show all their orders */}
+                                                                <Button
+                                                                    size="small"
+                                                                    variant="text"
+                                                                    onClick={() => {
+                                                                        const opt = sellerOptions.find((o) => o.label === sellerName);
+                                                                        if (opt) {
+                                                                            setSelectedSeller(opt.value);
+                                                                            setCurrentPage(1);
+                                                                        }
+                                                                    }}
+                                                                    sx={{ textTransform: 'none' }}
+                                                                >
+                                                                    View all
+                                                                </Button>
+                                                            </Stack>
                                                         </Stack>
                                                     </TableCell>
                                                 </TableRow>
@@ -2666,6 +2785,21 @@ export default function AffiliateOrdersPage() {
                         label="Exclude Carry Over"
                         sx={{ m: 0 }}
                     />
+                    <FormControl size="small" sx={{ minWidth: 140 }}>
+                        <InputLabel id="affiliate-marketplace-label">Marketplace</InputLabel>
+                        <Select
+                            labelId="affiliate-marketplace-label"
+                            value={marketplace}
+                            label="Marketplace"
+                            onChange={(e) => setMarketplace(e.target.value)}
+                        >
+                            <MenuItem value=""><em>All</em></MenuItem>
+                            <MenuItem value="US">US</MenuItem>
+                            <MenuItem value="AUS">AUS</MenuItem>
+                            <MenuItem value="UK">UK</MenuItem>
+                            <MenuItem value="CA">CA</MenuItem>
+                        </Select>
+                    </FormControl>
                     <FormControl size="small" sx={{ minWidth: 140 }}>
                         <InputLabel id="affiliate-date-mode-label">Date Mode</InputLabel>
                         <Select
