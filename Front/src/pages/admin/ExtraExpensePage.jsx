@@ -54,6 +54,7 @@ import {
 import api from '../../lib/api';
 
 const PAYMENT_METHODS = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Payoneer', 'Other', 'Growmentality'];
+const DIALOG_PAID_BY_ORDER = ['Sachin Sir', 'Sakchi', 'Satya Sir', 'Shubhankar Sir', 'Bapun', 'Soubhagya'];
 
 const CHART_COLORS = ['#1976d2', '#ed6c02', '#2e7d32', '#9c27b0', '#d32f2f', '#0288d1', '#6d4c41', '#455a64'];
 const EMPTY_FILTERS = {
@@ -103,6 +104,10 @@ const EMPTY_FORM = {
     remark: '',
     paymentMethod: '',
 };
+
+function normalizePaidBy(name) {
+    return (name || '').toLowerCase().replace(/\b(sir|ma'am|maam)\b/g, '').replace(/[^a-z0-9]/gi, ' ').trim();
+}
 
 function formatInr(value) {
     const n = Number(value) || 0;
@@ -394,6 +399,35 @@ const ExtraExpensePage = () => {
         return (filterOptions.categoryOptions || []).filter(Boolean).sort();
     }, [filterOptions.categoryOptions]);
 
+    const paidByOptionsList = useMemo(() => {
+        const arr = (filterOptions.paidByOptions || []).filter(Boolean);
+        const seen = new Map();
+        for (const name of arr) {
+            const norm = (name || '').toLowerCase()
+                .replace(/\b(sir|ma'am|maam)\b/g, '')
+                .replace(/[^a-z0-9]/gi, ' ')
+                .trim();
+            if (!norm) continue;
+            if (!seen.has(norm)) {
+                seen.set(norm, name);
+            } else {
+                const existing = seen.get(norm) || '';
+                const hasHonorificExisting = /\b(sir|ma'am|maam)\b/i.test(existing);
+                const hasHonorificNew = /\b(sir|ma'am|maam)\b/i.test(name);
+                // Prefer the variant that contains honorific (e.g., 'Sachin Sir')
+                if (!hasHonorificExisting && hasHonorificNew) {
+                    seen.set(norm, name);
+                }
+            }
+        }
+        return Array.from(seen.values());
+    }, [filterOptions.paidByOptions]);
+
+    const paidByDialogOptions = useMemo(() => {
+        // Show only this specific set (in this order) in the Add/Edit dialog
+        return DIALOG_PAID_BY_ORDER.slice();
+    }, []);
+
     const handleSubmit = async () => {
         try {
             setLoading(true);
@@ -459,11 +493,18 @@ const ExtraExpensePage = () => {
 
     const startEdit = (expense) => {
         setEditingId(expense._id);
+        let paidByVal = expense.paidBy || '';
+        try {
+            const norm = normalizePaidBy(paidByVal);
+            const match = (DIALOG_PAID_BY_ORDER || []).find((opt) => normalizePaidBy(opt) === norm);
+            if (match) paidByVal = match;
+        } catch (e) { /* ignore */ }
+
         setFormData({
             date: expense.date ? expense.date.split('T')[0] : '',
             name: expense.name,
             amount: expense.amount,
-            paidBy: expense.paidBy,
+            paidBy: paidByVal,
             category: mapOldCategoryToNew(expense.category) || '',
             remark: expense.remark || '',
             paymentMethod: expense.paymentMethod || '',
@@ -683,7 +724,7 @@ const ExtraExpensePage = () => {
                                 onChange={(e) => setFilters((f) => ({ ...f, paidBy: e.target.value }))}
                             >
                                 <MenuItem value="">All</MenuItem>
-                                {filterOptions.paidByOptions.map((name) => (
+                                {paidByOptionsList.map((name) => (
                                     <MenuItem key={name} value={name}>{name}</MenuItem>
                                 ))}
                             </Select>
@@ -1073,11 +1114,21 @@ const ExtraExpensePage = () => {
                             value={formData.amount}
                             onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
                         />
-                        <TextField
-                            label="Paid by"
-                            fullWidth
-                            value={formData.paidBy}
-                            onChange={(e) => setFormData({ ...formData, paidBy: e.target.value })}
+                        <Autocomplete
+                            freeSolo
+                            options={paidByDialogOptions}
+                            value={formData.paidBy || ''}
+                            onChange={(e, newVal) => setFormData({ ...formData, paidBy: newVal || '' })}
+                            onInputChange={(e, newInput) => setFormData({ ...formData, paidBy: newInput })}
+                            renderInput={(params) => (
+                                <TextField
+                                    {...params}
+                                    label="Paid by"
+                                    fullWidth
+                                    size="small"
+                                    placeholder="Select or type name"
+                                />
+                            )}
                         />
                         <FormControl fullWidth>
                             <InputLabel>Category</InputLabel>
