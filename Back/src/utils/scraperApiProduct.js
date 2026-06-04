@@ -14,8 +14,8 @@ import { scrapeAmazonPriceWithScraperAPI } from './scraperApiPrice.js';
 const SCRAPER_API_BASE = 'https://api.scraperapi.com/structured/amazon/product/v1';
 const SCRAPINGDOG_PRODUCT_BASE = 'https://api.scrapingdog.com/amazon/product';
 
-// Concurrency limiter - use 15 of 20 available concurrent requests
-const CONCURRENT_REQUESTS = parseInt(process.env.SCRAPER_API_CONCURRENT) || 15;
+// Concurrency limiter — ScrapingDog Lite allows 5; ScraperAPI plans often allow more
+const CONCURRENT_REQUESTS = parseInt(process.env.SCRAPER_API_CONCURRENT, 10) || 5;
 const limit = pLimit(CONCURRENT_REQUESTS);
 
 export function getScraperProvider() {
@@ -64,6 +64,16 @@ function enrichScraperHttpError(err, provider) {
   if (status === 404 && provider === 'scrapingdog') {
     const wrapped = new Error(
       `Amazon product not found for this ASIN/region (ScrapingDog 404). Try another ASIN or region.${suffix}`
+    );
+    wrapped.response = err.response;
+    wrapped.status = status;
+    return wrapped;
+  }
+
+  if (status === 429) {
+    const wrapped = new Error(
+      `${provider === 'scrapingdog' ? 'ScrapingDog' : 'ScraperAPI'} rate limit (429): too many concurrent requests. ` +
+      `Lower SCRAPER_API_CONCURRENT on the API server (try 3–5 for ScrapingDog Lite) or upgrade your plan, then retry in a minute.${suffix}`
     );
     wrapped.response = err.response;
     wrapped.status = status;
