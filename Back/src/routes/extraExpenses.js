@@ -1,9 +1,19 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import ExtraExpense from '../models/ExtraExpense.js';
+import CashCredit from '../models/CashCredit.js';
+import CreditHistory from '../models/CreditHistory.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { createExtraExpenseSchema, updateExtraExpenseSchema } from '../schemas/index.js';
+import { 
+    getOrCreateCashCredit, 
+    getYearMonth, 
+    getMonthBounds, 
+    calculateMonthlyBalance, 
+    getMonthlyBalances 
+} from './cashCredit.js';
+
 const router = express.Router();
 
 function escapeCsvCell(value) {
@@ -206,6 +216,9 @@ router.get('/', requireAuth, requirePageAccess('ExtraExpenses'), async (req, res
         const paidByOptions = await ExtraExpense.distinct('paidBy');
         const categoryOptions = await ExtraExpense.distinct('category');
 
+        // Get current credit information
+        const cashCredit = await getOrCreateCashCredit();
+
         res.json({
             expenses,
             summary: {
@@ -224,6 +237,7 @@ router.get('/', requireAuth, requirePageAccess('ExtraExpenses'), async (req, res
                 paidByOptions: paidByOptions.filter(Boolean).sort(),
                 categoryOptions: categoryOptions.filter(Boolean).sort(),
             },
+            credit: cashCredit,
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -281,6 +295,58 @@ router.post('/', requireAuth, requirePageAccess('ExtraExpenses'), validate(creat
         const expense = new ExtraExpense(payload);
         await expense.save();
         await expense.populate('bankAccount', 'name accountNumber');
+
+        // If payment method is 'Cash', deduct from credit
+        if (payload.paymentMethod && payload.paymentMethod.toLowerCase() === 'cash') {
+            const expenseMonth = getYearMonth(payload.date);
+            const monthlyBalances = await getMonthlyBalances();
+            
+            // Find balance for this month
+            let monthBalance = monthlyBalances.find(m => m.yearMonth === expenseMonth);
+            
+            // If no credit added yet for this month, create it
+            if (!monthBalance) {
+                monthBalance = await calculateMonthlyBalance(expenseMonth);
+            }
+
+            // Check if sufficient credit available in this month
+            if (monthBalance.netBalance < payload.amount) {
+                // Delete the expense since there's insufficient credit
+                await ExtraExpense.findByIdAndDelete(expense._id);
+                return res.status(400).json({ 
+                    error: `Insufficient credit for ${expenseMonth}. Available: ${monthBalance.netBalance}, Required: ${payload.amount}` 
+                });
+            }
+
+            // Update global cash credit
+            const cashCredit = await getOrCreateCashCredit();
+            cashCredit.totalUsed += payload.amount;
+            cashCredit.lastUpdated = new Date();
+            await cashCredit.save();
+
+            // Create credit history record
+            const history = new CreditHistory({
+                type: 'CREDIT_USED',
+                amount: payload.amount,
+                date: new Date(payload.date),
+                expenseId: expense._id,
+                remarks: `Cash expense: ${payload.name}`,
+                balanceAfter: 0, // Will recalculate
+            });
+            await history.save();
+
+            // Recalculate remaining balance from all months
+            const allMonths = await getMonthlyBalances();
+            const totalExpensesAll = allMonths.reduce((sum, m) => sum + m.cashExpenses, 0);
+            
+            cashCredit.remainingCredit = cashCredit.totalCredit - totalExpensesAll;
+            await cashCredit.save();
+
+            // Update history with final balance
+            history.balanceAfter = cashCredit.remainingCredit;
+            await history.save();
+        }
+
         res.status(201).json(expense);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -294,6 +360,11 @@ router.put('/:id', requireAuth, requirePageAccess('ExtraExpenses'), validate(upd
         const expense = await ExtraExpense.findById(id);
         if (!expense) return res.status(404).json({ error: 'Expense not found' });
 
+        const oldPaymentMethod = expense.paymentMethod;
+        const oldAmount = expense.amount;
+        const newPaymentMethod = req.body.paymentMethod !== undefined ? String(req.body.paymentMethod || '').trim() : oldPaymentMethod;
+        const newAmount = req.body.amount !== undefined ? Number(req.body.amount) : oldAmount;
+
         if (req.body.date !== undefined) expense.date = req.body.date;
         if (req.body.name !== undefined) expense.name = req.body.name;
         if (req.body.amount !== undefined) expense.amount = req.body.amount;
@@ -305,6 +376,68 @@ router.put('/:id', requireAuth, requirePageAccess('ExtraExpenses'), validate(upd
             const raw = req.body.bankAccount;
             expense.bankAccount =
                 raw && String(raw).trim() && mongoose.Types.ObjectId.isValid(raw) ? raw : null;
+        }
+
+        // Handle credit adjustments
+        const wasCardExpense = oldPaymentMethod && oldPaymentMethod.toLowerCase() === 'cash';
+        const isNowCashExpense = newPaymentMethod && newPaymentMethod.toLowerCase() === 'cash';
+        const amountChanged = oldAmount !== newAmount;
+
+        if (wasCardExpense || isNowCashExpense || amountChanged) {
+            const expenseDate = req.body.date || expense.date;
+            const expenseMonth = getYearMonth(expenseDate);
+
+            // If it was a cash expense before, remove the old deduction
+            if (wasCardExpense) {
+                await CreditHistory.findOneAndDelete({
+                    expenseId: id,
+                    type: 'CREDIT_USED',
+                });
+            }
+
+            // If it's now a cash expense, check and deduct the new amount
+            if (isNowCashExpense) {
+                const monthlyBalances = await getMonthlyBalances();
+                
+                // Find balance for this month
+                let monthBalance = monthlyBalances.find(m => m.yearMonth === expenseMonth);
+                
+                // If no credit added yet for this month, create it
+                if (!monthBalance) {
+                    monthBalance = await calculateMonthlyBalance(expenseMonth);
+                }
+
+                // Check if sufficient credit available in this month
+                if (monthBalance.netBalance < newAmount) {
+                    return res.status(400).json({ 
+                        error: `Insufficient credit for ${expenseMonth}. Available: ${monthBalance.netBalance}, Required: ${newAmount}` 
+                    });
+                }
+
+                // Create new credit history for the updated expense
+                const history = new CreditHistory({
+                    type: 'CREDIT_USED',
+                    amount: newAmount,
+                    date: new Date(expenseDate),
+                    expenseId: id,
+                    remarks: `Cash expense: ${expense.name}`,
+                    balanceAfter: 0, // Will recalculate
+                });
+                await history.save();
+            }
+
+            // Recalculate global totals
+            const cashCredit = await getOrCreateCashCredit();
+            
+            // Recalculate totalUsed = sum of all cash expenses across all months
+            const allMonths = await getMonthlyBalances();
+            const totalExpensesAll = allMonths.reduce((sum, m) => sum + m.cashExpenses, 0);
+            
+            cashCredit.totalUsed = totalExpensesAll;
+            cashCredit.remainingCredit = cashCredit.totalCredit - totalExpensesAll;
+            
+            cashCredit.lastUpdated = new Date();
+            await cashCredit.save();
         }
 
         await expense.save();
@@ -322,7 +455,28 @@ router.delete('/:id', requireAuth, requirePageAccess('ExtraExpenses'), async (re
         const expense = await ExtraExpense.findById(id);
         if (!expense) return res.status(404).json({ error: 'Expense not found' });
 
+        // Delete the expense first so monthly aggregations exclude it
         await ExtraExpense.findByIdAndDelete(id);
+
+        // If this was a cash expense, remove the credit history record and recalculate totals
+        if (expense.paymentMethod && expense.paymentMethod.toLowerCase() === 'cash') {
+            await CreditHistory.findOneAndDelete({
+                expenseId: id,
+                type: 'CREDIT_USED',
+            });
+
+            // Recalculate global totals from remaining records
+            const cashCredit = await getOrCreateCashCredit();
+            // Recalculate totalUsed = sum of all cash expenses across all months
+            const allMonths = await getMonthlyBalances();
+            const totalExpensesAll = allMonths.reduce((sum, m) => sum + m.cashExpenses, 0);
+
+            cashCredit.totalUsed = totalExpensesAll;
+            cashCredit.remainingCredit = cashCredit.totalCredit - totalExpensesAll;
+
+            cashCredit.lastUpdated = new Date();
+            await cashCredit.save();
+        }
         res.json({ message: 'Expense deleted' });
     } catch (err) {
         res.status(500).json({ error: err.message });

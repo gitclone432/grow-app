@@ -276,9 +276,14 @@ const MobileExpenseCard = ({ expense, onEdit, onDelete }) => {
                         <Typography variant="caption" color="text.secondary">Date</Typography>
                         <Typography variant="body2" sx={{ fontWeight: 700 }}>{dateStr}</Typography>
                     </Box>
-                    <Typography variant="body2" sx={{ fontWeight: 800, color: 'error.main' }}>
-                        {formatInr(expense.amount)}
-                    </Typography>
+                    {(() => {
+                        const isCredit = expense.isCredit;
+                        return (
+                            <Typography variant="body2" sx={{ fontWeight: 800, color: isCredit ? 'success.main' : 'error.main' }}>
+                                {formatInr(expense.amount)}
+                            </Typography>
+                        );
+                    })()}
                 </Stack>
                 <Box>
                     <Typography variant="caption" color="text.secondary">Name of Expenditure</Typography>
@@ -286,7 +291,14 @@ const MobileExpenseCard = ({ expense, onEdit, onDelete }) => {
                 </Box>
                 <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                     {expense.category ? <Chip size="small" label={mapOldCategoryToNew(expense.category)} /> : null}
-                    {expense.paymentMethod ? <Chip size="small" variant="outlined" label={expense.paymentMethod} /> : null}
+                    {expense.paymentMethod ? (
+                        <Chip
+                            size="small"
+                            label={expense.paymentMethod}
+                            color={expense.isCredit ? 'success' : undefined}
+                            variant={expense.isCredit ? 'filled' : 'outlined'}
+                        />
+                    ) : null}
                 </Stack>
                 <Typography variant="body2"><strong>Paid by:</strong> {expense.paidBy}</Typography>
                 {expense.remark ? (
@@ -300,6 +312,125 @@ const MobileExpenseCard = ({ expense, onEdit, onDelete }) => {
         </Paper>
     );
 };
+
+function CreditHistoryTable({ onClose }) {
+    const [creditHistory, setCreditHistory] = useState([]);
+    const [creditHistoryLoading, setCreditHistoryLoading] = useState(true);
+    const [deletingId, setDeletingId] = useState(null);
+
+    useEffect(() => {
+        fetchCreditHistory();
+    }, []);
+
+    const fetchCreditHistory = async () => {
+        try {
+            setCreditHistoryLoading(true);
+            const { data } = await api.get('/cash-credit/history', { params: { type: 'CREDIT_ADDED' } });
+            setCreditHistory(data.history || []);
+        } catch (error) {
+            console.error('Error fetching credit history:', error);
+        } finally {
+            setCreditHistoryLoading(false);
+        }
+    };
+
+    const handleDeleteRecord = async (id) => {
+        if (!window.confirm('Delete this credit history record?')) return;
+        try {
+            setDeletingId(id);
+            await api.delete(`/cash-credit/history/${id}`);
+            setCreditHistory(creditHistory.filter(r => r._id !== id));
+            // Refresh global credit summary after deleting a credit history record
+            fetchCredit();
+        } catch (error) {
+            console.error('Error deleting record:', error);
+        } finally {
+            setDeletingId(null);
+        }
+    };
+
+    if (creditHistoryLoading) {
+        return (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+                <CircularProgress />
+            </Box>
+        );
+    }
+
+    return (
+        <TableContainer sx={{ mt: 2 }}>
+            <Table size="small" stickyHeader>
+                <TableHead>
+                    <TableRow sx={{ bgcolor: '#f5f5f5' }}>
+                        <TableCell>Date</TableCell>
+                        <TableCell>Type</TableCell>
+                        <TableCell>Amount</TableCell>
+                        <TableCell>Given By / Expense</TableCell>
+                        <TableCell>Balance After</TableCell>
+                        <TableCell>Remarks</TableCell>
+                        <TableCell align="right">Actions</TableCell>
+                    </TableRow>
+                </TableHead>
+                <TableBody>
+                    {creditHistory.length === 0 ? (
+                        <TableRow>
+                            <TableCell colSpan={7} align="center" sx={{ py: 2 }}>
+                                <Typography color="text.secondary">No credit history records yet</Typography>
+                            </TableCell>
+                        </TableRow>
+                    ) : (
+                        creditHistory.map((record) => (
+                            <TableRow
+                                key={record._id}
+                                hover
+                                sx={{
+                                    bgcolor: record.type === 'CREDIT_ADDED' ? 'success.lighter' : 'error.lighter',
+                                }}
+                            >
+                                <TableCell>{new Date(record.date).toLocaleDateString()}</TableCell>
+                                <TableCell>
+                                    <Chip
+                                        size="small"
+                                        label={record.type === 'CREDIT_ADDED' ? 'Credit Added' : 'Credit Used'}
+                                        color={record.type === 'CREDIT_ADDED' ? 'success' : 'error'}
+                                        variant="filled"
+                                    />
+                                </TableCell>
+                                <TableCell sx={{ fontWeight: 700 }}>
+                                    {formatInr(record.amount)}
+                                </TableCell>
+                                <TableCell>
+                                    {record.type === 'CREDIT_ADDED'
+                                        ? record.creditGivenBy
+                                        : record.expenseId?.name || 'Deleted Expense'
+                                    }
+                                </TableCell>
+                                <TableCell sx={{ fontWeight: 600 }}>
+                                    {formatInr(record.balanceAfter)}
+                                </TableCell>
+                                <TableCell>
+                                    <Typography variant="body2" noWrap title={record.remarks || ''}>
+                                        {record.remarks || '—'}
+                                    </Typography>
+                                </TableCell>
+                                <TableCell align="right">
+                                    <IconButton
+                                        size="small"
+                                        onClick={() => handleDeleteRecord(record._id)}
+                                        disabled={deletingId === record._id}
+                                        color="error"
+                                    >
+                                        <DeleteIcon />
+                                    </IconButton>
+                                </TableCell>
+                            </TableRow>
+                        ))
+                    )}
+                </TableBody>
+            </Table>
+        </TableContainer>
+    );
+}
 
 const ExtraExpensePage = () => {
     const theme = useTheme();
@@ -319,6 +450,19 @@ const ExtraExpensePage = () => {
     const [filterOptions, setFilterOptions] = useState({ paidByOptions: [], categoryOptions: [] });
     const [filters, setFilters] = useState(EMPTY_FILTERS);
     const [appliedFilters, setAppliedFilters] = useState(EMPTY_FILTERS);
+
+    // Credit state
+    const [credit, setCredit] = useState({ totalCredit: 0, totalUsed: 0, remainingCredit: 0, monthlyBreakdown: [] });
+    const [monthlyBreakdown, setMonthlyBreakdown] = useState([]);
+    const [selectedMonth, setSelectedMonth] = useState(() => {
+        const now = new Date();
+        return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    });
+    const [openCreditDialog, setOpenCreditDialog] = useState(false);
+    const [creditFormData, setCreditFormData] = useState({ amount: '', date: new Date().toISOString().split('T')[0], creditGivenBy: '', remarks: '' });
+    const [creditDialogLoading, setCreditDialogLoading] = useState(false);
+    const [openCreditHistoryDialog, setOpenCreditHistoryDialog] = useState(false);
+    const [creditHistory, setCreditHistory] = useState([]);
 
     const [openDialog, setOpenDialog] = useState(false);
     const [loading, setLoading] = useState(false);
@@ -371,6 +515,17 @@ const ExtraExpensePage = () => {
             });
             setCharts(data?.charts || { byMonth: [], byCategory: [] });
             setFilterOptions(data?.filters || { paidByOptions: [], categoryOptions: [] });
+            // Set credit from response
+            if (data?.credit) {
+                setCredit(data.credit);
+            }
+            // Fetch credit history (only CREDIT_ADDED used for showing in table)
+            try {
+                const h = await api.get('/cash-credit/history', { params: { type: 'CREDIT_ADDED' } });
+                setCreditHistory(h.data?.history || []);
+            } catch (err) {
+                console.error('Failed to fetch credit history:', err);
+            }
         } catch (error) {
             console.error('Error fetching expenses:', error);
             setSnackbar({ open: true, message: 'Failed to load expenses', severity: 'error' });
@@ -379,9 +534,50 @@ const ExtraExpensePage = () => {
         }
     }, [queryParams]);
 
+    const fetchCredit = useCallback(async () => {
+        try {
+            const { data } = await api.get('/cash-credit');
+            setCredit(data);
+            if (data.monthlyBreakdown) {
+                setMonthlyBreakdown(data.monthlyBreakdown);
+            }
+        } catch (error) {
+            console.error('Error fetching credit:', error);
+        }
+    }, []);
+
+    const handleAddCredit = async () => {
+        try {
+            setCreditDialogLoading(true);
+            const payload = {
+                amount: parseFloat(creditFormData.amount),
+                date: creditFormData.date,
+                creditGivenBy: creditFormData.creditGivenBy || '',
+                remarks: creditFormData.remarks || '',
+            };
+            await api.post('/cash-credit/add', payload);
+            setSnackbar({ open: true, message: 'Credit added successfully', severity: 'success' });
+            setCreditFormData({ amount: '', date: new Date().toISOString().split('T')[0], creditGivenBy: '', remarks: '' });
+            setOpenCreditDialog(false);
+            // Refresh credit information
+            fetchCredit();
+            // Refresh expenses to reflect credit changes
+            fetchExpenses();
+        } catch (error) {
+            setSnackbar({
+                open: true,
+                message: error.response?.data?.error || 'Failed to add credit',
+                severity: 'error',
+            });
+        } finally {
+            setCreditDialogLoading(false);
+        }
+    };
+
     // Fetch on mount with empty filters
     useEffect(() => {
         fetchExpenses();
+        fetchCredit();
     }, []); // Empty dependency array - only run on mount
 
     // Re-fetch when applied filters change
@@ -443,6 +639,8 @@ const ExtraExpensePage = () => {
             }
             handleClose();
             fetchExpenses();
+            // Refresh global credit summary after changes
+            fetchCredit();
             setSnackbar({ open: true, message: 'Expense saved', severity: 'success' });
         } catch (error) {
             setSnackbar({
@@ -460,11 +658,30 @@ const ExtraExpensePage = () => {
         try {
             await api.delete(`/extra-expenses/${id}`);
             fetchExpenses();
+            // Refresh credit summary after deletion
+            fetchCredit();
             setSnackbar({ open: true, message: 'Expense deleted', severity: 'success' });
         } catch (error) {
             setSnackbar({
                 open: true,
                 message: error.response?.data?.error || 'Failed to delete',
+                severity: 'error',
+            });
+        }
+    };
+
+    const handleDeleteCredit = async (rawId) => {
+        if (!window.confirm('Delete this credit history record?')) return;
+        try {
+            await api.delete(`/cash-credit/history/${rawId}`);
+            fetchExpenses();
+            // Refresh credit summary after deleting a credit record
+            fetchCredit();
+            setSnackbar({ open: true, message: 'Credit record deleted', severity: 'success' });
+        } catch (error) {
+            setSnackbar({
+                open: true,
+                message: error.response?.data?.error || 'Failed to delete credit record',
                 severity: 'error',
             });
         }
@@ -534,18 +751,44 @@ const ExtraExpensePage = () => {
         appliedFilters.dateMode !== 'None' || appliedFilters.date || appliedFilters.from || appliedFilters.to || appliedFilters.paidBy || appliedFilters.category || appliedFilters.paymentMethod || appliedFilters.search.trim()
     );
 
+    // Merge expenses with credit-added records for table display
     const displayedExpenses = useMemo(() => {
-        let list = expenses || [];
         const pm = (appliedFilters.paymentMethod || '').trim();
+        // base expenses (apply payment method filter if set)
+        let expenseList = Array.isArray(expenses) ? expenses.slice() : [];
         if (pm) {
-            list = list.filter((e) => ((e.paymentMethod || '').toLowerCase() === pm.toLowerCase()));
+            expenseList = expenseList.filter((e) => ((e.paymentMethod || '').toLowerCase() === pm.toLowerCase()));
         }
-        // keep other client-side filters if needed in future
-        return list;
-    }, [expenses, appliedFilters.paymentMethod]);
 
+        // map credit history entries (only CREDIT_ADDED) to table rows
+        const creditRows = (creditHistory || [])
+            .filter((r) => r.type === 'CREDIT_ADDED')
+            .map((r) => ({
+                _id: `credit-${r._id}`,
+                date: r.date,
+                name: `Credit: ${r.creditGivenBy || 'Added'}`,
+                category: '',
+                amount: Number(r.amount) || 0,
+                paidBy: r.creditGivenBy || '',
+                paymentMethod: 'Credit',
+                remark: r.remarks || '',
+                isCredit: true,
+                rawRecord: r,
+            }));
+
+        // merge and sort by date desc
+        const merged = [...expenseList, ...creditRows].sort((a, b) => {
+            const da = a.date ? new Date(a.date).getTime() : 0;
+            const db = b.date ? new Date(b.date).getTime() : 0;
+            return db - da;
+        });
+
+        return merged;
+    }, [expenses, creditHistory, appliedFilters.paymentMethod]);
+
+    // Total should only sum actual expenses (exclude credit records)
     const listTotal = useMemo(
-        () => displayedExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0),
+        () => (displayedExpenses || []).filter(e => !e.isCredit).reduce((sum, e) => sum + (Number(e.amount) || 0), 0),
         [displayedExpenses]
     );
 
@@ -594,6 +837,161 @@ const ExtraExpensePage = () => {
                         Add Expense
                     </Button>
                 </Stack>
+            </Stack>
+
+            {/* Credit Box Section with Month Selector */}
+            <Stack spacing={2} sx={{ mb: 2 }}>
+                {/* Month Selector */}
+                <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600, minWidth: '100px' }}>
+                        Select Month:
+                    </Typography>
+                    <FormControl size="small" sx={{ minWidth: '200px' }}>
+                        <Select
+                            value={selectedMonth}
+                            onChange={(e) => setSelectedMonth(e.target.value)}
+                        >
+                            {monthlyBreakdown.map((month) => (
+                                <MenuItem key={month.yearMonth} value={month.yearMonth}>
+                                    {new Date(`${month.yearMonth}-01`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+                                </MenuItem>
+                            ))}
+                        </Select>
+                    </FormControl>
+                </Stack>
+
+                {/* Monthly Credit Details */}
+                {monthlyBreakdown.find(m => m.yearMonth === selectedMonth) && (
+                    (() => {
+                        const currentMonth = monthlyBreakdown.find(m => m.yearMonth === selectedMonth);
+                        return (
+                            <Grid container spacing={2}>
+                                <Grid item xs={12} sm={6} md={2.4}>
+                                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%', bgcolor: 'info.lighter', border: '2px solid', borderColor: 'info.main' }}>
+                                        <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+                                            <Box>
+                                                <Typography variant="caption" color="info.dark" sx={{ textTransform: 'uppercase', fontSize: '0.7rem' }}>Credit Added</Typography>
+                                                <Typography variant="h6" sx={{ fontWeight: 700, color: 'info.dark', fontSize: '1.1rem' }}>
+                                                    {formatInr(currentMonth.creditsAdded)}
+                                                </Typography>
+                                            </Box>
+                                            <Button
+                                                size="small"
+                                                variant="outlined"
+                                                onClick={() => setOpenCreditDialog(true)}
+                                                sx={{ mt: -0.5 }}
+                                            >
+                                                Add
+                                            </Button>
+                                        </Stack>
+                                    </Paper>
+                                </Grid>
+                                <Grid item xs={12} sm={6} md={2.4}>
+                                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%', bgcolor: 'error.lighter', border: '2px solid', borderColor: 'error.main' }}>
+                                        <Typography variant="caption" color="error.dark" sx={{ textTransform: 'uppercase', fontSize: '0.7rem' }}>Cash Expenses</Typography>
+                                        <Typography variant="h6" sx={{ fontWeight: 700, color: 'error.dark', fontSize: '1.1rem' }}>
+                                            {formatInr(currentMonth.cashExpenses)}
+                                        </Typography>
+                                        <Typography variant="caption" color="error.dark" sx={{ fontSize: '0.7rem' }}>
+                                            This month
+                                        </Typography>
+                                    </Paper>
+                                </Grid>
+                                <Grid item xs={12} sm={6} md={2.4}>
+                                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%', bgcolor: 'warning.lighter', border: '2px solid', borderColor: 'warning.main' }}>
+                                        <Typography variant="caption" color="warning.dark" sx={{ textTransform: 'uppercase', fontSize: '0.7rem' }}>Carryover</Typography>
+                                        <Typography variant="h6" sx={{ fontWeight: 700, color: 'warning.dark', fontSize: '1.1rem' }}>
+                                            {formatInr(Math.max(0, currentMonth.carryoverFromPrevious))}
+                                        </Typography>
+                                        <Typography variant="caption" color="warning.dark" sx={{ fontSize: '0.7rem' }}>
+                                            From previous
+                                        </Typography>
+                                    </Paper>
+                                </Grid>
+                                <Grid item xs={12} sm={6} md={2.4}>
+                                    <Paper sx={{ 
+                                        p: 2, 
+                                        borderRadius: 2, 
+                                        height: '100%', 
+                                        bgcolor: currentMonth.netBalance >= 0 ? 'success.lighter' : 'error.lighter',
+                                        border: '2px solid',
+                                        borderColor: currentMonth.netBalance >= 0 ? 'success.main' : 'error.main'
+                                    }}>
+                                        <Typography variant="caption" sx={{ 
+                                            textTransform: 'uppercase', 
+                                            fontSize: '0.7rem',
+                                            color: currentMonth.netBalance >= 0 ? 'success.dark' : 'error.dark'
+                                        }}>Available Balance</Typography>
+                                        <Typography variant="h6" sx={{ 
+                                            fontWeight: 700, 
+                                            fontSize: '1.1rem',
+                                            color: currentMonth.netBalance >= 0 ? 'success.dark' : 'error.dark'
+                                        }}>
+                                            {formatInr(Math.max(0, currentMonth.netBalance))}
+                                        </Typography>
+                                        <Typography variant="caption" sx={{ 
+                                            fontSize: '0.7rem',
+                                            color: currentMonth.netBalance >= 0 ? 'success.dark' : 'error.dark'
+                                        }}>
+                                            Ready to spend
+                                        </Typography>
+                                    </Paper>
+                                </Grid>
+                                <Grid item xs={12} sm={6} md={2.4}>
+                                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                        <Button
+                                            variant="outlined"
+                                            size="small"
+                                            onClick={() => setOpenCreditHistoryDialog(true)}
+                                            fullWidth
+                                        >
+                                            History
+                                        </Button>
+                                    </Paper>
+                                </Grid>
+                            </Grid>
+                        );
+                    })()
+                )}
+
+                {/* Global Credit Summary */}
+                <Box sx={{ 
+                    p: 2, 
+                    bgcolor: 'grey.100', 
+                    borderRadius: 1, 
+                    border: '1px solid',
+                    borderColor: 'grey.300'
+                }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', fontWeight: 600 }}>
+                        Global Summary
+                    </Typography>
+                    <Grid container spacing={1} sx={{ mt: 0.5 }}>
+                        <Grid item xs={6} sm={3}>
+                            <Box>
+                                <Typography variant="caption" color="text.secondary">Total Credit Added</Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                    {formatInr(credit.totalCredit)}
+                                </Typography>
+                            </Box>
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                            <Box>
+                                <Typography variant="caption" color="text.secondary">Total Used</Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 600, color: 'error.main' }}>
+                                    {formatInr(credit.totalUsed)}
+                                </Typography>
+                            </Box>
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                            <Box>
+                                <Typography variant="caption" color="text.secondary">Overall Balance</Typography>
+                                <Typography variant="body2" sx={{ fontWeight: 600, color: 'success.main' }}>
+                                    {formatInr(credit.remainingCredit)}
+                                </Typography>
+                            </Box>
+                        </Grid>
+                    </Grid>
+                </Box>
             </Stack>
 
             <Grid container spacing={2} sx={{ mb: 2 }}>
@@ -978,8 +1376,8 @@ const ExtraExpensePage = () => {
                             <MobileExpenseCard
                                 key={expense._id}
                                 expense={expense}
-                                onEdit={() => startEdit(expense)}
-                                onDelete={() => handleDelete(expense._id)}
+                                onEdit={() => expense.isCredit ? null : startEdit(expense)}
+                                onDelete={() => expense.isCredit ? handleDeleteCredit(expense.rawRecord?._id) : handleDelete(expense._id)}
                             />
                         ))}
                         <Paper sx={{ p: 1.5, borderRadius: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1009,31 +1407,54 @@ const ExtraExpensePage = () => {
                         </TableRow>
                     </TableHead>
                     <TableBody>
-                        {displayedExpenses.map((expense) => (
-                            <TableRow key={expense._id} hover>
-                                <TableCell>{new Date(expense.date).toLocaleDateString()}</TableCell>
-                                <TableCell sx={{ fontWeight: 600 }}>{expense.name}</TableCell>
-                                <TableCell>{expense.category ? mapOldCategoryToNew(expense.category) : '—'}</TableCell>
-                                <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>
-                                    {formatInr(expense.amount)}
-                                </TableCell>
-                                <TableCell>{expense.paidBy}</TableCell>
-                                <TableCell>{expense.paymentMethod || '—'}</TableCell>
-                                <TableCell sx={{ maxWidth: 200 }}>
-                                    <Typography variant="body2" noWrap title={expense.remark || ''}>
-                                        {expense.remark || '—'}
-                                    </Typography>
-                                </TableCell>
-                                <TableCell align="right">
-                                    <IconButton size="small" onClick={() => startEdit(expense)} color="primary">
-                                        <EditIcon />
-                                    </IconButton>
-                                    <IconButton size="small" onClick={() => handleDelete(expense._id)} color="error">
-                                        <DeleteIcon />
-                                    </IconButton>
-                                </TableCell>
-                            </TableRow>
-                        ))}
+                        {displayedExpenses.map((expense) => {
+                            const isCredit = !!expense.isCredit;
+                            const isCashExpense = !isCredit && expense.paymentMethod && expense.paymentMethod.toLowerCase() === 'cash';
+                            return (
+                                <TableRow key={expense._id} hover sx={{ bgcolor: isCredit ? 'success.lighter' : (isCashExpense ? 'error.lighter' : 'transparent') }}>
+                                    <TableCell>{new Date(expense.date).toLocaleDateString()}</TableCell>
+                                    <TableCell sx={{ fontWeight: 600 }}>{expense.name}</TableCell>
+                                    <TableCell>{expense.category ? mapOldCategoryToNew(expense.category) : '—'}</TableCell>
+                                    <TableCell align="right" sx={{ fontWeight: 700, color: isCredit ? 'success.main' : 'error.main' }}>
+                                        {formatInr(expense.amount)}
+                                    </TableCell>
+                                    <TableCell>{expense.paidBy}</TableCell>
+                                    <TableCell>
+                                        {isCredit ? (
+                                            <Chip size="small" label="Credit" color="success" variant="filled" />
+                                        ) : (
+                                            <Chip
+                                                size="small"
+                                                label={expense.paymentMethod || '—'}
+                                                color={isCashExpense ? 'error' : 'default'}
+                                                variant={isCashExpense ? 'filled' : 'outlined'}
+                                            />
+                                        )}
+                                    </TableCell>
+                                    <TableCell sx={{ maxWidth: 200 }}>
+                                        <Typography variant="body2" noWrap title={expense.remark || ''}>
+                                            {expense.remark || '—'}
+                                        </Typography>
+                                    </TableCell>
+                                    <TableCell align="right">
+                                        {isCredit ? (
+                                            <IconButton size="small" onClick={() => handleDeleteCredit(expense.rawRecord?._id)} color="error">
+                                                <DeleteIcon />
+                                            </IconButton>
+                                        ) : (
+                                            <>
+                                                <IconButton size="small" onClick={() => startEdit(expense)} color="primary">
+                                                    <EditIcon />
+                                                </IconButton>
+                                                <IconButton size="small" onClick={() => handleDelete(expense._id)} color="error">
+                                                    <DeleteIcon />
+                                                </IconButton>
+                                            </>
+                                        )}
+                                    </TableCell>
+                                </TableRow>
+                            );
+                        })}
                         {displayedExpenses.length === 0 && (
                             <TableRow>
                                 <TableCell colSpan={8} align="center">No expenses found.</TableCell>
@@ -1172,6 +1593,89 @@ const ExtraExpensePage = () => {
                         {loading ? 'Saving…' : 'Save'}
                     </Button>
                 </DialogActions>
+            </Dialog>
+
+            {/* Add Credit Dialog */}
+            <Dialog
+                open={openCreditDialog}
+                onClose={() => setOpenCreditDialog(false)}
+                fullScreen={isSmallMobile}
+                fullWidth
+                maxWidth="sm"
+            >
+                <DialogTitle>Add Credit Amount</DialogTitle>
+                <DialogContent>
+                    <Stack spacing={2} sx={{ mt: 1, minWidth: { sm: 320 } }}>
+                        <Alert severity="info">
+                            Enter the credit amount that will be used for cash expenses. When you add a cash expense, the amount will be automatically deducted from this credit.
+                        </Alert>
+                        <TextField
+                            label="Amount (INR)"
+                            type="number"
+                            fullWidth
+                            value={creditFormData.amount}
+                            onChange={(e) => setCreditFormData({ ...creditFormData, amount: e.target.value })}
+                            placeholder="e.g., 100000"
+                        />
+                        <TextField
+                            label="Date"
+                            type="date"
+                            fullWidth
+                            InputLabelProps={{ shrink: true }}
+                            value={creditFormData.date}
+                            onChange={(e) => setCreditFormData({ ...creditFormData, date: e.target.value })}
+                        />
+                        <TextField
+                            label="Credit Given By"
+                            fullWidth
+                            value={creditFormData.creditGivenBy}
+                            onChange={(e) => setCreditFormData({ ...creditFormData, creditGivenBy: e.target.value })}
+                            placeholder="Name of person who provided credit"
+                        />
+                        <TextField
+                            label="Remarks"
+                            fullWidth
+                            multiline
+                            minRows={2}
+                            value={creditFormData.remarks}
+                            onChange={(e) => setCreditFormData({ ...creditFormData, remarks: e.target.value })}
+                            placeholder="Additional notes"
+                        />
+                    </Stack>
+                </DialogContent>
+                <DialogActions>
+                    <Button onClick={() => setOpenCreditDialog(false)}>Cancel</Button>
+                    <Button 
+                        onClick={handleAddCredit} 
+                        variant="contained" 
+                        disabled={creditDialogLoading || !creditFormData.amount}
+                    >
+                        {creditDialogLoading ? 'Adding…' : 'Add Credit'}
+                    </Button>
+                </DialogActions>
+            </Dialog>
+
+            {/* Credit History Dialog */}
+            <Dialog
+                open={openCreditHistoryDialog}
+                onClose={() => setOpenCreditHistoryDialog(false)}
+                fullScreen={isSmallMobile}
+                fullWidth
+                maxWidth="md"
+            >
+                <DialogTitle>
+                    Credit History
+                    <IconButton
+                        onClick={() => setOpenCreditHistoryDialog(false)}
+                        sx={{ position: 'absolute', right: 8, top: 8 }}
+                        aria-label="Close"
+                    >
+                        <CloseIcon />
+                    </IconButton>
+                </DialogTitle>
+                <DialogContent>
+                    <CreditHistoryTable onClose={() => setOpenCreditHistoryDialog(false)} />
+                </DialogContent>
             </Dialog>
 
             <Snackbar
