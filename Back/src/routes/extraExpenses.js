@@ -16,6 +16,24 @@ import {
 
 const router = express.Router();
 
+// Category mapping: old individual names → new group names
+const CATEGORY_MAP = {
+    'Salaries': 'Fixed Expenses',
+    'Office & Supplies': 'Fixed Expenses',
+    'Office Expense': 'Fixed Expenses',
+    'Utilities': 'Variable Expenses',
+    'Pantry & Refreshments': 'Variable Expenses',
+    'Puja Expense': 'Other Expenses',
+    'Uncategorized': 'Other Expenses',
+    '__uncategorized__': 'Other Expenses'
+};
+
+// Get all old category names that map to a new category group
+function getOldCategoriesForNewCategory(newCat) {
+    if (!newCat) return [];
+    return Object.keys(CATEGORY_MAP).filter(old => CATEGORY_MAP[old] === newCat);
+}
+
 function escapeCsvCell(value) {
     const s = value == null ? '' : String(value);
     if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
@@ -119,20 +137,37 @@ function buildListFilter(query) {
     const paidBy = String(query.paidBy || '').trim();
     if (paidBy) filter.paidBy = paidBy;
 
-    // Handle category filtering - supports both old category names and new category groups
-    const categories = Array.isArray(query.categories) ? query.categories : 
-                      (query.categories ? [query.categories] : []);
-    const category = String(query.category || '').trim();
-    
+    // Handle category filtering
+    // Support: categories array (old names), category (new name), or groupCategory (new name)
+    const rawCategories = query.categories || query['categories[]'] || null;
+    let categories = [];
+    if (Array.isArray(rawCategories)) {
+        categories = rawCategories.slice();
+    } else if (typeof rawCategories === 'string' && rawCategories.trim()) {
+        categories = rawCategories.split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    let category = String(query.category || '').trim();
+    const groupCategory = String(query.groupCategory || '').trim();
+
+    // If a group category (new name) is specified, convert to old names and add the new name too
+    if (groupCategory && !categories.length && !category) {
+        const oldCats = getOldCategoriesForNewCategory(groupCategory);
+        // Match both the new name (in case DB stores it) and old names
+        categories = [groupCategory, ...oldCats];
+    }
+
     if (categories.length > 0) {
-        // Filter by multiple old category names (from new category group)
+        // Filter by multiple category names (match any)
         filter.category = { $in: categories };
     } else if (category) {
-        // Legacy: filter by single category name
+        // Single category: match the new name OR old names that map to it
         if (category === '__uncategorized__') {
             filter.$or = [{ category: { $exists: false } }, { category: null }, { category: '' }];
         } else {
-            filter.category = category;
+            const oldCats = getOldCategoriesForNewCategory(category);
+            const allMatches = [category, ...oldCats];  // Match both new and old names
+            filter.category = { $in: allMatches };
         }
     }
 

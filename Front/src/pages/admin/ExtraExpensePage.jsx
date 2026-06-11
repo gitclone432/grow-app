@@ -490,11 +490,9 @@ const ExtraExpensePage = () => {
         if (appliedFilters.paidBy) p.paidBy = appliedFilters.paidBy;
         if (appliedFilters.paymentMethod) p.paymentMethod = appliedFilters.paymentMethod;
         if (appliedFilters.category) {
-            // Convert new category to old categories for backend query
-            const oldCats = getOldCategoriesForNewCategory(appliedFilters.category);
-            if (oldCats.length > 0) {
-                p.categories = oldCats; // Pass array to backend to filter by multiple old categories
-            }
+            // Send the category group name (new name) to backend
+            // Backend will match both new names and old category names that map to it
+            p.groupCategory = appliedFilters.category;
         }
         if (appliedFilters.search.trim()) p.search = appliedFilters.search.trim();
         return p;
@@ -754,6 +752,8 @@ const ExtraExpensePage = () => {
     // Merge expenses with credit-added records for table display
     const displayedExpenses = useMemo(() => {
         const pm = (appliedFilters.paymentMethod || '').trim();
+        const hasCategoryFilter = Boolean(appliedFilters.category);
+        
         // base expenses (apply payment method filter if set)
         let expenseList = Array.isArray(expenses) ? expenses.slice() : [];
         if (pm) {
@@ -761,7 +761,8 @@ const ExtraExpensePage = () => {
         }
 
         // map credit history entries (only CREDIT_ADDED) to table rows
-        const creditRows = (creditHistory || [])
+        // Only show credit entries if no category filter is applied (credit entries have no category)
+        const creditRows = hasCategoryFilter ? [] : (creditHistory || [])
             .filter((r) => r.type === 'CREDIT_ADDED')
             .map((r) => ({
                 _id: `credit-${r._id}`,
@@ -784,7 +785,7 @@ const ExtraExpensePage = () => {
         });
 
         return merged;
-    }, [expenses, creditHistory, appliedFilters.paymentMethod]);
+    }, [expenses, creditHistory, appliedFilters.paymentMethod, appliedFilters.category]);
 
     // Total should only sum actual expenses (exclude credit records)
     const listTotal = useMemo(
