@@ -1202,6 +1202,8 @@ const getOrderSku = (order) => {
   return '';
 };
 
+const getSupplierLink = (order) => String(order?.supplierLink || order?.affiliateLink || '').trim();
+
 const createEmptyDateFilter = () => ({ mode: 'none', single: '', from: '', to: '' });
 const normalizeDateFilter = (value) => (
   value && typeof value === 'object'
@@ -1590,7 +1592,7 @@ function FulfillmentDashboard() {
 
   // Column visibility state - persisted in sessionStorage
   const DEFAULT_VISIBLE_COLUMNS = [
-    'seller', 'orderId', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'sku', 'itemCategory', 'buyerNote',
+    'seller', 'orderId', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'sku', 'supplierLink', 'itemCategory', 'buyerNote',
     'buyerName', 'shippingAddress', 'marketplace', 'subtotal',
     'shipping', 'salesTax', 'discount', 'transactionFees',
     'adFeeGeneral', 'cancelStatus', 'refunds', 'orderEarnings', 'trackingNumber',
@@ -1607,6 +1609,7 @@ function FulfillmentDashboard() {
     { id: 'deliveryDate', label: 'Delivery Date' },
     { id: 'productName', label: 'Product Name' },
     { id: 'sku', label: 'SKU' },
+    { id: 'supplierLink', label: 'Supplier Link' },
     { id: 'itemCategory', label: 'Category' },
     { id: 'buyerNote', label: 'Buyer Note' },
     { id: 'buyerName', label: 'Buyer Name' },
@@ -3031,6 +3034,7 @@ function FulfillmentDashboard() {
         },
         productName: { header: 'Product Name', accessor: 'productName' },
         sku: { header: 'SKU', accessor: (o) => getOrderSku(o) },
+        supplierLink: { header: 'Supplier Link', accessor: (o) => getSupplierLink(o) },
         buyerNote: { header: 'Buyer Note', accessor: 'buyerCheckoutNotes' },
         buyerName: { header: 'Buyer Name', accessor: 'shippingFullName' },
         shippingAddress: {
@@ -3844,6 +3848,7 @@ function FulfillmentDashboard() {
                       {visibleColumnsSet.has('deliveryDate') && <TableCell sx={HEADER_CELL_SX}>Delivery Date</TableCell>}
                       {visibleColumnsSet.has('productName') && <TableCell sx={HEADER_CELL_SX}>Product Name</TableCell>}
                       {visibleColumnsSet.has('sku') && <TableCell sx={HEADER_CELL_SX}>SKU</TableCell>}
+                      {visibleColumnsSet.has('supplierLink') && <TableCell sx={HEADER_CELL_SX}>Supplier Link</TableCell>}
                       {visibleColumnsSet.has('itemCategory') && <TableCell sx={HEADER_CELL_SX}>Category</TableCell>}
                       {visibleColumnsSet.has('buyerNote') && <TableCell sx={HEADER_CELL_SX}>Buyer Note</TableCell>}
                       {visibleColumnsSet.has('buyerName') && <TableCell sx={HEADER_CELL_SX}>Buyer Name</TableCell>}
@@ -4107,6 +4112,56 @@ function FulfillmentDashboard() {
                                   </IconButton>
                                 )}
                               </Stack>
+                            </TableCell>
+                          )}
+                          {visibleColumnsSet.has('supplierLink') && (
+                            <TableCell sx={{ maxWidth: 260, pr: 1 }}>
+                              {(() => {
+                                const supplierLink = getSupplierLink(order);
+                                if (!supplierLink) {
+                                  return <Typography variant="body2" color="text.disabled">-</Typography>;
+                                }
+                                return (
+                                  <Stack direction="row" spacing={0.5} alignItems="center">
+                                    <Tooltip title={supplierLink} arrow placement="top">
+                                      <Link
+                                        href={supplierLink}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        variant="body2"
+                                        sx={{
+                                          maxWidth: 180,
+                                          overflow: 'hidden',
+                                          textOverflow: 'ellipsis',
+                                          whiteSpace: 'nowrap',
+                                          display: 'inline-block',
+                                        }}
+                                      >
+                                        Link
+                                      </Link>
+                                    </Tooltip>
+                                    <Tooltip title="Open link">
+                                      <IconButton
+                                        size="small"
+                                        component="a"
+                                        href={supplierLink}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        aria-label="open supplier link"
+                                      >
+                                        <OpenInNewIcon fontSize="small" sx={{ fontSize: '1rem' }} />
+                                      </IconButton>
+                                    </Tooltip>
+                                    <IconButton
+                                      size="small"
+                                      onClick={() => handleCopy(supplierLink)}
+                                      aria-label="copy supplier link"
+                                    >
+                                      <ContentCopyIcon fontSize="small" sx={{ fontSize: '1rem' }} />
+                                    </IconButton>
+                                  </Stack>
+                                );
+                              })()}
                             </TableCell>
                           )}
                           {visibleColumnsSet.has('itemCategory') && (

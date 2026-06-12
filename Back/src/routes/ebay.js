@@ -29,6 +29,7 @@ import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import ChatAgent from '../models/ChatAgent.js';
 import { getOrderQtyExcludedLegacyIdSet } from '../utils/orderQtyExcludeLegacyCache.js';
+import { enrichOrdersWithSupplierLinks } from '../utils/supplierLinkFromListings.js';
 import { parseStringPromise } from 'xml2js';
 import imageCache from '../lib/imageCache.js';
 import multer from 'multer';
@@ -3009,10 +3010,12 @@ router.get('/stored-orders', async (req, res) => {
       return orderObj;
     });
 
+    const ordersWithSupplierLinks = await enrichOrdersWithSupplierLinks(ordersWithConvoData);
+
     console.log(`[Stored Orders] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${totalOrders} orders`);
 
     res.json({
-      orders: ordersWithConvoData,
+      orders: ordersWithSupplierLinks,
       pagination: {
         currentPage: pageNum,
         totalPages,
