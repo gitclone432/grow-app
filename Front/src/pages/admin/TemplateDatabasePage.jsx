@@ -15,6 +15,12 @@ import DownloadIcon from '@mui/icons-material/Download';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import api from '../../lib/api';
 
+function formatListingPrice(value) {
+  if (value == null || value === '') return '—';
+  const amount = Number(value);
+  return Number.isFinite(amount) ? `$${amount.toFixed(2)}` : '—';
+}
+
 export default function TemplateDatabasePage() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
@@ -488,9 +494,12 @@ export default function TemplateDatabasePage() {
                           </Stack>
 
                           {/* Price & Quantity */}
-                          <Stack direction="row" spacing={2}>
+                          <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
                             <Typography variant="body2" color="text.secondary">
-                              Price: <strong>${listing.startPrice?.toFixed(2) || '0.00'}</strong>
+                              Amazon: <strong>{formatListingPrice(listing.amazonScrapedPrice)}</strong>
+                            </Typography>
+                            <Typography variant="body2" color="text.secondary">
+                              eBay: <strong>{formatListingPrice(listing.startPrice)}</strong>
                             </Typography>
                             <Typography variant="body2" color="text.secondary">
                               Qty: <strong>{listing.quantity || 0}</strong>
@@ -523,7 +532,8 @@ export default function TemplateDatabasePage() {
                           <TableCell sx={{ fontWeight: 'bold', minWidth: 300 }}>Link</TableCell>
                           <TableCell sx={{ fontWeight: 'bold', minWidth: 200 }}>Title</TableCell>
                           <TableCell sx={{ fontWeight: 'bold', width: 120 }}>Template</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 100 }}>Price</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', width: 100 }}>Amazon</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', width: 100 }}>eBay</TableCell>
                           <TableCell sx={{ fontWeight: 'bold', width: 80 }}>Qty</TableCell>
                           <TableCell sx={{ fontWeight: 'bold', width: 100 }}>Status</TableCell>
                           <TableCell align="right" sx={{ fontWeight: 'bold', width: 100 }}>Actions</TableCell>
@@ -631,8 +641,13 @@ export default function TemplateDatabasePage() {
                               />
                             </TableCell>
                             <TableCell>
+                              <Typography variant="body2" fontWeight="medium" color="text.secondary">
+                                {formatListingPrice(listing.amazonScrapedPrice)}
+                              </Typography>
+                            </TableCell>
+                            <TableCell>
                               <Typography variant="body2" fontWeight="medium">
-                                ${listing.startPrice?.toFixed(2) || '0.00'}
+                                {formatListingPrice(listing.startPrice)}
                               </Typography>
                             </TableCell>
                             <TableCell>
@@ -856,9 +871,15 @@ export default function TemplateDatabasePage() {
                 </Typography>
                 <Grid container spacing={2}>
                   <Grid item xs={6} sm={3}>
-                    <Typography variant="caption" color="text.secondary">Start Price</Typography>
+                    <Typography variant="caption" color="text.secondary">Amazon Price</Typography>
+                    <Typography variant="body2" fontWeight="bold" color="text.secondary">
+                      {formatListingPrice(selectedListing.amazonScrapedPrice)}
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6} sm={3}>
+                    <Typography variant="caption" color="text.secondary">eBay Start Price</Typography>
                     <Typography variant="body2" fontWeight="bold" color="primary">
-                      ${selectedListing.startPrice?.toFixed(2) || '0.00'}
+                      {formatListingPrice(selectedListing.startPrice)}
                     </Typography>
                   </Grid>
                   <Grid item xs={6} sm={3}>

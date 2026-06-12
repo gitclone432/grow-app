@@ -230,6 +230,17 @@ function buildFallbackFeatureBullets(rawDescription = '') {
   return lines.slice(0, 8).map((line, idx, arr) => formatBulletLi(line, idx === arr.length - 1)).join('');
 }
 
+function parseAmazonPrice(value) {
+  const numeric = parseFloat(String(value || '').replace(/[^0-9.]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+}
+
+function withAmazonScrapedPrice(listingData, item) {
+  if (listingData?.amazonScrapedPrice != null) return listingData;
+  const scrapedPrice = parseAmazonPrice(item?.sourceData?.price);
+  return scrapedPrice != null ? { ...listingData, amazonScrapedPrice: scrapedPrice } : listingData;
+}
+
 function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}, sourceData = {}, aiDescriptionRaw = '') {
   let composed = String(templateHtml || '');
   if (!composed.trim()) return '';
@@ -586,7 +597,10 @@ export default function AsinReviewModal({
       const listingsToSave = activeItems
         .filter(item => !['error', 'loading', 'blocked'].includes(item.status))
         .map(item => {
-          const listingData = editedItems[item.id] || item.generatedListing;
+          const listingData = withAmazonScrapedPrice(
+            editedItems[item.id] || item.generatedListing,
+            item
+          );
           
           // Mark duplicates for update
           if (item.status === 'duplicate_updateable') {
@@ -943,7 +957,10 @@ export default function AsinReviewModal({
                   const listingsToSave = activeItems
                     .filter(item => !['error', 'loading', 'blocked'].includes(item.status))
                     .map(item => {
-                      const listingData = editedItems[item.id] || item.generatedListing;
+                      const listingData = withAmazonScrapedPrice(
+                        editedItems[item.id] || item.generatedListing,
+                        item
+                      );
                       if (item.status === 'duplicate_updateable') {
                         return {
                           ...listingData,

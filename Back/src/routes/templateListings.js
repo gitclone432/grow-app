@@ -162,13 +162,13 @@ async function buildDuplicateUpdateablePreviewItem({
     status: 'duplicate_updateable',
     aiDescription: safeAiDescription,
     sourceData: buildSourceDataFromAmazon(amazonData),
-    generatedListing: {
+    generatedListing: attachAmazonScrapedPrice({
       ...autofill.mergedCoreFields,
       customLabel: futureSKU,
       customFields: autofill.customFieldsMerged,
       _asinReference: asin,
       _existingListingId: existingListing._id,
-    },
+    }, amazonData),
     pricingCalculation: autofill.pricingCalculation,
     warnings: [
       'This ASIN already exists in this template — fields refreshed from Amazon.',
@@ -183,6 +183,48 @@ async function buildDuplicateUpdateablePreviewItem({
 function parseAmazonPriceToNumber(priceValue) {
   const numeric = parseFloat(String(priceValue || '').replace(/[^0-9.]/g, ''));
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+}
+
+function attachAmazonScrapedPrice(listingPayload, amazonData) {
+  const amazonScrapedPrice = parseAmazonPriceToNumber(amazonData?.price);
+  if (amazonScrapedPrice != null) {
+    listingPayload.amazonScrapedPrice = amazonScrapedPrice;
+  }
+  return listingPayload;
+}
+
+async function attachAmazonScrapedPriceFallback(listings) {
+  const plain = listings.map((listing) =>
+    typeof listing.toObject === 'function' ? listing.toObject() : { ...listing }
+  );
+  const missingAsins = [
+    ...new Set(
+      plain
+        .filter((listing) => listing.amazonScrapedPrice == null && listing._asinReference)
+        .map((listing) => listing._asinReference)
+    ),
+  ];
+  if (!missingAsins.length) return plain;
+
+  const directoryRows = await AsinDirectory.find({ asin: { $in: missingAsins } })
+    .select('asin price')
+    .lean();
+  const priceByAsin = new Map(
+    directoryRows
+      .map((row) => [row.asin, parseAmazonPriceToNumber(row.price)])
+      .filter(([, price]) => price != null)
+  );
+
+  return plain.map((listing) => {
+    if (
+      listing.amazonScrapedPrice == null &&
+      listing._asinReference &&
+      priceByAsin.has(listing._asinReference)
+    ) {
+      return { ...listing, amazonScrapedPrice: priceByAsin.get(listing._asinReference) };
+    }
+    return listing;
+  });
 }
 
 function getConfiguredAiDescription(fieldConfigs = [], coreFields = {}, customFields = {}) {
@@ -417,9 +459,11 @@ router.get('/database-view', requireAuth, async (req, res) => {
         .limit(parseInt(limit)),
       TemplateListing.countDocuments(query)
     ]);
+
+    const listingsWithPrices = await attachAmazonScrapedPriceFallback(listings);
     
     res.json({
-      listings,
+      listings: listingsWithPrices,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -851,12 +895,12 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           sku: finalSKU,
           aiDescription: safeAiDescription,
           sourceData: buildSourceDataFromAmazon(amazonData),
-          generatedListing: {
+          generatedListing: attachAmazonScrapedPrice({
             ...mergedCoreFields,
             customLabel: finalSKU,
             customFields: customFieldsMerged,
             _asinReference: asin
-          },
+          }, amazonData),
           pricingCalculation,
           warnings,
           errors: validationErrors,
@@ -1085,12 +1129,12 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             review: amazonData.review || '',
             productInformation: amazonData.productInformation || {}
           },
-          generatedListing: {
+          generatedListing: attachAmazonScrapedPrice({
             ...mergedCoreFields,
             customLabel: finalSKU,
             customFields: customFieldsMerged,
             _asinReference: asin
-          },
+          }, amazonData),
           pricingCalculation,
           warnings,
           errors: validationErrors,
@@ -1752,7 +1796,8 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
             status: 'success',
             autoFilledData: {
               coreFields: mergedCoreFields,
-              customFields
+              customFields,
+              amazonScrapedPrice: parseAmazonPriceToNumber(amazonData.price),
             },
             amazonSource: {
               title: amazonData.title,
@@ -2455,12 +2500,12 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             productInformation: amazonData.productInformation || {},
             rawData: amazonData.rawData
           },
-          generatedListing: {
+          generatedListing: attachAmazonScrapedPrice({
             ...mergedCoreFields,
             customLabel: sku,
             customFields: customFieldsMerged,
             _asinReference: asin
-          },
+          }, amazonData),
           pricingCalculation,
           warnings,
           errors: validationErrors,
@@ -2704,7 +2749,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             scheduleTime: '',
             updatedAt: Date.now()
           };
-          const overwritableFields = ['title', 'description', 'startPrice', 'quantity', 'itemPhotoUrl', 'conditionId', 'format', 'duration', 'location'];
+          const overwritableFields = ['title', 'description', 'startPrice', 'amazonScrapedPrice', 'quantity', 'itemPhotoUrl', 'conditionId', 'format', 'duration', 'location'];
           for (const field of overwritableFields) {
             if (listingData[field] !== undefined && listingData[field] !== null && listingData[field] !== '') {
               updateData[field] = listingData[field];

@@ -945,7 +945,10 @@ export default function TemplateListingsPage() {
           ...mergedCoreFields,
           customFields,
           customLabel: result.sku,
-          _asinReference: result.asin
+          _asinReference: result.asin,
+          ...(result.autoFilledData?.amazonScrapedPrice != null
+            ? { amazonScrapedPrice: result.autoFilledData.amazonScrapedPrice }
+            : {}),
         };
       });
 

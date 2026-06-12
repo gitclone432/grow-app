@@ -186,6 +186,14 @@ function buildAmazonLinkFromAsin(asin) {
     return `https://www.amazon.com/dp/${clean}`;
 }
 
+/** Prefer saved TemplateListing.amazonLink; fall back to /dp/{ASIN}. */
+function resolveSupplierLinkFromListing(listingRow) {
+    if (!listingRow) return '';
+    const savedLink = String(listingRow.amazonLink || '').trim();
+    if (savedLink) return savedLink;
+    return buildAmazonLinkFromAsin(listingRow._asinReference);
+}
+
 async function applySupplierLinksFromSavedAsins(orders = []) {
     if (!Array.isArray(orders) || orders.length === 0) return orders;
 
@@ -244,11 +252,14 @@ async function enrichSupplierLinksForOrders(orders = []) {
         customLabel: { $in: skus },
         deletedAt: null,
     })
-        .select('+_asinReference sellerId customLabel')
+        .select('+_asinReference sellerId customLabel amazonLink')
         .lean();
 
-    const asinBySellerSku = new Map(
-        templateListings.map((row) => [`${String(row.sellerId)}::${String(row.customLabel || '').trim()}`, row._asinReference || ''])
+    const supplierLinkBySellerSku = new Map(
+        templateListings.map((row) => [
+            `${String(row.sellerId)}::${String(row.customLabel || '').trim()}`,
+            resolveSupplierLinkFromListing(row),
+        ])
     );
 
     return orders.map((order) => {
@@ -260,12 +271,12 @@ async function enrichSupplierLinksForOrders(orders = []) {
         const sku = extractOrderSku(order) || listingSkuBySellerItem.get(`${sellerId}::${itemNumber}`) || '';
         if (!sellerId || !sku) return order;
 
-        const asin = asinBySellerSku.get(`${sellerId}::${sku}`) || '';
-        if (!asin) return order;
+        const supplierLink = supplierLinkBySellerSku.get(`${sellerId}::${sku}`) || '';
+        if (!supplierLink) return order;
 
         return {
             ...order,
-            affiliateLink: buildAmazonLinkFromAsin(asin),
+            affiliateLink: supplierLink,
         };
     });
 }
@@ -304,7 +315,7 @@ async function attachSellersToOrders(orders = []) {
     });
 }
 
-// Persist supplier links for old orders by matching seller+SKU with saved template ASINs.
+// Persist supplier links for old orders by matching seller+SKU with Listings Database (TemplateListing).
 router.post('/backfill-supplier-links', async (req, res) => {
     try {
         const { sellerId, limit = 2000 } = req.body || {};

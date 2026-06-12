@@ -96,6 +96,7 @@ const DAILY_ORDER_ALL_COLUMNS = [
     { id: 'orderId', label: 'Order ID' },
     { id: 'productName', label: 'Product Name' },
     { id: 'seller', label: 'Seller' },
+    { id: 'sku', label: 'SKU' },
     { id: 'supplierLink', label: 'Supplier Link' },
     { id: 'affiliateLinks', label: 'Affiliate Links' },
     { id: 'priceUsd', label: 'Price (USD)' },
@@ -171,6 +172,16 @@ function getCarryOverLabel(carryOverDays) {
 
 function getSellerGroupName(order) {
     return order?.sellerGroupName || order?.seller?.user?.username || order?.sellerId || 'Unknown Seller';
+}
+
+function getOrderSku(order) {
+    const lineItem = Array.isArray(order?.lineItems) ? order.lineItems[0] : null;
+    return (
+        lineItem?.sku ||
+        lineItem?.SKU ||
+        order?.sku ||
+        ''
+    ).toString().trim();
 }
 
 function getDefaultSellerOption(sellerOptions) {
@@ -1299,7 +1310,7 @@ export default function AffiliateOrdersPage() {
     const backfillSupplierLinks = useCallback(async () => {
         const confirmed = window.confirm(
             'Backfill Supplier Links for existing orders?\n\n' +
-            'This will map saved SKU -> ASIN and write missing Supplier Link values in database.'
+            'This will match seller + SKU to Listings Database and write Amazon supplier links for orders that are missing them.'
         );
         if (!confirmed) return;
 
@@ -1650,6 +1661,7 @@ export default function AffiliateOrdersPage() {
             orderId: 'orderId',
             productName: (order) => order.lineItems?.[0]?.title || order.productName || '',
             seller: (order) => order.sellerGroupName || '',
+            sku: (order) => getOrderSku(order),
             supplierLink: 'affiliateLink',
             affiliateLinks: 'affiliateLinks',
             priceUsd: (order) => order.affiliatePrice ?? '',
@@ -1812,6 +1824,7 @@ export default function AffiliateOrdersPage() {
                                     const sellerName = order.sellerGroupName || '—';
                                     const itemId = order.lineItems?.[0]?.legacyItemId || order.itemNumber;
                                     const productTitle = order.lineItems?.[0]?.title || order.productName || '—';
+                                    const orderSku = getOrderSku(order);
                                     const previousSellerName = idx > 0 ? section.orders[idx - 1].sellerGroupName : null;
                                     const showSellerHeader = idx === 0 || sellerName !== previousSellerName;
                                     const showSectionHeader = idx === 0 && section.label;
@@ -2023,6 +2036,43 @@ export default function AffiliateOrdersPage() {
 
                                                 {/* Seller */}
                                                 {isColVisible('seller') && <TableCell sx={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>{sellerName}</TableCell>}
+
+                                                {/* SKU */}
+                                                {isColVisible('sku') && (
+                                                    <TableCell sx={{ minWidth: 130, whiteSpace: 'nowrap' }}>
+                                                        {orderSku ? (
+                                                            <Stack direction="row" alignItems="center" spacing={0.5}>
+                                                                <Typography
+                                                                    variant="body2"
+                                                                    sx={{
+                                                                        fontFamily: 'monospace',
+                                                                        fontSize: '0.78rem',
+                                                                        fontWeight: 600,
+                                                                        bgcolor: 'grey.100',
+                                                                        px: 0.75,
+                                                                        py: 0.25,
+                                                                        borderRadius: 0.5,
+                                                                    }}
+                                                                >
+                                                                    {orderSku}
+                                                                </Typography>
+                                                                <Tooltip title="Copy SKU">
+                                                                    <IconButton
+                                                                        size="small"
+                                                                        onClick={() => {
+                                                                            navigator.clipboard.writeText(orderSku);
+                                                                            notify('info', 'SKU copied');
+                                                                        }}
+                                                                    >
+                                                                        <ContentCopyIcon sx={{ fontSize: 12 }} />
+                                                                    </IconButton>
+                                                                </Tooltip>
+                                                            </Stack>
+                                                        ) : (
+                                                            <Typography variant="body2" color="text.secondary">—</Typography>
+                                                        )}
+                                                    </TableCell>
+                                                )}
 
                                                 {/* Supplier Link */}
                                                 {isColVisible('supplierLink') && <TableCell sx={{ minWidth: 220 }}>

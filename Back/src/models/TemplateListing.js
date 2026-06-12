@@ -41,6 +41,11 @@ const templateListingSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  /** Amazon cost from ScrapingDog/ScraperAPI at listing save time (not eBay start price). */
+  amazonScrapedPrice: {
+    type: Number,
+    default: null
+  },
   quantity: {
     type: Number,
     default: 1
