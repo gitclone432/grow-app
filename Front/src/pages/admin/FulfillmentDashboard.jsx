@@ -2946,7 +2946,7 @@ function FulfillmentDashboard() {
   };
 
   const handleFulfillmentImport = async ({ rows, fillEmptyOnly, onProgress }) => {
-    const chunkSize = 2000;
+    const chunkSize = 100;
     const totalRows = rows.length;
     const totalChunks = Math.ceil(totalRows / chunkSize);
     const totals = { updated: 0, skipped: 0, notFound: 0, errors: [], processed: 0 };
@@ -2954,10 +2954,22 @@ function FulfillmentDashboard() {
     for (let start = 0; start < rows.length; start += chunkSize) {
       const chunkIndex = Math.floor(start / chunkSize) + 1;
       const chunk = rows.slice(start, start + chunkSize);
+
+      onProgress?.({
+        phase: 'sending',
+        chunkIndex,
+        totalChunks,
+        processed: start,
+        totalRows,
+        updated: totals.updated,
+        skipped: totals.skipped,
+        notFound: totals.notFound,
+      });
+
       const { data } = await api.post('/ebay/orders/bulk-import-fulfillment', {
         rows: chunk,
         fillEmptyOnly,
-      });
+      }, { timeout: 300000 });
       totals.updated += data.updated || 0;
       totals.skipped += data.skipped || 0;
       totals.notFound += data.notFound || 0;
@@ -2965,6 +2977,7 @@ function FulfillmentDashboard() {
       totals.processed = Math.min(start + chunk.length, totalRows);
 
       onProgress?.({
+        phase: 'done',
         chunkIndex,
         totalChunks,
         processed: totals.processed,

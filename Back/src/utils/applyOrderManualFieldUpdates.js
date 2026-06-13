@@ -171,6 +171,9 @@ export async function importFulfillmentRows(rows = [], { fillEmptyOnly = true } 
     errors: [],
   };
 
+  const fillEmpty = fillEmptyOnly !== false;
+  const workItems = [];
+
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index] || {};
     const orderKey = String(row.orderId || '').trim();
@@ -192,9 +195,20 @@ export async function importFulfillmentRows(rows = [], { fillEmptyOnly = true } 
       continue;
     }
 
+    workItems.push({ index, orderKey, incoming });
+  }
+
+  if (!workItems.length) {
+    return summary;
+  }
+
+  const orderIds = [...new Set(workItems.map((item) => item.orderKey))];
+  const orders = await Order.find({ orderId: { $in: orderIds } });
+  const orderById = new Map(orders.map((order) => [order.orderId, order]));
+
+  for (const { index, orderKey, incoming } of workItems) {
     try {
-      const order = await Order.findOne({ orderId: orderKey })
-        .populate({ path: 'seller', populate: { path: 'user', select: 'username' } });
+      const order = orderById.get(orderKey);
 
       if (!order) {
         summary.notFound += 1;
@@ -204,7 +218,7 @@ export async function importFulfillmentRows(rows = [], { fillEmptyOnly = true } 
         continue;
       }
 
-      const merged = mergeFulfillmentUpdates(order, incoming, { fillEmptyOnly: fillEmptyOnly !== false });
+      const merged = mergeFulfillmentUpdates(order, incoming, { fillEmptyOnly: fillEmpty });
       if (!Object.keys(merged).length) {
         summary.skipped += 1;
         continue;

@@ -166,10 +166,11 @@ export default function FulfillmentCsvImportDialog({ open, onClose, onImport }) 
       processed: 0,
       totalRows: rows.length,
       chunkIndex: 0,
-      totalChunks: Math.ceil(rows.length / 2000),
+      totalChunks: Math.ceil(rows.length / 100),
       updated: 0,
       skipped: 0,
       notFound: 0,
+      phase: 'starting',
     });
 
     try {
@@ -178,9 +179,16 @@ export default function FulfillmentCsvImportDialog({ open, onClose, onImport }) 
         fillEmptyOnly,
         onProgress: (progress) => {
           setImportProgress(progress);
+          if (progress.phase === 'sending') {
+            setImportLog((prev) => [
+              ...prev,
+              `Sending batch ${progress.chunkIndex}/${progress.totalChunks} (${Math.min(100, progress.totalRows - progress.processed).toLocaleString()} rows)…`,
+            ]);
+            return;
+          }
           setImportLog((prev) => [
             ...prev,
-            `Batch ${progress.chunkIndex}/${progress.totalChunks}: processed ${progress.processed.toLocaleString()}/${progress.totalRows.toLocaleString()} — ${progress.updated.toLocaleString()} updated, ${progress.notFound.toLocaleString()} not found, ${progress.skipped.toLocaleString()} skipped`,
+            `Batch ${progress.chunkIndex}/${progress.totalChunks}: ${progress.processed.toLocaleString()}/${progress.totalRows.toLocaleString()} rows — ${progress.updated.toLocaleString()} updated, ${progress.notFound.toLocaleString()} not found, ${progress.skipped.toLocaleString()} skipped`,
           ]);
         },
       });
@@ -191,8 +199,11 @@ export default function FulfillmentCsvImportDialog({ open, onClose, onImport }) 
         `Done — ${totals.updated.toLocaleString()} updated, ${totals.notFound.toLocaleString()} not found, ${totals.skipped.toLocaleString()} skipped.`,
       ]);
     } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Import failed');
-      setImportLog((prev) => [...prev, `Failed: ${err.response?.data?.error || err.message || 'Import failed'}`]);
+      const message = err.code === 'ECONNABORTED'
+        ? 'Import timed out — try again after deploying the latest backend, or use the CLI tool for very large files.'
+        : (err.response?.data?.error || err.message || 'Import failed');
+      setError(message);
+      setImportLog((prev) => [...prev, `Failed: ${message}`]);
     } finally {
       setLoading(false);
     }
@@ -365,7 +376,7 @@ export default function FulfillmentCsvImportDialog({ open, onClose, onImport }) 
                 )}
               </Stack>
               <LinearProgress
-                variant="determinate"
+                variant={loading && progressPercent === 0 && importProgress?.phase === 'sending' ? 'indeterminate' : 'determinate'}
                 value={importSummary ? 100 : progressPercent}
                 sx={{ mb: 1.5, height: 8, borderRadius: 1 }}
               />

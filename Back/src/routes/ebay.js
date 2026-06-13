@@ -11019,8 +11019,8 @@ router.post('/orders/bulk-import-fulfillment', requireAuth, requirePageAccess('F
       return res.status(400).json({ error: 'rows array is required' });
     }
 
-    if (rows.length > 2000) {
-      return res.status(400).json({ error: 'Maximum 2000 rows per request. Import in batches or use the CLI tool for large files.' });
+    if (rows.length > 500) {
+      return res.status(400).json({ error: 'Maximum 500 rows per request. Import in batches or use the CLI tool for large files.' });
     }
 
     const summary = await importFulfillmentRows(rows, { fillEmptyOnly: fillEmptyOnly !== false });
