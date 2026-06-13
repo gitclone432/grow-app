@@ -2945,11 +2945,14 @@ function FulfillmentDashboard() {
     setExportDialogOpen(true);
   };
 
-  const handleFulfillmentImport = async ({ rows, fillEmptyOnly }) => {
+  const handleFulfillmentImport = async ({ rows, fillEmptyOnly, onProgress }) => {
     const chunkSize = 2000;
-    const totals = { updated: 0, skipped: 0, notFound: 0, errors: [] };
+    const totalRows = rows.length;
+    const totalChunks = Math.ceil(totalRows / chunkSize);
+    const totals = { updated: 0, skipped: 0, notFound: 0, errors: [], processed: 0 };
 
     for (let start = 0; start < rows.length; start += chunkSize) {
+      const chunkIndex = Math.floor(start / chunkSize) + 1;
       const chunk = rows.slice(start, start + chunkSize);
       const { data } = await api.post('/ebay/orders/bulk-import-fulfillment', {
         rows: chunk,
@@ -2959,6 +2962,17 @@ function FulfillmentDashboard() {
       totals.skipped += data.skipped || 0;
       totals.notFound += data.notFound || 0;
       totals.errors.push(...(data.errors || []));
+      totals.processed = Math.min(start + chunk.length, totalRows);
+
+      onProgress?.({
+        chunkIndex,
+        totalChunks,
+        processed: totals.processed,
+        totalRows,
+        updated: totals.updated,
+        skipped: totals.skipped,
+        notFound: totals.notFound,
+      });
     }
 
     const parts = [
