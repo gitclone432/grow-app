@@ -1774,23 +1774,26 @@ export default function AffiliateOrdersPage() {
                 </Stack>
                 <Stack direction="row" spacing={0.5} alignItems="center">
                     <FormControl size="small" sx={{ minWidth: 220 }}>
-                        <InputLabel id="affiliate-seller-filter-label">Seller</InputLabel>
+                        <InputLabel
+                            id="affiliate-seller-filter-label"
+                            shrink={selectedSeller != null && selectedSeller !== ''}
+                        >
+                            Store
+                        </InputLabel>
                         <Select
                             labelId="affiliate-seller-filter-label"
-                            value={selectedSeller}
-                            label="Seller"
-                            displayEmpty
+                            value={selectedSeller ?? ''}
+                            label="Store"
                             sx={{ minWidth: 220 }}
-                            renderValue={(value) => (
-                                <Box sx={{ minWidth: 160, pl: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                    {value ? sellerOptions.find((option) => option.value === value)?.label || value : 'All Sellers'}
-                                </Box>
-                            )}
                             onChange={(e) => setSelectedSeller(e.target.value)}
                         >
-                            <MenuItem value="">All Sellers</MenuItem>
+                            <MenuItem value="">
+                                <em>All Stores</em>
+                            </MenuItem>
                             {sellerOptions.map((option) => (
-                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                                <MenuItem key={option.value} value={option.value}>
+                                    {option.label}
+                                </MenuItem>
                             ))}
                         </Select>
                     </FormControl>

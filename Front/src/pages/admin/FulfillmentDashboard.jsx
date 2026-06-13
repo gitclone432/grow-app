@@ -73,6 +73,7 @@ import SyncIcon from '@mui/icons-material/Sync';
 
 import SearchIcon from '@mui/icons-material/Search';
 import DownloadIcon from '@mui/icons-material/Download';
+import UploadIcon from '@mui/icons-material/Upload';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import BlockIcon from '@mui/icons-material/Block';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
@@ -93,6 +94,7 @@ import {
 } from '../../constants/remarkTemplates';
 import ItemCategoryAssignDialog from '../../components/ItemCategoryAssignDialog.jsx';
 import FulfillmentSkeleton from '../../components/skeletons/FulfillmentSkeleton';
+import FulfillmentCsvImportDialog from '../../components/FulfillmentCsvImportDialog';
 
 
 // --- IMAGE VIEWER DIALOG ---
@@ -1557,6 +1559,7 @@ function FulfillmentDashboard() {
 
   // CSV Export dialog state
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
   // selectedExportColumns is initialized after ALL_COLUMNS is defined
 
   // Snackbar state
@@ -2942,6 +2945,38 @@ function FulfillmentDashboard() {
     setExportDialogOpen(true);
   };
 
+  const handleFulfillmentImport = async ({ rows, fillEmptyOnly }) => {
+    const chunkSize = 2000;
+    const totals = { updated: 0, skipped: 0, notFound: 0, errors: [] };
+
+    for (let start = 0; start < rows.length; start += chunkSize) {
+      const chunk = rows.slice(start, start + chunkSize);
+      const { data } = await api.post('/ebay/orders/bulk-import-fulfillment', {
+        rows: chunk,
+        fillEmptyOnly,
+      });
+      totals.updated += data.updated || 0;
+      totals.skipped += data.skipped || 0;
+      totals.notFound += data.notFound || 0;
+      totals.errors.push(...(data.errors || []));
+    }
+
+    const parts = [
+      `${totals.updated} updated`,
+      `${totals.notFound} not found`,
+      `${totals.skipped} skipped`,
+    ];
+    setSnackbarMsg(`Import complete: ${parts.join(', ')}`);
+    setSnackbarSeverity(totals.updated > 0 ? 'success' : 'warning');
+    setSnackbarOpen(true);
+
+    if (totals.updated > 0) {
+      await fetchOrders();
+    }
+
+    return totals;
+  };
+
   // Toggle column selection in Export Dialog
   const handleToggleExportColumn = (columnId) => {
     setSelectedExportColumns(prev => {
@@ -3243,6 +3278,16 @@ function FulfillmentDashboard() {
                 </Typography>
               )}
               <Stack direction="row" spacing={1} alignItems="center">
+                <Button
+                  variant="outlined"
+                  color="primary"
+                  size="small"
+                  startIcon={<UploadIcon />}
+                  onClick={() => setImportDialogOpen(true)}
+                  sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
+                >
+                  {isSmallMobile ? 'Import' : 'Import CSV'}
+                </Button>
                 {orders.length > 0 && (
                   <Button
                     variant="outlined"
@@ -5041,6 +5086,12 @@ function FulfillmentDashboard() {
 
 
         {/* CSV Export Column Selection Dialog */}
+        <FulfillmentCsvImportDialog
+          open={importDialogOpen}
+          onClose={() => setImportDialogOpen(false)}
+          onImport={handleFulfillmentImport}
+        />
+
         <Dialog
           open={exportDialogOpen}
           onClose={() => setExportDialogOpen(false)}

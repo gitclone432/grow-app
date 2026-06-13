@@ -30,6 +30,10 @@ import ConversationMeta from '../models/ConversationMeta.js';
 import ChatAgent from '../models/ChatAgent.js';
 import { getOrderQtyExcludedLegacyIdSet } from '../utils/orderQtyExcludeLegacyCache.js';
 import { enrichOrdersWithSupplierLinks } from '../utils/supplierLinkFromListings.js';
+import {
+  applyManualFieldUpdatesToOrder,
+  importFulfillmentRows,
+} from '../utils/applyOrderManualFieldUpdates.js';
 import { parseStringPromise } from 'xml2js';
 import imageCache from '../lib/imageCache.js';
 import multer from 'multer';
@@ -10978,93 +10982,18 @@ router.delete('/chat-agents/:id', requireAuth, async (req, res) => {
   }
 });
 
-//Manual fields to upadte for amazon 
+//Manual fields to upadte for amazon
 router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => {
   const { orderId } = req.params;
   const updates = req.body;
 
-  const allowedFields = ['amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId', 'amazonRefund', 'cardName', 'resolution', 'remark', 'alreadyInUse', 'remarkMessageSent'];
-  const updateData = {};
-
-  Object.keys(updates).forEach(key => {
-    if (allowedFields.includes(key)) {
-      if (key === 'remark') {
-        const rawRemark = updates[key];
-        if (
-          rawRemark === null ||
-          rawRemark === undefined ||
-          String(rawRemark).trim() === '' ||
-          String(rawRemark).trim().toLowerCase() === 'select'
-        ) {
-          updateData[key] = null;
-        } else {
-          updateData[key] = String(rawRemark).trim();
-        }
-      } else {
-        updateData[key] = updates[key];
-      }
-    }
-  });
-
   try {
-    // Find the order first to get full data for USD recalculation
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
-    const previousAmazonAccount = order.amazonAccount;
-    const previousAmazonAccountAssignmentSource = order.amazonAccountAssignmentSource;
+    const result = await applyManualFieldUpdatesToOrder(order, updates);
 
-    // Apply manual updates to order object
-    Object.keys(updateData).forEach(key => {
-      order[key] = updateData[key];
-    });
-
-    if (Object.prototype.hasOwnProperty.call(updateData, 'amazonAccount')) {
-      if (updateData.amazonAccount) {
-        order.amazonAccountAssignmentSource = 'fulfillment';
-
-        if (order.sourcingStatus !== 'Done') {
-          order.sourcingStatus = 'Done';
-        }
-
-        if (!order.sourcingCompletedAt) {
-          order.sourcingCompletedAt = new Date();
-        }
-      } else if (previousAmazonAccount && previousAmazonAccountAssignmentSource === 'fulfillment') {
-        order.amazonAccountAssignmentSource = null;
-
-        if (order.sourcingStatus === 'Done') {
-          order.sourcingStatus = 'Not Yet';
-          order.sourcingCompletedAt = null;
-        }
-      }
-    }
-
-    // Check if any monetary fields were updated
-    const monetaryFields = ['beforeTax', 'estimatedTax', 'amazonRefund'];
-    const updatedMonetaryField = Object.keys(updates).some(key => monetaryFields.includes(key));
-
-    // Recalculate USD values if monetary fields were updated
-    if (updatedMonetaryField) {
-      const usdUpdates = recalculateUSDFields(order);
-      Object.keys(usdUpdates).forEach(key => {
-        order[key] = usdUpdates[key];
-      });
-
-      // If beforeTaxUSD or estimatedTaxUSD changed, recalculate Amazon financials
-      if (updates.beforeTax !== undefined || updates.estimatedTax !== undefined) {
-        const amazonFinancials = await calculateAmazonFinancials(order);
-        Object.keys(amazonFinancials).forEach(key => {
-          order[key] = amazonFinancials[key];
-        });
-      }
-    }
-
-    // Save the updated order
-    await order.save();
-
-    // Populate seller info for response
-    await order.populate({
+    await result.order.populate({
       path: 'seller',
       populate: {
         path: 'user',
@@ -11074,9 +11003,28 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
 
     res.json({
       success: true,
-      order,
-      recalculated: updatedMonetaryField ? 'USD values recalculated' : null
+      order: result.order,
+      recalculated: result.recalculated ? 'USD values recalculated' : null
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/orders/bulk-import-fulfillment', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  try {
+    const { rows = [], fillEmptyOnly = true } = req.body;
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: 'rows array is required' });
+    }
+
+    if (rows.length > 2000) {
+      return res.status(400).json({ error: 'Maximum 2000 rows per request. Import in batches or use the CLI tool for large files.' });
+    }
+
+    const summary = await importFulfillmentRows(rows, { fillEmptyOnly: fillEmptyOnly !== false });
+    res.json(summary);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
