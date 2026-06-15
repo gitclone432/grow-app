@@ -25,6 +25,7 @@ import AddCircleIcon from '@mui/icons-material/AddCircle';
 import InsightsIcon from '@mui/icons-material/Insights';
 import StoreIcon from '@mui/icons-material/Store';
 import AppsIcon from '@mui/icons-material/Apps';
+import StorefrontIcon from '@mui/icons-material/Storefront';
 import CategoryIcon from '@mui/icons-material/Category';
 import ListAltIcon from '@mui/icons-material/ListAlt';
 import ExpandMore from '@mui/icons-material/ExpandMore';
@@ -116,6 +117,10 @@ import CronJobsPage from '../pages/admin/CronJobsPage.jsx';
 import ScraperTesterPage from '../pages/admin/ScraperTesterPage.jsx';
 import ImageOverlaySettingsPage from '../pages/admin/ImageOverlaySettingsPage.jsx';
 import GmailTesterPage from '../pages/admin/GmailTesterPage.jsx';
+import EtsyDashboardPage from '../pages/admin/etsy/EtsyDashboardPage.jsx';
+import EtsyProductsPage from '../pages/admin/etsy/EtsyProductsPage.jsx';
+import EtsyOrderFulfilmentPage from '../pages/admin/etsy/EtsyOrderFulfilmentPage.jsx';
+import EtsyProfitSheetPage from '../pages/admin/etsy/EtsyProfitSheetPage.jsx';
 import AmazonPiSourceColumnsPage from '../pages/admin/AmazonPiSourceColumnsPage.jsx';
 import AffiliateOrdersPage from '../pages/admin/AffiliateOrdersPage.jsx';
 import LinkIcon from '@mui/icons-material/Link';
@@ -173,6 +178,7 @@ import PageAccessManagementPage from '../pages/admin/PageAccessManagementPage.js
 import PageAccessAuditLogPage from '../pages/admin/PageAccessAuditLogPage.jsx';
 import UserPasswordManagementPage from '../pages/admin/UserPasswordManagementPage.jsx';
 import StoresPage from '../pages/admin/StoresPage.jsx';
+import EtsyStoresPage from '../pages/admin/EtsyStoresPage.jsx';
 import DescriptionTemplatesPage from '../pages/admin/DescriptionTemplatesPage.jsx';
 import SettingsIcon from '@mui/icons-material/Settings';
 
@@ -218,6 +224,7 @@ const categoryIcons = {
   ebayParams: StoreIcon,
   hrManagement: SupervisorAccountIcon,
   others: AppsIcon,
+  etsy: StorefrontIcon,
   settingsSection: SettingsIcon,
 };
 
@@ -355,7 +362,12 @@ const COMPONENT_MAP = {
   'UserPerformance': UserPerformancePage,
   'EmployeeDetails': EmployeeDetailsPage,
   'StoresPage': StoresPage,
+  'EtsyStoresPage': EtsyStoresPage,
   'DescriptionTemplates': DescriptionTemplatesPage,
+  'EtsyProducts': EtsyProductsPage,
+  'EtsyOrderFulfilment': EtsyOrderFulfilmentPage,
+  'EtsyProfitSheet': EtsyProfitSheetPage,
+  'EtsyDashboard': EtsyDashboardPage,
 };
 
 export default function AdminLayout({ user, onLogout }) {
@@ -672,6 +684,7 @@ export default function AdminLayout({ user, onLogout }) {
         {renderCategoryMenu('ebayParams')}
         {renderCategoryMenu('hrManagement')}
         {renderCategoryMenu('others')}
+        {renderCategoryMenu('etsy')}
         {renderCategoryMenu('settingsSection')}
 
         {/* Ideas & Issues - standalone for users who don't see it in HR category */}

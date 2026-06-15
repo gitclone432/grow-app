@@ -179,7 +179,7 @@ export default function DescriptionTemplatesPage() {
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 720 }}>
         Templates are saved to the database and shared across the team. Stores assign a template under
-        Settings → Stores → Edit store (Description Template).
+        Settings → eBay Stores → Edit store (Description Template).
       </Typography>
 
       {saveError ? <Alert severity="error" sx={{ mb: 2 }}>{saveError}</Alert> : null}

@@ -113,8 +113,15 @@ export const PAGE_DEFAULT_ROLES = {
   'UserPerformance': ['superadmin'],
   'EmployeeDetails': ['superadmin', 'hradmin', 'operationhead'],
 
+  // Etsy
+  'EtsyProducts': ['superadmin', 'listingadmin'],
+  'EtsyOrderFulfilment': ['superadmin', 'listingadmin'],
+  'EtsyProfitSheet': ['superadmin', 'listingadmin'],
+  'EtsyDashboard': ['superadmin', 'listingadmin'],
+
   // Stores
   'StoresPage': ['superadmin', 'listingadmin'],
+  'EtsyStoresPage': ['superadmin', 'listingadmin'],
 
   // Settings
   'SettingsPage': ['superadmin', 'listingadmin'],

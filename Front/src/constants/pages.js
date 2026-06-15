@@ -20,6 +20,7 @@ export const PAGE_CATEGORIES = {
   ebayParams: { id: 'ebayParams', name: 'eBay Parameters', icon: 'StoreIcon' },
   hrManagement: { id: 'hrManagement', name: 'HR & Management', icon: 'SupervisorAccountIcon' },
   others: { id: 'others', name: 'Others', icon: 'AppsIcon' },
+  etsy: { id: 'etsy', name: 'ETSY', icon: 'StorefrontIcon' },
   settingsSection: { id: 'settingsSection', name: 'Settings', icon: 'SettingsIcon' },
 };
 
@@ -155,8 +156,15 @@ export const PAGE_REGISTRY = [
   { id: 'UserPerformance', name: 'User Performance Logs', path: '/user-performance', category: 'others', defaultRoles: ['superadmin'] },
   { id: 'EmployeeDetails', name: 'Employee Details', path: '/employee-details', category: 'others', defaultRoles: ['superadmin', 'hradmin', 'operationhead'] },
 
+  // ====== ETSY ======
+  { id: 'EtsyProducts', name: 'Products', path: '/etsy/products', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'EtsyOrderFulfilment', name: 'Order Fulfilment', path: '/etsy/order-fulfilment', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'EtsyProfitSheet', name: 'Profit Sheet', path: '/etsy/profit-sheet', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'EtsyDashboard', name: 'Dashboard', path: '/etsy/dashboard', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
+
   // ====== SETTINGS ======
-  { id: 'StoresPage', name: 'Stores', path: '/stores-page', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'StoresPage', name: 'eBay Stores', path: '/stores-page', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'EtsyStoresPage', name: 'Etsy Stores', path: '/etsy-stores', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'DescriptionTemplates', name: 'Description Templates', path: '/description-templates', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
 ];
 

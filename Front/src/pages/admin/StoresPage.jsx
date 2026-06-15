@@ -217,7 +217,7 @@ export default function StoresPage() {
   return (
     <Box>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 2 }}>
-        Stores
+        eBay Stores
       </Typography>
 
       {galleryError ? (
@@ -226,7 +226,7 @@ export default function StoresPage() {
 
       <Paper sx={{ p: 2, borderRadius: 2, mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Typography variant="body2" color="text.secondary">
-          Seller accounts are listed here.
+          eBay seller accounts are listed here.
         </Typography>
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={loadSellers} disabled={loading}>
           {loading ? 'Loading...' : 'Refresh'}

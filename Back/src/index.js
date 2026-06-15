@@ -101,6 +101,8 @@ import affiliateBalanceRoutes from './routes/affiliateBalance.js';
 import listingStatsRoutes from './routes/listingStats.js';
 import itemCategoryMapRoutes from './routes/itemCategoryMap.js';
 import microOrdersRoutes from './routes/microOrders.js';
+import etsyOrderFulfilmentRoutes from './routes/etsyOrderFulfilment.js';
+import etsyStoresRoutes from './routes/etsyStores.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
@@ -235,6 +237,8 @@ app.use('/api/affiliate-balance', affiliateBalanceRoutes);
 app.use('/api/listing-stats', listingStatsRoutes);
 app.use('/api/item-category-map', itemCategoryMapRoutes);
 app.use('/api/micro-orders', microOrdersRoutes);
+app.use('/api/etsy/order-fulfilment', etsyOrderFulfilmentRoutes);
+app.use('/api/etsy/stores', etsyStoresRoutes);
 
 // Optional: same-origin production — serve Vite build (see Dockerfile / deployment-plan.md)
 if (process.env.SERVE_FRONTEND === 'true') {

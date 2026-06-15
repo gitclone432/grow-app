@@ -55,7 +55,7 @@ function sellersFieldToTokens(s) {
 }
 
 /**
- * Same list as Settings → Stores (`/sellers/all`): eBay seller accounts.
+ * Same list as Settings → eBay Stores (`/sellers/all`): eBay seller accounts.
  * The form saves comma-separated seller document _id values so multiple stores under one user stay distinct;
  * Payoneer / eBay still match legacy username/email tokens in existing rows.
  */
@@ -100,7 +100,7 @@ function formatSellersCell(sellersStr, sellerOptions) {
 const BankAccountsPage = () => {
     const theme = useTheme();
     const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
-    /** Same API as Settings → Stores page (`StoresPage.jsx`). */
+    /** Same API as Settings → eBay Stores page (`StoresPage.jsx`). */
     const [sellers, setSellers] = useState([]);
 
     /** Stores dropdown: close after each pick so the full list is not left open (multi-select). */
@@ -384,7 +384,7 @@ const BankAccountsPage = () => {
                             inputProps={{ style: { fontFamily: 'ui-monospace, monospace' } }}
                         />
                         <FormControl fullWidth>
-                            <InputLabel id="bank-account-stores-label">Stores (Settings → Stores)</InputLabel>
+                            <InputLabel id="bank-account-stores-label">Stores (Settings → eBay Stores)</InputLabel>
                             <Select
                                 labelId="bank-account-stores-label"
                                 multiple
@@ -403,7 +403,7 @@ const BankAccountsPage = () => {
                                     setSellersFromParts(nextIds);
                                     setStoresMenuOpen(false);
                                 }}
-                                input={<OutlinedInput label="Stores (Settings → Stores)" />}
+                                input={<OutlinedInput label="Stores (Settings → eBay Stores)" />}
                                 renderValue={(selected) => {
                                     if (!selected.length) {
                                         return sellerOptions.length === 0 ? 'No stores' : 'Select stores…';
@@ -459,12 +459,12 @@ const BankAccountsPage = () => {
                                 {sellerOptions.length === 0 ? (
                                     <>
                                         No seller accounts loaded. Add or manage them under{' '}
-                                        <RouterLink to="/admin/stores-page">Settings → Stores</RouterLink>.
+                                        <RouterLink to="/admin/stores-page">Settings → eBay Stores</RouterLink>.
                                     </>
                                 ) : (
                                     <>
                                         Same eBay seller accounts as{' '}
-                                        <RouterLink to="/admin/stores-page">Settings → Stores</RouterLink>. Pick one
+                                        <RouterLink to="/admin/stores-page">Settings → eBay Stores</RouterLink>. Pick one
                                         store at a time—the list closes after each choice. Remove a store with the × on
                                         its chip. Saved as store IDs for Payoneer matching.
                                     </>
