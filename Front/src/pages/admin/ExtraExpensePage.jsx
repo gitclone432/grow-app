@@ -16,6 +16,7 @@ import {
     InputLabel,
     MenuItem,
     Paper,
+    Pagination,
     Select,
     Snackbar,
     Stack,
@@ -224,22 +225,30 @@ function ExpenseChartCard({
     children,
 }) {
     return (
-        <Paper sx={{ borderRadius: 2, height: '100%', overflow: 'hidden' }}>
+        <Paper 
+            elevation={0}
+            sx={{ 
+                borderRadius: 3, 
+                height: '100%', 
+                overflow: 'hidden',
+                background: 'linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(249,250,251,0.95) 100%)',
+                border: '1px solid rgba(209, 213, 219, 0.5)',
+                boxShadow: '0 4px 16px rgba(107, 114, 128, 0.08)'
+            }}>
             <Stack
                 direction="row"
                 alignItems="center"
                 justifyContent="space-between"
                 sx={{
-                    px: 2,
-                    py: 1.25,
-                    borderBottom: collapsed ? 'none' : '1px solid',
-                    borderColor: 'divider',
-                    bgcolor: 'grey.50',
+                    px: 2.5,
+                    py: 2,
+                    borderBottom: collapsed ? 'none' : '1px solid rgba(209, 213, 219, 0.5)',
+                    background: 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%)',
                 }}
             >
                 <Box sx={{ minWidth: 0 }}>
-                    <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{title}</Typography>
-                    <Typography variant="caption" color="text.secondary">{subtitle}</Typography>
+                    <Typography variant="subtitle1" sx={{ fontWeight: 700, color: '#374151' }}>{title}</Typography>
+                    <Typography variant="caption" sx={{ color: '#6b7280', fontWeight: 500 }}>{subtitle}</Typography>
                 </Box>
                 <Stack direction="row" spacing={0.5}>
                     <MuiTooltip title="Expand chart">
@@ -267,35 +276,80 @@ function ExpenseChartCard({
 
 const MobileExpenseCard = ({ expense, onEdit, onDelete }) => {
     const dateStr = expense.date ? new Date(expense.date).toLocaleDateString() : '-';
+    const isCredit = !!expense.isCredit;
+    const isCashExpense = !isCredit && expense.paymentMethod && expense.paymentMethod.toLowerCase() === 'cash';
 
     return (
-        <Paper elevation={2} sx={{ p: 1.5, borderRadius: 2 }}>
-            <Stack spacing={1}>
+        <Paper 
+            elevation={0}
+            sx={{ 
+                p: 2, 
+                borderRadius: 3,
+                background: isCredit
+                    ? 'linear-gradient(135deg, rgba(220, 252, 231, 0.7) 0%, rgba(187, 247, 208, 0.5) 100%)'
+                    : (isCashExpense 
+                        ? 'linear-gradient(135deg, rgba(254, 226, 226, 0.7) 0%, rgba(252, 165, 165, 0.5) 100%)'
+                        : 'linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(249,250,251,0.95) 100%)'),
+                border: '1px solid',
+                borderColor: isCredit 
+                    ? 'rgba(34, 197, 94, 0.3)'
+                    : (isCashExpense ? 'rgba(239, 68, 68, 0.3)' : 'rgba(209, 213, 219, 0.5)'),
+                boxShadow: isCredit
+                    ? '0 4px 16px rgba(34, 197, 94, 0.15)'
+                    : (isCashExpense ? '0 4px 16px rgba(239, 68, 68, 0.15)' : '0 4px 16px rgba(107, 114, 128, 0.08)'),
+                transition: 'all 0.3s ease',
+                '&:hover': {
+                    transform: 'translateY(-2px)',
+                    boxShadow: isCredit
+                        ? '0 8px 24px rgba(34, 197, 94, 0.25)'
+                        : (isCashExpense ? '0 8px 24px rgba(239, 68, 68, 0.25)' : '0 8px 24px rgba(107, 114, 128, 0.15)')
+                }
+            }}>
+            <Stack spacing={1.5}>
                 <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
                     <Box sx={{ minWidth: 0 }}>
-                        <Typography variant="caption" color="text.secondary">Date</Typography>
-                        <Typography variant="body2" sx={{ fontWeight: 700 }}>{dateStr}</Typography>
+                        <Typography variant="caption" sx={{ color: '#6b7280', fontWeight: 600 }}>📅 Date</Typography>
+                        <Typography variant="body2" sx={{ fontWeight: 700, color: '#374151' }}>{dateStr}</Typography>
                     </Box>
                     {(() => {
-                        const isCredit = expense.isCredit;
                         return (
-                            <Typography variant="body2" sx={{ fontWeight: 800, color: isCredit ? 'success.main' : 'error.main' }}>
+                            <Typography variant="h6" sx={{ fontWeight: 900, color: isCredit ? '#16a34a' : '#dc2626' }}>
                                 {formatInr(expense.amount)}
                             </Typography>
                         );
                     })()}
                 </Stack>
                 <Box>
-                    <Typography variant="caption" color="text.secondary">Name of Expenditure</Typography>
-                    <Typography variant="body2" sx={{ fontWeight: 600 }}>{expense.name}</Typography>
+                    <Typography variant="caption" sx={{ color: '#6b7280', fontWeight: 600 }}>📝 Name of Expenditure</Typography>
+                    <Typography variant="body1" sx={{ fontWeight: 700, color: '#1f2937' }}>{expense.name}</Typography>
                 </Box>
                 <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    {expense.category ? <Chip size="small" label={mapOldCategoryToNew(expense.category)} /> : null}
+                    {expense.category ? (
+                        <Chip 
+                            size="small" 
+                            label={mapOldCategoryToNew(expense.category)}
+                            sx={{
+                                fontWeight: 600,
+                                borderRadius: 2,
+                                background: 'linear-gradient(135deg, #e0e7ff 0%, #dbeafe 100%)',
+                                color: '#3730a3',
+                                border: '1px solid rgba(99, 102, 241, 0.2)'
+                            }}
+                        />
+                    ) : null}
                     {expense.paymentMethod ? (
                         <Chip
                             size="small"
                             label={expense.paymentMethod}
-                            color={expense.isCredit ? 'success' : undefined}
+                            sx={{
+                                fontWeight: 600,
+                                borderRadius: 2,
+                                ...(expense.isCredit ? {
+                                    background: 'linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%)',
+                                    color: '#14532d',
+                                    border: '1px solid rgba(34, 197, 94, 0.3)'
+                                } : {})
+                            }}
                             variant={expense.isCredit ? 'filled' : 'outlined'}
                         />
                     ) : null}
@@ -474,6 +528,8 @@ const ExtraExpensePage = () => {
     const [chartsSectionOpen, setChartsSectionOpen] = useState(false);
     const [chartCollapsed, setChartCollapsed] = useState({ month: true, category: true });
     const [expandedChart, setExpandedChart] = useState(null);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [itemsPerPage, setItemsPerPage] = useState(50);
 
     const queryParams = useMemo(() => {
         const p = {};
@@ -793,6 +849,24 @@ const ExtraExpensePage = () => {
         [displayedExpenses]
     );
 
+    // Reset to page 1 when filters change
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [displayedExpenses]);
+
+    // Calculate pagination values
+    const totalPages = useMemo(
+        () => Math.ceil((displayedExpenses?.length || 0) / itemsPerPage),
+        [displayedExpenses, itemsPerPage]
+    );
+
+    // Get paginated data
+    const paginatedExpenses = useMemo(() => {
+        const startIdx = (currentPage - 1) * itemsPerPage;
+        const endIdx = startIdx + itemsPerPage;
+        return (displayedExpenses || []).slice(startIdx, endIdx);
+    }, [displayedExpenses, currentPage, itemsPerPage]);
+
     const toggleChartsSection = () => {
         setChartsSectionOpen((prev) => !prev);
     };
@@ -810,30 +884,82 @@ const ExtraExpensePage = () => {
     }
 
     return (
-        <Box sx={{ p: { xs: 1.5, sm: 3 } }}>
+        <Box sx={{ 
+            p: { xs: 1.5, sm: 3 },
+            minHeight: '100vh',
+            background: 'transparent'
+        }}>
             <Stack
                 direction={{ xs: 'column', sm: 'row' }}
                 spacing={1.5}
                 justifyContent="space-between"
                 alignItems={{ xs: 'stretch', sm: 'center' }}
-                mb={2}
+                mb={3}
             >
-                <Typography variant="h5" sx={{ fontWeight: 700 }}>Extra Expenses</Typography>
-                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                <Typography 
+                    variant="h4" 
+                    sx={{ 
+                        fontWeight: 700,
+                        background: 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)',
+                        WebkitBackgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                        letterSpacing: '-0.5px'
+                    }}
+                >
+                    Extra Expenses
+                </Typography>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
                     <Button
                         variant="outlined"
                         startIcon={<FileDownloadIcon />}
                         onClick={handleExportCsv}
                         disabled={exporting}
                         fullWidth={isMobile}
+                        sx={{
+                            px: 3,
+                            py: 1.2,
+                            borderRadius: 2,
+                            fontWeight: 700,
+                            color: '#3b82f6',
+                            borderColor: 'rgba(59, 130, 246, 0.5)',
+                            borderWidth: '2px',
+                            background: 'linear-gradient(135deg, rgba(219, 234, 254, 0.3) 0%, rgba(224, 231, 255, 0.3) 100%)',
+                            backdropFilter: 'blur(10px)',
+                            transition: 'all 0.3s ease',
+                            '&:hover': {
+                                borderColor: '#3b82f6',
+                                background: 'linear-gradient(135deg, rgba(219, 234, 254, 0.5) 0%, rgba(224, 231, 255, 0.5) 100%)',
+                                transform: 'translateY(-2px)',
+                                boxShadow: '0 6px 16px rgba(59, 130, 246, 0.3)'
+                            },
+                            '&.Mui-disabled': {
+                                borderColor: 'rgba(156, 163, 175, 0.3)',
+                                color: '#9ca3af',
+                                background: 'rgba(243, 244, 246, 0.5)'
+                            }
+                        }}
                     >
-                        {exporting ? 'Exporting…' : 'Export CSV'}
+                        {exporting ? '⏳ Exporting…' : '⬇️ Export CSV'}
                     </Button>
                     <Button
                         variant="contained"
                         startIcon={<AddIcon />}
                         onClick={() => setOpenDialog(true)}
                         fullWidth={isMobile}
+                        sx={{
+                            px: 3,
+                            py: 1.2,
+                            borderRadius: 2,
+                            fontWeight: 700,
+                            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                            boxShadow: '0 4px 12px rgba(118, 75, 162, 0.3)',
+                            transition: 'all 0.3s ease',
+                            '&:hover': {
+                                background: 'linear-gradient(135deg, #5568d3 0%, #653a8a 100%)',
+                                transform: 'translateY(-2px)',
+                                boxShadow: '0 6px 16px rgba(118, 75, 162, 0.4)'
+                            }
+                        }}
                     >
                         Add Expense
                     </Button>
@@ -841,25 +967,75 @@ const ExtraExpensePage = () => {
             </Stack>
 
             {/* Credit Box Section with Month Selector */}
-            <Stack spacing={2} sx={{ mb: 2 }}>
+            <Stack spacing={2.5} sx={{ mb: 3 }}>
                 {/* Month Selector */}
-                <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: 'wrap' }}>
-                    <Typography variant="subtitle2" sx={{ fontWeight: 600, minWidth: '100px' }}>
-                        Select Month:
-                    </Typography>
-                    <FormControl size="small" sx={{ minWidth: '200px' }}>
-                        <Select
-                            value={selectedMonth}
-                            onChange={(e) => setSelectedMonth(e.target.value)}
-                        >
-                            {monthlyBreakdown.map((month) => (
-                                <MenuItem key={month.yearMonth} value={month.yearMonth}>
-                                    {new Date(`${month.yearMonth}-01`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
-                                </MenuItem>
-                            ))}
-                        </Select>
-                    </FormControl>
-                </Stack>
+                <Paper
+                    elevation={0}
+                    sx={{
+                        p: 2.5,
+                        borderRadius: 3,
+                        background: 'linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(249,250,251,0.98) 100%)',
+                        border: '1px solid rgba(209, 213, 219, 0.5)',
+                        boxShadow: '0 4px 16px rgba(107, 114, 128, 0.08)',
+                        backdropFilter: 'blur(10px)'
+                    }}
+                >
+                    <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: 'wrap', gap: 2 }}>
+                        <Typography variant="subtitle1" sx={{ fontWeight: 800, color: '#374151', fontSize: '1rem' }}>
+                            📅 Select Month:
+                        </Typography>
+                        <FormControl 
+                            size="small" 
+                            sx={{ 
+                                minWidth: '220px',
+                                flex: { xs: 1, sm: 'initial' }
+                            }}>
+                            <Select
+                                value={selectedMonth}
+                                onChange={(e) => setSelectedMonth(e.target.value)}
+                                sx={{
+                                    borderRadius: 2,
+                                    fontWeight: 600,
+                                    '& .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(209, 213, 219, 0.6)',
+                                        borderWidth: '2px'
+                                    },
+                                    '&:hover .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(102, 126, 234, 0.6)'
+                                    },
+                                    '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: '#667eea',
+                                        borderWidth: '2px'
+                                    },
+                                    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+                                    boxShadow: '0 2px 8px rgba(107, 114, 128, 0.06)'
+                                }}
+                            >
+                                {monthlyBreakdown.map((month) => (
+                                    <MenuItem 
+                                        key={month.yearMonth} 
+                                        value={month.yearMonth}
+                                        sx={{
+                                            fontWeight: 600,
+                                            '&:hover': {
+                                                background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)'
+                                            },
+                                            '&.Mui-selected': {
+                                                background: 'linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%)',
+                                                fontWeight: 700,
+                                                '&:hover': {
+                                                    background: 'linear-gradient(135deg, rgba(102, 126, 234, 0.25) 0%, rgba(118, 75, 162, 0.25) 100%)'
+                                                }
+                                            }
+                                        }}
+                                    >
+                                        {new Date(`${month.yearMonth}-01`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+                                    </MenuItem>
+                                ))}
+                            </Select>
+                        </FormControl>
+                    </Stack>
+                </Paper>
 
                 {/* Monthly Credit Details */}
                 {monthlyBreakdown.find(m => m.yearMonth === selectedMonth) && (
@@ -867,12 +1043,25 @@ const ExtraExpensePage = () => {
                         const currentMonth = monthlyBreakdown.find(m => m.yearMonth === selectedMonth);
                         return (
                             <Grid container spacing={2}>
-                                <Grid item xs={12} sm={6} md={2.4}>
-                                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%', bgcolor: 'info.lighter', border: '2px solid', borderColor: 'info.main' }}>
+                <Grid item xs={12} sm={6} md={2.4}>
+                                    <Paper sx={{ 
+                                        p: 2.5, 
+                                        borderRadius: 3, 
+                                        height: '100%', 
+                                        background: 'linear-gradient(135deg, rgba(224, 242, 254, 0.9) 0%, rgba(186, 230, 253, 0.7) 100%)',
+                                        border: '1px solid',
+                                        borderColor: 'rgba(14, 165, 233, 0.3)',
+                                        boxShadow: '0 8px 24px rgba(14, 165, 233, 0.15)',
+                                        transition: 'all 0.3s ease',
+                                        '&:hover': {
+                                            transform: 'translateY(-4px)',
+                                            boxShadow: '0 12px 32px rgba(14, 165, 233, 0.25)'
+                                        }
+                                    }}>
                                         <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
                                             <Box>
-                                                <Typography variant="caption" color="info.dark" sx={{ textTransform: 'uppercase', fontSize: '0.7rem' }}>Credit Added</Typography>
-                                                <Typography variant="h6" sx={{ fontWeight: 700, color: 'info.dark', fontSize: '1.1rem' }}>
+                                                <Typography variant="caption" color="info.dark" sx={{ textTransform: 'uppercase', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.5px' }}>Credit Added</Typography>
+                                                <Typography variant="h5" sx={{ fontWeight: 800, color: '#075985', fontSize: '1.4rem', mt: 0.5 }}>
                                                     {formatInr(currentMonth.creditsAdded)}
                                                 </Typography>
                                             </Box>
@@ -888,9 +1077,22 @@ const ExtraExpensePage = () => {
                                     </Paper>
                                 </Grid>
                                 <Grid item xs={12} sm={6} md={2.4}>
-                                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%', bgcolor: 'error.lighter', border: '2px solid', borderColor: 'error.main' }}>
-                                        <Typography variant="caption" color="error.dark" sx={{ textTransform: 'uppercase', fontSize: '0.7rem' }}>Cash Expenses</Typography>
-                                        <Typography variant="h6" sx={{ fontWeight: 700, color: 'error.dark', fontSize: '1.1rem' }}>
+                                    <Paper sx={{ 
+                                        p: 2.5, 
+                                        borderRadius: 3, 
+                                        height: '100%', 
+                                        background: 'linear-gradient(135deg, rgba(254, 226, 226, 0.9) 0%, rgba(252, 165, 165, 0.7) 100%)',
+                                        border: '1px solid',
+                                        borderColor: 'rgba(239, 68, 68, 0.3)',
+                                        boxShadow: '0 8px 24px rgba(239, 68, 68, 0.15)',
+                                        transition: 'all 0.3s ease',
+                                        '&:hover': {
+                                            transform: 'translateY(-4px)',
+                                            boxShadow: '0 12px 32px rgba(239, 68, 68, 0.25)'
+                                        }
+                                    }}>
+                                        <Typography variant="caption" color="error.dark" sx={{ textTransform: 'uppercase', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.5px' }}>Cash Expenses</Typography>
+                                        <Typography variant="h5" sx={{ fontWeight: 800, color: '#b91c1c', fontSize: '1.4rem', mt: 0.5 }}>
                                             {formatInr(currentMonth.cashExpenses)}
                                         </Typography>
                                         <Typography variant="caption" color="error.dark" sx={{ fontSize: '0.7rem' }}>
@@ -899,9 +1101,22 @@ const ExtraExpensePage = () => {
                                     </Paper>
                                 </Grid>
                                 <Grid item xs={12} sm={6} md={2.4}>
-                                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%', bgcolor: 'warning.lighter', border: '2px solid', borderColor: 'warning.main' }}>
-                                        <Typography variant="caption" color="warning.dark" sx={{ textTransform: 'uppercase', fontSize: '0.7rem' }}>Carryover</Typography>
-                                        <Typography variant="h6" sx={{ fontWeight: 700, color: 'warning.dark', fontSize: '1.1rem' }}>
+                                    <Paper sx={{ 
+                                        p: 2.5, 
+                                        borderRadius: 3, 
+                                        height: '100%', 
+                                        background: 'linear-gradient(135deg, rgba(254, 243, 199, 0.9) 0%, rgba(253, 230, 138, 0.7) 100%)',
+                                        border: '1px solid',
+                                        borderColor: 'rgba(251, 146, 60, 0.3)',
+                                        boxShadow: '0 8px 24px rgba(251, 146, 60, 0.15)',
+                                        transition: 'all 0.3s ease',
+                                        '&:hover': {
+                                            transform: 'translateY(-4px)',
+                                            boxShadow: '0 12px 32px rgba(251, 146, 60, 0.25)'
+                                        }
+                                    }}>
+                                        <Typography variant="caption" color="warning.dark" sx={{ textTransform: 'uppercase', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.5px' }}>Carryover</Typography>
+                                        <Typography variant="h5" sx={{ fontWeight: 800, color: '#92400e', fontSize: '1.4rem', mt: 0.5 }}>
                                             {formatInr(Math.max(0, currentMonth.carryoverFromPrevious))}
                                         </Typography>
                                         <Typography variant="caption" color="warning.dark" sx={{ fontSize: '0.7rem' }}>
@@ -911,22 +1126,39 @@ const ExtraExpensePage = () => {
                                 </Grid>
                                 <Grid item xs={12} sm={6} md={2.4}>
                                     <Paper sx={{ 
-                                        p: 2, 
-                                        borderRadius: 2, 
+                                        p: 2.5, 
+                                        borderRadius: 3, 
                                         height: '100%', 
-                                        bgcolor: currentMonth.netBalance >= 0 ? 'success.lighter' : 'error.lighter',
-                                        border: '2px solid',
-                                        borderColor: currentMonth.netBalance >= 0 ? 'success.main' : 'error.main'
+                                        background: currentMonth.netBalance >= 0 
+                                            ? 'linear-gradient(135deg, rgba(220, 252, 231, 0.9) 0%, rgba(187, 247, 208, 0.7) 100%)'
+                                            : 'linear-gradient(135deg, rgba(254, 226, 226, 0.9) 0%, rgba(252, 165, 165, 0.7) 100%)',
+                                        border: '1px solid',
+                                        borderColor: currentMonth.netBalance >= 0 
+                                            ? 'rgba(34, 197, 94, 0.3)'
+                                            : 'rgba(239, 68, 68, 0.3)',
+                                        boxShadow: currentMonth.netBalance >= 0
+                                            ? '0 8px 24px rgba(34, 197, 94, 0.15)'
+                                            : '0 8px 24px rgba(239, 68, 68, 0.15)',
+                                        transition: 'all 0.3s ease',
+                                        '&:hover': {
+                                            transform: 'translateY(-4px)',
+                                            boxShadow: currentMonth.netBalance >= 0
+                                                ? '0 12px 32px rgba(34, 197, 94, 0.25)'
+                                                : '0 12px 32px rgba(239, 68, 68, 0.25)'
+                                        }
                                     }}>
                                         <Typography variant="caption" sx={{ 
                                             textTransform: 'uppercase', 
                                             fontSize: '0.7rem',
-                                            color: currentMonth.netBalance >= 0 ? 'success.dark' : 'error.dark'
+                                            fontWeight: 700,
+                                            letterSpacing: '0.5px',
+                                            color: currentMonth.netBalance >= 0 ? '#166534' : '#b91c1c'
                                         }}>Available Balance</Typography>
-                                        <Typography variant="h6" sx={{ 
-                                            fontWeight: 700, 
-                                            fontSize: '1.1rem',
-                                            color: currentMonth.netBalance >= 0 ? 'success.dark' : 'error.dark'
+                                        <Typography variant="h5" sx={{ 
+                                            fontWeight: 800, 
+                                            fontSize: '1.4rem',
+                                            mt: 0.5,
+                                            color: currentMonth.netBalance >= 0 ? '#166534' : '#b91c1c'
                                         }}>
                                             {formatInr(Math.max(0, currentMonth.netBalance))}
                                         </Typography>
@@ -939,7 +1171,22 @@ const ExtraExpensePage = () => {
                                     </Paper>
                                 </Grid>
                                 <Grid item xs={12} sm={6} md={2.4}>
-                                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                    <Paper sx={{ 
+                                        p: 2.5, 
+                                        borderRadius: 3, 
+                                        height: '100%', 
+                                        display: 'flex', 
+                                        alignItems: 'center', 
+                                        justifyContent: 'center',
+                                        background: 'linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(240,249,255,0.95) 100%)',
+                                        border: '1px solid rgba(59, 130, 246, 0.2)',
+                                        boxShadow: '0 8px 24px rgba(59, 130, 246, 0.1)',
+                                        transition: 'all 0.3s ease',
+                                        '&:hover': {
+                                            transform: 'translateY(-4px)',
+                                            boxShadow: '0 12px 32px rgba(59, 130, 246, 0.2)'
+                                        }
+                                    }}>
                                         <Button
                                             variant="outlined"
                                             size="small"
@@ -957,36 +1204,37 @@ const ExtraExpensePage = () => {
 
                 {/* Global Credit Summary */}
                 <Box sx={{ 
-                    p: 2, 
-                    bgcolor: 'grey.100', 
-                    borderRadius: 1, 
-                    border: '1px solid',
-                    borderColor: 'grey.300'
+                    p: 3.5, 
+                    background: 'linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(240,249,255,0.98) 100%)',
+                    borderRadius: 3, 
+                    border: '1px solid rgba(59, 130, 246, 0.3)',
+                    boxShadow: '0 8px 24px rgba(59, 130, 246, 0.15)',
+                    backdropFilter: 'blur(10px)'
                 }}>
-                    <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', fontWeight: 600 }}>
-                        Global Summary
+                    <Typography variant="subtitle1" sx={{ textTransform: 'uppercase', fontWeight: 800, color: '#1e40af', fontSize: '0.9rem', mb: 2 }}>
+                        🏦 GLOBAL SUMMARY
                     </Typography>
-                    <Grid container spacing={1} sx={{ mt: 0.5 }}>
-                        <Grid item xs={6} sm={3}>
+                    <Grid container spacing={3} sx={{ mt: 0.5 }}>
+                        <Grid item xs={6} sm={4}>
                             <Box>
-                                <Typography variant="caption" color="text.secondary">Total Credit Added</Typography>
-                                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                <Typography variant="caption" sx={{ color: '#6b7280', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Total Credit Added</Typography>
+                                <Typography variant="h6" sx={{ fontWeight: 800, color: '#374151', mt: 0.5 }}>
                                     {formatInr(credit.totalCredit)}
                                 </Typography>
                             </Box>
                         </Grid>
-                        <Grid item xs={6} sm={3}>
+                        <Grid item xs={6} sm={4}>
                             <Box>
-                                <Typography variant="caption" color="text.secondary">Total Used</Typography>
-                                <Typography variant="body2" sx={{ fontWeight: 600, color: 'error.main' }}>
+                                <Typography variant="caption" sx={{ color: '#6b7280', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Total Used</Typography>
+                                <Typography variant="h6" sx={{ fontWeight: 800, color: '#dc2626', mt: 0.5 }}>
                                     {formatInr(credit.totalUsed)}
                                 </Typography>
                             </Box>
                         </Grid>
-                        <Grid item xs={6} sm={3}>
+                        <Grid item xs={12} sm={4}>
                             <Box>
-                                <Typography variant="caption" color="text.secondary">Overall Balance</Typography>
-                                <Typography variant="body2" sx={{ fontWeight: 600, color: 'success.main' }}>
+                                <Typography variant="caption" sx={{ color: '#6b7280', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Overall Balance</Typography>
+                                <Typography variant="h6" sx={{ fontWeight: 800, color: '#16a34a', mt: 0.5 }}>
                                     {formatInr(credit.remainingCredit)}
                                 </Typography>
                             </Box>
@@ -995,65 +1243,145 @@ const ExtraExpensePage = () => {
                 </Box>
             </Stack>
 
-            <Grid container spacing={2} sx={{ mb: 2 }}>
+            <Grid container spacing={2} sx={{ mb: 3 }}>
                 <Grid item xs={12} sm={6} md={3}>
-                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
-                        <Typography variant="overline" color="text.secondary">This month</Typography>
-                        <Typography variant="h6" sx={{ fontWeight: 700, color: 'error.main' }}>
+                    <Paper 
+                        elevation={0}
+                        sx={{ 
+                            p: 2.5, 
+                            borderRadius: 3, 
+                            height: '100%',
+                            background: 'linear-gradient(135deg, rgba(254, 226, 226, 0.5) 0%, rgba(252, 165, 165, 0.3) 100%)',
+                            border: '1px solid rgba(239, 68, 68, 0.3)',
+                            boxShadow: '0 4px 16px rgba(239, 68, 68, 0.12)',
+                            transition: 'all 0.3s ease',
+                            '&:hover': {
+                                transform: 'translateY(-2px)',
+                                boxShadow: '0 6px 20px rgba(239, 68, 68, 0.18)'
+                            }
+                        }}>
+                        <Typography variant="overline" sx={{ color: '#7f1d1d', fontWeight: 700, fontSize: '0.75rem' }}>📅 This month</Typography>
+                        <Typography variant="h5" sx={{ fontWeight: 800, color: '#dc2626', mt: 1 }}>
                             {formatInr(summary.monthTotal)}
                         </Typography>
-                        <Typography variant="caption" color="text.secondary">
+                        <Typography variant="caption" sx={{ color: '#991b1b', fontWeight: 600, mt: 0.5, display: 'block' }}>
                             {summary.monthCount} expense{summary.monthCount === 1 ? '' : 's'}
-                            {hasActiveFilters ? ' · matches filters' : ''}
+                            {hasActiveFilters ? ' • matches filters' : ''}
                         </Typography>
                     </Paper>
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
-                        <Typography variant="overline" color="text.secondary">This year</Typography>
-                        <Typography variant="h6" sx={{ fontWeight: 700, color: 'error.main' }}>
+                    <Paper 
+                        elevation={0}
+                        sx={{ 
+                            p: 2.5, 
+                            borderRadius: 3, 
+                            height: '100%',
+                            background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.3) 100%)',
+                            border: '1px solid rgba(59, 130, 246, 0.3)',
+                            boxShadow: '0 4px 16px rgba(59, 130, 246, 0.12)',
+                            transition: 'all 0.3s ease',
+                            '&:hover': {
+                                transform: 'translateY(-2px)',
+                                boxShadow: '0 6px 20px rgba(59, 130, 246, 0.18)'
+                            }
+                        }}>
+                        <Typography variant="overline" sx={{ color: '#1e3a8a', fontWeight: 700, fontSize: '0.75rem' }}>📊 This year</Typography>
+                        <Typography variant="h5" sx={{ fontWeight: 800, color: '#dc2626', mt: 1 }}>
                             {formatInr(summary.yearTotal)}
                         </Typography>
-                        <Typography variant="caption" color="text.secondary">
+                        <Typography variant="caption" sx={{ color: '#1e40af', fontWeight: 600, mt: 0.5, display: 'block' }}>
                             {summary.yearCount} expense{summary.yearCount === 1 ? '' : 's'}
-                            {hasActiveFilters ? ' · matches filters' : ''}
+                            {hasActiveFilters ? ' • matches filters' : ''}
                         </Typography>
                     </Paper>
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
-                        <Typography variant="overline" color="text.secondary">
-                            {hasActiveFilters ? 'Filtered total' : 'Listed total'}
+                    <Paper 
+                        elevation={0}
+                        sx={{ 
+                            p: 2.5, 
+                            borderRadius: 3, 
+                            height: '100%',
+                            background: 'linear-gradient(135deg, rgba(232, 222, 248, 0.5) 0%, rgba(221, 214, 254, 0.3) 100%)',
+                            border: '1px solid rgba(139, 92, 246, 0.3)',
+                            boxShadow: '0 4px 16px rgba(139, 92, 246, 0.12)',
+                            transition: 'all 0.3s ease',
+                            '&:hover': {
+                                transform: 'translateY(-2px)',
+                                boxShadow: '0 6px 20px rgba(139, 92, 246, 0.18)'
+                            }
+                        }}>
+                        <Typography variant="overline" sx={{ color: '#4c1d95', fontWeight: 700, fontSize: '0.75rem' }}>
+                            {hasActiveFilters ? '🔍 Filtered total' : '📋 Listed total'}
                         </Typography>
-                        <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                        <Typography variant="h5" sx={{ fontWeight: 800, color: '#7c3aed', mt: 1 }}>
                             {formatInr(summary.filteredTotal)}
                         </Typography>
-                        <Typography variant="caption" color="text.secondary">
+                        <Typography variant="caption" sx={{ color: '#5b21b6', fontWeight: 600, mt: 0.5, display: 'block' }}>
                             {summary.filteredCount} in current view
                         </Typography>
                     </Paper>
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                    <Paper sx={{ p: 2, borderRadius: 2, height: '100%' }}>
-                        <Typography variant="overline" color="text.secondary">Categories</Typography>
-                        <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                    <Paper 
+                        elevation={0}
+                        sx={{ 
+                            p: 2.5, 
+                            borderRadius: 3, 
+                            height: '100%',
+                            background: 'linear-gradient(135deg, rgba(220, 252, 231, 0.5) 0%, rgba(187, 247, 208, 0.3) 100%)',
+                            border: '1px solid rgba(34, 197, 94, 0.3)',
+                            boxShadow: '0 4px 16px rgba(34, 197, 94, 0.12)',
+                            transition: 'all 0.3s ease',
+                            '&:hover': {
+                                transform: 'translateY(-2px)',
+                                boxShadow: '0 6px 20px rgba(34, 197, 94, 0.18)'
+                            }
+                        }}>
+                        <Typography variant="overline" sx={{ color: '#14532d', fontWeight: 700, fontSize: '0.75rem' }}>🏷️ Categories</Typography>
+                        <Typography variant="h5" sx={{ fontWeight: 800, color: '#16a34a', mt: 1 }}>
                             {charts.byCategory?.length || 0}
                         </Typography>
-                        <Typography variant="caption" color="text.secondary">
+                        <Typography variant="caption" sx={{ color: '#166534', fontWeight: 600, mt: 0.5, display: 'block' }}>
                             in current view
                         </Typography>
                     </Paper>
                 </Grid>
             </Grid>
 
-            <Paper sx={{ p: 2, borderRadius: 2, mb: 2 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>Filters</Typography>
-                <Grid container spacing={1.5}>
+            <Paper 
+                elevation={0}
+                sx={{ 
+                    p: 2.5, 
+                    borderRadius: 3, 
+                    mb: 3,
+                    background: 'linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(249,250,251,0.98) 100%)',
+                    border: '1px solid rgba(209, 213, 219, 0.5)',
+                    boxShadow: '0 4px 16px rgba(107, 114, 128, 0.08)',
+                    backdropFilter: 'blur(10px)'
+                }}>
+                <Typography variant="subtitle1" sx={{ fontWeight: 800, mb: 2, color: '#374151', fontSize: '1.1rem' }}>🔍 Filters</Typography>
+                <Grid container spacing={2}>
                     <Grid item xs={12} sm={6} md={2}>
                         <FormControl size="small" fullWidth>
-                            <InputLabel>Date Mode</InputLabel>
+                            <InputLabel sx={{ fontWeight: 600 }}>Date Mode</InputLabel>
                             <Select
                                 label="Date Mode"
+                                sx={{
+                                    borderRadius: 2,
+                                    '& .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(209, 213, 219, 0.6)'
+                                    },
+                                    '&:hover .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(102, 126, 234, 0.5)'
+                                    },
+                                    '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: '#667eea',
+                                        borderWidth: '2px'
+                                    },
+                                    backgroundColor: 'rgba(255, 255, 255, 0.8)'
+                                }}
                                 value={filters.dateMode}
                                 onChange={(e) => {
                                     const mode = e.target.value;
@@ -1067,9 +1395,9 @@ const ExtraExpensePage = () => {
                                     }));
                                 }}
                             >
-                                <MenuItem value="None">None</MenuItem>
-                                <MenuItem value="Single Day">Single Day</MenuItem>
-                                <MenuItem value="Date Range">Date Range</MenuItem>
+                                <MenuItem value="None" sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>None</MenuItem>
+                                <MenuItem value="Single Day" sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>Single Day</MenuItem>
+                                <MenuItem value="Date Range" sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>Date Range</MenuItem>
                             </Select>
                         </FormControl>
                     </Grid>
@@ -1081,9 +1409,25 @@ const ExtraExpensePage = () => {
                                 type="date"
                                 size="small"
                                 fullWidth
-                                InputLabelProps={{ shrink: true }}
+                                InputLabelProps={{ shrink: true, sx: { fontWeight: 600 } }}
                                 value={filters.date}
                                 onChange={(e) => setFilters((f) => ({ ...f, date: e.target.value }))}
+                                sx={{
+                                    '& .MuiOutlinedInput-root': {
+                                        borderRadius: 2,
+                                        backgroundColor: 'rgba(255, 255, 255, 0.8)',
+                                        '& fieldset': {
+                                            borderColor: 'rgba(209, 213, 219, 0.6)'
+                                        },
+                                        '&:hover fieldset': {
+                                            borderColor: 'rgba(102, 126, 234, 0.5)'
+                                        },
+                                        '&.Mui-focused fieldset': {
+                                            borderColor: '#667eea',
+                                            borderWidth: '2px'
+                                        }
+                                    }
+                                }}
                             />
                         </Grid>
                     )}
@@ -1096,9 +1440,25 @@ const ExtraExpensePage = () => {
                                     type="date"
                                     size="small"
                                     fullWidth
-                                    InputLabelProps={{ shrink: true }}
+                                    InputLabelProps={{ shrink: true, sx: { fontWeight: 600 } }}
                                     value={filters.from}
                                     onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
+                                    sx={{
+                                        '& .MuiOutlinedInput-root': {
+                                            borderRadius: 2,
+                                            backgroundColor: 'rgba(255, 255, 255, 0.8)',
+                                            '& fieldset': {
+                                                borderColor: 'rgba(209, 213, 219, 0.6)'
+                                            },
+                                            '&:hover fieldset': {
+                                                borderColor: 'rgba(102, 126, 234, 0.5)'
+                                            },
+                                            '&.Mui-focused fieldset': {
+                                                borderColor: '#667eea',
+                                                borderWidth: '2px'
+                                            }
+                                        }
+                                    }}
                                 />
                             </Grid>
                             <Grid item xs={12} sm={6} md={2}>
@@ -1107,61 +1467,119 @@ const ExtraExpensePage = () => {
                                     type="date"
                                     size="small"
                                     fullWidth
-                                    InputLabelProps={{ shrink: true }}
+                                    InputLabelProps={{ shrink: true, sx: { fontWeight: 600 } }}
                                     value={filters.to}
                                     onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
+                                    sx={{
+                                        '& .MuiOutlinedInput-root': {
+                                            borderRadius: 2,
+                                            backgroundColor: 'rgba(255, 255, 255, 0.8)',
+                                            '& fieldset': {
+                                                borderColor: 'rgba(209, 213, 219, 0.6)'
+                                            },
+                                            '&:hover fieldset': {
+                                                borderColor: 'rgba(102, 126, 234, 0.5)'
+                                            },
+                                            '&.Mui-focused fieldset': {
+                                                borderColor: '#667eea',
+                                                borderWidth: '2px'
+                                            }
+                                        }
+                                    }}
                                 />
                             </Grid>
                         </>
                     )}
                     <Grid item xs={12} sm={6} md={2}>
                         <FormControl size="small" fullWidth>
-                            <InputLabel>Paid by</InputLabel>
+                            <InputLabel sx={{ fontWeight: 600 }}>Paid by</InputLabel>
                             <Select
                                 label="Paid by"
                                 value={filters.paidBy}
                                 onChange={(e) => setFilters((f) => ({ ...f, paidBy: e.target.value }))}
+                                sx={{
+                                    borderRadius: 2,
+                                    '& .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(209, 213, 219, 0.6)'
+                                    },
+                                    '&:hover .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(102, 126, 234, 0.5)'
+                                    },
+                                    '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: '#667eea',
+                                        borderWidth: '2px'
+                                    },
+                                    backgroundColor: 'rgba(255, 255, 255, 0.8)'
+                                }}
                             >
-                                <MenuItem value="">All</MenuItem>
+                                <MenuItem value="" sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>All</MenuItem>
                                 {paidByOptionsList.map((name) => (
-                                    <MenuItem key={name} value={name}>{name}</MenuItem>
+                                    <MenuItem key={name} value={name} sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>{name}</MenuItem>
                                 ))}
                             </Select>
                         </FormControl>
                     </Grid>
                     <Grid item xs={12} sm={6} md={2}>
                         <FormControl size="small" fullWidth>
-                            <InputLabel>Category</InputLabel>
+                            <InputLabel sx={{ fontWeight: 600 }}>Category</InputLabel>
                             <Select
                                 label="Category"
                                 value={filters.category}
                                 onChange={(e) => setFilters((f) => ({ ...f, category: e.target.value }))}
+                                sx={{
+                                    borderRadius: 2,
+                                    '& .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(209, 213, 219, 0.6)'
+                                    },
+                                    '&:hover .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(102, 126, 234, 0.5)'
+                                    },
+                                    '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: '#667eea',
+                                        borderWidth: '2px'
+                                    },
+                                    backgroundColor: 'rgba(255, 255, 255, 0.8)'
+                                }}
                             >
-                                <MenuItem value="">All</MenuItem>
+                                <MenuItem value="" sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>All</MenuItem>
                                 {CATEGORY_OPTIONS.map((cat) => (
-                                    <MenuItem key={cat} value={cat}>{cat}</MenuItem>
+                                    <MenuItem key={cat} value={cat} sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>{cat}</MenuItem>
                                 ))}
                             </Select>
                         </FormControl>
                     </Grid>
                     <Grid item xs={12} sm={6} md={2}>
                         <FormControl size="small" fullWidth>
-                            <InputLabel>Payment method</InputLabel>
+                            <InputLabel sx={{ fontWeight: 600 }}>Payment method</InputLabel>
                             <Select
                                 label="Payment method"
                                 value={filters.paymentMethod || ''}
                                 onChange={(e) => setFilters((f) => ({ ...f, paymentMethod: e.target.value }))}
+                                sx={{
+                                    borderRadius: 2,
+                                    '& .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(209, 213, 219, 0.6)'
+                                    },
+                                    '&:hover .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(102, 126, 234, 0.5)'
+                                    },
+                                    '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: '#667eea',
+                                        borderWidth: '2px'
+                                    },
+                                    backgroundColor: 'rgba(255, 255, 255, 0.8)'
+                                }}
                             >
-                                <MenuItem value="">All</MenuItem>
+                                <MenuItem value="" sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>All</MenuItem>
                                 {PAYMENT_METHODS.map((m) => (
-                                    <MenuItem key={m} value={m}>{m}</MenuItem>
+                                    <MenuItem key={m} value={m} sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>{m}</MenuItem>
                                 ))}
                             </Select>
                         </FormControl>
                     </Grid>
                     <Grid item xs={12} sm={6} md={2}>
                         <FormControl size="small" fullWidth>
-                            <InputLabel>Search expenditure name</InputLabel>
+                            <InputLabel sx={{ fontWeight: 600 }}>Search expenditure name</InputLabel>
                             <Select
                                 label="Search expenditure name"
                                 value={filters.searchSelect || ''}
@@ -1174,12 +1592,26 @@ const ExtraExpensePage = () => {
                                         setFilters((f) => ({ ...f, searchSelect: val, search: val }));
                                     }
                                 }}
+                                sx={{
+                                    borderRadius: 2,
+                                    '& .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(209, 213, 219, 0.6)'
+                                    },
+                                    '&:hover .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: 'rgba(102, 126, 234, 0.5)'
+                                    },
+                                    '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                                        borderColor: '#667eea',
+                                        borderWidth: '2px'
+                                    },
+                                    backgroundColor: 'rgba(255, 255, 255, 0.8)'
+                                }}
                             >
-                                <MenuItem value="">All</MenuItem>
+                                <MenuItem value="" sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>All</MenuItem>
                                 {NAME_FILTER_OPTIONS.map((name) => (
-                                    <MenuItem key={name} value={name}>{name}</MenuItem>
+                                    <MenuItem key={name} value={name} sx={{ fontWeight: 600, '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>{name}</MenuItem>
                                 ))}
-                                <MenuItem value="__custom__">Search by name...</MenuItem>
+                                <MenuItem value="__custom__" sx={{ fontWeight: 600, fontStyle: 'italic', '&:hover': { background: 'linear-gradient(135deg, rgba(224, 231, 255, 0.5) 0%, rgba(219, 234, 254, 0.5) 100%)' } }}>Search by name...</MenuItem>
                             </Select>
                         </FormControl>
                     </Grid>
@@ -1191,21 +1623,69 @@ const ExtraExpensePage = () => {
                                 fullWidth
                                 value={filters.search}
                                 onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+                                InputLabelProps={{ sx: { fontWeight: 600 } }}
+                                sx={{
+                                    '& .MuiOutlinedInput-root': {
+                                        borderRadius: 2,
+                                        backgroundColor: 'rgba(255, 255, 255, 0.8)',
+                                        '& fieldset': {
+                                            borderColor: 'rgba(209, 213, 219, 0.6)'
+                                        },
+                                        '&:hover fieldset': {
+                                            borderColor: 'rgba(102, 126, 234, 0.5)'
+                                        },
+                                        '&.Mui-focused fieldset': {
+                                            borderColor: '#667eea',
+                                            borderWidth: '2px'
+                                        }
+                                    }
+                                }}
                             />
                         </Grid>
                     )}
                 </Grid>
-                <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
+                <Stack direction="row" spacing={2} sx={{ mt: 2.5 }}>
                     <Button 
                         variant="contained" 
-                        size="small" 
+                        size="medium"
                         onClick={handleApplyFilters}
+                        sx={{
+                            px: 3,
+                            py: 1,
+                            borderRadius: 2,
+                            fontWeight: 700,
+                            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                            boxShadow: '0 4px 12px rgba(118, 75, 162, 0.3)',
+                            transition: 'all 0.3s ease',
+                            '&:hover': {
+                                background: 'linear-gradient(135deg, #5568d3 0%, #653a8a 100%)',
+                                transform: 'translateY(-2px)',
+                                boxShadow: '0 6px 16px rgba(118, 75, 162, 0.4)'
+                            }
+                        }}
                     >
-                        Apply Filters
+                        ✨ Apply Filters
                     </Button>
                     {hasActiveFilters ? (
-                        <Button size="small" onClick={handleClearFilters}>
-                            Clear filters
+                        <Button 
+                            size="medium" 
+                            onClick={handleClearFilters}
+                            sx={{
+                                px: 3,
+                                py: 1,
+                                borderRadius: 2,
+                                fontWeight: 600,
+                                color: '#6b7280',
+                                borderColor: 'rgba(209, 213, 219, 0.6)',
+                                transition: 'all 0.2s ease',
+                                '&:hover': {
+                                    borderColor: '#dc2626',
+                                    color: '#dc2626',
+                                    backgroundColor: 'rgba(254, 226, 226, 0.3)'
+                                }
+                            }}
+                        >
+                            🗑️ Clear filters
                         </Button>
                     ) : null}
                 </Stack>
@@ -1368,12 +1848,21 @@ const ExtraExpensePage = () => {
 
             <Box sx={{ display: { xs: 'block', md: 'none' }, mb: 3 }}>
                 {displayedExpenses.length === 0 ? (
-                    <Paper sx={{ p: 2, textAlign: 'center' }}>
-                        <Typography variant="body2" color="text.secondary">No expenses found.</Typography>
+                    <Paper 
+                        elevation={0}
+                        sx={{ 
+                            p: 4, 
+                            textAlign: 'center',
+                            borderRadius: 3,
+                            background: 'linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(249,250,251,0.98) 100%)',
+                            border: '1px solid rgba(209, 213, 219, 0.5)',
+                            boxShadow: '0 4px 16px rgba(107, 114, 128, 0.08)'
+                        }}>
+                        <Typography variant="h6" sx={{ color: '#6b7280', fontWeight: 600 }}>📭 No expenses found.</Typography>
                     </Paper>
                 ) : (
                     <Stack spacing={1.5}>
-                        {displayedExpenses.map((expense) => (
+                        {paginatedExpenses.map((expense) => (
                             <MobileExpenseCard
                                 key={expense._id}
                                 expense={expense}
@@ -1381,22 +1870,86 @@ const ExtraExpensePage = () => {
                                 onDelete={() => expense.isCredit ? handleDeleteCredit(expense.rawRecord?._id) : handleDelete(expense._id)}
                             />
                         ))}
-                        <Paper sx={{ p: 1.5, borderRadius: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                                Total ({displayedExpenses.length})
+                        <Paper 
+                            elevation={0}
+                            sx={{ 
+                                p: 2, 
+                                borderRadius: 3, 
+                                display: 'flex', 
+                                justifyContent: 'space-between', 
+                                alignItems: 'center',
+                                background: 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%)',
+                                border: '1px solid rgba(209, 213, 219, 0.5)'
+                            }}>
+                            <Typography variant="subtitle2" sx={{ fontWeight: 700, color: '#374151' }}>
+                                📊 Total this page ({paginatedExpenses.length})
                             </Typography>
-                            <Typography variant="subtitle1" sx={{ fontWeight: 800, color: 'error.main' }}>
-                                {formatInr(listTotal)}
+                            <Typography variant="h6" sx={{ fontWeight: 900, color: '#dc2626' }}>
+                                {formatInr(paginatedExpenses.filter(e => !e.isCredit).reduce((sum, e) => sum + (Number(e.amount) || 0), 0))}
                             </Typography>
                         </Paper>
+                        {totalPages > 1 && (
+                            <Stack spacing={1.5}>
+                                <Stack direction="row" justifyContent="center" alignItems="center" spacing={2} sx={{ mt: 2 }}>
+                                    <FormControl sx={{ minWidth: 120 }} size="small">
+                                        <InputLabel>Rows per page</InputLabel>
+                                        <Select
+                                            value={itemsPerPage}
+                                            onChange={(e) => {
+                                                setItemsPerPage(e.target.value);
+                                                setCurrentPage(1);
+                                            }}
+                                            label="Rows per page"
+                                        >
+                                            <MenuItem value={50}>50</MenuItem>
+                                            <MenuItem value={100}>100</MenuItem>
+                                            <MenuItem value={150}>150</MenuItem>
+                                        </Select>
+                                    </FormControl>
+                                    <Pagination
+                                        count={totalPages}
+                                        page={currentPage}
+                                        onChange={(e, value) => setCurrentPage(value)}
+                                        color="primary"
+                                        size="small"
+                                    />
+                                </Stack>
+                                <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'center' }}>
+                                    Page {currentPage} of {totalPages}
+                                </Typography>
+                            </Stack>
+                        )}
                     </Stack>
                 )}
             </Box>
 
-            <TableContainer component={Paper} sx={{ display: { xs: 'none', md: 'block' }, overflowX: 'auto' }}>
+            <TableContainer 
+                component={Paper} 
+                elevation={0}
+                sx={{ 
+                    display: { xs: 'none', md: 'block' }, 
+                    overflowX: 'auto',
+                    borderRadius: 3,
+                    background: 'linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(249,250,251,0.98) 100%)',
+                    border: '1px solid rgba(209, 213, 219, 0.5)',
+                    boxShadow: '0 8px 32px rgba(107, 114, 128, 0.12)',
+                    backdropFilter: 'blur(10px)'
+                }}>
                 <Table size="small">
                     <TableHead>
-                        <TableRow sx={{ bgcolor: '#f5f5f5' }}>
+                        <TableRow 
+                            sx={{ 
+                                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                                '& .MuiTableCell-root': {
+                                    color: '#ffffff',
+                                    fontWeight: 700,
+                                    fontSize: '0.813rem',
+                                    letterSpacing: '0.5px',
+                                    textTransform: 'uppercase',
+                                    borderBottom: 'none',
+                                    py: 2
+                                }
+                            }}>
                             <TableCell>Date</TableCell>
                             <TableCell>Name of Expenditure</TableCell>
                             <TableCell>Category</TableCell>
@@ -1408,27 +1961,88 @@ const ExtraExpensePage = () => {
                         </TableRow>
                     </TableHead>
                     <TableBody>
-                        {displayedExpenses.map((expense) => {
+                        {paginatedExpenses.map((expense, idx) => {
                             const isCredit = !!expense.isCredit;
                             const isCashExpense = !isCredit && expense.paymentMethod && expense.paymentMethod.toLowerCase() === 'cash';
                             return (
-                                <TableRow key={expense._id} hover sx={{ bgcolor: isCredit ? 'success.lighter' : (isCashExpense ? 'error.lighter' : 'transparent') }}>
+                                <TableRow 
+                                    key={expense._id} 
+                                    sx={{ 
+                                        bgcolor: isCredit 
+                                            ? 'rgba(220, 252, 231, 0.3)' 
+                                            : (isCashExpense ? 'rgba(254, 226, 226, 0.3)' : 'transparent'),
+                                        transition: 'background-color 0.2s ease, box-shadow 0.2s ease',
+                                        '&:nth-of-type(even)': {
+                                            bgcolor: isCredit 
+                                                ? 'rgba(220, 252, 231, 0.4)'
+                                                : (isCashExpense ? 'rgba(254, 226, 226, 0.4)' : 'rgba(249, 250, 251, 0.5)')
+                                        },
+                                        '&:hover': {
+                                            bgcolor: isCredit
+                                                ? 'rgba(187, 247, 208, 0.6)'
+                                                : (isCashExpense ? 'rgba(252, 165, 165, 0.6)' : 'rgba(224, 231, 255, 0.5)'),
+                                            boxShadow: '0 0 0 1px rgba(102, 126, 234, 0.2) inset'
+                                        },
+                                        '& .MuiTableCell-root': {
+                                            borderColor: 'rgba(209, 213, 219, 0.4)'
+                                        }
+                                    }}>
                                     <TableCell>{new Date(expense.date).toLocaleDateString()}</TableCell>
-                                    <TableCell sx={{ fontWeight: 600 }}>{expense.name}</TableCell>
-                                    <TableCell>{expense.category ? mapOldCategoryToNew(expense.category) : '—'}</TableCell>
-                                    <TableCell align="right" sx={{ fontWeight: 700, color: isCredit ? 'success.main' : 'error.main' }}>
+                                    <TableCell sx={{ fontWeight: 600, color: '#374151' }}>{expense.name}</TableCell>
+                                    <TableCell>
+                                        {expense.category ? (
+                                            <Chip 
+                                                size="small" 
+                                                label={mapOldCategoryToNew(expense.category)}
+                                                sx={{
+                                                    fontWeight: 600,
+                                                    fontSize: '0.75rem',
+                                                    borderRadius: 2,
+                                                    background: 'linear-gradient(135deg, #e0e7ff 0%, #dbeafe 100%)',
+                                                    color: '#3730a3',
+                                                    border: '1px solid rgba(99, 102, 241, 0.2)'
+                                                }}
+                                            />
+                                        ) : '—'}
+                                    </TableCell>
+                                    <TableCell align="right" sx={{ fontWeight: 800, fontSize: '0.938rem', color: isCredit ? '#16a34a' : '#dc2626' }}>
                                         {formatInr(expense.amount)}
                                     </TableCell>
                                     <TableCell>{expense.paidBy}</TableCell>
                                     <TableCell>
                                         {isCredit ? (
-                                            <Chip size="small" label="Credit" color="success" variant="filled" />
+                                            <Chip 
+                                                size="small" 
+                                                label="✅ Credit" 
+                                                sx={{
+                                                    fontWeight: 700,
+                                                    fontSize: '0.75rem',
+                                                    borderRadius: 2,
+                                                    background: 'linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%)',
+                                                    color: '#14532d',
+                                                    border: '1px solid rgba(34, 197, 94, 0.3)',
+                                                    boxShadow: '0 2px 8px rgba(34, 197, 94, 0.2)'
+                                                }}
+                                            />
                                         ) : (
                                             <Chip
                                                 size="small"
                                                 label={expense.paymentMethod || '—'}
-                                                color={isCashExpense ? 'error' : 'default'}
-                                                variant={isCashExpense ? 'filled' : 'outlined'}
+                                                sx={{
+                                                    fontWeight: 600,
+                                                    fontSize: '0.75rem',
+                                                    borderRadius: 2,
+                                                    ...(isCashExpense ? {
+                                                        background: 'linear-gradient(135deg, #fecaca 0%, #fca5a5 100%)',
+                                                        color: '#7f1d1d',
+                                                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                                                        boxShadow: '0 2px 8px rgba(239, 68, 68, 0.2)'
+                                                    } : {
+                                                        background: 'linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%)',
+                                                        color: '#374151',
+                                                        border: '1px solid rgba(156, 163, 175, 0.3)'
+                                                    })
+                                                }}
                                             />
                                         )}
                                     </TableCell>
@@ -1439,16 +2053,52 @@ const ExtraExpensePage = () => {
                                     </TableCell>
                                     <TableCell align="right">
                                         {isCredit ? (
-                                            <IconButton size="small" onClick={() => handleDeleteCredit(expense.rawRecord?._id)} color="error">
-                                                <DeleteIcon />
+                                            <IconButton 
+                                                size="small" 
+                                                onClick={() => handleDeleteCredit(expense.rawRecord?._id)} 
+                                                sx={{
+                                                    color: '#dc2626',
+                                                    transition: 'all 0.2s ease',
+                                                    '&:hover': {
+                                                        background: 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)',
+                                                        transform: 'scale(1.1)',
+                                                        boxShadow: '0 4px 12px rgba(239, 68, 68, 0.3)'
+                                                    }
+                                                }}
+                                            >
+                                                <DeleteIcon fontSize="small" />
                                             </IconButton>
                                         ) : (
                                             <>
-                                                <IconButton size="small" onClick={() => startEdit(expense)} color="primary">
-                                                    <EditIcon />
+                                                <IconButton 
+                                                    size="small" 
+                                                    onClick={() => startEdit(expense)} 
+                                                    sx={{
+                                                        color: '#3b82f6',
+                                                        transition: 'all 0.2s ease',
+                                                        '&:hover': {
+                                                            background: 'linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%)',
+                                                            transform: 'scale(1.1)',
+                                                            boxShadow: '0 4px 12px rgba(59, 130, 246, 0.3)'
+                                                        }
+                                                    }}
+                                                >
+                                                    <EditIcon fontSize="small" />
                                                 </IconButton>
-                                                <IconButton size="small" onClick={() => handleDelete(expense._id)} color="error">
-                                                    <DeleteIcon />
+                                                <IconButton 
+                                                    size="small" 
+                                                    onClick={() => handleDelete(expense._id)} 
+                                                    sx={{
+                                                        color: '#dc2626',
+                                                        transition: 'all 0.2s ease',
+                                                        '&:hover': {
+                                                            background: 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)',
+                                                            transform: 'scale(1.1)',
+                                                            boxShadow: '0 4px 12px rgba(239, 68, 68, 0.3)'
+                                                        }
+                                                    }}
+                                                >
+                                                    <DeleteIcon fontSize="small" />
                                                 </IconButton>
                                             </>
                                         )}
@@ -1456,45 +2106,104 @@ const ExtraExpensePage = () => {
                                 </TableRow>
                             );
                         })}
-                        {displayedExpenses.length === 0 && (
+                        {paginatedExpenses.length === 0 && (
                             <TableRow>
                                 <TableCell colSpan={8} align="center">No expenses found.</TableCell>
                             </TableRow>
                         )}
                     </TableBody>
-                    {displayedExpenses.length > 0 ? (
+                    {paginatedExpenses.length > 0 ? (
                         <TableFooter>
-                            <TableRow sx={{ bgcolor: 'grey.100' }}>
+                            <TableRow 
+                                sx={{ 
+                                    background: 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%)',
+                                    '& .MuiTableCell-root': {
+                                        borderTop: '2px solid rgba(139, 92, 246, 0.3)',
+                                        py: 2
+                                    }
+                                }}>
                                 <TableCell
                                     sx={{
-                                        fontWeight: 700,
-                                        borderTop: '2px solid',
-                                        borderColor: 'divider',
+                                        fontWeight: 800,
                                         whiteSpace: 'nowrap',
+                                        color: '#374151',
+                                        fontSize: '0.875rem'
                                     }}
                                 >
-                                    Total ({displayedExpenses.length})
+                                    📋 Page Total ({paginatedExpenses.length})
                                 </TableCell>
-                                <TableCell sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
-                                <TableCell sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
+                                <TableCell />
+                                <TableCell />
                                 <TableCell
                                     align="right"
                                     sx={{
-                                        fontWeight: 800,
-                                        color: 'error.main',
-                                        borderTop: '2px solid',
-                                        borderColor: 'divider',
+                                        fontWeight: 900,
+                                        color: '#dc2626',
                                         whiteSpace: 'nowrap',
+                                        fontSize: '1rem'
                                     }}
                                 >
-                                    {formatInr(listTotal)}
+                                    {formatInr(paginatedExpenses.filter(e => !e.isCredit).reduce((sum, e) => sum + (Number(e.amount) || 0), 0))}
                                 </TableCell>
-                                <TableCell colSpan={4} sx={{ borderTop: '2px solid', borderColor: 'divider' }} />
+                                <TableCell colSpan={4} />
                             </TableRow>
                         </TableFooter>
                     ) : null}
                 </Table>
             </TableContainer>
+
+            {/* Pagination Controls for Desktop */}
+            {displayedExpenses.length > 0 && totalPages > 1 && (
+                <Paper
+                    elevation={0}
+                    sx={{
+                        display: { xs: 'none', md: 'block' },
+                        mt: 3,
+                        p: 2.5,
+                        borderRadius: 3,
+                        background: 'linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(249,250,251,0.98) 100%)',
+                        border: '1px solid rgba(209, 213, 219, 0.5)',
+                        boxShadow: '0 4px 16px rgba(107, 114, 128, 0.08)'
+                    }}
+                >
+                    <Stack direction="row" justifyContent="center" alignItems="center" spacing={3}>
+                        <FormControl sx={{ minWidth: 140 }} size="small">
+                            <InputLabel>Rows per page</InputLabel>
+                            <Select
+                                value={itemsPerPage}
+                                onChange={(e) => {
+                                    setItemsPerPage(e.target.value);
+                                    setCurrentPage(1);
+                                }}
+                                label="Rows per page"
+                            >
+                                <MenuItem value={50}>50</MenuItem>
+                                <MenuItem value={100}>100</MenuItem>
+                                <MenuItem value={150}>150</MenuItem>
+                            </Select>
+                        </FormControl>
+                        <Pagination
+                            count={totalPages}
+                            page={currentPage}
+                            onChange={(e, value) => setCurrentPage(value)}
+                            color="primary"
+                            sx={{
+                                '& .MuiPaginationItem-root': {
+                                    fontWeight: 600,
+                                    '&.Mui-selected': {
+                                        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                                        color: '#ffffff',
+                                        boxShadow: '0 4px 12px rgba(118, 75, 162, 0.3)'
+                                    }
+                                }
+                            }}
+                        />
+                        <Typography variant="body2" sx={{ minWidth: 180, fontWeight: 600, color: '#6b7280' }}>
+                            Page {currentPage} of {totalPages} ({displayedExpenses.length} total)
+                        </Typography>
+                    </Stack>
+                </Paper>
+            )}
 
             <Dialog
                 open={openDialog}
