@@ -3,6 +3,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import {
   Box,
   IconButton,
+  MenuItem,
   Select,
   TextField,
   Typography,
@@ -15,8 +16,49 @@ function normalizeDisplayValue(value) {
 
 function getDisplayLabel(value, column) {
   const text = normalizeDisplayValue(value);
-  if (!text) return '-';
+  if (!text) {
+    if (column.emptyLabel) return column.emptyLabel;
+    return '-';
+  }
+  if (column.optionLabels?.[text]) return column.optionLabels[text];
   return text;
+}
+
+function SelectOptionPill({ label, style, compact = false, empty = false }) {
+  if (!style) {
+    return (
+      <Typography
+        component="span"
+        sx={{
+          fontSize: compact ? '0.75rem' : '0.8125rem',
+          fontStyle: empty ? 'italic' : 'normal',
+          color: 'text.secondary',
+          lineHeight: 1.2,
+        }}
+      >
+        {label}
+      </Typography>
+    );
+  }
+
+  return (
+    <Box
+      component="span"
+      sx={{
+        display: 'inline-block',
+        px: compact ? 0.75 : 1,
+        py: compact ? 0.15 : 0.25,
+        borderRadius: '999px',
+        fontSize: compact ? '0.6875rem' : '0.75rem',
+        fontWeight: 600,
+        backgroundColor: style.bg,
+        color: style.color,
+        lineHeight: 1.2,
+      }}
+    >
+      {label}
+    </Box>
+  );
 }
 
 const EtsyEditableCell = memo(function EtsyEditableCell({
@@ -24,6 +66,7 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
   value,
   disabled = false,
   saving = false,
+  compact = false,
   onSave,
   onCopy,
 }) {
@@ -60,8 +103,8 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
   };
 
   const commonSx = {
-    '& .MuiInputBase-root': { fontSize: '0.8125rem' },
-    '& .MuiInputBase-input': { py: 0.5, px: 0.75 },
+    '& .MuiInputBase-root': { fontSize: compact ? '0.75rem' : '0.8125rem' },
+    '& .MuiInputBase-input': { py: compact ? 0.25 : 0.5, px: compact ? 0.5 : 0.75 },
   };
 
   const selectOptions = useMemo(() => {
@@ -74,7 +117,68 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
   }, [column.options, localValue]);
 
   const pillStyle = column.optionStyles?.[localValue] || null;
-  const displayLabel = getDisplayLabel(localValue, column);
+  const displayLabel = column.getDisplayLabel
+    ? column.getDisplayLabel(value)
+    : getDisplayLabel(localValue, column);
+  const isEmptySelect = column.inputType === 'select' && !normalizeDisplayValue(value) && column.emptyLabel;
+
+  if (column.inputType === 'select' && column.alwaysEdit) {
+    return (
+      <Select
+        fullWidth
+        displayEmpty
+        size="small"
+        variant="standard"
+        disableUnderline
+        disabled={disabled || saving}
+        value={localValue}
+        onChange={(e) => {
+          const next = e.target.value;
+          setLocalValue(next);
+          commitSave(next);
+        }}
+        renderValue={(selected) => {
+          const label = column.optionLabels?.[selected]
+            ?? (selected || column.emptyLabel || 'Select status');
+          return (
+            <SelectOptionPill
+              label={label}
+              style={selected ? column.optionStyles?.[selected] : null}
+              compact={compact}
+              empty={!selected}
+            />
+          );
+        }}
+        sx={{
+          fontSize: compact ? '0.75rem' : '0.8125rem',
+          '& .MuiSelect-select': {
+            py: compact ? 0.25 : 0.5,
+            px: compact ? 0.5 : 0.75,
+            minHeight: compact ? 24 : 32,
+            display: 'flex',
+            alignItems: 'center',
+          },
+        }}
+        MenuProps={{
+          PaperProps: { sx: { mt: 0.5 } },
+        }}
+      >
+        {selectOptions.map((option) => {
+          const label = column.optionLabels?.[option] ?? (option || column.emptyLabel || '-');
+          return (
+            <MenuItem key={option || 'empty'} value={option} sx={{ py: compact ? 0.5 : 0.75 }}>
+              <SelectOptionPill
+                label={label}
+                style={option ? column.optionStyles?.[option] : null}
+                compact={compact}
+                empty={!option}
+              />
+            </MenuItem>
+          );
+        })}
+      </Select>
+    );
+  }
 
   if (!editing) {
     const rawText = normalizeDisplayValue(value);
@@ -98,34 +202,38 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
             if (!disabled && !saving && !column.computed) setEditing(true);
           }}
           sx={{
-            minHeight: 28,
-            lineHeight: 1.4,
+            minHeight: compact ? 20 : 28,
+            lineHeight: compact ? 1.2 : 1.4,
+            fontSize: compact ? '0.75rem' : undefined,
             cursor: disabled || saving || column.computed ? 'default' : 'pointer',
             opacity: saving ? 0.6 : 1,
             flex: 1,
             minWidth: 0,
             maxWidth: '100%',
-            whiteSpace: column.multiline ? 'pre-wrap' : 'nowrap',
+            whiteSpace: compact || !column.multiline ? 'nowrap' : 'pre-wrap',
             overflow: 'hidden',
-            textOverflow: column.multiline ? 'clip' : 'ellipsis',
-            wordBreak: column.multiline ? 'break-word' : 'normal',
-            overflowWrap: column.multiline ? 'anywhere' : 'normal',
+            textOverflow: compact || !column.multiline ? 'ellipsis' : 'clip',
+            wordBreak: compact || !column.multiline ? 'normal' : 'break-word',
+            overflowWrap: compact || !column.multiline ? 'normal' : 'anywhere',
             ...(column.computed
               ? { color: 'text.secondary', fontStyle: 'italic' }
               : {}),
             ...(pillStyle
               ? {
                 display: 'inline-block',
-                px: 1.25,
-                py: 0.35,
+                px: compact ? 0.75 : 1.25,
+                py: compact ? 0.15 : 0.35,
                 borderRadius: '999px',
-                fontSize: '0.75rem',
+                fontSize: compact ? '0.6875rem' : '0.75rem',
                 fontWeight: 600,
                 backgroundColor: pillStyle.bg,
                 color: pillStyle.color,
               }
               : {
-                color: displayLabel === '-' ? 'text.secondary' : 'text.primary',
+                color: isEmptySelect || displayLabel === '-'
+                  ? 'text.secondary'
+                  : 'text.primary',
+                ...(isEmptySelect ? { fontStyle: 'italic' } : {}),
               }),
           }}
         >
@@ -140,9 +248,9 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
               e.stopPropagation();
               onCopy(rawText);
             }}
-            sx={{ p: 0.25, flexShrink: 0 }}
+            sx={{ p: compact ? 0.125 : 0.25, flexShrink: 0 }}
           >
-            <ContentCopyIcon sx={{ fontSize: 14 }} />
+            <ContentCopyIcon sx={{ fontSize: compact ? 12 : 14 }} />
           </IconButton>
         )}
       </Box>
@@ -150,7 +258,59 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
   }
 
   if (column.inputType === 'select') {
-    const activeStyle = localValue ? column.optionStyles?.[localValue] : null;
+    if (column.optionStyles) {
+      return (
+        <Select
+          fullWidth
+          displayEmpty
+          size="small"
+          variant="standard"
+          disableUnderline
+          disabled={disabled || saving}
+          value={localValue}
+          defaultOpen
+          onChange={(e) => {
+            const next = e.target.value;
+            setLocalValue(next);
+            finishEditing(next);
+          }}
+          onClose={() => setEditing(false)}
+          renderValue={(selected) => {
+            const label = column.optionLabels?.[selected] ?? (selected || '-');
+            return (
+              <SelectOptionPill
+                label={label}
+                style={selected ? column.optionStyles?.[selected] : null}
+                compact={compact}
+                empty={!selected}
+              />
+            );
+          }}
+          sx={{
+            fontSize: compact ? '0.75rem' : '0.8125rem',
+            '& .MuiSelect-select': {
+              py: compact ? 0.25 : 0.5,
+              px: compact ? 0.5 : 0.75,
+              minHeight: compact ? 24 : 32,
+            },
+          }}
+        >
+          {selectOptions.map((option) => {
+            const label = column.optionLabels?.[option] ?? (option || '-');
+            return (
+              <MenuItem key={option || 'empty'} value={option}>
+                <SelectOptionPill
+                  label={label}
+                  style={option ? column.optionStyles?.[option] : null}
+                  compact={compact}
+                  empty={!option}
+                />
+              </MenuItem>
+            );
+          })}
+        </Select>
+      );
+    }
 
     return (
       <Select
@@ -167,21 +327,18 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
         onBlur={() => setEditing(false)}
         sx={{
           ...commonSx,
-          fontSize: '0.8125rem',
+          fontSize: compact ? '0.75rem' : '0.8125rem',
           minWidth: column.minWidth ? Math.min(column.minWidth, 280) : 140,
-          color: activeStyle?.color,
-          backgroundColor: activeStyle?.bg || 'transparent',
-          borderRadius: activeStyle ? '999px' : 1,
           '& .MuiNativeSelect-select': {
-            py: 0.5,
-            px: 1,
-            fontWeight: activeStyle ? 600 : 400,
+            py: compact ? 0.25 : 0.5,
+            px: compact ? 0.75 : 1,
+            minHeight: compact ? 24 : 32,
           },
         }}
       >
         {selectOptions.map((option) => (
           <option key={option || 'empty'} value={option}>
-            {option || '-'}
+            {column.optionLabels?.[option] ?? (option || '-')}
           </option>
         ))}
       </Select>
@@ -194,8 +351,8 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
       size="small"
       fullWidth
       multiline={Boolean(column.multiline)}
-      minRows={column.multiline ? 2 : 1}
-      maxRows={column.multiline ? 4 : 1}
+      minRows={column.multiline ? 1 : 1}
+      maxRows={column.multiline ? (compact ? 2 : 4) : 1}
       type={column.inputType === 'date' ? 'date' : column.inputType === 'number' ? 'number' : 'text'}
       value={localValue}
       disabled={disabled || saving}
@@ -222,10 +379,39 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
 
 export default EtsyEditableCell;
 
-export function EtsyRowNumberCell({ serialNumber, onDelete, deleting = false }) {
+export function EtsyRowNumberCell({ serialNumber, onDelete, onCalculate, deleting = false, compact = false }) {
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
-      <Typography variant="body2">{serialNumber}</Typography>
+    <Box sx={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: compact ? 0.125 : 0.5,
+      lineHeight: 1.1,
+    }}
+    >
+      <Typography variant="body2" sx={{ fontSize: compact ? '0.75rem' : undefined, lineHeight: 1.1 }}>
+        {serialNumber}
+      </Typography>
+      {onCalculate && (
+        <Typography
+          component="button"
+          type="button"
+          variant="caption"
+          onClick={onCalculate}
+          sx={{
+            border: 'none',
+            background: 'none',
+            color: 'primary.main',
+            cursor: 'pointer',
+            p: 0,
+            fontSize: compact ? '0.625rem' : '0.7rem',
+            lineHeight: 1.1,
+            textDecoration: 'underline',
+          }}
+        >
+          Calc
+        </Typography>
+      )}
       <Typography
         component="button"
         type="button"
@@ -238,7 +424,8 @@ export function EtsyRowNumberCell({ serialNumber, onDelete, deleting = false }) 
           color: 'error.main',
           cursor: deleting ? 'default' : 'pointer',
           p: 0,
-          fontSize: '0.7rem',
+          fontSize: compact ? '0.625rem' : '0.7rem',
+          lineHeight: 1.1,
           textDecoration: 'underline',
           opacity: deleting ? 0.5 : 1,
         }}
