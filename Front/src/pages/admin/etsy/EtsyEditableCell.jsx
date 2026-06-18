@@ -14,11 +14,33 @@ function normalizeDisplayValue(value) {
   return String(value);
 }
 
+function parseUsdNumber(value) {
+  const cleaned = String(value ?? '').replace(/[^\d.-]/g, '');
+  if (!cleaned || cleaned === '-' || cleaned === '.') return null;
+  const num = Number.parseFloat(cleaned);
+  return Number.isFinite(num) ? num : null;
+}
+
+function normalizeUsdStorage(value) {
+  const num = parseUsdNumber(value);
+  if (num == null) return '';
+  return num.toFixed(2);
+}
+
+function formatUsdCellDisplay(value) {
+  const num = parseUsdNumber(value);
+  if (num == null) return '';
+  return `$${num.toFixed(2)}`;
+}
+
 function getDisplayLabel(value, column) {
   const text = normalizeDisplayValue(value);
   if (!text) {
     if (column.emptyLabel) return column.emptyLabel;
     return '-';
+  }
+  if (column.format === 'usd') {
+    return formatUsdCellDisplay(text) || '-';
   }
   if (column.optionLabels?.[text]) return column.optionLabels[text];
   return text;
@@ -92,8 +114,14 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
   }, [editing]);
 
   const commitSave = (nextValue) => {
-    const normalized = normalizeDisplayValue(nextValue);
-    if (normalized === normalizeDisplayValue(value)) return;
+    let normalized = normalizeDisplayValue(nextValue);
+    if (column.format === 'usd') {
+      normalized = normalizeUsdStorage(normalized);
+    }
+    const currentValue = column.format === 'usd'
+      ? normalizeUsdStorage(value)
+      : normalizeDisplayValue(value);
+    if (normalized === currentValue) return;
     onSave(normalized);
   };
 
@@ -121,6 +149,8 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
     ? column.getDisplayLabel(value)
     : getDisplayLabel(localValue, column);
   const isEmptySelect = column.inputType === 'select' && !normalizeDisplayValue(value) && column.emptyLabel;
+  const cellAlign = column.align || 'left';
+  const justifyContent = cellAlign === 'right' ? 'flex-end' : cellAlign === 'center' ? 'center' : 'flex-start';
 
   if (column.inputType === 'select' && column.alwaysEdit) {
     return (
@@ -189,6 +219,7 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
         sx={{
           display: 'flex',
           alignItems: 'center',
+          justifyContent,
           gap: 0.25,
           minWidth: 0,
           width: '100%',
@@ -205,9 +236,11 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
             minHeight: compact ? 20 : 28,
             lineHeight: compact ? 1.2 : 1.4,
             fontSize: compact ? '0.75rem' : undefined,
+            textAlign: cellAlign,
+            width: cellAlign === 'center' || cellAlign === 'right' ? '100%' : 'auto',
+            flex: cellAlign === 'left' ? 1 : undefined,
             cursor: disabled || saving || column.computed ? 'default' : 'pointer',
             opacity: saving ? 0.6 : 1,
-            flex: 1,
             minWidth: 0,
             maxWidth: '100%',
             whiteSpace: compact || !column.multiline ? 'nowrap' : 'pre-wrap',
@@ -372,14 +405,90 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
       }}
       InputLabelProps={column.inputType === 'date' ? { shrink: true } : undefined}
       sx={commonSx}
-      placeholder="-"
+      placeholder={column.format === 'usd' ? '$0.00' : '-'}
     />
   );
 });
 
 export default EtsyEditableCell;
 
-export function EtsyRowNumberCell({ serialNumber, onDelete, onCalculate, deleting = false, compact = false }) {
+export function EtsyRowNumberCell({
+  serialNumber,
+  onDelete,
+  onCalculate,
+  deleting = false,
+  compact = false,
+  inlineActions = false,
+}) {
+  const removeButton = (
+    <Typography
+      component="button"
+      type="button"
+      variant="caption"
+      disabled={deleting}
+      onClick={onDelete}
+      sx={{
+        border: 'none',
+        background: 'none',
+        color: 'error.main',
+        cursor: deleting ? 'default' : 'pointer',
+        p: 0,
+        fontSize: compact ? '0.625rem' : '0.75rem',
+        lineHeight: 1.43,
+        textDecoration: 'underline',
+        opacity: deleting ? 0.5 : 1,
+        textTransform: 'lowercase',
+      }}
+    >
+      {deleting ? '...' : 'remove'}
+    </Typography>
+  );
+
+  if (compact || inlineActions) {
+    return (
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: compact ? 0.375 : 0.75,
+          flexWrap: 'nowrap',
+          lineHeight: 1.43,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        <Typography
+          variant="body2"
+          component="span"
+          sx={{ fontSize: compact ? '0.75rem' : undefined, lineHeight: 1.43 }}
+        >
+          {serialNumber}
+        </Typography>
+        {onCalculate && (
+          <Typography
+            component="button"
+            type="button"
+            variant="caption"
+            onClick={onCalculate}
+            sx={{
+              border: 'none',
+              background: 'none',
+              color: 'primary.main',
+              cursor: 'pointer',
+              p: 0,
+              fontSize: compact ? '0.625rem' : '0.75rem',
+              lineHeight: 1.43,
+              textDecoration: 'underline',
+            }}
+          >
+            Calc
+          </Typography>
+        )}
+        {removeButton}
+      </Box>
+    );
+  }
+
   return (
     <Box sx={{
       display: 'flex',

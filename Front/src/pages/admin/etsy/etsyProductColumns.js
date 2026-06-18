@@ -30,12 +30,12 @@ export function normalizeListingStatus(value) {
 }
 
 export const ETSY_PRODUCT_COLUMNS = [
-  { key: 'rowNum', label: '#', minWidth: 72, align: 'center', editable: false },
+  { key: 'rowNum', label: '#', minWidth: 88, align: 'center', editable: false },
   { key: 'listedDate', label: 'Listed Date', minWidth: 118, inputType: 'date' },
   { key: 'store', label: 'Store', minWidth: 110, inputType: 'select', options: [''] },
   { key: 'sku', label: 'SKU', minWidth: 108, inputType: 'text', emptyLabel: 'Auto from link' },
-  { key: 'supplierPrice', label: 'Supplier', minWidth: 92, align: 'right', inputType: 'text' },
-  { key: 'listedPrice', label: 'Listed', minWidth: 92, align: 'right', inputType: 'text' },
+  { key: 'supplierPrice', label: 'Supplier', minWidth: 96, align: 'right', inputType: 'text', format: 'usd' },
+  { key: 'listedPrice', label: 'Listed', minWidth: 96, align: 'right', inputType: 'text', format: 'usd' },
   { key: 'region', label: 'Region', minWidth: 80, align: 'center', inputType: 'select', options: ['', ...ETSY_REGION_OPTIONS] },
   { key: 'timeLeft', label: 'Time Left', minWidth: 108, align: 'center', computed: true },
   { key: 'links', label: 'Links', minWidth: 180, inputType: 'text', multiline: true, copyable: true },

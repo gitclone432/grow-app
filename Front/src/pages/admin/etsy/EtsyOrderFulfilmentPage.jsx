@@ -102,32 +102,37 @@ function sortOrdersNewestFirst(orders = []) {
   });
 }
 
-const SECTION_HEADER_HEIGHT = 34;
+const SECTION_HEADER_HEIGHT = 32;
+
+const COMPUTED_COLUMN_BODY_BG = '#fff5f5';
+const COMPUTED_COLUMN_BODY_BG_ALT = '#ffecec';
 
 const HEADER_CELL_SX = {
   fontWeight: 'bold',
-  py: 1.25,
-  px: 1.5,
   whiteSpace: 'nowrap',
   borderBottom: 'none',
   fontSize: '0.8125rem',
 };
 
 const BODY_CELL_SX = {
-  py: 0.75,
-  px: 1,
   borderBottom: '1px solid',
   borderColor: 'divider',
   fontSize: '0.8125rem',
-  verticalAlign: 'top',
+  lineHeight: 1.43,
+  verticalAlign: 'middle',
   overflow: 'hidden',
 };
 
 function getRowBackground(rowIndex, isSaving, theme) {
   if (isSaving) return '#fff8e1';
-  return rowIndex % 2 === 0
-    ? theme.palette.grey[50]
+  return rowIndex % 2 === 1
+    ? theme.palette.action.hover
     : theme.palette.background.paper;
+}
+
+function getComputedBodyBackground(rowIndex, isSaving) {
+  if (isSaving) return '#fff8e1';
+  return rowIndex % 2 === 1 ? COMPUTED_COLUMN_BODY_BG_ALT : COMPUTED_COLUMN_BODY_BG;
 }
 
 function getHeaderCellSx(column, theme) {
@@ -138,32 +143,39 @@ function getHeaderCellSx(column, theme) {
     zIndex: 2,
     backgroundColor: theme.palette.primary.main,
     color: theme.palette.common.white,
-    ...(column.key === 'rowNum' ? { borderRight: '2px solid rgba(255,255,255,0.35)' } : {}),
+    textAlign: column.align || 'left',
+    ...(column.key === 'rowNum'
+      ? {
+        borderRight: '2px solid rgba(255,255,255,0.35)',
+        textAlign: 'center',
+      }
+      : {}),
   };
 }
 
 function getBodyCellSx(column, isSaving, rowIndex, theme) {
-  const isMultiline = column.key === 'productName' || column.key === 'address';
+  const isComputed = Boolean(column.computed);
 
   return {
     ...BODY_CELL_SX,
-    backgroundColor: getRowBackground(rowIndex, isSaving, theme),
+    backgroundColor: isComputed
+      ? getComputedBodyBackground(rowIndex, isSaving)
+      : getRowBackground(rowIndex, isSaving, theme),
     ...(column.key === 'rowNum'
       ? { borderRight: '2px solid', borderColor: 'divider', textAlign: 'center' }
       : {}),
-    ...(isMultiline
-      ? { whiteSpace: 'normal', wordBreak: 'break-word', overflowWrap: 'anywhere' }
-      : { whiteSpace: 'nowrap', textOverflow: 'ellipsis' }),
+    ...(column.align ? { textAlign: column.align } : {}),
+    whiteSpace: 'nowrap',
+    textOverflow: 'ellipsis',
   };
 }
 
 const SECTION_HEADER_SX = {
   fontWeight: 700,
-  py: 0.75,
-  px: 1.5,
   whiteSpace: 'nowrap',
   borderBottom: '2px solid rgba(15, 23, 42, 0.12)',
   fontSize: '0.75rem',
+  lineHeight: 1.43,
   letterSpacing: '0.04em',
   textTransform: 'uppercase',
 };
@@ -793,6 +805,7 @@ export default function EtsyOrderFulfilmentPage() {
                 tableLayout: 'fixed',
                 width: tableMinWidth,
                 minWidth: tableMinWidth,
+                '& td, & th': { whiteSpace: 'nowrap' },
               }}
             >
               <colgroup>
@@ -861,10 +874,11 @@ export default function EtsyOrderFulfilmentPage() {
                             <EtsyRowNumberCell
                               serialNumber={serialNumber}
                               deleting={rowDeleting}
+                              inlineActions
                               onDelete={() => handleDeleteRow(row._id)}
                             />
                           ) : column.key === 'storeName' ? (
-                            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                            <Typography variant="body2" fontWeight="medium" noWrap>
                               {storeLabel}
                             </Typography>
                           ) : (
@@ -885,7 +899,7 @@ export default function EtsyOrderFulfilmentPage() {
               </TableBody>
             </Table>
             {totalPages > 1 && (
-              <Box sx={{ display: 'flex', justifyContent: 'center', py: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 1.25, borderTop: '1px solid', borderColor: 'divider' }}>
                 <Pagination
                   count={totalPages}
                   page={page}

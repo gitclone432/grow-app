@@ -12,11 +12,19 @@ export const ETSY_SOLD_PRICE_DEFAULTS = {
   processingRate: 0.05,
   processingFixed: 25,
   operatingRate: 0.0029,
-  relistFee: 18,
+  relistUsdFactor: 0.2,
+  trackingIdUsdFactor: 0.24,
   tdsTcsRate: 0.006,
   offsiteAdsRate: 0.15,
-  trackingIdFee: 21.6,
 };
+
+function getSupplierBasedFlatFees(settings) {
+  const rate = settings.supplierExRate;
+  return {
+    relistFee: round2(settings.relistUsdFactor * rate),
+    trackingIdFee: round2(settings.trackingIdUsdFactor * rate),
+  };
+}
 
 function round2(value) {
   return Math.round(value * 100) / 100;
@@ -73,11 +81,10 @@ export function computeSoldPriceBreakdown({
   const etsyFee = round2(settings.etsyFeeRate * soldPrice * settings.etsySoldExRate);
   const processingFee = round2((settings.processingRate * grossWithTax * settings.etsyGrossExRate) + settings.processingFixed);
   const operatingFee = round2(settings.operatingRate * grossWithTax * settings.etsyGrossExRate);
-  const relistFee = round2(settings.relistFee);
+  const { relistFee, trackingIdFee } = getSupplierBasedFlatFees(settings);
   const tdsTcs = round2(settings.tdsTcsRate * grossWithTax * settings.etsyGrossExRate);
   const offsiteAds = round2(settings.offsiteAdsRate * soldPrice * settings.etsySoldExRate);
   const couponAmount = round2(coupon);
-  const trackingIdFee = round2(settings.trackingIdFee);
 
   const netInr = round2(
     (grossWithTax * settings.etsyGrossExRate)
@@ -134,6 +141,7 @@ export function calculateSoldPriceFromTargetProfit({
   const supplier = computeSupplierBreakdown({ cost, ship, config });
   const settings = mergeConfig(config);
   const grossMultiplier = 1 + settings.soldTaxRate;
+  const { relistFee, trackingIdFee } = getSupplierBasedFlatFees(settings);
 
   const soldPriceCoefficient = round2(
     settings.etsyGrossExRate
@@ -144,7 +152,7 @@ export function calculateSoldPriceFromTargetProfit({
     - (settings.offsiteAdsRate * settings.etsySoldExRate)
   );
 
-  const fixedFees = round2(settings.processingFixed + settings.relistFee + settings.trackingIdFee + coupon);
+  const fixedFees = round2(settings.processingFixed + relistFee + trackingIdFee + coupon);
 
   if (soldPriceCoefficient <= 0) {
     return {

@@ -52,9 +52,9 @@ export default function EtsySoldPriceCalculatorDialog({
   const [targetProfit, setTargetProfit] = useState('');
   const [soldPrice, setSoldPrice] = useState('');
   const [supplierExRate, setSupplierExRate] = useState(String(ETSY_SOLD_PRICE_DEFAULTS.supplierExRate));
-  const [etsyGrossExRate, setEtsyGrossExRate] = useState(String(ETSY_SOLD_PRICE_DEFAULTS.etsyGrossExRate));
-  const [etsySoldExRate, setEtsySoldExRate] = useState(String(ETSY_SOLD_PRICE_DEFAULTS.etsySoldExRate));
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [etsyExRate, setEtsyExRate] = useState(String(ETSY_SOLD_PRICE_DEFAULTS.etsyGrossExRate));
+  const [etsyFeeExRate, setEtsyFeeExRate] = useState(String(ETSY_SOLD_PRICE_DEFAULTS.etsySoldExRate));
+  const [showFeeExRate, setShowFeeExRate] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -64,14 +64,25 @@ export default function EtsySoldPriceCalculatorDialog({
     setCoupon('0');
     setTargetProfit('');
     setMode('target');
-    setShowAdvanced(false);
+    setSupplierExRate(String(ETSY_SOLD_PRICE_DEFAULTS.supplierExRate));
+    setEtsyExRate(String(ETSY_SOLD_PRICE_DEFAULTS.etsyGrossExRate));
+    setEtsyFeeExRate(String(ETSY_SOLD_PRICE_DEFAULTS.etsySoldExRate));
+    setShowFeeExRate(false);
   }, [open, product]);
 
-  const config = useMemo(() => ({
-    supplierExRate: parseUsd(supplierExRate) || ETSY_SOLD_PRICE_DEFAULTS.supplierExRate,
-    etsyGrossExRate: parseUsd(etsyGrossExRate) || ETSY_SOLD_PRICE_DEFAULTS.etsyGrossExRate,
-    etsySoldExRate: parseUsd(etsySoldExRate) || ETSY_SOLD_PRICE_DEFAULTS.etsySoldExRate,
-  }), [supplierExRate, etsyGrossExRate, etsySoldExRate]);
+  const config = useMemo(() => {
+    const supplierRate = parseUsd(supplierExRate) || ETSY_SOLD_PRICE_DEFAULTS.supplierExRate;
+    const etsyGrossRate = parseUsd(etsyExRate) || ETSY_SOLD_PRICE_DEFAULTS.etsyGrossExRate;
+    const etsySoldRate = showFeeExRate
+      ? (parseUsd(etsyFeeExRate) || supplierRate)
+      : supplierRate;
+
+    return {
+      supplierExRate: supplierRate,
+      etsyGrossExRate: etsyGrossRate,
+      etsySoldExRate: etsySoldRate,
+    };
+  }, [supplierExRate, etsyExRate, etsyFeeExRate, showFeeExRate]);
 
   const result = useMemo(() => {
     const inputs = {
@@ -176,39 +187,55 @@ export default function EtsySoldPriceCalculatorDialog({
             placeholder="0"
           />
 
+          <Divider />
+
+          <Typography variant="subtitle2" fontWeight={700}>
+            Exchange rates (₹ per $1 USD)
+          </Typography>
+
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+            <TextField
+              label="Supplier EX rate"
+              size="small"
+              fullWidth
+              type="number"
+              inputProps={{ min: 0, step: '0.01' }}
+              value={supplierExRate}
+              onChange={(e) => setSupplierExRate(e.target.value)}
+              helperText="Landed cost: USD × rate → INR"
+            />
+            <TextField
+              label="Etsy EX rate"
+              size="small"
+              fullWidth
+              type="number"
+              inputProps={{ min: 0, step: '0.01' }}
+              value={etsyExRate}
+              onChange={(e) => setEtsyExRate(e.target.value)}
+              helperText="Net: (gross − tax) × rate → INR"
+            />
+          </Stack>
+
           <Button
             size="small"
             variant="text"
-            onClick={() => setShowAdvanced((prev) => !prev)}
+            onClick={() => setShowFeeExRate((prev) => !prev)}
             sx={{ alignSelf: 'flex-start', px: 0 }}
           >
-            {showAdvanced ? 'Hide' : 'Show'} exchange rates
+            {showFeeExRate ? 'Hide' : 'Use different rate for'} Etsy fee & offsite ads
           </Button>
 
-          {showAdvanced && (
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
-              <TextField
-                label="Supplier FX"
-                size="small"
-                fullWidth
-                value={supplierExRate}
-                onChange={(e) => setSupplierExRate(e.target.value)}
-              />
-              <TextField
-                label="Etsy gross FX"
-                size="small"
-                fullWidth
-                value={etsyGrossExRate}
-                onChange={(e) => setEtsyGrossExRate(e.target.value)}
-              />
-              <TextField
-                label="Etsy sold FX"
-                size="small"
-                fullWidth
-                value={etsySoldExRate}
-                onChange={(e) => setEtsySoldExRate(e.target.value)}
-              />
-            </Stack>
+          {showFeeExRate && (
+            <TextField
+              label="Etsy fee EX rate"
+              size="small"
+              fullWidth
+              type="number"
+              inputProps={{ min: 0, step: '0.01' }}
+              value={etsyFeeExRate}
+              onChange={(e) => setEtsyFeeExRate(e.target.value)}
+              helperText="Etsy fee & 15% offsite ads: sold USD × rate"
+            />
           )}
         </Stack>
 
@@ -239,7 +266,11 @@ export default function EtsySoldPriceCalculatorDialog({
             <Stack spacing={0.75} sx={{ mb: 1.5 }}>
               <BreakdownRow label="Buying price (USD)" value={formatUsdAmount(result.supplier.buyingPrice)} />
               <BreakdownRow label="CC + IGST (USD)" value={formatUsdAmount(result.supplier.totalCc)} />
-              <BreakdownRow label="Landed cost (INR)" value={formatInrAmount(result.supplier.inrCost)} bold />
+              <BreakdownRow
+                label={`Landed cost (INR @ ${config.supplierExRate})`}
+                value={formatInrAmount(result.supplier.inrCost)}
+                bold
+              />
             </Stack>
 
             <Divider sx={{ my: 1.5 }} />
@@ -252,11 +283,21 @@ export default function EtsySoldPriceCalculatorDialog({
               <BreakdownRow label="Etsy fee" value={formatInrAmount(result.breakdown.etsyFee)} />
               <BreakdownRow label="Processing fee" value={formatInrAmount(result.breakdown.processingFee)} />
               <BreakdownRow label="Operating fee" value={formatInrAmount(result.breakdown.operatingFee)} />
-              <BreakdownRow label="Relist" value={formatInrAmount(result.breakdown.relistFee)} />
+              <BreakdownRow
+                label={`Relist (0.20 × ${config.supplierExRate})`}
+                value={formatInrAmount(result.breakdown.relistFee)}
+              />
               <BreakdownRow label="TDS + TCS" value={formatInrAmount(result.breakdown.tdsTcs)} />
               <BreakdownRow label="Offsite ads (15%)" value={formatInrAmount(result.breakdown.offsiteAds)} />
-              <BreakdownRow label="Tracking ID" value={formatInrAmount(result.breakdown.trackingIdFee)} />
-              <BreakdownRow label="Net (INR)" value={formatInrAmount(result.breakdown.netInr)} bold />
+              <BreakdownRow
+                label={`Tracking ID (0.24 × ${config.supplierExRate})`}
+                value={formatInrAmount(result.breakdown.trackingIdFee)}
+              />
+              <BreakdownRow
+                label={`Net (INR @ ${config.etsyGrossExRate})`}
+                value={formatInrAmount(result.breakdown.netInr)}
+                bold
+              />
               <BreakdownRow label="Profit (INR)" value={formatInrAmount(result.breakdown.profitInr)} bold />
             </Stack>
           </Box>

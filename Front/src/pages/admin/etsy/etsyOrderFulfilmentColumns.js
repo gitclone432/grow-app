@@ -63,14 +63,14 @@ export const TRACKING_ID_UPLOADED_STYLES = {
 };
 
 export const ETSY_ORDER_FULFILMENT_COLUMNS = [
-  { key: 'rowNum', label: '#', minWidth: 96, align: 'center', section: 'index', editable: false },
-  { key: 'storeName', label: 'Store', minWidth: 120, section: 'index', editable: false },
-  { key: 'dateSold', label: 'Date of Sold', minWidth: 130, section: 'etsy', inputType: 'date' },
-  { key: 'etsyOrdersReceivedTime', label: 'Etsy Orders Received Time', minWidth: 190, section: 'etsy', inputType: 'text' },
-  { key: 'shipBy', label: 'Ship By', minWidth: 130, section: 'etsy', inputType: 'date' },
-  { key: 'estimateEtsyDelivery', label: 'Estimate ETSY Delivery', minWidth: 168, section: 'etsy', inputType: 'date' },
-  { key: 'productName', label: 'Product Name', minWidth: 280, section: 'etsy', inputType: 'text', multiline: true },
-  { key: 'sku', label: 'SKU', minWidth: 130, section: 'etsy', inputType: 'text' },
+  { key: 'rowNum', label: '#', minWidth: 76, align: 'center', section: 'index', editable: false },
+  { key: 'storeName', label: 'Store', minWidth: 88, section: 'index', editable: false },
+  { key: 'dateSold', label: 'Date of Sold', minWidth: 104, align: 'center', section: 'etsy', inputType: 'date' },
+  { key: 'etsyOrdersReceivedTime', label: 'Received Time', minWidth: 108, align: 'center', section: 'etsy', inputType: 'text' },
+  { key: 'shipBy', label: 'Ship By', minWidth: 104, align: 'center', section: 'etsy', inputType: 'date' },
+  { key: 'estimateEtsyDelivery', label: 'Est. Delivery', minWidth: 112, align: 'center', section: 'etsy', inputType: 'date' },
+  { key: 'productName', label: 'Product Name', minWidth: 200, section: 'etsy', inputType: 'text', multiline: true },
+  { key: 'sku', label: 'SKU', minWidth: 96, section: 'etsy', inputType: 'text' },
   { key: 'address', label: 'Address', minWidth: 280, section: 'etsy', inputType: 'text', multiline: true },
   { key: 'zipCode', label: 'Zip Code', minWidth: 112, section: 'etsy', computed: true, copyable: true },
   { key: 'region', label: 'Region', minWidth: 96, align: 'center', section: 'etsy', inputType: 'select', options: ['', ...ETSY_REGION_OPTIONS] },
