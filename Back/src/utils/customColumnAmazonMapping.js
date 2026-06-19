@@ -22,6 +22,8 @@ const CUSTOM_COLUMN_TO_AMAZON_FIELD = {
   'band width': 'bandWidth',
   'band color': 'bandColor',
   brand: 'brand',
+  'storage capacity': 'size',
+  storagecapacity: 'size',
 };
 
 /** product_information paths when top-level scrape fields are empty */
@@ -46,6 +48,24 @@ const CUSTOM_COLUMN_PI_FALLBACKS = {
   size: ['size'],
   color: ['color'],
   compatibility: ['compatible_devices', 'compatible_phone_models', 'compatible_cellular_phone_models'],
+  'storage capacity': [
+    'storage_capacity',
+    'hard_disk_size',
+    'memory_storage_capacity',
+    'digital_storage_capacity',
+    'flash_memory_size',
+    'internal_memory_storage_capacity',
+    'storage',
+  ],
+  storagecapacity: [
+    'storage_capacity',
+    'hard_disk_size',
+    'memory_storage_capacity',
+    'digital_storage_capacity',
+    'flash_memory_size',
+    'internal_memory_storage_capacity',
+    'storage',
+  ],
 };
 
 /** Augmented `amazon_pi_*` keys (from saved PI catalog + augmentAmazonDataWithPiColumns) */
@@ -67,6 +87,18 @@ const CUSTOM_COLUMN_PI_KEY_HINTS = {
     'amazon_pi_compatible_cellular_phone_models',
   ],
   screensize: ['amazon_pi_screen_size'],
+  'storage capacity': [
+    'amazon_pi_storage_capacity',
+    'amazon_pi_hard_disk_size',
+    'amazon_pi_memory_storage_capacity',
+    'amazon_pi_digital_storage_capacity',
+    'amazon_pi_flash_memory_size',
+  ],
+  storagecapacity: [
+    'amazon_pi_storage_capacity',
+    'amazon_pi_hard_disk_size',
+    'amazon_pi_memory_storage_capacity',
+  ],
 };
 
 export function customColumnHasDefault(column) {

@@ -14,6 +14,9 @@ import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
 import { getAsinCacheStats, clearAsinCache, invalidateAsinCache } from '../utils/asinCache.js';
 import AsinDirectory from '../models/AsinDirectory.js';
+import { ensureValidToken } from './ebay.js';
+import { addFixedPriceItemListing } from '../lib/ebayTradingDirectList.js';
+import { enrichListingItemSpecifics } from '../utils/ebayItemSpecificsEnrichment.js';
 
 const router = express.Router();
 
@@ -1569,14 +1572,21 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
       resolveAutofillCustomColumns(template)
     );
     const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
-    
+    const customColumns = resolveAutofillCustomColumns(template);
+    const customFieldsMerged = mergeReviewIntoCustomFields(customFields, mergedCoreFields, customColumns);
+    const enrichedListing = enrichListingItemSpecifics(
+      { customFields: customFieldsMerged },
+      customColumns,
+      amazonData
+    );
+
     // 4. Return auto-filled data (separated by type)
     res.json({
       success: true,
       asin,
       autoFilledData: {
         coreFields: mergedCoreFields,
-        customFields
+        customFields: enrichedListing.customFields,
       },
       amazonSource: {
         title: amazonData.title,
@@ -4786,6 +4796,146 @@ router.post('/cache-invalidate/:asin', requireAuth, async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message
+    });
+  }
+});
+
+// POST /api/template-listings/direct-list — Single SKU → eBay Trading API (AddFixedPriceItem)
+router.post('/direct-list', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, listing, asin, region = 'US', verifyOnly = false } = req.body;
+
+    if (!templateId || !sellerId) {
+      return res.status(400).json({ error: 'templateId and sellerId are required' });
+    }
+
+    let listingPayload = listing;
+    let amazonData = null;
+
+    if (!listingPayload && asin) {
+      const template = await getEffectiveTemplate(templateId, sellerId);
+      if (!template) {
+        return res.status(404).json({ error: 'Template not found' });
+      }
+
+      const fieldConfigs = resolveAutofillFieldConfigs(template);
+      let pricingConfig = template.pricingConfig;
+      const sellerConfig = await SellerPricingConfig.findOne({ sellerId, templateId });
+      if (sellerConfig) pricingConfig = sellerConfig.pricingConfig;
+
+      amazonData = await fetchAmazonData(asin, region);
+      const { coreFields, customFields } = await applyFieldConfigs(
+        amazonData,
+        fieldConfigs,
+        pricingConfig,
+        resolveAutofillCustomColumns(template)
+      );
+      const mergedCoreFields = mergeTemplateCoreFields(template.coreFieldDefaults, coreFields, amazonData);
+      const customColumns = resolveAutofillCustomColumns(template);
+      const customFieldsMerged = mergeReviewIntoCustomFields(customFields, mergedCoreFields, customColumns);
+
+      listingPayload = enrichListingItemSpecifics(
+        {
+          ...mergedCoreFields,
+          customLabel: generateSKUFromASIN(asin),
+          customFields: customFieldsMerged,
+          _asinReference: asin,
+        },
+        customColumns,
+        amazonData
+      );
+    }
+
+    if (!listingPayload || typeof listingPayload !== 'object') {
+      return res.status(400).json({ error: 'listing object or asin is required' });
+    }
+
+    const missing = ['customLabel', 'title', 'startPrice', 'categoryId', 'itemPhotoUrl']
+      .filter((key) => !String(listingPayload[key] ?? '').trim());
+    if (missing.length > 0) {
+      return res.status(400).json({ error: `Missing required listing fields: ${missing.join(', ')}` });
+    }
+
+    const [template, seller] = await Promise.all([
+      getEffectiveTemplate(templateId, sellerId),
+      Seller.findById(sellerId),
+    ]);
+
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const listingAsin = asin || listingPayload._asinReference;
+    if (!amazonData && listingAsin) {
+      try {
+        amazonData = await fetchAmazonData(listingAsin, region);
+      } catch (fetchErr) {
+        console.warn('[Direct List] Could not fetch Amazon data for item specifics:', fetchErr.message);
+      }
+    }
+
+    const customColumns = resolveAutofillCustomColumns(template);
+    listingPayload = enrichListingItemSpecifics(listingPayload, customColumns, amazonData);
+
+    const token = await ensureValidToken(seller);
+    const ebayResult = await addFixedPriceItemListing(token, listingPayload, { verifyOnly: Boolean(verifyOnly) });
+
+    if (!verifyOnly && ebayResult.itemId) {
+      await TemplateListing.findOneAndUpdate(
+        { templateId, sellerId, customLabel: listingPayload.customLabel },
+        {
+          $set: {
+            templateId,
+            sellerId,
+            ...listingPayload,
+            customFields: listingPayload.customFields || {},
+            status: 'active',
+            ebayItemId: ebayResult.itemId,
+            ebayListingUrl: ebayResult.listingUrl,
+            ebayPublishedAt: new Date(),
+            _asinReference: listingPayload._asinReference || asin || '',
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    }
+
+    res.json({
+      success: true,
+      itemId: ebayResult.itemId,
+      listingUrl: ebayResult.listingUrl,
+      ack: ebayResult.ack,
+      fees: ebayResult.fees,
+      warnings: ebayResult.warnings,
+      verifiedOnly: ebayResult.verifiedOnly,
+      listing: {
+        customLabel: listingPayload.customLabel,
+        title: listingPayload.title,
+        startPrice: listingPayload.startPrice,
+        categoryId: listingPayload.categoryId,
+        asin: listingPayload._asinReference || asin || null,
+        location: listingPayload.location || null,
+        country: listingPayload.country || null,
+        postalCode: listingPayload.postalCode || null,
+        itemSpecifics: Object.fromEntries(
+          Object.entries(listingPayload.customFields || {}).map(([key, value]) => [
+            String(key).replace(/^C:/i, '').trim(),
+            value,
+          ])
+        ),
+      },
+      message: verifyOnly
+        ? 'Listing validated with eBay (VerifyAddFixedPriceItem) — not published.'
+        : 'Listing published on eBay via Trading API.',
+    });
+  } catch (error) {
+    console.error('[Direct List] Error:', error);
+    res.status(500).json({
+      error: error.message || 'Failed to list on eBay',
+      details: error.response?.data || undefined,
     });
   }
 });

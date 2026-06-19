@@ -83,6 +83,7 @@ export const PAGE_REGISTRY = [
   { id: 'AsinLists', name: 'ASIN Lists', path: '/asin-lists', category: 'listingResearch', submenu: 'asinImporter', defaultRoles: ['superadmin', 'productadmin'] },
   // Direct items
   { id: 'FeedUpload', name: 'Feed Upload (CSV)', path: '/feed-upload', category: 'listingResearch', defaultRoles: ['superadmin', 'listingadmin', 'lister'] },
+  { id: 'DirectList', name: 'Direct List to eBay', path: '/direct-list', category: 'listingResearch', defaultRoles: ['superadmin', 'listingadmin', 'lister'] },
   { id: 'FeedUploadStats', name: 'Feed Upload Stats', path: '/feed-upload-stats', category: 'listingResearch', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'CsvStorage', name: 'CSV Storage', path: '/csv-storage', category: 'listingResearch', defaultRoles: ['superadmin', 'listingadmin', 'lister'] },
   { id: 'ProductResearch', name: 'Product Research', path: '/research', category: 'listingResearch', defaultRoles: ['superadmin', 'productadmin'] },
@@ -159,6 +160,7 @@ export const PAGE_REGISTRY = [
   // ====== ETSY ======
   { id: 'EtsyProducts', name: 'Products', path: '/etsy/products', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyOrderFulfilment', name: 'Order Fulfilment', path: '/etsy/order-fulfilment', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'EtsyOrderAnalytics', name: 'Etsy Order Analytics', path: '/etsy/order-analytics', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyProfitSheet', name: 'Profit Sheet', path: '/etsy/profit-sheet', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyDashboard', name: 'Dashboard', path: '/etsy/dashboard', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
 

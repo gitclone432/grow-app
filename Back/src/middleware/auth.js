@@ -44,6 +44,7 @@ export const PAGE_DEFAULT_ROLES = {
   'AsinDirectory': ['superadmin', 'productadmin'],
   'AsinLists': ['superadmin', 'productadmin'],
   'FeedUpload': ['superadmin', 'listingadmin', 'lister'],
+  'DirectList': ['superadmin', 'listingadmin', 'lister'],
   'FeedUploadStats': ['superadmin', 'listingadmin'],
   'CsvStorage': ['superadmin', 'listingadmin', 'lister'],
   'ProductResearch': ['superadmin', 'productadmin'],
@@ -116,6 +117,7 @@ export const PAGE_DEFAULT_ROLES = {
   // Etsy
   'EtsyProducts': ['superadmin', 'listingadmin'],
   'EtsyOrderFulfilment': ['superadmin', 'listingadmin'],
+  'EtsyOrderAnalytics': ['superadmin', 'listingadmin'],
   'EtsyProfitSheet': ['superadmin', 'listingadmin'],
   'EtsyDashboard': ['superadmin', 'listingadmin'],
 

@@ -86,6 +86,7 @@ import EmployeeManagementPage from '../pages/admin/EmployeeManagementPage.jsx';
 import BuyerChatPage from '../pages/admin/BuyerChatPage.jsx';
 import RangeAnalyzerPage from '../pages/admin/RangeAnalyzerPage.jsx';
 import FeedUploadPage from '../pages/ebay/FeedUploadPage.jsx';
+import DirectListPage from '../pages/ebay/DirectListPage.jsx';
 import SellingPrivilegesPage from '../pages/admin/SellingPrivilegesPage.jsx';
 import EbayApiUsagePage from '../pages/admin/EbayApiUsagePage.jsx';
 import EbayApiTesterPage from '../pages/admin/EbayApiTesterPage.jsx';
@@ -120,6 +121,7 @@ import GmailTesterPage from '../pages/admin/GmailTesterPage.jsx';
 import EtsyDashboardPage from '../pages/admin/etsy/EtsyDashboardPage.jsx';
 import EtsyProductsPage from '../pages/admin/etsy/EtsyProductsPage.jsx';
 import EtsyOrderFulfilmentPage from '../pages/admin/etsy/EtsyOrderFulfilmentPage.jsx';
+import EtsyOrderAnalyticsPage from '../pages/admin/etsy/EtsyOrderAnalyticsPage.jsx';
 import EtsyProfitSheetPage from '../pages/admin/etsy/EtsyProfitSheetPage.jsx';
 import AmazonPiSourceColumnsPage from '../pages/admin/AmazonPiSourceColumnsPage.jsx';
 import AffiliateOrdersPage from '../pages/admin/AffiliateOrdersPage.jsx';
@@ -299,6 +301,7 @@ const COMPONENT_MAP = {
   'AsinDirectory': AsinDirectoryPage,
   'AsinLists': AsinListPage,
   'FeedUpload': FeedUploadPage,
+  'DirectList': DirectListPage,
   'FeedUploadStats': FeedUploadStatsPage,
   'CsvStorage': CsvStoragePage,
   'ProductResearch': ProductResearchPage,
@@ -366,6 +369,7 @@ const COMPONENT_MAP = {
   'DescriptionTemplates': DescriptionTemplatesPage,
   'EtsyProducts': EtsyProductsPage,
   'EtsyOrderFulfilment': EtsyOrderFulfilmentPage,
+  'EtsyOrderAnalytics': EtsyOrderAnalyticsPage,
   'EtsyProfitSheet': EtsyProfitSheetPage,
   'EtsyDashboard': EtsyDashboardPage,
 };
