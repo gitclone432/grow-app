@@ -148,7 +148,11 @@ export function isEmptyCustomFieldValue(value) {
 
 function normalizeAmazonScalar(value) {
   if (value == null || value === '') return null;
-  if (typeof value === 'object' && !Array.isArray(value)) {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => String(item ?? '').trim()).filter(Boolean);
+    return items.length ? items : null;
+  }
+  if (typeof value === 'object') {
     return JSON.stringify(value);
   }
   const text = String(value).trim();

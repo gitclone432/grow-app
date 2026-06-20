@@ -90,7 +90,7 @@ const OrderSchema = new mongoose.Schema(
     amazonAccount: String,
     amazonAccountAssignmentSource: {
       type: String,
-      enum: ['affiliate', 'fulfillment'],
+      enum: ['affiliate', 'fulfillment', 'store_settings'],
       default: null
     },
     arrivingDate: String,

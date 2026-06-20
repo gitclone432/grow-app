@@ -1,5 +1,10 @@
 import axios from 'axios';
 import { parseStringPromise } from 'xml2js';
+import { splitItemPhotoUrls } from '../utils/itemPhotoUrls.js';
+import {
+  normalizeStoreLocationForEbay,
+  validateTradingLocationFields,
+} from '../utils/ebayTradingLocation.js';
 
 export function escapeXml(unsafe) {
   if (unsafe == null) return '';
@@ -21,24 +26,11 @@ function parseConditionId(value) {
   return match ? match[1] : '1000';
 }
 
-function splitPhotoUrls(value) {
-  return String(value || '')
-    .split('|')
-    .map((url) => url.trim())
-    .filter(Boolean)
-    .slice(0, 12);
-}
-
-function normalizeTradingLocation(value) {
-  const text = String(value || '').trim();
-  if (!text) return 'United States';
-  if (text.toLowerCase().replace(/\s+/g, '') === 'unitedstates') return 'United States';
-  return text;
-}
-
-function normalizeTradingCountry(value) {
-  const text = String(value || 'US').trim().toUpperCase();
-  return text.length === 2 ? text : 'US';
+function buildPictureDetailsXml(itemPhotoUrl) {
+  const urls = splitItemPhotoUrls(itemPhotoUrl);
+  if (urls.length === 0) return '';
+  const pictureNodes = urls.map((url) => `<PictureURL>${escapeXml(url)}</PictureURL>`).join('');
+  return `<PictureDetails>${pictureNodes}</PictureDetails>`;
 }
 
 function buildItemSpecificsXml(customFields = {}) {
@@ -57,13 +49,6 @@ function buildItemSpecificsXml(customFields = {}) {
 
   if (blocks.length === 0) return '';
   return `<ItemSpecifics>${blocks.join('')}</ItemSpecifics>`;
-}
-
-function buildPictureDetailsXml(itemPhotoUrl) {
-  const urls = splitPhotoUrls(itemPhotoUrl);
-  if (urls.length === 0) return '';
-  const pictureNodes = urls.map((url) => `<PictureURL>${escapeXml(url)}</PictureURL>`).join('');
-  return `<PictureDetails>${pictureNodes}</PictureDetails>`;
 }
 
 function buildProductListingDetailsXml(listing = {}) {
@@ -148,9 +133,17 @@ export function buildAddFixedPriceItemXml(token, listing = {}, { verifyOnly = fa
   const sku = String(listing.customLabel || '').trim();
   const duration = String(listing.duration || 'GTC').trim();
   const dispatchTime = String(listing.maxDispatchTime || '1').trim() || '1';
-  const location = normalizeTradingLocation(listing.location);
-  const country = normalizeTradingCountry(listing.country);
-  const postalCode = String(listing.postalCode || '').trim();
+  const normalizedLocation = normalizeStoreLocationForEbay({
+    location: listing.location,
+    country: listing.country,
+    postalCode: listing.postalCode,
+  });
+  const locationErrors = validateTradingLocationFields(normalizedLocation);
+  if (locationErrors.length > 0) {
+    throw new Error(locationErrors.join('; '));
+  }
+
+  const { location, country, postalCode } = normalizedLocation;
 
   if (!title || !categoryId || !Number.isFinite(startPrice) || !sku) {
     throw new Error('title, categoryId, startPrice, and customLabel (SKU) are required');

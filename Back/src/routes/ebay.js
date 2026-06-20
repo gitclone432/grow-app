@@ -72,6 +72,7 @@ import {
   getExchangeRateRecordForDate,
   getOrderTotalAmount
 } from '../utils/exchangeRateUtils.js';
+import { enrichNewOrderData } from '../utils/ebayStoreOrderSettings.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
@@ -4711,9 +4712,12 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
 
               if (!existingOrder) {
                 const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
-                const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
-                if (policyEligibleAt) {
-                  orderData.policyMessageEligibleAt = policyEligibleAt;
+                await enrichNewOrderData(orderData, seller._id);
+                if (!orderData.policyMessageDisabled) {
+                  const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
+                  if (policyEligibleAt) {
+                    orderData.policyMessageEligibleAt = policyEligibleAt;
+                  }
                 }
                 const newOrder = await Order.create(orderData);
                 newOrders.push(newOrder);
@@ -5067,9 +5071,12 @@ export async function scheduledPollNewOrders() {
 
             if (!existingOrder) {
               const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
-              const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
-              if (policyEligibleAt) {
-                orderData.policyMessageEligibleAt = policyEligibleAt;
+              await enrichNewOrderData(orderData, seller._id);
+              if (!orderData.policyMessageDisabled) {
+                const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
+                if (policyEligibleAt) {
+                  orderData.policyMessageEligibleAt = policyEligibleAt;
+                }
               }
               const newOrder = await Order.create(orderData);
               newOrders.push(newOrder);
@@ -5279,6 +5286,13 @@ router.post('/resync-from-dec1', requireAuth, requirePageAccess('Fulfillment'), 
               updateCount++;
             } else {
               // Create new order
+              await enrichNewOrderData(orderData, seller._id);
+              if (!orderData.policyMessageDisabled) {
+                const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
+                if (policyEligibleAt) {
+                  orderData.policyMessageEligibleAt = policyEligibleAt;
+                }
+              }
               await Order.create(orderData);
               newCount++;
             }

@@ -713,7 +713,13 @@ function applyTransform(value, transform) {
   
   switch (transform) {
     case 'pipeSeparated':
-      return Array.isArray(value) ? value.join(' | ') : value;
+      if (Array.isArray(value)) {
+        return value.map((item) => String(item ?? '').trim()).filter(Boolean).join(' | ');
+      }
+      if (typeof value === 'string' && value.includes(',')) {
+        return value.split(',').map((item) => item.trim()).filter(Boolean).join(' | ');
+      }
+      return value;
       
     case 'removeSymbol':
       return typeof value === 'string' ? value.replace(/[$€£¥]/g, '') : value;

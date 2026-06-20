@@ -1,356 +1,758 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Box,
   Button,
+  Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   FormControl,
+  IconButton,
   InputLabel,
   MenuItem,
   Paper,
   Select,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
+  Stack,
+  Switch,
+  Tab,
+  Tabs,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
-import RefreshIcon from '@mui/icons-material/Refresh';
 import EditIcon from '@mui/icons-material/Edit';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import SaveIcon from '@mui/icons-material/Save';
+import StorefrontIcon from '@mui/icons-material/Storefront';
 import api from '../../lib/api.js';
+import PricingConfigSection from '../../components/PricingConfigSection.jsx';
 import {
   fetchDescriptionTemplateGallery,
-  LEGACY_STORE_TEMPLATE_MAP_KEY,
-  patchDescriptionTemplateStoreMap,
 } from '../../lib/descriptionTemplateGalleryApi.js';
 
+const STORE_SETTINGS_REGION = 'US';
+
+const COUNTRY_OPTIONS = [
+  { code: 'US', label: 'United States' },
+  { code: 'GB', label: 'United Kingdom' },
+  { code: 'CA', label: 'Canada' },
+  { code: 'AU', label: 'Australia' },
+  { code: 'DE', label: 'Germany' },
+  { code: 'IN', label: 'India' },
+];
+
+const EMPTY_LISTER = {
+  defaultCountry: 'US',
+  defaultPostalCode: '',
+  defaultLocation: '',
+  paymentProfileName: 'Payment Policy',
+  shippingProfileName: 'Shipping Policy',
+  returnProfileName: 'Return Policy',
+  brandMode: 'from_scraper',
+};
+
+const EMPTY_GENERAL = {
+  descriptionTemplateId: '',
+};
+
+function truncateMessagePreview(text, max = 140) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max)}…`;
+}
+
+function TabPanel({ active, children }) {
+  if (!active) return null;
+  return <Box sx={{ pt: 3 }}>{children}</Box>;
+}
+
+function SettingsSection({ title, description, children, action }) {
+  return (
+    <Paper
+      variant="outlined"
+      sx={{
+        p: { xs: 2, sm: 2.5 },
+        borderRadius: 2,
+        bgcolor: 'background.paper',
+      }}
+    >
+      <Stack spacing={2.5}>
+        <Box>
+          <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+            {title}
+          </Typography>
+          {description ? (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              {description}
+            </Typography>
+          ) : null}
+        </Box>
+        {children}
+        {action ? (
+          <Box sx={{ pt: 0.5, display: 'flex', justifyContent: 'flex-start' }}>
+            {action}
+          </Box>
+        ) : null}
+      </Stack>
+    </Paper>
+  );
+}
+
+function SaveButton({ saving, disabled, onClick, label }) {
+  return (
+    <Button
+      variant="contained"
+      startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+      onClick={onClick}
+      disabled={disabled || saving}
+    >
+      {label}
+    </Button>
+  );
+}
+
 export default function StoresPage() {
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
+  const [sellers, setSellers] = useState([]);
+  const [listingTemplates, setListingTemplates] = useState([]);
+  const [descriptionTemplates, setDescriptionTemplates] = useState([]);
+
+  const [selectedSellerId, setSelectedSellerId] = useState('');
+  const [tab, setTab] = useState(0);
+
+  const [lister, setLister] = useState(EMPTY_LISTER);
+  const [automaticMessages, setAutomaticMessages] = useState([]);
+  const [general, setGeneral] = useState(EMPTY_GENERAL);
+  const [pricingTemplateId, setPricingTemplateId] = useState('');
+  const [pricingConfig, setPricingConfig] = useState(null);
+  const [pricingIsCustom, setPricingIsCustom] = useState(false);
+
+  const [loading, setLoading] = useState(true);
+  const [loadingSettings, setLoadingSettings] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [savingPricing, setSavingPricing] = useState(false);
+  const [savingOrders, setSavingOrders] = useState(false);
+  const [editMessage, setEditMessage] = useState(null);
   const [error, setError] = useState('');
-  const [actionLoading, setActionLoading] = useState({ sync: false, renew: false, delete: false });
-  const [editingSeller, setEditingSeller] = useState(null);
-  const [form, setForm] = useState({
-    username: '',
-    email: '',
-    isStoreActive: true,
-    marketplaces: '',
-  });
-  const [templates, setTemplates] = useState([]);
-  const [storeTemplateMap, setStoreTemplateMap] = useState({});
-  const [selectedTemplateId, setSelectedTemplateId] = useState('');
-  const [galleryError, setGalleryError] = useState('');
+  const [success, setSuccess] = useState('');
 
-  const loadTemplateGallery = async () => {
-    setGalleryError('');
-    try {
-      let { templates: list, storeTemplateMap: map } = await fetchDescriptionTemplateGallery();
-      const mapObj = map && typeof map === 'object' ? map : {};
-
-      if (
-        (!mapObj || Object.keys(mapObj).length === 0)
-      ) {
-        try {
-          const rawMap = localStorage.getItem(LEGACY_STORE_TEMPLATE_MAP_KEY);
-          const parsedMap = rawMap ? JSON.parse(rawMap) : {};
-          if (parsedMap && typeof parsedMap === 'object' && Object.keys(parsedMap).length) {
-            await patchDescriptionTemplateStoreMap(parsedMap);
-            ({ templates: list, storeTemplateMap: map } = await fetchDescriptionTemplateGallery());
-            localStorage.removeItem(LEGACY_STORE_TEMPLATE_MAP_KEY);
-          }
-        } catch (e) {
-          console.warn('Legacy store template map migrate skipped:', e?.message || e);
-        }
-      }
-
-      const nextTemplates = Array.isArray(list) ? list : [];
-      const nextMap = map && typeof map === 'object' ? map : {};
-      setTemplates(nextTemplates);
-      setStoreTemplateMap(nextMap);
-      return { templates: nextTemplates, storeTemplateMap: nextMap };
-    } catch (e) {
-      console.error('Failed to load description template gallery', e);
-      setGalleryError(e?.response?.data?.error || 'Failed to load description templates (server)');
-      setTemplates([]);
-      setStoreTemplateMap({});
-      return { templates: [], storeTemplateMap: {} };
-    }
-  };
-
-  const loadSellers = async () => {
-    setLoading(true);
-    try {
-      const { data } = await api.get('/sellers/all');
-      const sellers = Array.isArray(data) ? data : [];
-      setRows(sellers);
-    } catch (error) {
-      console.error('Failed to load sellers:', error);
-      setRows([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadSellers();
-  }, []);
-
-  useEffect(() => {
-    void loadTemplateGallery();
-  }, []);
-
-  const sortedRows = useMemo(
-    () =>
-      [...rows].sort((a, b) =>
-        String(a?.user?.username || '').localeCompare(String(b?.user?.username || ''))
-      ),
-    [rows]
+  const selectedSeller = useMemo(
+    () => sellers.find((s) => String(s._id) === String(selectedSellerId)),
+    [sellers, selectedSellerId]
   );
 
-  const openEdit = async (seller) => {
-    const { storeTemplateMap: freshMap } = await loadTemplateGallery();
-    const selectedFromStorage = freshMap?.[seller?._id] || '';
-    setEditingSeller(seller);
-    setForm({
-      username: seller?.user?.username || '',
-      email: seller?.user?.email || '',
-      isStoreActive: seller?.isStoreActive !== false,
-      marketplaces: Array.isArray(seller?.ebayMarketplaces) ? seller.ebayMarketplaces.join(', ') : '',
-    });
-    setError('');
-    setSelectedTemplateId(selectedFromStorage);
-    setEditOpen(true);
-  };
-
-  const saveStoreTemplateSelection = async (sellerId, templateId) => {
-    if (!sellerId) return;
-    try {
-      const next = { [sellerId]: templateId || '' };
-      const result = await patchDescriptionTemplateStoreMap(next);
-      const merged = result.storeTemplateMap && typeof result.storeTemplateMap === 'object' ? result.storeTemplateMap : {};
-      setStoreTemplateMap(merged);
-      if (Array.isArray(result.templates)) setTemplates(result.templates);
-    } catch (e) {
-      console.error('Failed to save store template mapping', e);
-      setError(e?.response?.data?.error || 'Failed to save description template for this store');
+  const loadSellers = useCallback(async () => {
+    const { data } = await api.get('/sellers/all');
+    const list = Array.isArray(data) ? data : [];
+    setSellers(list);
+    if (!selectedSellerId && list.length > 0) {
+      setSelectedSellerId(list[0]._id);
     }
-  };
+    return list;
+  }, [selectedSellerId]);
 
-  const saveEdit = async () => {
-    if (!editingSeller?._id) return;
+  const loadTemplates = useCallback(async () => {
+    const [listingRes, gallery] = await Promise.all([
+      api.get('/listing-templates'),
+      fetchDescriptionTemplateGallery().catch(() => ({ templates: [] })),
+    ]);
+    setListingTemplates(Array.isArray(listingRes.data) ? listingRes.data : []);
+    setDescriptionTemplates(Array.isArray(gallery.templates) ? gallery.templates : []);
+  }, []);
+
+  const loadPricing = useCallback(async (sellerId, templateId) => {
+    if (!sellerId || !templateId) {
+      setPricingConfig(null);
+      setPricingIsCustom(false);
+      return;
+    }
+    const { data } = await api.get('/seller-pricing-config', {
+      params: { sellerId, templateId },
+    });
+    setPricingConfig(data.pricingConfig || null);
+    setPricingIsCustom(Boolean(data.isCustom));
+  }, []);
+
+  const loadStoreSettings = useCallback(async (sellerId) => {
+    if (!sellerId) return;
+    setLoadingSettings(true);
+    setError('');
+    try {
+      const { data } = await api.get('/ebay-store-settings', {
+        params: { sellerId, region: STORE_SETTINGS_REGION },
+      });
+      const nextLister = { ...EMPTY_LISTER, ...(data.settings?.lister || {}) };
+      setLister(nextLister);
+      setAutomaticMessages(Array.isArray(data.settings?.orders?.automaticMessages)
+        ? data.settings.orders.automaticMessages
+        : []);
+      setGeneral({ ...EMPTY_GENERAL, ...(data.settings?.general || {}) });
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to load store settings');
+    } finally {
+      setLoadingSettings(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedSellerId && pricingTemplateId) {
+      void loadPricing(selectedSellerId, pricingTemplateId);
+    } else {
+      setPricingConfig(null);
+      setPricingIsCustom(false);
+    }
+  }, [selectedSellerId, pricingTemplateId, loadPricing]);
+
+  useEffect(() => {
+    const init = async () => {
+      setLoading(true);
+      try {
+        await Promise.all([loadSellers(), loadTemplates()]);
+      } catch (err) {
+        setError(err.response?.data?.error || 'Failed to initialize page');
+      } finally {
+        setLoading(false);
+      }
+    };
+    void init();
+  }, [loadSellers, loadTemplates]);
+
+  useEffect(() => {
+    if (selectedSellerId) {
+      void loadStoreSettings(selectedSellerId);
+    }
+  }, [selectedSellerId, loadStoreSettings]);
+
+  const saveListerSettings = async () => {
+    if (!selectedSellerId) return;
     setSaving(true);
     setError('');
+    setSuccess('');
     try {
       const payload = {
-        username: form.username.trim(),
-        email: form.email.trim(),
-        isStoreActive: form.isStoreActive,
-        ebayMarketplaces: form.marketplaces
-          .split(',')
-          .map((x) => x.trim())
-          .filter(Boolean),
+        sellerId: selectedSellerId,
+        region: STORE_SETTINGS_REGION,
+        lister,
       };
-      await api.patch(`/sellers/${editingSeller._id}`, payload);
-      setEditOpen(false);
-      setEditingSeller(null);
-      await loadSellers();
-    } catch (e) {
-      setError(e?.response?.data?.error || 'Failed to update seller');
+      const { data } = await api.put('/ebay-store-settings', payload);
+      setLister({ ...EMPTY_LISTER, ...data.settings.lister });
+      setSuccess('Lister settings saved.');
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to save lister settings');
     } finally {
       setSaving(false);
     }
   };
 
-  const syncStore = async () => {
-    if (!editingSeller?._id) return;
-    setActionLoading((p) => ({ ...p, sync: true }));
+  const saveAutomaticMessages = async () => {
+    if (!selectedSellerId) return;
+    setSavingOrders(true);
+    setError('');
+    setSuccess('');
     try {
-      await api.post('/ebay/sync-all-listings', { sellerId: editingSeller._id });
-      await loadSellers();
-    } catch (e) {
-      setError(e?.response?.data?.error || 'Failed to sync store');
+      const { data } = await api.put('/ebay-store-settings', {
+        sellerId: selectedSellerId,
+        region: STORE_SETTINGS_REGION,
+        orders: { automaticMessages },
+      });
+      setAutomaticMessages(Array.isArray(data.settings?.orders?.automaticMessages)
+        ? data.settings.orders.automaticMessages
+        : []);
+      setSuccess('Automatic message settings saved.');
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to save automatic messages');
     } finally {
-      setActionLoading((p) => ({ ...p, sync: false }));
+      setSavingOrders(false);
     }
   };
 
-  const renewStoreToken = async () => {
-    if (!editingSeller?._id) return;
-    setActionLoading((p) => ({ ...p, renew: true }));
+  const updateAutomaticMessage = (messageId, patch) => {
+    setAutomaticMessages((prev) => prev.map((message) => (
+      message.id === messageId ? { ...message, ...patch } : message
+    )));
+  };
+
+  const saveEditedMessage = () => {
+    if (!editMessage?.id) return;
+    updateAutomaticMessage(editMessage.id, { body: editMessage.body });
+    setEditMessage(null);
+  };
+
+  const saveGeneralSettings = async () => {
+    if (!selectedSellerId) return;
+    setSaving(true);
+    setError('');
+    setSuccess('');
     try {
-      const { data } = await api.get(`/sellers/${editingSeller._id}/renew-ebay-url`);
-      const base = import.meta.env.VITE_API_URL || '';
-      const renewUrl = (data?.url || '').startsWith('http') ? data.url : `${base}${data.url || ''}`;
-      if (renewUrl) window.open(renewUrl, '_blank', 'noopener,noreferrer');
-    } catch (e) {
-      setError(e?.response?.data?.error || 'Failed to generate renew URL');
+      const { data } = await api.put('/ebay-store-settings', {
+        sellerId: selectedSellerId,
+        region: STORE_SETTINGS_REGION,
+        general,
+      });
+      setGeneral({ ...EMPTY_GENERAL, ...data.settings.general });
+      setSuccess('General settings saved.');
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to save general settings');
     } finally {
-      setActionLoading((p) => ({ ...p, renew: false }));
+      setSaving(false);
     }
   };
 
-  const deleteStore = async () => {
-    if (!editingSeller?._id) return;
-    const ok = window.confirm('Delete this store? This will archive it and deactivate the seller account.');
-    if (!ok) return;
-    setActionLoading((p) => ({ ...p, delete: true }));
+  const savePricingSettings = async () => {
+    if (!selectedSellerId || !pricingTemplateId || !pricingConfig) return;
+    setSavingPricing(true);
+    setError('');
+    setSuccess('');
     try {
-      await api.delete(`/sellers/${editingSeller._id}`);
-      setEditOpen(false);
-      setEditingSeller(null);
-      await loadSellers();
-    } catch (e) {
-      setError(e?.response?.data?.error || 'Failed to delete store');
+      await api.post('/seller-pricing-config', {
+        sellerId: selectedSellerId,
+        templateId: pricingTemplateId,
+        pricingConfig,
+      });
+      setPricingIsCustom(true);
+      setSuccess('Pricing settings saved for this store + template.');
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to save pricing settings');
     } finally {
-      setActionLoading((p) => ({ ...p, delete: false }));
+      setSavingPricing(false);
     }
   };
+
+  if (loading) {
+    return (
+      <Box sx={{ p: 4, display: 'flex', justifyContent: 'center' }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
 
   return (
-    <Box>
-      <Typography variant="h5" sx={{ fontWeight: 700, mb: 2 }}>
-        eBay Stores
-      </Typography>
+    <Box sx={{ maxWidth: 920, mx: 'auto' }}>
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        spacing={2}
+        justifyContent="space-between"
+        alignItems={{ xs: 'stretch', sm: 'flex-start' }}
+        sx={{ mb: 3 }}
+      >
+        <Box>
+          <Typography variant="h5" sx={{ fontWeight: 700 }}>
+            eBay Stores
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+            Defaults for listing, pricing, messages, and descriptions per store.
+          </Typography>
+        </Box>
 
-      {galleryError ? (
-        <Alert severity="warning" sx={{ mb: 2 }}>{galleryError}</Alert>
-      ) : null}
-
-      <Paper sx={{ p: 2, borderRadius: 2, mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Typography variant="body2" color="text.secondary">
-          eBay seller accounts are listed here.
-        </Typography>
-        <Button variant="outlined" startIcon={<RefreshIcon />} onClick={loadSellers} disabled={loading}>
-          {loading ? 'Loading...' : 'Refresh'}
-        </Button>
-      </Paper>
-
-      <TableContainer component={Paper} sx={{ borderRadius: 2 }}>
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell sx={{ width: 48 }} align="center">#</TableCell>
-              <TableCell>Username</TableCell>
-              <TableCell>Email</TableCell>
-              <TableCell>Store Active</TableCell>
-              <TableCell>Marketplaces</TableCell>
-              <TableCell>Description Template</TableCell>
-              <TableCell align="right">Action</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {sortedRows.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} align="center" sx={{ py: 3 }}>
-                  {loading ? 'Loading sellers...' : 'No sellers found.'}
-                </TableCell>
-              </TableRow>
-            ) : (
-              sortedRows.map((seller, index) => (
-                <TableRow key={seller._id} hover>
-                  <TableCell align="center" sx={{ color: 'text.secondary', fontWeight: 600 }}>
-                    {index + 1}
-                  </TableCell>
-                  <TableCell>{seller?.user?.username || '-'}</TableCell>
-                  <TableCell>{seller?.user?.email || '-'}</TableCell>
-                  <TableCell>{seller?.isStoreActive === false ? 'No' : 'Yes'}</TableCell>
-                  <TableCell>{Array.isArray(seller?.ebayMarketplaces) && seller.ebayMarketplaces.length > 0 ? seller.ebayMarketplaces.join(', ') : '-'}</TableCell>
-                  <TableCell>
-                    {templates.find((t) => String(t.id) === String(storeTemplateMap[seller._id]))?.title || '-'}
-                  </TableCell>
-                  <TableCell align="right">
-                    <Button size="small" variant="outlined" startIcon={<EditIcon />} onClick={() => openEdit(seller)}>
-                      Edit
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </TableContainer>
-
-      <Dialog open={editOpen} onClose={() => setEditOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Edit Store</DialogTitle>
-        <DialogContent sx={{ pt: 1.5 }}>
-          <TextField
-            margin="dense"
-            label="Username"
-            fullWidth
-            value={form.username}
-            onChange={(e) => setForm((prev) => ({ ...prev, username: e.target.value }))}
-          />
-          <TextField
-            margin="dense"
-            label="Email"
-            fullWidth
-            value={form.email}
-            onChange={(e) => setForm((prev) => ({ ...prev, email: e.target.value }))}
-          />
-          <TextField
-            margin="dense"
-            label="Store Active (yes/no)"
-            fullWidth
-            value={form.isStoreActive ? 'yes' : 'no'}
-            onChange={(e) => {
-              const val = e.target.value.trim().toLowerCase();
-              setForm((prev) => ({ ...prev, isStoreActive: val !== 'no' && val !== 'false' && val !== '0' }));
-            }}
-            helperText="Type yes or no"
-          />
-          <TextField
-            margin="dense"
-            label="Marketplaces (comma separated)"
-            fullWidth
-            value={form.marketplaces}
-            onChange={(e) => setForm((prev) => ({ ...prev, marketplaces: e.target.value }))}
-            placeholder="EBAY_US, EBAY_UK"
-          />
-          <FormControl margin="dense" fullWidth size="small">
-            <InputLabel>Description Template</InputLabel>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
+          <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 240 } }}>
+            <InputLabel>Store</InputLabel>
             <Select
-              label="Description Template"
-              value={selectedTemplateId}
-              onChange={(e) => {
-                const value = e.target.value;
-                setSelectedTemplateId(value);
-                if (editingSeller?._id) void saveStoreTemplateSelection(editingSeller._id, value);
-              }}
+              label="Store"
+              value={selectedSellerId}
+              onChange={(e) => setSelectedSellerId(e.target.value)}
+              displayEmpty
             >
-              <MenuItem value="">
-                <em>None</em>
-              </MenuItem>
-              {templates.map((template) => (
-                <MenuItem key={template.id} value={template.id}>
-                  {template.title}
+              {sellers.length === 0 && (
+                <MenuItem value="" disabled>No stores connected</MenuItem>
+              )}
+              {sellers.map((seller) => (
+                <MenuItem key={seller._id} value={seller._id}>
+                  {seller.user?.username || seller._id}
                 </MenuItem>
               ))}
             </Select>
           </FormControl>
-          {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
+          <Tooltip title="Reload settings">
+            <span>
+              <IconButton
+                onClick={() => loadStoreSettings(selectedSellerId)}
+                disabled={loadingSettings || !selectedSellerId}
+                sx={{
+                  border: 1,
+                  borderColor: 'divider',
+                  borderRadius: 1.5,
+                }}
+              >
+                <RefreshIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+        </Stack>
+      </Stack>
+
+      {error ? (
+        <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }} onClose={() => setError('')}>
+          {error}
+        </Alert>
+      ) : null}
+      {success ? (
+        <Alert severity="success" sx={{ mb: 2, borderRadius: 2 }} onClose={() => setSuccess('')}>
+          {success}
+        </Alert>
+      ) : null}
+
+      <Paper
+        elevation={0}
+        sx={{
+          border: 1,
+          borderColor: 'divider',
+          borderRadius: 2,
+          overflow: 'hidden',
+        }}
+      >
+        <Tabs
+          value={tab}
+          onChange={(_, value) => setTab(value)}
+          variant="scrollable"
+          scrollButtons="auto"
+          sx={{
+            px: { xs: 1, sm: 2 },
+            borderBottom: 1,
+            borderColor: 'divider',
+            bgcolor: (theme) => theme.palette.mode === 'dark' ? 'grey.900' : 'grey.50',
+            '& .MuiTab-root': { minHeight: 48, textTransform: 'none', fontWeight: 600 },
+          }}
+        >
+          <Tab label="Lister" />
+          <Tab label="Pricing" />
+          <Tab label="Orders" />
+          <Tab label="General" />
+        </Tabs>
+
+        <Box sx={{ p: { xs: 2, sm: 3 }, minHeight: 360 }}>
+          {loadingSettings ? (
+            <Box sx={{ py: 8, display: 'flex', justifyContent: 'center' }}>
+              <CircularProgress size={28} />
+            </Box>
+          ) : !selectedSellerId ? (
+            <Box sx={{ py: 8, textAlign: 'center' }}>
+              <StorefrontIcon sx={{ fontSize: 40, color: 'text.disabled', mb: 1 }} />
+              <Typography color="text.secondary">Select a store to view settings.</Typography>
+            </Box>
+          ) : (
+            <>
+              <TabPanel active={tab === 0}>
+                <Stack spacing={2.5}>
+                  <SettingsSection
+                    title="Item location"
+                    description={`eBay item location fields for ${selectedSeller?.user?.username || 'this store'}. These map to Trading API Country, Location, and PostalCode.`}
+                  >
+                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                      <FormControl fullWidth size="small" required>
+                        <InputLabel>eBay Country</InputLabel>
+                        <Select
+                          label="eBay Country *"
+                          value={lister.defaultCountry}
+                          onChange={(e) => setLister((p) => ({
+                            ...p,
+                            defaultCountry: e.target.value,
+                            defaultLocation: '',
+                          }))}
+                        >
+                          {COUNTRY_OPTIONS.map((opt) => (
+                            <MenuItem key={opt.code} value={opt.code}>{opt.label}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <TextField
+                        label="eBay Postal / ZIP (optional)"
+                        size="small"
+                        value={lister.defaultPostalCode}
+                        onChange={(e) => setLister((p) => ({ ...p, defaultPostalCode: e.target.value }))}
+                        fullWidth
+                      />
+                    </Stack>
+                    <TextField
+                      label="eBay Location (city / region)"
+                      size="small"
+                      value={lister.defaultLocation}
+                      onChange={(e) => setLister((p) => ({ ...p, defaultLocation: e.target.value }))}
+                      fullWidth
+                      required
+                      placeholder="e.g. Casper, Wyoming or Balasore, Odisha"
+                      helperText="City and state/region only — do not include country name. Use English/Latin text."
+                    />
+                  </SettingsSection>
+
+                  <SettingsSection
+                    title="Brand"
+                    description="How the Brand item specific is set when listing on eBay via Direct List."
+                  >
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Brand source</InputLabel>
+                      <Select
+                        label="Brand source"
+                        value={lister.brandMode || 'from_scraper'}
+                        onChange={(e) => setLister((p) => ({ ...p, brandMode: e.target.value }))}
+                      >
+                        <MenuItem value="from_scraper">From Amazon scraper</MenuItem>
+                        <MenuItem value="does_not_apply">Does Not Apply</MenuItem>
+                      </Select>
+                    </FormControl>
+                  </SettingsSection>
+
+                  <SettingsSection
+                    title="Business policies"
+                    description="Policy names must match your eBay Business Policies."
+                  >
+                    <Stack spacing={2}>
+                      <TextField
+                        label="Payment policy"
+                        size="small"
+                        value={lister.paymentProfileName}
+                        onChange={(e) => setLister((p) => ({ ...p, paymentProfileName: e.target.value }))}
+                        fullWidth
+                      />
+                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                        <TextField
+                          label="Shipping policy"
+                          size="small"
+                          value={lister.shippingProfileName}
+                          onChange={(e) => setLister((p) => ({ ...p, shippingProfileName: e.target.value }))}
+                          fullWidth
+                        />
+                        <TextField
+                          label="Return policy"
+                          size="small"
+                          value={lister.returnProfileName}
+                          onChange={(e) => setLister((p) => ({ ...p, returnProfileName: e.target.value }))}
+                          fullWidth
+                        />
+                      </Stack>
+                    </Stack>
+                  </SettingsSection>
+
+                  <Box sx={{ display: 'flex', justifyContent: 'flex-start' }}>
+                    <SaveButton
+                      saving={saving}
+                      disabled={!selectedSellerId}
+                      onClick={saveListerSettings}
+                      label="Save lister settings"
+                    />
+                  </Box>
+                </Stack>
+              </TabPanel>
+
+              <TabPanel active={tab === 1}>
+                <Stack spacing={2.5}>
+                  <SettingsSection
+                    title="Template pricing"
+                    description="Override pricing rules for a listing template on this store."
+                    action={pricingTemplateId && pricingConfig ? (
+                      <SaveButton
+                        saving={savingPricing}
+                        disabled={!pricingConfig}
+                        onClick={savePricingSettings}
+                        label="Save pricing settings"
+                      />
+                    ) : null}
+                  >
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Listing template</InputLabel>
+                      <Select
+                        label="Listing template"
+                        value={pricingTemplateId}
+                        onChange={(e) => setPricingTemplateId(e.target.value)}
+                      >
+                        <MenuItem value=""><em>Select template</em></MenuItem>
+                        {listingTemplates.map((template) => (
+                          <MenuItem key={template._id} value={template._id}>
+                            {template.name}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+
+                    {!pricingTemplateId ? (
+                      <Alert severity="info" sx={{ borderRadius: 2 }}>
+                        Choose a listing template to edit store-specific pricing overrides.
+                      </Alert>
+                    ) : (
+                      <>
+                        <Alert severity="info" sx={{ borderRadius: 2 }}>
+                          {selectedSeller?.user?.username} ·{' '}
+                          <strong>{listingTemplates.find((t) => t._id === pricingTemplateId)?.name || pricingTemplateId}</strong>
+                          {pricingIsCustom ? ' · custom override' : ' · template defaults until saved'}
+                        </Alert>
+                        {pricingConfig ? (
+                          <PricingConfigSection
+                            pricingConfig={pricingConfig}
+                            onChange={setPricingConfig}
+                          />
+                        ) : null}
+                      </>
+                    )}
+                  </SettingsSection>
+                </Stack>
+              </TabPanel>
+
+              <TabPanel active={tab === 2}>
+                <SettingsSection
+                  title="Automatic messages"
+                  description="Enable and edit customer message templates. Sending will be connected later."
+                  action={(
+                    <SaveButton
+                      saving={savingOrders}
+                      disabled={!selectedSellerId}
+                      onClick={saveAutomaticMessages}
+                      label="Save message settings"
+                    />
+                  )}
+                >
+                  <Stack
+                    direction="row"
+                    spacing={1}
+                    alignItems="center"
+                    sx={{ display: { xs: 'none', sm: 'flex' }, px: 1.5, pb: 0.5 }}
+                  >
+                    <Typography variant="caption" color="text.secondary" sx={{ width: 168, flexShrink: 0 }}>
+                      Message
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+                      Preview
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" sx={{ width: 120, textAlign: 'right' }}>
+                      Status
+                    </Typography>
+                  </Stack>
+
+                  <Stack spacing={1}>
+                    {automaticMessages.map((message) => (
+                      <Paper
+                        key={message.id}
+                        variant="outlined"
+                        sx={{
+                          p: 1.5,
+                          borderRadius: 1.5,
+                          transition: 'border-color 0.15s ease',
+                          '&:hover': { borderColor: 'primary.light' },
+                        }}
+                      >
+                        <Stack
+                          direction={{ xs: 'column', sm: 'row' }}
+                          alignItems={{ xs: 'stretch', sm: 'center' }}
+                          spacing={1.5}
+                        >
+                          <Typography
+                            variant="body2"
+                            sx={{ width: { sm: 168 }, fontWeight: 600, flexShrink: 0 }}
+                          >
+                            {message.label}
+                          </Typography>
+                          <Typography
+                            variant="body2"
+                            color="text.secondary"
+                            sx={{
+                              flex: 1,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {truncateMessagePreview(message.body)}
+                          </Typography>
+                          <Stack
+                            direction="row"
+                            alignItems="center"
+                            justifyContent={{ xs: 'space-between', sm: 'flex-end' }}
+                            spacing={1}
+                            sx={{ width: { sm: 120 }, flexShrink: 0 }}
+                          >
+                            <Chip
+                              label={message.enabled ? 'On' : 'Off'}
+                              size="small"
+                              color={message.enabled ? 'success' : 'default'}
+                              variant={message.enabled ? 'filled' : 'outlined'}
+                              sx={{ minWidth: 44 }}
+                            />
+                            <Tooltip title="Edit message">
+                              <IconButton
+                                size="small"
+                                aria-label={`Edit ${message.label}`}
+                                onClick={() => setEditMessage({ ...message })}
+                              >
+                                <EditIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                            <Switch
+                              size="small"
+                              checked={Boolean(message.enabled)}
+                              onChange={(e) => updateAutomaticMessage(message.id, { enabled: e.target.checked })}
+                              inputProps={{ 'aria-label': `Toggle ${message.label}` }}
+                            />
+                          </Stack>
+                        </Stack>
+                      </Paper>
+                    ))}
+                  </Stack>
+
+                  <Stack direction="row" alignItems="center" spacing={0.5}>
+                    <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+                    <Typography variant="caption" color="text.secondary">
+                      Placeholders: {'{{ buyer_first_name }}'}, {'{{ shipping_carrier }}'}, {'{{ tracking_number }}'}, {'{{ feedback_url }}'}
+                    </Typography>
+                  </Stack>
+                </SettingsSection>
+              </TabPanel>
+
+              <TabPanel active={tab === 3}>
+                <SettingsSection
+                  title="Description template"
+                  description="Used when building HTML descriptions for this store."
+                  action={(
+                    <SaveButton
+                      saving={saving}
+                      disabled={!selectedSellerId}
+                      onClick={saveGeneralSettings}
+                      label="Save general settings"
+                    />
+                  )}
+                >
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Description template</InputLabel>
+                    <Select
+                      label="Description template"
+                      value={general.descriptionTemplateId}
+                      onChange={(e) => setGeneral((p) => ({ ...p, descriptionTemplateId: e.target.value }))}
+                    >
+                      <MenuItem value=""><em>None</em></MenuItem>
+                      {descriptionTemplates.map((template) => (
+                        <MenuItem key={template.id} value={template.id}>
+                          {template.title}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </SettingsSection>
+              </TabPanel>
+            </>
+          )}
+        </Box>
+      </Paper>
+
+      <Dialog open={Boolean(editMessage)} onClose={() => setEditMessage(null)} fullWidth maxWidth="sm">
+        <DialogTitle sx={{ fontWeight: 600 }}>
+          Edit message — {editMessage?.label}
+        </DialogTitle>
+        <DialogContent dividers>
+          <TextField
+            label="Message body"
+            value={editMessage?.body || ''}
+            onChange={(e) => setEditMessage((prev) => ({ ...prev, body: e.target.value }))}
+            fullWidth
+            multiline
+            minRows={10}
+            margin="dense"
+            helperText="Placeholders: {{ buyer_first_name }}, {{ shipping_carrier }}, {{ tracking_number }}, {{ feedback_url }}"
+          />
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setEditOpen(false)}>Cancel</Button>
-          <Button onClick={syncStore} variant="outlined" disabled={actionLoading.sync}>
-            {actionLoading.sync ? 'Syncing...' : 'Sync Store'}
-          </Button>
-          <Button onClick={renewStoreToken} variant="outlined" disabled={actionLoading.renew}>
-            {actionLoading.renew ? 'Opening...' : 'Renew Store Token'}
-          </Button>
-          <Button onClick={deleteStore} color="error" variant="outlined" disabled={actionLoading.delete}>
-            {actionLoading.delete ? 'Deleting...' : 'Delete Store'}
-          </Button>
-          <Button onClick={saveEdit} variant="contained" disabled={saving}>
-            {saving ? 'Saving...' : 'Save'}
-          </Button>
+        <DialogActions sx={{ px: 3, py: 2 }}>
+          <Button onClick={() => setEditMessage(null)}>Cancel</Button>
+          <Button variant="contained" onClick={saveEditedMessage}>Apply</Button>
         </DialogActions>
       </Dialog>
     </Box>

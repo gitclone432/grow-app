@@ -9,6 +9,7 @@ import {
   refreshPayoneerFeedCache,
 } from './routes/ebay.js';
 import { importTransactionsFromGmail } from './utils/gmailTransactionImporter.js';
+import { runScheduledDirectListJobs } from './lib/directListJobRunner.js';
 
 const scheduledTaskMap = new Map();
 
@@ -27,6 +28,14 @@ export const CRON_JOB_DEFINITIONS = [
     jobKey: 'csvAutoUpload',
     label: 'Auto-upload CSV',
     description: 'Run scheduled CSV uploads.',
+    cronExpr: '* * * * *',
+    timezone: '',
+    enabled: true,
+  },
+  {
+    jobKey: 'directListBulkJobs',
+    label: 'Scheduled bulk Direct List',
+    description: 'Process queued bulk Direct List jobs (batches of ASINs to eBay).',
     cronExpr: '* * * * *',
     timezone: '',
     enabled: true,
@@ -116,6 +125,10 @@ async function runCsvAutoUpload() {
   await runScheduledUploads();
 }
 
+async function runDirectListBulkJobs() {
+  await runScheduledDirectListJobs();
+}
+
 async function runPollAllSellers() {
   console.log('[CRON] Scheduled Poll All Sellers starting...');
   await scheduledSyncAllSellers();
@@ -151,6 +164,7 @@ async function runPayoneerFeedRefresh() {
 const CRON_JOB_HANDLERS = {
   dailyTimerAutoStop: runDailyTimerAutoStop,
   csvAutoUpload: runCsvAutoUpload,
+  directListBulkJobs: runDirectListBulkJobs,
   pollAllSellers: runPollAllSellers,
   pollNewOrders: runPollNewOrders,
   autoCompatRunForDate: runAutoCompatForDate,

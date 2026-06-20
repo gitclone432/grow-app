@@ -57,7 +57,7 @@ export const CORE_FIELD_SECTIONS = [
         ]
       },
       { key: 'immediatePayRequired', label: 'Immediate Pay Required', type: 'checkbox' },
-      { key: 'location', label: 'Location', type: 'text', placeholder: 'e.g., New Delhi, India' },
+      { key: 'location', label: 'Location (city/region)', type: 'text', placeholder: 'e.g. New Delhi, Delhi' },
       { key: 'scheduleTime', label: 'Schedule Time', type: 'text', placeholder: 'YYYY-MM-DD HH:MM:SS' }
     ]
   },
