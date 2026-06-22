@@ -14,7 +14,11 @@ import {
 } from '../utils/templateCoreFieldMerge.js';
 import { enrichListingItemSpecifics, applyCustomColumnDefaults } from '../utils/ebayItemSpecificsEnrichment.js';
 import { mergeItemPhotoUrls, joinItemPhotoUrls } from '../utils/itemPhotoUrls.js';
-import { applyStoreListerSettings, stripStoreControlledListingFields } from '../utils/ebayStoreListerDefaults.js';
+import {
+  applyStoreListerSettings,
+  buildStoreListerAppliedSummary,
+  stripStoreControlledListingFields,
+} from '../utils/ebayStoreListerDefaults.js';
 import { applyStoreBrandToListing, getStoreBrandMode, stripBrandFromCustomFields } from '../utils/ebayStoreBrand.js';
 import { generateSKUFromASIN } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
@@ -404,16 +408,17 @@ export async function prepareDirectListPayload({
     attachAmazonScrapedPrice(listingPayload, amazonData);
   }
 
-  return { listingPayload, amazonData, template, context: ctx, storeListerApplied: {
-    location: listingPayload.location || '',
-    country: listingPayload.country || '',
-    postalCode: listingPayload.postalCode || '',
-    shippingProfileName: listingPayload.shippingProfileName || '',
-    returnProfileName: listingPayload.returnProfileName || '',
-    paymentProfileName: listingPayload.paymentProfileName || '',
-    brandMode: brandResult.brandApplied.mode,
-    brand: brandResult.brandApplied.value,
-  } };
+  const storeListerApplied = await buildStoreListerAppliedSummary(
+    sellerId,
+    STORE_LISTER_REGION,
+    brandResult.brandApplied
+  );
+
+  return { listingPayload, amazonData, template, context: ctx, storeListerApplied };
+}
+
+export async function getDirectListStoreListerDefaults(sellerId, region = 'US') {
+  return buildStoreListerAppliedSummary(sellerId, region);
 }
 
 export async function submitDirectListPayload({

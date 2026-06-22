@@ -77,3 +77,19 @@ export async function applyStoreListerSettings(listingPayload = {}, sellerId, re
     ...policyDefaults,
   };
 }
+
+/** Summary for Direct List UI — always sourced from store lister settings in Mongo. */
+export async function buildStoreListerAppliedSummary(sellerId, region = 'US', brandApplied = {}) {
+  const [locationDefaults, policyDefaults, storeDefaults] = await Promise.all([
+    getStoreLocationDefaults(sellerId, region),
+    getStoreBusinessPolicies(sellerId, region),
+    getEbayStoreListerDefaults(sellerId, region),
+  ]);
+
+  return {
+    ...locationDefaults,
+    ...policyDefaults,
+    brandMode: brandApplied.mode ?? storeDefaults?.brandMode ?? 'from_scraper',
+    brand: brandApplied.value ?? '',
+  };
+}

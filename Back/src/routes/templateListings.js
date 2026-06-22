@@ -25,6 +25,7 @@ import {
   previewDirectListBulk,
   processDirectListBulk,
   submitDirectListPayload,
+  getDirectListStoreListerDefaults,
 } from '../lib/directListPrepare.js';
 import DirectListJob, {
   DIRECT_LIST_JOB_MAX_ASINS,
@@ -4783,6 +4784,29 @@ router.post('/cache-invalidate/:asin', requireAuth, async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+});
+
+// GET /api/template-listings/direct-list/store-lister-defaults — Store location + business policies for UI
+router.get('/direct-list/store-lister-defaults', requireAuth, async (req, res) => {
+  try {
+    const sellerId = String(req.query.sellerId || '').trim();
+    const region = String(req.query.region || 'US').trim().toUpperCase() || 'US';
+
+    if (!sellerId) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const storeListerApplied = await getDirectListStoreListerDefaults(sellerId, region);
+    res.json({ storeListerApplied });
+  } catch (error) {
+    console.error('[Direct List Store Defaults] Error:', error);
+    res.status(500).json({ error: error.message || 'Failed to load store lister defaults' });
   }
 });
 

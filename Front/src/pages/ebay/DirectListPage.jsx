@@ -186,30 +186,51 @@ function mergeListingFields(base, patch) {
   };
 }
 
-function StoreListerSummary({ storeListerApplied }) {
-  if (!storeListerApplied) return null;
+function mergeStoreListerSummary(applied, sellerDefaults) {
+  const base = sellerDefaults || {};
+  const prep = applied || {};
+  return {
+    location: prep.location || base.location || '',
+    country: prep.country || base.country || '',
+    postalCode: prep.postalCode || base.postalCode || '',
+    shippingProfileName: base.shippingProfileName || prep.shippingProfileName || '',
+    returnProfileName: base.returnProfileName || prep.returnProfileName || '',
+    paymentProfileName: base.paymentProfileName || prep.paymentProfileName || '',
+    brandMode: prep.brandMode ?? base.brandMode,
+    brand: prep.brand ?? base.brand,
+  };
+}
+
+function StoreListerSummary({ storeListerApplied, storeListerDefaults }) {
+  const summary = mergeStoreListerSummary(storeListerApplied, storeListerDefaults);
+  const hasContent = summary.location
+    || summary.shippingProfileName
+    || summary.returnProfileName
+    || summary.paymentProfileName
+    || summary.brandMode;
+  if (!hasContent) return null;
   return (
     <>
       <Typography variant="body2">
         <strong>Location:</strong>{' '}
-        {storeListerApplied.location || '—'}
-        {storeListerApplied.country ? ` · ${storeListerApplied.country}` : ''}
-        {storeListerApplied.postalCode ? ` · ${storeListerApplied.postalCode}` : ''}
+        {summary.location || '—'}
+        {summary.country ? ` · ${summary.country}` : ''}
+        {summary.postalCode ? ` · ${summary.postalCode}` : ''}
       </Typography>
       <Typography variant="body2">
         <strong>Brand:</strong>{' '}
-        {storeListerApplied.brand
-          || (storeListerApplied.brandMode === 'does_not_apply' ? 'Does Not Apply' : '—')}
+        {summary.brand
+          || (summary.brandMode === 'does_not_apply' ? 'Does Not Apply' : '—')}
         {' '}
-        ({BRAND_MODE_LABELS[storeListerApplied.brandMode] || BRAND_MODE_LABELS.from_scraper})
+        ({BRAND_MODE_LABELS[summary.brandMode] || BRAND_MODE_LABELS.from_scraper})
       </Typography>
-      {(storeListerApplied.shippingProfileName || storeListerApplied.returnProfileName || storeListerApplied.paymentProfileName) && (
+      {(summary.shippingProfileName || summary.returnProfileName || summary.paymentProfileName) && (
         <Typography variant="body2">
           <strong>Policies:</strong>{' '}
           {[
-            storeListerApplied.shippingProfileName && `Shipping: ${storeListerApplied.shippingProfileName}`,
-            storeListerApplied.returnProfileName && `Returns: ${storeListerApplied.returnProfileName}`,
-            storeListerApplied.paymentProfileName && `Payment: ${storeListerApplied.paymentProfileName}`,
+            summary.shippingProfileName && `Shipping: ${summary.shippingProfileName}`,
+            summary.returnProfileName && `Returns: ${summary.returnProfileName}`,
+            summary.paymentProfileName && `Payment: ${summary.paymentProfileName}`,
           ].filter(Boolean).join(' · ')}
         </Typography>
       )}
@@ -224,6 +245,7 @@ function SingleListingReviewPanel({
   listingNow,
   canList,
   onSubmit,
+  storeListerDefaults,
 }) {
   const showPreview = Boolean(preview?.listing);
   const showResult = Boolean(result);
@@ -275,7 +297,10 @@ function SingleListingReviewPanel({
           </Typography>
           <Typography variant="body2"><strong>Photos:</strong> {listing.photoCount ?? 0}</Typography>
           {listing.asin && <Typography variant="body2"><strong>ASIN:</strong> {listing.asin}</Typography>}
-          <StoreListerSummary storeListerApplied={storeListerApplied} />
+          <StoreListerSummary
+            storeListerApplied={storeListerApplied}
+            storeListerDefaults={storeListerDefaults}
+          />
         </Stack>
       )}
 
@@ -493,6 +518,26 @@ export default function DirectListPage() {
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [storeListerDefaults, setStoreListerDefaults] = useState(null);
+
+  const loadStoreListerDefaults = useCallback(async () => {
+    if (!selectedSeller) {
+      setStoreListerDefaults(null);
+      return;
+    }
+    try {
+      const { data } = await api.get('/template-listings/direct-list/store-lister-defaults', {
+        params: { sellerId: selectedSeller, region: 'US' },
+      });
+      setStoreListerDefaults(data.storeListerApplied || null);
+    } catch {
+      setStoreListerDefaults(null);
+    }
+  }, [selectedSeller]);
+
+  useEffect(() => {
+    void loadStoreListerDefaults();
+  }, [loadStoreListerDefaults]);
 
   const parsedBulkAsins = useMemo(() => parseBulkAsins(bulkAsinsText), [bulkAsinsText]);
   const bulkBatchCount = useMemo(
@@ -990,6 +1035,7 @@ export default function DirectListPage() {
             listingNow={listingNow}
             canList={canList}
             onSubmit={handleListOnEbay}
+            storeListerDefaults={storeListerDefaults}
           />
         </>
       )}
