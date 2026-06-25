@@ -330,16 +330,19 @@ export default function SalaryPage() {
     const years = Array.from({ length: 5 }, (_, i) => currentYear - 2 + i);
 
     return (
-        <Box sx={{ width: '100%', mb: 4 }}>
-            <Typography variant="h4" sx={{ mb: 2 }}>Salary Page</Typography>
+        <Box sx={{ width: '100%', mb: 4, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)', p: { xs: 1.5, sm: 2, md: 3 } }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+                <Typography variant="h4" sx={{ fontWeight: 800, color: theme => theme.palette.primary.main }}>Salary Page</Typography>
+            </Box>
 
-            <Box sx={{ mb: 3, display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+            <Box sx={{ mb: 3, display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', background: theme => `linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(240,249,255,0.9) 100%)`, p: 2, borderRadius: 2, border: theme => `1px solid ${theme.palette.divider}` }}>
                 <TextField
                     select
                     label="Year"
                     value={year}
                     onChange={(e) => setYear(e.target.value)}
                     size="small"
+                    sx={{ '& .MuiOutlinedInput-root': { borderRadius: 1.5 } }}
                 >
                     {years.map((y) => (
                         <MenuItem key={y} value={y}>{y}</MenuItem>
@@ -350,33 +353,33 @@ export default function SalaryPage() {
                     variant="contained"
                     startIcon={<AddIcon />}
                     onClick={handleAddNewRow}
-                    sx={{ textTransform: 'none' }}
+                    sx={{ textTransform: 'none', background: theme => `linear-gradient(135deg, ${theme.palette.primary.main} 0%, ${theme.palette.success.main} 100%)`, boxShadow: theme => `0 4px 12px ${theme.palette.primary.main}40` }}
                 >
                     Add Employee
                 </Button>
             </Box>
 
-            <Paper sx={{ width: '100%', overflow: 'hidden' }}>
+            <Paper sx={{ width: '100%', overflow: 'hidden', borderRadius: 2, boxShadow: theme => `0 8px 24px ${theme.palette.primary.main}10`, border: theme => `1px solid ${theme.palette.divider}` }}>
                 <TableContainer sx={{ maxHeight: 'calc(100vh - 200px)' }}>
                     <Table stickyHeader aria-label="sticky table" size="small">
                         <TableHead>
-                            <TableRow>
-                                <TableCell sx={{ position: 'sticky', left: 0, bgcolor: 'background.paper', zIndex: 2, minWidth: 200 }}>
+                            <TableRow sx={{ bgcolor: theme => theme.palette.primary.main, '& th': { color: 'white', fontWeight: 700 } }}>
+                                <TableCell sx={{ position: 'sticky', left: 0, bgcolor: theme => theme.palette.primary.main, color: 'white', fontWeight: 700, zIndex: 2, minWidth: 200 }}>
                                     Name / Designation
                                 </TableCell>
                                 {MONTHS.map(m => (
                                     <React.Fragment key={m}>
-                                        <TableCell align="center" sx={{ minWidth: 100, bgcolor: 'background.paper', pt: 2, pb: 2 }}>
+                                        <TableCell align="center" sx={{ minWidth: 100, bgcolor: theme => theme.palette.primary.main, color: 'white', fontWeight: 700, pt: 2, pb: 2 }}>
                                             {m.charAt(0).toUpperCase() + m.slice(1)}
                                         </TableCell>
                                         {m !== 'dec' && (
-                                            <TableCell align="center" sx={{ minWidth: 80, bgcolor: 'background.paper', borderRight: '1px solid #e0e0e0', pt: 2, pb: 2 }}>
+                                            <TableCell align="center" sx={{ minWidth: 80, bgcolor: theme => theme.palette.primary.main, color: 'white', fontWeight: 700, borderRight: theme => `1px solid ${theme.palette.primary.dark}`, pt: 2, pb: 2 }}>
                                                 appri (%)
                                             </TableCell>
                                         )}
                                     </React.Fragment>
                                 ))}
-                                <TableCell sx={{ position: 'sticky', right: 0, bgcolor: 'background.paper', zIndex: 2 }}>
+                                <TableCell sx={{ position: 'sticky', right: 0, bgcolor: theme => theme.palette.primary.main, color: 'white', fontWeight: 700, zIndex: 2 }}>
                                     Total
                                 </TableCell>
                             </TableRow>

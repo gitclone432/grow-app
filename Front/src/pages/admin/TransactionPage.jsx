@@ -532,15 +532,24 @@ const TransactionPage = () => {
     );
 
     return (
-        <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>
+        <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 }, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)' }}>
             <Stack
                 direction={{ xs: 'column', sm: 'row' }}
                 spacing={1.5}
                 justifyContent="space-between"
                 alignItems={{ xs: 'stretch', sm: 'center' }}
                 mb={2}
+                sx={{
+                    background: theme => `linear-gradient(135deg, ${theme.palette.primary.main}15 0%, ${theme.palette.info.main}15 100%)`,
+                    p: 2,
+                    borderRadius: 2,
+                    border: theme => `1px solid ${theme.palette.primary.main}30`
+                }}
             >
-                <Typography variant="h5">Transactions</Typography>
+                <Typography variant="h5" sx={{ fontWeight: 800, color: theme => theme.palette.primary.main }}>
+                    <PaymentsIcon sx={{ mr: 1, verticalAlign: 'middle' }} />
+                    Transactions
+                </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
                     <Button
                         variant="outlined"

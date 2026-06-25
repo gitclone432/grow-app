@@ -162,7 +162,7 @@ export default function MicroOrdersPage() {
   const totalPages = Math.max(1, Math.ceil(totalCount / rowsPerPage) || 1);
 
   return (
-    <Box sx={{ pb: 4 }}>
+    <Box sx={{ pb: 4, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)', p: { xs: 1.5, sm: 2, md: 3 } }}>
       <Breadcrumbs sx={{ mb: 1.5, fontSize: '0.875rem' }}>
         <Typography color="text.secondary">Finance & Cash Flow</Typography>
         <Typography color="text.primary" fontWeight={600}>
@@ -170,7 +170,7 @@ export default function MicroOrdersPage() {
         </Typography>
       </Breadcrumbs>
 
-      <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5, letterSpacing: '-0.02em' }}>
+      <Typography variant="h4" sx={{ fontWeight: 800, mb: 0.5, letterSpacing: '-0.02em', color: theme => theme.palette.primary.main }}>
         Micro Orders
       </Typography>
       <Typography variant="body1" color="text.secondary" sx={{ mb: 2.5 }}>
@@ -188,6 +188,8 @@ export default function MicroOrdersPage() {
           flexWrap: 'wrap',
           alignItems: 'center',
           gap: 2,
+          background: theme => `linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(240,249,255,0.9) 100%)`,
+          border: theme => `1px solid ${theme.palette.divider}`
         }}
       >
         <FormControl size="small" sx={{ minWidth: 200 }}>

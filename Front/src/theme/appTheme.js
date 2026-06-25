@@ -15,31 +15,31 @@ export const dashboardSignatureTokens = {
         control: 8
     },
     surfaces: {
-        pageCard: 'linear-gradient(180deg, #ffffff 0%, #f8fbff 100%)',
-        metricCard: 'linear-gradient(180deg, rgba(255,255,255,1) 0%, rgba(248,250,252,0.92) 100%)',
-        emptyState: 'linear-gradient(180deg, #ffffff 0%, #fafcff 100%)'
+        pageCard: 'linear-gradient(135deg, #ffffff 0%, #f0f9ff 100%)',
+        metricCard: 'linear-gradient(135deg, rgba(255,255,255,1) 0%, rgba(240,249,255,0.95) 100%)',
+        emptyState: 'linear-gradient(135deg, #ffffff 0%, #ecf0f1 100%)'
     },
     shadows: {
-        card: '0 14px 36px rgba(15, 23, 42, 0.06)',
-        table: '0 18px 40px rgba(15, 23, 42, 0.06)'
+        card: '0 8px 24px rgba(0, 0, 0, 0.08)',
+        table: '0 12px 32px rgba(0, 0, 0, 0.1)'
     },
     table: {
-        headerBackground: '#123b63',
+        headerBackground: '#0f766e',
         headerForeground: '#ffffff',
-        rowStripe: 'rgba(248, 250, 252, 0.7)',
-        rowHover: 'rgba(37, 99, 235, 0.04)',
-        rowBorder: 'rgba(15, 23, 42, 0.08)',
-        indexBadgeBackground: 'rgba(18, 59, 99, 0.08)',
-        indexBadgeForeground: '#123b63'
+        rowStripe: 'rgba(240, 249, 255, 0.8)',
+        rowHover: 'rgba(20, 184, 166, 0.08)',
+        rowBorder: 'rgba(0, 0, 0, 0.06)',
+        indexBadgeBackground: 'rgba(20, 184, 166, 0.1)',
+        indexBadgeForeground: '#0f766e'
     },
     tones: {
         neutral: { background: 'rgba(15, 23, 42, 0.05)', border: 'rgba(15, 23, 42, 0.08)', color: '#0f172a' },
-        info: { background: 'rgba(2, 132, 199, 0.12)', border: 'rgba(2, 132, 199, 0.18)', color: '#075985' },
-        success: { background: 'rgba(22, 163, 74, 0.12)', border: 'rgba(22, 163, 74, 0.18)', color: '#166534' },
-        warning: { background: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.2)', color: '#92400e' },
-        danger: { background: 'rgba(220, 38, 38, 0.1)', border: 'rgba(220, 38, 38, 0.15)', color: '#b91c1c' },
-        amazon: { background: 'rgba(249, 115, 22, 0.12)', border: 'rgba(249, 115, 22, 0.18)', color: '#9a3412' },
-        shipping: { background: 'rgba(59, 130, 246, 0.12)', border: 'rgba(59, 130, 246, 0.18)', color: '#1d4ed8' }
+        info: { background: 'rgba(6, 182, 212, 0.12)', border: 'rgba(6, 182, 212, 0.2)', color: '#0891b2' },
+        success: { background: 'rgba(16, 185, 129, 0.12)', border: 'rgba(16, 185, 129, 0.2)', color: '#047857' },
+        warning: { background: 'rgba(245, 158, 11, 0.12)', border: 'rgba(245, 158, 11, 0.18)', color: '#d97706' },
+        danger: { background: 'rgba(239, 68, 68, 0.12)', border: 'rgba(239, 68, 68, 0.18)', color: '#dc2626' },
+        amazon: { background: 'rgba(249, 115, 22, 0.12)', border: 'rgba(249, 115, 22, 0.18)', color: '#c2410c' },
+        shipping: { background: 'rgba(59, 130, 246, 0.12)', border: 'rgba(59, 130, 246, 0.18)', color: '#2563eb' }
     }
 };
 
@@ -47,25 +47,25 @@ export const dashboardSignatureThemeOptions = {
     palette: {
         mode: 'light',
         primary: {
-            main: '#123b63'
+            main: '#0f766e'
         },
         secondary: {
-            main: '#2563eb'
+            main: '#06b6d4'
         },
         success: {
-            main: '#166534'
+            main: '#10b981'
         },
         warning: {
-            main: '#92400e'
+            main: '#f59e0b'
         },
         error: {
-            main: '#b91c1c'
+            main: '#ef4444'
         },
         info: {
-            main: '#075985'
+            main: '#0891b2'
         },
         background: {
-            default: '#f8fbff',
+            default: '#f0f9ff',
             paper: '#ffffff'
         }
     },

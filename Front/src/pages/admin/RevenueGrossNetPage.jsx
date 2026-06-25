@@ -124,7 +124,7 @@ export default function RevenueGrossNetPage() {
   };
 
   return (
-    <Box sx={{ pb: 4 }}>
+    <Box sx={{ pb: 4, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)', p: { xs: 1.5, sm: 2, md: 3 } }}>
       <Breadcrumbs sx={{ mb: 1.5, fontSize: '0.875rem' }}>
         <Typography color="text.secondary">Finance & Cash Flow</Typography>
         <Typography color="text.primary" fontWeight={600}>
@@ -133,8 +133,8 @@ export default function RevenueGrossNetPage() {
       </Breadcrumbs>
 
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
-        <TrendingUpIcon color="primary" />
-        <Typography variant="h4" sx={{ fontWeight: 700, letterSpacing: '-0.02em' }}>
+        <TrendingUpIcon sx={{ color: theme => theme.palette.primary.main }} />
+        <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: '-0.02em', color: theme => theme.palette.primary.main }}>
           Revenue (Gross & Net)
         </Typography>
       </Stack>
@@ -142,8 +142,8 @@ export default function RevenueGrossNetPage() {
         Gross = eBay earnings (orderEarnings). Net = earnings after TDS and T.ID — same definitions as All Orders USD.
       </Typography>
 
-      <Paper variant="outlined" sx={{ p: 2, mb: 2.5, borderRadius: 2 }}>
-        <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>
+      <Paper variant="outlined" sx={{ p: 2, mb: 2.5, borderRadius: 2, background: theme => `linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(240,249,255,0.9) 100%)`, border: theme => `1px solid ${theme.palette.divider}` }}>
+        <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5, color: theme => theme.palette.primary.main }}>
           Filters
         </Typography>
         <Grid container spacing={1.5}>
@@ -264,12 +264,12 @@ export default function RevenueGrossNetPage() {
         <>
           <Grid container spacing={2} sx={{ mb: 2.5 }}>
             <Grid item xs={12} sm={6} md={3}>
-              <Card variant="outlined" sx={{ borderRadius: 2, height: '100%' }}>
+              <Card sx={{ borderRadius: 2, height: '100%', background: theme => `linear-gradient(135deg, ${theme.palette.primary.main}10 0%, ${theme.palette.primary.main}05 100%)`, border: theme => `1px solid ${theme.palette.primary.main}30` }}>
                 <CardContent>
-                  <Typography variant="overline" color="text.secondary">
+                  <Typography variant="overline" color="text.secondary" sx={{ fontWeight: 600 }}>
                     Gross revenue (USD)
                   </Typography>
-                  <Typography variant="h5" sx={{ fontWeight: 700, color: 'primary.main' }}>
+                  <Typography variant="h5" sx={{ fontWeight: 800, color: theme => theme.palette.primary.main }}>
                     {formatUsd(summary?.grossRevenue)}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
@@ -279,12 +279,12 @@ export default function RevenueGrossNetPage() {
               </Card>
             </Grid>
             <Grid item xs={12} sm={6} md={3}>
-              <Card variant="outlined" sx={{ borderRadius: 2, height: '100%' }}>
+              <Card sx={{ borderRadius: 2, height: '100%', background: theme => `linear-gradient(135deg, ${theme.palette.success.main}10 0%, ${theme.palette.success.main}05 100%)`, border: theme => `1px solid ${theme.palette.success.main}30` }}>
                 <CardContent>
-                  <Typography variant="overline" color="text.secondary">
+                  <Typography variant="overline" color="text.secondary" sx={{ fontWeight: 600 }}>
                     Net revenue (USD)
                   </Typography>
-                  <Typography variant="h5" sx={{ fontWeight: 700, color: 'success.main' }}>
+                  <Typography variant="h5" sx={{ fontWeight: 800, color: theme => theme.palette.success.main }}>
                     {formatUsd(summary?.netRevenue)}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
@@ -294,12 +294,12 @@ export default function RevenueGrossNetPage() {
               </Card>
             </Grid>
             <Grid item xs={12} sm={6} md={3}>
-              <Card variant="outlined" sx={{ borderRadius: 2, height: '100%' }}>
+              <Card sx={{ borderRadius: 2, height: '100%', background: theme => `linear-gradient(135deg, ${theme.palette.secondary.main}10 0%, ${theme.palette.secondary.main}05 100%)`, border: theme => `1px solid ${theme.palette.secondary.main}30` }}>
                 <CardContent>
-                  <Typography variant="overline" color="text.secondary">
+                  <Typography variant="overline" color="text.secondary" sx={{ fontWeight: 600 }}>
                     Orders
                   </Typography>
-                  <Typography variant="h5" sx={{ fontWeight: 700 }}>
+                  <Typography variant="h5" sx={{ fontWeight: 800, color: theme => theme.palette.secondary.main }}>
                     {summary?.orderCount ?? 0}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
@@ -309,12 +309,12 @@ export default function RevenueGrossNetPage() {
               </Card>
             </Grid>
             <Grid item xs={12} sm={6} md={3}>
-              <Card variant="outlined" sx={{ borderRadius: 2, height: '100%' }}>
+              <Card sx={{ borderRadius: 2, height: '100%', background: theme => `linear-gradient(135deg, ${theme.palette.warning.main}10 0%, ${theme.palette.warning.main}05 100%)`, border: theme => `1px solid ${theme.palette.warning.main}30` }}>
                 <CardContent>
-                  <Typography variant="overline" color="text.secondary">
+                  <Typography variant="overline" color="text.secondary" sx={{ fontWeight: 600 }}>
                     P.Balance (INR)
                   </Typography>
-                  <Typography variant="h5" sx={{ fontWeight: 700 }}>
+                  <Typography variant="h5" sx={{ fontWeight: 800, color: theme => theme.palette.warning.main }}>
                     {formatInr(summary?.totalPBalanceInr)}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
@@ -327,19 +327,19 @@ export default function RevenueGrossNetPage() {
 
           {committed.groupBy !== 'none' && byPeriod.length > 0 ? (
             <Paper variant="outlined" sx={{ borderRadius: 2, mb: 2.5, overflow: 'hidden' }}>
-              <Typography variant="subtitle1" sx={{ fontWeight: 700, p: 2, pb: 1 }}>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700, p: 2, pb: 1, color: theme => theme.palette.primary.main }}>
                 By {committed.groupBy}
               </Typography>
               <TableContainer>
                 <Table size="small">
                   <TableHead>
-                    <TableRow sx={{ bgcolor: 'grey.100' }}>
-                      <TableCell sx={{ fontWeight: 700 }}>Period</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 700 }}>Orders</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 700 }}>Gross (USD)</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 700 }}>TDS</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 700 }}>T.ID</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 700 }}>Net (USD)</TableCell>
+                    <TableRow sx={{ bgcolor: theme => theme.palette.primary.main, '& th': { color: 'white', fontWeight: 700 } }}>
+                      <TableCell sx={{ color: 'white', fontWeight: 700 }}>Period</TableCell>
+                      <TableCell align="right" sx={{ color: 'white', fontWeight: 700 }}>Orders</TableCell>
+                      <TableCell align="right" sx={{ color: 'white', fontWeight: 700 }}>Gross (USD)</TableCell>
+                      <TableCell align="right" sx={{ color: 'white', fontWeight: 700 }}>TDS</TableCell>
+                      <TableCell align="right" sx={{ color: 'white', fontWeight: 700 }}>T.ID</TableCell>
+                      <TableCell align="right" sx={{ color: 'white', fontWeight: 700 }}>Net (USD)</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>

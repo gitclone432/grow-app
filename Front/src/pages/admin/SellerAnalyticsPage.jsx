@@ -204,9 +204,9 @@ export default function SellerAnalyticsPage() {
   };
 
   return (
-    <Box sx={{ p: 3 }}>
+    <Box sx={{ p: 3, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)' }}>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
-        <Typography variant="h4">Seller Analytics</Typography>
+        <Typography variant="h4" sx={{ fontWeight: 800, color: theme => theme.palette.primary.main }}>Seller Analytics</Typography>
         {loading && (
           <Stack direction="row" alignItems="center" spacing={1}>
             <CircularProgress size={20} />
@@ -215,11 +215,11 @@ export default function SellerAnalyticsPage() {
         )}
       </Stack>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {error && <Alert severity="error" sx={{ mb: 2, borderRadius: 2, background: theme => `linear-gradient(135deg, ${theme.palette.error.main}15 0%, ${theme.palette.error.main}05 100%)`, border: theme => `1px solid ${theme.palette.error.main}30` }} />}
 
       {/* Filters */}
-      <Paper sx={{ p: 2, mb: 3 }}>
-        <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2 }}>
+      <Paper sx={{ p: 2, mb: 3, background: theme => `linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(240,249,255,0.9) 100%)`, border: theme => `1px solid ${theme.palette.divider}` }}>
+        <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 2, color: theme => theme.palette.primary.main }}>
           Filters
         </Typography>
         <Stack spacing={2}>
@@ -452,27 +452,27 @@ export default function SellerAnalyticsPage() {
             : 'Select a date range to view analytics.'}
         </Alert>
       ) : (
-        <TableContainer component={Paper} sx={{ maxHeight: 500 }}>
+        <TableContainer component={Paper} sx={{ maxHeight: 500, borderRadius: 2, boxShadow: theme => `0 8px 24px ${theme.palette.primary.main}10`, border: theme => `1px solid ${theme.palette.divider}` }}>
           <Table size="small" stickyHeader>
             <TableHead>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', position: 'sticky', top: 0, zIndex: 100 }}>
+              <TableRow sx={{ '& th': { color: 'white', fontWeight: 700 } }}>
+                <TableCell sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.primary.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>
                   {groupBy === 'day' ? 'Date' : groupBy === 'week' ? 'Week' : 'Month'}
                 </TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', position: 'sticky', top: 0, zIndex: 100 }}>Orders</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', position: 'sticky', top: 0, zIndex: 100 }}>Subtotal</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', position: 'sticky', top: 0, zIndex: 100 }}>Shipping</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', position: 'sticky', top: 0, zIndex: 100 }}>Sales Tax</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', position: 'sticky', top: 0, zIndex: 100 }}>Discount</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', position: 'sticky', top: 0, zIndex: 100 }}>Transaction Fees</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', position: 'sticky', top: 0, zIndex: 100 }}>Ad Fees</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff9c4', position: 'sticky', top: 0, zIndex: 100 }}>Earnings</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', position: 'sticky', top: 0, zIndex: 100 }}>TDS</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', position: 'sticky', top: 0, zIndex: 100 }}>T.ID</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#e1f5fe', position: 'sticky', top: 0, zIndex: 100 }}>P.Balance (INR)</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#e8f5e9', position: 'sticky', top: 0, zIndex: 100 }}>A_total-inr</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fce4ec', position: 'sticky', top: 0, zIndex: 100 }}>Credit Card Fees</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#fff3cd', position: 'sticky', top: 0, zIndex: 100 }}>Total (A_total-inr + CC Fees)</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.primary.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Orders</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.secondary.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Subtotal</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.secondary.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Shipping</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.secondary.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Sales Tax</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.secondary.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Discount</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.secondary.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Transaction Fees</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.secondary.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Ad Fees</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.success.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Earnings</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.warning.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>TDS</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.warning.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>T.ID</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.info.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>P.Balance (INR)</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.success.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>A_total-inr</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.error.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Credit Card Fees</TableCell>
+                <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: theme => theme.palette.warning.main, color: 'white', position: 'sticky', top: 0, zIndex: 100 }}>Total (A_total-inr + CC Fees)</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 'bold', bgcolor: '#c8e6c9', position: 'sticky', top: 0, zIndex: 100 }}>Profit (INR)</TableCell>
               </TableRow>
             </TableHead>

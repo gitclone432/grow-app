@@ -315,33 +315,33 @@ const AffiliateBalancePage = () => {
     const sortedRecords = records.sort((a, b) => new Date(b.date) - new Date(a.date));
 
     return (
-        <Box sx={{ pb: 4 }}>
+        <Box sx={{ pb: 4, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)', p: { xs: 1.5, sm: 2, md: 3 } }}>
             <Breadcrumbs sx={{ mb: 1.5, fontSize: '0.875rem' }}>
                 <Typography color="text.secondary">Finance & Cash Flow</Typography>
                 <Typography color="text.primary" fontWeight={600}>Daily Card Expenses</Typography>
             </Breadcrumbs>
 
             <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 3 }}>
-                <Typography variant="h5" sx={{ fontWeight: 700, flex: 1 }}>
+                <Typography variant="h5" sx={{ fontWeight: 800, flex: 1, color: theme => theme.palette.primary.main }}>
                     Daily Card Expenses
                 </Typography>
-                <Button startIcon={<RefreshIcon />} size="small" onClick={fetchRecords} disabled={loading}>
+                <Button startIcon={<RefreshIcon />} size="small" onClick={fetchRecords} disabled={loading} sx={{ color: theme => theme.palette.info.main }}>
                     Refresh
                 </Button>
-                <Button variant="outlined" size="small" onClick={() => setOpenManageDialog(true)}>
+                <Button variant="outlined" size="small" onClick={() => setOpenManageDialog(true)} sx={{ borderColor: theme => theme.palette.warning.main, color: theme => theme.palette.warning.main }}>
                     Manage Cards & Accounts
                 </Button>
-                <Button startIcon={<AddIcon />} variant="contained" size="small" onClick={() => handleOpenDialog()}>
+                <Button startIcon={<AddIcon />} variant="contained" size="small" onClick={() => handleOpenDialog()} sx={{ background: theme => `linear-gradient(135deg, ${theme.palette.primary.main} 0%, ${theme.palette.success.main} 100%)`, boxShadow: theme => `0 4px 12px ${theme.palette.primary.main}40` }}>
                     Add Record
                 </Button>
             </Stack>
 
-            {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
-            {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
+            {error && <Alert severity="error" sx={{ mb: 2, borderRadius: 2, background: theme => `linear-gradient(135deg, ${theme.palette.error.main}15 0%, ${theme.palette.error.main}05 100%)`, border: theme => `1px solid ${theme.palette.error.main}30` }} onClose={() => setError('')}>{error}</Alert>}
+            {success && <Alert severity="success" sx={{ mb: 2, borderRadius: 2, background: theme => `linear-gradient(135deg, ${theme.palette.success.main}15 0%, ${theme.palette.success.main}05 100%)`, border: theme => `1px solid ${theme.palette.success.main}30` }} onClose={() => setSuccess('')}>{success}</Alert>}
 
             {/* Filters */}
-            <Paper variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 1.5 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1.5 }}>Filters</Typography>
+            <Paper variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 2, background: theme => `linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(240,249,255,0.9) 100%)`, border: theme => `1px solid ${theme.palette.divider}` }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1.5, color: theme => theme.palette.primary.main }}>Filters</Typography>
                 <Grid container spacing={2} alignItems="flex-end">
                     <Grid item xs={12} sm={3}>
                         <FormControl fullWidth size="small">
@@ -454,18 +454,18 @@ const AffiliateBalancePage = () => {
                 <TableContainer component={Paper} variant="outlined">
                     <Table size="small">
                         <TableHead>
-                            <TableRow sx={{ bgcolor: 'grey.100' }}>
-                                <TableCell sx={{ fontWeight: 700 }}>Date</TableCell>
-                                <TableCell sx={{ fontWeight: 700 }}>Account Name</TableCell>
-                                <TableCell align="right" sx={{ fontWeight: 700 }}>Available Balance (USD)</TableCell>
-                                <TableCell align="right" sx={{ fontWeight: 700 }}>Balance Added (USD)</TableCell>
-                                <TableCell align="right" sx={{ fontWeight: 700 }}>Total Balance (USD)</TableCell>
-                                <TableCell sx={{ fontWeight: 700 }}>Card No</TableCell>
-                                <TableCell align="right" sx={{ fontWeight: 700 }}>Expenses</TableCell>
-                                <TableCell sx={{ fontWeight: 700 }}>Marketplace</TableCell>
-                                <TableCell sx={{ fontWeight: 700 }}>Payment Revision</TableCell>
-                                <TableCell sx={{ fontWeight: 700 }}>Notes</TableCell>
-                                <TableCell align="center" sx={{ fontWeight: 700 }}>Actions</TableCell>
+                            <TableRow sx={{ bgcolor: theme => theme.palette.primary.main, '& th': { color: 'white', fontWeight: 700 } }}>
+                                <TableCell sx={{ fontWeight: 700, color: 'white' }}>Date</TableCell>
+                                <TableCell sx={{ fontWeight: 700, color: 'white' }}>Account Name</TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 700, color: 'white' }}>Available Balance (USD)</TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 700, color: 'white' }}>Balance Added (USD)</TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 700, color: 'white' }}>Total Balance (USD)</TableCell>
+                                <TableCell sx={{ fontWeight: 700, color: 'white' }}>Card No</TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 700, color: 'white' }}>Expenses</TableCell>
+                                <TableCell sx={{ fontWeight: 700, color: 'white' }}>Marketplace</TableCell>
+                                <TableCell sx={{ fontWeight: 700, color: 'white' }}>Payment Revision</TableCell>
+                                <TableCell sx={{ fontWeight: 700, color: 'white' }}>Notes</TableCell>
+                                <TableCell align="center" sx={{ fontWeight: 700, color: 'white' }}>Actions</TableCell>
                             </TableRow>
                         </TableHead>
                         <TableBody>

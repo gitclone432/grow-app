@@ -213,7 +213,7 @@ const BankAccountsPage = () => {
     );
 
     return (
-        <Box sx={{ p: { xs: 2, sm: 3 } }}>
+        <Box sx={{ p: { xs: 2, sm: 3 }, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)' }}>
             <Box 
                 display="flex" 
                 flexDirection={{ xs: 'column', sm: 'row' }}
@@ -221,8 +221,17 @@ const BankAccountsPage = () => {
                 alignItems={{ xs: 'stretch', sm: 'center' }}
                 gap={{ xs: 1, sm: 1 }}
                 mb={3}
+                sx={{
+                    background: theme => `linear-gradient(135deg, ${theme.palette.primary.main}15 0%, ${theme.palette.success.main}15 100%)`,
+                    p: 2.5,
+                    borderRadius: 2,
+                    border: theme => `1px solid ${theme.palette.primary.main}30`
+                }}
             >
-                <Typography variant="h5">Bank Accounts</Typography>
+                <Typography variant="h5" sx={{ fontWeight: 800, color: theme => theme.palette.primary.main }}>
+                    <AccountBalanceIcon sx={{ mr: 1, verticalAlign: 'middle' }} />
+                    Bank Accounts
+                </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
                     <Button
                         variant="outlined"
@@ -230,6 +239,7 @@ const BankAccountsPage = () => {
                         component={RouterLink}
                         to="/admin/payoneer"
                         fullWidth={isMobile}
+                        sx={{ borderColor: theme => theme.palette.info.main, color: theme => theme.palette.info.main }}
                     >
                         Payoneer Sheet
                     </Button>
@@ -238,30 +248,31 @@ const BankAccountsPage = () => {
                         startIcon={<AddIcon />}
                         onClick={dialog.openCreate}
                         fullWidth={isMobile}
+                        sx={{ background: theme => `linear-gradient(135deg, ${theme.palette.primary.main} 0%, ${theme.palette.success.main} 100%)`, boxShadow: theme => `0 4px 12px ${theme.palette.primary.main}40` }}
                     >
                         Add Bank Account
                     </Button>
                 </Stack>
             </Box>
 
-            <Alert severity="info" sx={{ mb: 2 }}>
+            <Alert severity="info" sx={{ mb: 2, borderRadius: 2, background: theme => `linear-gradient(135deg, ${theme.palette.info.main}15 0%, ${theme.palette.secondary.main}15 100%)`, border: theme => `1px solid ${theme.palette.info.main}30` }}>
                 Use <strong>one bank account row per real bank account</strong>. Link{' '}
                 <strong>multiple stores</strong> on that row (Stores dropdown). Do not create a
                 separate bank row for each store unless they are separate bank accounts — add the{' '}
                 <strong>account number</strong> so same-name accounts stay distinct in Transactions.
             </Alert>
 
-            <TableContainer component={Paper} sx={{ overflowX: 'auto' }}>
+            <TableContainer component={Paper} sx={{ overflowX: 'auto', borderRadius: 2, boxShadow: theme => `0 8px 24px ${theme.palette.primary.main}10`, border: theme => `1px solid ${theme.palette.divider}` }}>
                 <Table>
                     <TableHead>
-                        <TableRow sx={{ bgcolor: '#f5f5f5' }}>
-                            <TableCell>Bank</TableCell>
-                            <TableCell>Account Number</TableCell>
-                            <TableCell>IFSC Code</TableCell>
-                            <TableCell>Payoneer ID</TableCell>
-                            <TableCell>Sellers</TableCell>
-                            <TableCell>Payoneer</TableCell>
-                            <TableCell align="right">Actions</TableCell>
+                        <TableRow sx={{ bgcolor: theme => theme.palette.primary.main, '& th': { color: 'white', fontWeight: 700 } }}>
+                            <TableCell sx={{ color: 'white', fontWeight: 700 }}>Bank</TableCell>
+                            <TableCell sx={{ color: 'white', fontWeight: 700 }}>Account Number</TableCell>
+                            <TableCell sx={{ color: 'white', fontWeight: 700 }}>IFSC Code</TableCell>
+                            <TableCell sx={{ color: 'white', fontWeight: 700 }}>Payoneer ID</TableCell>
+                            <TableCell sx={{ color: 'white', fontWeight: 700 }}>Sellers</TableCell>
+                            <TableCell sx={{ color: 'white', fontWeight: 700 }}>Payoneer</TableCell>
+                            <TableCell align="right" sx={{ color: 'white', fontWeight: 700 }}>Actions</TableCell>
                         </TableRow>
                     </TableHead>
                     <TableBody>

@@ -254,13 +254,13 @@ const PriceChangeHistoryPage = () => {
 
   return (
     <LocalizationProvider dateAdapter={AdapterDateFns}>
-      <Box sx={{ p: 3 }}>
-        <Typography variant="h4" gutterBottom>
+      <Box sx={{ p: 3, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)' }}>
+        <Typography variant="h4" gutterBottom sx={{ fontWeight: 800, color: theme => theme.palette.primary.main }}>
           Price Change History
         </Typography>
 
         {/* Filters */}
-        <Paper sx={{ p: 2, mb: 2 }}>
+        <Paper sx={{ p: 2, mb: 2, background: theme => `linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(240,249,255,0.9) 100%)`, border: theme => `1px solid ${theme.palette.divider}` }}>
           <Typography variant="h6" gutterBottom>
             Filters
           </Typography>

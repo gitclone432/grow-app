@@ -806,7 +806,7 @@ export default function AllOrdersSheetPage() {
 
   return (
     <Fade in timeout={600}>
-    <Box sx={{ p: 3 }}>
+    <Box sx={{ p: 3, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)' }}>
       {/* CSV Export Modal */}
       <Dialog open={showExportModal} onClose={() => setShowExportModal(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Export Orders by Date Range</DialogTitle>
@@ -2204,11 +2204,11 @@ export default function AllOrdersSheetPage() {
                 });
                 
                 return (
-                  <TableRow sx={{ bgcolor: '#f5f5f5', '& td': { fontWeight: 'bold', borderTop: '2px solid #000' } }}>
-                    <TableCell sx={{ position: 'sticky', left: 0, zIndex: 1, bgcolor: '#f5f5f5' }}>TOTALS</TableCell>
-                    <TableCell sx={{ position: 'sticky', left: 100, zIndex: 1, bgcolor: '#f5f5f5' }}></TableCell>
-                    <TableCell sx={{ position: 'sticky', left: 210, zIndex: 1, bgcolor: '#f5f5f5', minWidth: 350 }}></TableCell>
-                    <TableCell sx={{ position: 'sticky', left: 560, zIndex: 1, bgcolor: '#f5f5f5', boxShadow: '4px 0 5px rgba(0,0,0,0.12)' }}></TableCell>
+                  <TableRow sx={{ bgcolor: theme => theme.palette.primary.main, '& td': { fontWeight: 'bold', borderTop: '2px solid rgba(0,0,0,0.12)', color: 'white' } }}>
+                    <TableCell sx={{ position: 'sticky', left: 0, zIndex: 1, bgcolor: theme => theme.palette.primary.main, color: 'white' }}>TOTALS</TableCell>
+                    <TableCell sx={{ position: 'sticky', left: 100, zIndex: 1, bgcolor: theme => theme.palette.primary.main, color: 'white' }} />
+                    <TableCell sx={{ position: 'sticky', left: 210, zIndex: 1, bgcolor: theme => theme.palette.primary.main, color: 'white', minWidth: 350 }} />
+                    <TableCell sx={{ position: 'sticky', left: 560, zIndex: 1, bgcolor: theme => theme.palette.primary.main, color: 'white', boxShadow: '4px 0 5px rgba(0,0,0,0.12)' }} />
                     <TableCell align="right">${totals.subtotal.toFixed(2)}</TableCell>
                     <TableCell align="right">${totals.shipping.toFixed(2)}</TableCell>
                     <TableCell align="right">${totals.salesTax.toFixed(2)}</TableCell>

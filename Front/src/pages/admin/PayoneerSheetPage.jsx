@@ -922,9 +922,9 @@ const PayoneerSheetPage = () => {
     };
 
     return (
-        <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>
+        <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 }, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)' }}>
             {/* MARKETPLACE TABS */}
-            <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
+            <Box sx={{ borderBottom: 2, borderColor: theme => theme.palette.primary.main, mb: 3 }}>
                 <Tabs 
                     value={marketplace} 
                     onChange={handleMarketplaceChange}
@@ -933,7 +933,16 @@ const PayoneerSheetPage = () => {
                         '& .MuiTab-root': {
                             textTransform: 'capitalize',
                             fontSize: '1rem',
-                            fontWeight: 500
+                            fontWeight: 600,
+                            color: theme => theme.palette.text.secondary,
+                            transition: 'all 0.3s ease'
+                        },
+                        '& .MuiTab-root:hover': {
+                            color: theme => theme.palette.primary.main
+                        },
+                        '& .Mui-selected': {
+                            color: theme => theme.palette.primary.main,
+                            fontWeight: 700
                         }
                     }}
                 >
@@ -953,7 +962,7 @@ const PayoneerSheetPage = () => {
                     mb: { xs: 2, sm: 3 },
                 }}
             >
-                <Typography variant={isSmallMobile ? 'h6' : 'h5'} sx={{ fontWeight: 'bold' }}>
+                <Typography variant={isSmallMobile ? 'h6' : 'h5'} sx={{ fontWeight: 800, color: theme => theme.palette.primary.main }}>
                     {marketplace === 'ebay' ? 'eBay' : marketplace === 'etsy' ? 'Etsy' : 'Walmart'} Payoneer Records
                 </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
@@ -965,6 +974,7 @@ const PayoneerSheetPage = () => {
                                 onClick={() => loadPayoutFeed(true)}
                                 disabled={payoutFeedLoading}
                                 fullWidth={isSmallMobile}
+                                sx={{ borderColor: theme => theme.palette.info.main, color: theme => theme.palette.info.main }}
                             >
                                 {payoutFeedLoading ? 'Refreshing eBay…' : 'Refresh eBay payouts'}
                             </Button>
@@ -974,6 +984,7 @@ const PayoneerSheetPage = () => {
                                 onClick={handleSyncGmail}
                                 disabled={gmailSyncLoading}
                                 fullWidth={isSmallMobile}
+                                sx={{ borderColor: theme => theme.palette.secondary.main, color: theme => theme.palette.secondary.main }}
                             >
                                 {gmailSyncLoading ? 'Syncing Gmail…' : 'Sync Gmail'}
                             </Button>
@@ -985,6 +996,7 @@ const PayoneerSheetPage = () => {
                         component={RouterLink}
                         to="/admin/bank-accounts"
                         fullWidth={isSmallMobile}
+                        sx={{ borderColor: theme => theme.palette.primary.main, color: theme => theme.palette.primary.main }}
                     >
                         Bank accounts
                     </Button>
@@ -998,6 +1010,7 @@ const PayoneerSheetPage = () => {
                                 : '/admin/transactions'
                         }
                         fullWidth={isSmallMobile}
+                        sx={{ borderColor: theme => theme.palette.warning.main, color: theme => theme.palette.warning.main }}
                     >
                         Transactions
                     </Button>
@@ -1006,6 +1019,7 @@ const PayoneerSheetPage = () => {
                         startIcon={<AddIcon />}
                         onClick={openAddDialog}
                         fullWidth={isSmallMobile}
+                        sx={{ background: theme => `linear-gradient(135deg, ${theme.palette.primary.main} 0%, ${theme.palette.success.main} 100%)`, boxShadow: theme => `0 4px 12px ${theme.palette.primary.main}40` }}
                     >
                         Add Record
                     </Button>
@@ -1013,7 +1027,7 @@ const PayoneerSheetPage = () => {
             </Box>
 
             {/* ADVANCED FILTERS */}
-            <Paper sx={{ p: 2, mb: 2 }}>
+            <Paper sx={{ p: 2, mb: 2, background: theme => `linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(240,249,255,0.9) 100%)`, backdropFilter: 'blur(10px)', border: theme => `1px solid ${theme.palette.divider}` }}>
                 <Stack spacing={2}>
                     <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="center" flexWrap="wrap">
                         {/* Store Filter */}
@@ -1023,7 +1037,7 @@ const PayoneerSheetPage = () => {
                             size="small"
                             value={filters.store}
                             onChange={(e) => setFilters(prev => ({ ...prev, store: e.target.value }))}
-                            sx={{ minWidth: 150 }}
+                            sx={{ minWidth: 150, '& .MuiOutlinedInput-root': { borderRadius: 1.5 } }}
                         >
                             <MenuItem value="">
                                 <em>All Stores</em>
@@ -1049,7 +1063,7 @@ const PayoneerSheetPage = () => {
                                 else next.delete('bankAccount');
                                 setSearchParams(next, { replace: true });
                             }}
-                            sx={{ minWidth: 180 }}
+                            sx={{ minWidth: 180, '& .MuiOutlinedInput-root': { borderRadius: 1.5 } }}
                         >
                             <MenuItem value="">
                                 <em>All bank accounts</em>
@@ -1068,7 +1082,7 @@ const PayoneerSheetPage = () => {
                             size="small"
                             value={filters.dateMode}
                             onChange={(e) => setFilters(prev => ({ ...prev, dateMode: e.target.value }))}
-                            sx={{ minWidth: 120 }}
+                            sx={{ minWidth: 120, '& .MuiOutlinedInput-root': { borderRadius: 1.5 } }}
                         >
                             <MenuItem value="none">None</MenuItem>
                             <MenuItem value="single">Single Date</MenuItem>
