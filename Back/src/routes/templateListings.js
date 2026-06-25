@@ -15,7 +15,8 @@ import { mergeDefaultCoreFieldDefaults } from '../constants/defaultDescriptionTe
 import { generateSKUFromASIN, generateSKUWithCount } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
-import { getAsinCacheStats, clearAsinCache, invalidateAsinCache } from '../utils/asinCache.js';
+import { getAsinCacheStats, clearAsinCache, invalidateAsinCache, getCachedAsinData } from '../utils/asinCache.js';
+import { amazonSourceSnapshotFields, buildListingReuseContext } from '../utils/listingDatabaseAmazonCache.js';
 import AsinDirectory from '../models/AsinDirectory.js';
 import { ensureValidToken } from './ebay.js';
 import {
@@ -27,6 +28,7 @@ import {
   submitDirectListPayload,
   getDirectListStoreListerDefaults,
 } from '../lib/directListPrepare.js';
+import { resolveTemplateEbayMarketplace } from '../utils/ebayActionField.js';
 import DirectListJob, {
   DIRECT_LIST_JOB_MAX_ASINS,
   DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE,
@@ -73,6 +75,16 @@ function fieldConfigsUsePiSources(fieldConfigs = []) {
   return fieldConfigs.some((config) => String(config?.amazonField || '').startsWith('amazon_pi_'));
 }
 
+function attachAmazonSnapshotFromCache(listingData, region = 'US') {
+  const asin = String(listingData?._asinReference || '').trim().toUpperCase();
+  if (!asin) return listingData;
+  const cached = getCachedAsinData(asin, region);
+  return {
+    ...listingData,
+    ...amazonSourceSnapshotFields(cached, region),
+  };
+}
+
 function buildSourceDataFromAmazon(amazonData = {}) {
   return {
     title: amazonData.title,
@@ -103,19 +115,41 @@ function buildSourceDataFromAmazon(amazonData = {}) {
   };
 }
 
-async function runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig) {
+async function runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin = null) {
   const customColumns = resolveAutofillCustomColumns(template);
-  const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
+  const { reuseOptions, isReuse } = asin
+    ? await buildListingReuseContext(asin)
+    : { reuseOptions: {}, isReuse: false };
+  const { coreFields, customFields, pricingCalculation, reusedFromDatabase } = await applyFieldConfigs(
     amazonData,
     fieldConfigs,
     pricingConfig,
-    customColumns
+    customColumns,
+    reuseOptions
   );
   const coreFieldDefaults = resolveTemplateCoreFieldDefaults(template);
-  const mergedCoreFields = mergeTemplateCoreFields(coreFieldDefaults, coreFields, amazonData);
+  const skipReuseDefaults = reusedFromDatabase || isReuse;
+  const mergedCoreFields = mergeTemplateCoreFields(
+    coreFieldDefaults,
+    coreFields,
+    amazonData,
+    { reuseMode: skipReuseDefaults }
+  );
   const customFieldsMerged = mergeReviewIntoCustomFields(customFields, coreFields, customColumns);
-  applyCustomColumnDefaults(customFieldsMerged, customColumns);
-  return { coreFields, customFields, customFieldsMerged, mergedCoreFields, pricingCalculation };
+  if (!skipReuseDefaults) {
+    applyCustomColumnDefaults(customFieldsMerged, customColumns);
+  }
+  if (!skipReuseDefaults && amazonData?.images?.length) {
+    mergedCoreFields.itemPhotoUrl = mergeItemPhotoUrls(mergedCoreFields.itemPhotoUrl, amazonData.images);
+  }
+  return {
+    coreFields,
+    customFields,
+    customFieldsMerged,
+    mergedCoreFields,
+    pricingCalculation,
+    reusedFromDatabase: skipReuseDefaults,
+  };
 }
 
 async function buildAmazonDataFromDirectoryDoc(asin, region, doc) {
@@ -166,7 +200,7 @@ async function buildDuplicateUpdateablePreviewItem({
   pricingConfig,
 }) {
   const amazonData = await fetchAmazonData(asin, region);
-  const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig);
+  const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
   const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
   const futureSKU = generateSKUWithCount(asin, asinCountDoc?.listingCount || 0);
   const safeAiDescription = getConfiguredAiDescription(
@@ -849,7 +883,7 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         
         // Fetch and process ASIN (new listing case)
         const amazonData = await fetchAmazonData(asin, region);
-        const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig);
+        const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
         const { coreFields, customFields, customFieldsMerged, mergedCoreFields, pricingCalculation } = autofill;
 
         const warnings = [];
@@ -1055,7 +1089,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
         // Look up ASIN in the directory; live-scrape when PI catalog fields are configured
         const doc = await AsinDirectory.findOne({ asin }).lean();
         const amazonData = await resolveAmazonDataForPreview(asin, region, doc, fieldConfigs);
-        const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig);
+        const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
         const { coreFields, customFields, customFieldsMerged, mergedCoreFields, pricingCalculation } = autofill;
 
         const warnings = [];
@@ -1173,7 +1207,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 // Create new listing
 router.post('/', requireAuth, async (req, res) => {
   try {
-    const listingData = req.body;
+    const listingData = attachAmazonSnapshotFromCache(req.body, req.body.region || 'US');
     
     if (!listingData.templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -1544,31 +1578,23 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
     console.log(`Fetching Amazon data for ASIN: ${asin} (${region})`);
     const amazonData = await fetchAmazonData(asin, region);
     
-    // 3. Apply field configurations (AI + direct mappings)
+    // 3. Apply field configurations (AI + direct mappings; reuse prior listing when ASIN exists)
     console.log(`Processing ${fieldConfigs.length} field configs`);
-    const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
-      amazonData,
-      fieldConfigs,
-      pricingConfig,
-      resolveAutofillCustomColumns(template)
-    );
-    const coreFieldDefaults = resolveTemplateCoreFieldDefaults(template);
-    const mergedCoreFields = mergeTemplateCoreFields(coreFieldDefaults, coreFields, amazonData);
-    if (amazonData?.images?.length) {
-      mergedCoreFields.itemPhotoUrl = mergeItemPhotoUrls(mergedCoreFields.itemPhotoUrl, amazonData.images);
-    }
+    const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
+    const { mergedCoreFields, customFieldsMerged, pricingCalculation } = autofill;
     const customColumns = resolveAutofillCustomColumns(template);
-    const customFieldsMerged = mergeReviewIntoCustomFields(customFields, mergedCoreFields, customColumns);
     const enrichedListing = enrichListingItemSpecifics(
       { customFields: customFieldsMerged },
       customColumns,
-      amazonData
+      amazonData,
+      { reuseMode: Boolean(autofill.reusedFromDatabase) }
     );
 
     // 4. Return auto-filled data (separated by type)
     res.json({
       success: true,
       asin,
+      reusedFromDatabase: Boolean(autofill.reusedFromDatabase),
       autoFilledData: {
         coreFields: mergedCoreFields,
         customFields: enrichedListing.customFields,
@@ -1777,22 +1803,17 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
           // Fetch Amazon data
           const amazonData = await fetchAmazonData(asin, region);
           
-          // Apply field configurations
-          const { coreFields, customFields, pricingCalculation } = await applyFieldConfigs(
-            amazonData,
-            fieldConfigs,
-            pricingConfig,
-            resolveAutofillCustomColumns(template)
-          );
-          const coreFieldDefaults = resolveTemplateCoreFieldDefaults(template);
-    const mergedCoreFields = mergeTemplateCoreFields(coreFieldDefaults, coreFields, amazonData);
+          // Apply field configurations (reuse prior listing when ASIN exists)
+          const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
+          const { mergedCoreFields, customFieldsMerged, pricingCalculation } = autofill;
           
           return {
             asin,
             status: 'success',
+            reusedFromDatabase: Boolean(autofill.reusedFromDatabase),
             autoFilledData: {
               coreFields: mergedCoreFields,
-              customFields,
+              customFields: customFieldsMerged,
               amazonScrapedPrice: parseAmazonPriceToNumber(amazonData.price),
             },
             amazonSource: {
@@ -2407,24 +2428,13 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         // Fetch Amazon data
         const amazonData = await fetchAmazonData(asin, region);
         
-        // Apply field configurations
-        const { coreFields, customFields, pricingCalculation } = 
-          await applyFieldConfigs(amazonData, fieldConfigs, pricingConfig, resolveAutofillCustomColumns(template));
-        let customFieldsMerged = mergeReviewIntoCustomFields(
-          customFields,
-          coreFields,
-          resolveAutofillCustomColumns(template)
-        );
-        
-        // Apply template core field defaults as base layer (autofilled fields override these)
-        const coreFieldDefaults = resolveTemplateCoreFieldDefaults(template);
-    const mergedCoreFields = mergeTemplateCoreFields(coreFieldDefaults, coreFields, amazonData);
-        
-        applyCustomColumnDefaults(customFieldsMerged, template?.customColumns);
+        // Apply field configurations (reuse prior listing when ASIN exists)
+        const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
+        const { mergedCoreFields, customFieldsMerged, pricingCalculation } = autofill;
         
         console.log(`✅ Generated fields for ${asin}:`);
         console.log(`   Core fields: ${Object.keys(mergedCoreFields).join(', ')}`);
-        console.log(`   Custom fields: ${Object.keys(customFields).join(', ')}`);
+        console.log(`   Custom fields: ${Object.keys(autofill.customFields).join(', ')}`);
         
         // SKU already generated earlier for collision check
         
@@ -2599,7 +2609,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
 // Bulk save: Save reviewed/edited listings to database
 router.post('/bulk-save', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, listings, options = {} } = req.body;
+    const { templateId, sellerId, listings, options = {}, region = 'US' } = req.body;
     
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -2853,7 +2863,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             : new Map();
           
           Object.assign(inactiveListing, {
-            ...listingData,
+            ...attachAmazonSnapshotFromCache(listingData, region),
             customLabel: sku,
             customFields: customFieldsMap,
             templateId,
@@ -2910,7 +2920,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
         
         // Create new listing
         const listing = new TemplateListing({
-          ...listingData,
+          ...attachAmazonSnapshotFromCache(listingData, region),
           customLabel: sku,
           customFields: customFieldsMap,
           templateId,
@@ -4791,7 +4801,8 @@ router.post('/cache-invalidate/:asin', requireAuth, async (req, res) => {
 router.get('/direct-list/store-lister-defaults', requireAuth, async (req, res) => {
   try {
     const sellerId = String(req.query.sellerId || '').trim();
-    const region = String(req.query.region || 'US').trim().toUpperCase() || 'US';
+    const templateId = String(req.query.templateId || '').trim();
+    let region = String(req.query.region || 'US').trim().toUpperCase() || 'US';
 
     if (!sellerId) {
       return res.status(400).json({ error: 'sellerId is required' });
@@ -4802,8 +4813,17 @@ router.get('/direct-list/store-lister-defaults', requireAuth, async (req, res) =
       return res.status(404).json({ error: 'Seller not found' });
     }
 
+    let ebayMarketplace = null;
+    if (templateId) {
+      const template = await getEffectiveTemplate(templateId, sellerId);
+      if (template) {
+        ebayMarketplace = resolveTemplateEbayMarketplace(template);
+        region = ebayMarketplace.storeListerRegion;
+      }
+    }
+
     const storeListerApplied = await getDirectListStoreListerDefaults(sellerId, region);
-    res.json({ storeListerApplied });
+    res.json({ storeListerApplied, ebayMarketplace, storeListerRegion: region });
   } catch (error) {
     console.error('[Direct List Store Defaults] Error:', error);
     res.status(500).json({ error: error.message || 'Failed to load store lister defaults' });
@@ -4835,6 +4855,7 @@ router.post('/direct-list/preview', requireAuth, async (req, res) => {
       asin,
       region,
       defaults,
+      createdBy: req.user?.userId,
     });
 
     res.json(result);
@@ -4888,6 +4909,7 @@ router.post('/direct-list-bulk/preview', requireAuth, async (req, res) => {
       region,
       defaults,
       concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 2, 1), 3),
+      createdBy: req.user?.userId,
     });
 
     res.json(previewResult);
@@ -4914,7 +4936,7 @@ router.post('/direct-list', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'Seller not found' });
     }
 
-    const { listingPayload, storeListerApplied } = await prepareDirectListPayload({
+    const { listingPayload, storeListerApplied, amazonData, ebayMarketplace } = await prepareDirectListPayload({
       templateId,
       sellerId,
       listing,
@@ -4932,9 +4954,13 @@ router.post('/direct-list', requireAuth, async (req, res) => {
       sellerId,
       asin,
       storeListerApplied,
+      createdBy: req.user?.userId,
+      amazonData,
+      region,
+      ebayMarketplace,
     });
 
-    res.json(result);
+    res.json({ ...result, ebayMarketplace });
   } catch (error) {
     console.error('[Direct List] Error:', error);
     res.status(error.statusCode || 500).json({
@@ -4989,6 +5015,7 @@ router.post('/direct-list-bulk', requireAuth, async (req, res) => {
       defaults,
       token,
       concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 2, 1), 3),
+      createdBy: req.user?.userId,
     });
 
     res.json(bulkResult);

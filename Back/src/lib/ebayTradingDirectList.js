@@ -126,7 +126,7 @@ function parseTradingAck(result, responseKey) {
 export function buildAddFixedPriceItemXml(
   token,
   listing = {},
-  { verifyOnly = false, categoryMappingAllowed = true } = {}
+  { verifyOnly = false, categoryMappingAllowed = true, currency = 'USD' } = {}
 ) {
   const requestTag = verifyOnly ? 'VerifyAddFixedPriceItemRequest' : 'AddFixedPriceItemRequest';
   const title = String(listing.title || '').trim();
@@ -158,14 +158,16 @@ export function buildAddFixedPriceItemXml(
     throw new Error('At least one item photo URL is required');
   }
 
+  const currencyCode = String(currency || 'USD').trim().toUpperCase() || 'USD';
+
   const itemXml = `
     <Title>${escapeXml(title)}</Title>
     <Description><![CDATA[${description}]]></Description>
     <PrimaryCategory><CategoryID>${escapeXml(categoryId)}</CategoryID></PrimaryCategory>
-    <StartPrice currencyID="USD">${startPrice.toFixed(2)}</StartPrice>
+    <StartPrice currencyID="${escapeXml(currencyCode)}">${startPrice.toFixed(2)}</StartPrice>
     <CategoryMappingAllowed>${categoryMappingAllowed ? 'true' : 'false'}</CategoryMappingAllowed>
     <Country>${escapeXml(country)}</Country>
-    <Currency>USD</Currency>
+    <Currency>${escapeXml(currencyCode)}</Currency>
     <DispatchTimeMax>${escapeXml(dispatchTime)}</DispatchTimeMax>
     <ListingDuration>${escapeXml(duration)}</ListingDuration>
     <ListingType>FixedPriceItem</ListingType>
@@ -193,10 +195,14 @@ export function buildAddFixedPriceItemXml(
 export async function addFixedPriceItemListing(
   token,
   listing,
-  { siteId = '0', verifyOnly = false, categoryMappingAllowed = true } = {}
+  { siteId = '0', currency = 'USD', verifyOnly = false, categoryMappingAllowed = true } = {}
 ) {
   const callName = verifyOnly ? 'VerifyAddFixedPriceItem' : 'AddFixedPriceItem';
-  const xmlRequest = buildAddFixedPriceItemXml(token, listing, { verifyOnly, categoryMappingAllowed });
+  const xmlRequest = buildAddFixedPriceItemXml(token, listing, {
+    verifyOnly,
+    categoryMappingAllowed,
+    currency,
+  });
 
   const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
     headers: {

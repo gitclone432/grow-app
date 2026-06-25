@@ -18,6 +18,7 @@ import {
   applyStoreListerSettings,
   buildStoreListerAppliedSummary,
   stripStoreControlledListingFields,
+  STORE_CONTROLLED_LISTING_FIELDS,
 } from '../utils/ebayStoreListerDefaults.js';
 import { applyStoreBrandToListing, getStoreBrandMode, stripBrandFromCustomFields } from '../utils/ebayStoreBrand.js';
 import { generateSKUFromASIN } from '../utils/skuGenerator.js';
@@ -25,13 +26,14 @@ import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { addFixedPriceItemListing } from './ebayTradingDirectList.js';
 import { buildAmazonSupplierLink } from '../utils/supplierLinkFromListings.js';
 import { attachAmazonScrapedPrice } from '../utils/amazonScrapedPrice.js';
+import { amazonSourceSnapshotFields, buildListingReuseContext } from '../utils/listingDatabaseAmazonCache.js';
 import {
   applyDescriptionTemplatePlaceholders,
   hasUnsubstitutedPlaceholders,
 } from '../utils/descriptionTemplatePlaceholders.js';
+import { resolveTemplateEbayMarketplace } from '../utils/ebayActionField.js';
 
 const REQUIRED_FIELDS = ['customLabel', 'title', 'startPrice', 'categoryId', 'itemPhotoUrl'];
-const STORE_LISTER_REGION = 'US';
 
 export function parseDirectListAsins(value) {
   return [...new Set(
@@ -87,7 +89,7 @@ function templateDescriptionNeedsAiAutofill(coreFieldDefaults = {}) {
   return /\{\{AI_FEATURE_BULLETS\}\}|\{\{AI_DESCRIPTION\}\}/i.test(desc);
 }
 
-async function resolveDescriptionAiText(amazonData, template, pricingConfig, customColumns, coreFieldDefaults) {
+async function resolveDescriptionAiText(amazonData, template, pricingConfig, customColumns, coreFieldDefaults, reuseOptions = {}) {
   if (!amazonData || !templateDescriptionNeedsAiAutofill(coreFieldDefaults)) return '';
 
   const descriptionAiConfig = resolveDescriptionAiAutofillConfig(template);
@@ -98,7 +100,8 @@ async function resolveDescriptionAiText(amazonData, template, pricingConfig, cus
       amazonData,
       [descriptionAiConfig],
       pricingConfig,
-      customColumns
+      customColumns,
+      reuseOptions
     );
     return String(coreFields?.description || '').trim();
   } catch (error) {
@@ -191,6 +194,107 @@ export function toCustomFieldsMap(customFields) {
   return new Map();
 }
 
+const PERSIST_SKIP_KEYS = new Set([
+  '_id',
+  '__v',
+  'sellerId',
+  'templateId',
+  'customFields',
+  'createdAt',
+  'updatedAt',
+  'deletedAt',
+  'createdBy',
+  'status',
+  'ebayItemId',
+  'ebayListingUrl',
+  'ebayPublishedAt',
+  'amazonSourceSnapshot',
+  'amazonSourceRegion',
+]);
+
+function buildPersistableListingFields(listingPayload = {}, storeListerApplied = null) {
+  const merged = { ...(listingPayload || {}) };
+  if (storeListerApplied && typeof storeListerApplied === 'object') {
+    for (const key of STORE_CONTROLLED_LISTING_FIELDS) {
+      const value = storeListerApplied[key];
+      if (value != null && String(value).trim() !== '') {
+        merged[key] = value;
+      }
+    }
+  }
+
+  const out = {};
+  for (const key of Object.keys(TemplateListing.schema.paths)) {
+    if (PERSIST_SKIP_KEYS.has(key)) continue;
+    if (merged[key] === undefined || merged[key] === null) continue;
+    out[key] = merged[key];
+  }
+  return out;
+}
+
+/** Upsert full listing row to Listings Database (TemplateListing). */
+export async function persistTemplateListingRecord({
+  templateId,
+  sellerId,
+  listingPayload,
+  storeListerApplied = null,
+  status = 'draft',
+  ebayResult = null,
+  createdBy = null,
+  amazonData = null,
+  region = 'US',
+}) {
+  if (!templateId || !sellerId || !listingPayload?.customLabel) return null;
+
+  const asinRef = String(listingPayload._asinReference || '').trim().toUpperCase();
+  const persistFields = buildPersistableListingFields(listingPayload, storeListerApplied);
+
+  const existing = await TemplateListing.findOne({
+    templateId,
+    sellerId,
+    customLabel: listingPayload.customLabel,
+  }).select('status ebayItemId').lean();
+
+  let nextStatus = status;
+  if (ebayResult?.itemId) {
+    nextStatus = 'active';
+  } else if (existing?.status === 'active' && existing?.ebayItemId) {
+    nextStatus = 'active';
+  }
+
+  const $set = {
+    templateId,
+    sellerId,
+    ...persistFields,
+    customFields: toCustomFieldsMap(listingPayload.customFields || {}),
+    status: nextStatus,
+    updatedAt: new Date(),
+  };
+
+  if (asinRef) {
+    $set._asinReference = asinRef;
+    $set.amazonLink = listingPayload.amazonLink || buildAmazonSupplierLink(asinRef);
+    Object.assign($set, amazonSourceSnapshotFields(amazonData, region));
+  }
+
+  if (ebayResult?.itemId) {
+    $set.ebayItemId = String(ebayResult.itemId);
+    $set.ebayListingUrl = ebayResult.listingUrl || '';
+    $set.ebayPublishedAt = new Date();
+  }
+
+  const update = { $set };
+  if (createdBy && !existing) {
+    update.$setOnInsert = { createdBy };
+  }
+
+  return TemplateListing.findOneAndUpdate(
+    { templateId, sellerId, customLabel: listingPayload.customLabel },
+    update,
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+}
+
 export function formatListingSummary(listingPayload = {}, asin = null) {
   return {
     customLabel: listingPayload.customLabel,
@@ -242,14 +346,17 @@ export async function loadDirectListContext(templateId, sellerId) {
   let pricingConfig = template.pricingConfig;
   if (sellerConfig) pricingConfig = sellerConfig.pricingConfig;
 
+  const ebayMarketplace = resolveTemplateEbayMarketplace(template);
+
   const effectiveCoreFieldDefaults = await resolveEffectiveCoreFieldDefaults(
     template,
     sellerId,
-    STORE_LISTER_REGION
+    ebayMarketplace.storeListerRegion
   );
 
   return {
     template,
+    ebayMarketplace,
     effectiveCoreFieldDefaults,
     fieldConfigs: resolveAutofillFieldConfigs(template, effectiveCoreFieldDefaults),
     customColumns: resolveAutofillCustomColumns(template),
@@ -269,11 +376,13 @@ export async function prepareDirectListPayload({
   const ctx = context || await loadDirectListContext(templateId, sellerId);
   const {
     template,
+    ebayMarketplace,
     fieldConfigs,
     customColumns,
     pricingConfig,
     effectiveCoreFieldDefaults,
   } = ctx;
+  const storeListerRegion = ebayMarketplace.storeListerRegion;
   const coreFieldDefaults = effectiveCoreFieldDefaults || template.coreFieldDefaults || {};
 
   let listingPayload = listing;
@@ -282,28 +391,51 @@ export async function prepareDirectListPayload({
   const clientListing = listing && typeof listing === 'object' ? listing : null;
 
   let aiDescription = '';
+  let reusedFromDatabase = false;
+  let listingReuseOptions = {};
 
   if (normalizedAsin) {
+    const { reuseOptions, isReuse } = await buildListingReuseContext(normalizedAsin);
+    listingReuseOptions = reuseOptions;
+    reusedFromDatabase = isReuse;
+
     amazonData = await fetchAmazonData(normalizedAsin, region);
-    aiDescription = await resolveDescriptionAiText(
-      amazonData,
-      template,
-      pricingConfig,
-      customColumns,
-      coreFieldDefaults
-    );
-    const { coreFields, customFields } = await applyFieldConfigs(
+
+    const { coreFields, customFields, reusedFromDatabase: autofillReuse } = await applyFieldConfigs(
       amazonData,
       fieldConfigs,
       pricingConfig,
-      customColumns
+      customColumns,
+      reuseOptions
     );
-    const mergedCoreFields = mergeTemplateCoreFields(coreFieldDefaults, coreFields, amazonData);
-    if (amazonData?.images?.length) {
+    reusedFromDatabase = autofillReuse || isReuse;
+
+    if (templateDescriptionNeedsAiAutofill(coreFieldDefaults)) {
+      aiDescription = await resolveDescriptionAiText(
+        amazonData,
+        template,
+        pricingConfig,
+        customColumns,
+        coreFieldDefaults,
+        reuseOptions
+      );
+    } else {
+      aiDescription = String(coreFields?.description || '').trim();
+    }
+
+    const mergedCoreFields = mergeTemplateCoreFields(
+      coreFieldDefaults,
+      coreFields,
+      amazonData,
+      { reuseMode: reusedFromDatabase }
+    );
+    if (!reusedFromDatabase && amazonData?.images?.length) {
       mergedCoreFields.itemPhotoUrl = mergeItemPhotoUrls(mergedCoreFields.itemPhotoUrl, amazonData.images);
     }
     const customFieldsMerged = mergeReviewIntoCustomFields(customFields, mergedCoreFields, customColumns);
-    applyCustomColumnDefaults(customFieldsMerged, customColumns);
+    if (!reusedFromDatabase) {
+      applyCustomColumnDefaults(customFieldsMerged, customColumns);
+    }
 
     const baseListing = {
       ...mergedCoreFields,
@@ -317,7 +449,8 @@ export async function prepareDirectListPayload({
         applyDescriptionPlaceholdersIfNeeded(baseListing, amazonData, aiDescription)
       ),
       customColumns,
-      amazonData
+      amazonData,
+      { reuseMode: reusedFromDatabase }
     );
 
     listingPayload = clientListing
@@ -341,19 +474,24 @@ export async function prepareDirectListPayload({
     }
   }
 
-  listingPayload = enrichListingItemSpecifics(listingPayload, customColumns, amazonData);
-  if (amazonData?.images?.length) {
+  listingPayload = enrichListingItemSpecifics(
+    listingPayload,
+    customColumns,
+    amazonData,
+    { reuseMode: reusedFromDatabase }
+  );
+  if (!reusedFromDatabase && amazonData?.images?.length) {
     listingPayload.itemPhotoUrl = mergeItemPhotoUrls(listingPayload.itemPhotoUrl, amazonData.images);
   }
 
-  listingPayload = await applyStoreListerSettings(listingPayload, sellerId, STORE_LISTER_REGION);
+  listingPayload = await applyStoreListerSettings(listingPayload, sellerId, storeListerRegion);
 
   listingPayload = {
     ...listingPayload,
     customFields: stripBrandFromCustomFields(listingPayload.customFields),
   };
 
-  const brandMode = await getStoreBrandMode(sellerId, STORE_LISTER_REGION);
+  const brandMode = await getStoreBrandMode(sellerId, storeListerRegion);
   const brandResult = applyStoreBrandToListing(
     listingPayload,
     brandMode,
@@ -371,6 +509,8 @@ export async function prepareDirectListPayload({
 
   console.log('[Direct List] Applied store lister settings:', {
     sellerId: String(sellerId),
+    ebaySite: ebayMarketplace.marketplaceLabel,
+    ebaySiteId: ebayMarketplace.siteId,
     location: listingPayload.location,
     country: listingPayload.country,
     postalCode: listingPayload.postalCode,
@@ -385,7 +525,8 @@ export async function prepareDirectListPayload({
         template,
         pricingConfig,
         customColumns,
-        coreFieldDefaults
+        coreFieldDefaults,
+        listingReuseOptions
       );
     }
     listingPayload = applyDescriptionPlaceholdersIfNeeded(listingPayload, amazonData, aiDescription);
@@ -410,11 +551,19 @@ export async function prepareDirectListPayload({
 
   const storeListerApplied = await buildStoreListerAppliedSummary(
     sellerId,
-    STORE_LISTER_REGION,
+    storeListerRegion,
     brandResult.brandApplied
   );
 
-  return { listingPayload, amazonData, template, context: ctx, storeListerApplied };
+  return {
+    listingPayload,
+    amazonData,
+    template,
+    context: ctx,
+    ebayMarketplace,
+    storeListerApplied,
+    reusedFromDatabase,
+  };
 }
 
 export async function getDirectListStoreListerDefaults(sellerId, region = 'US') {
@@ -429,34 +578,36 @@ export async function submitDirectListPayload({
   sellerId,
   asin = null,
   storeListerApplied = null,
+  createdBy = null,
+  amazonData = null,
+  region = 'US',
+  ebayMarketplace = null,
 }) {
+  let marketplace = ebayMarketplace;
+  if (!marketplace && templateId) {
+    const template = await getEffectiveTemplate(templateId, sellerId);
+    marketplace = resolveTemplateEbayMarketplace(template);
+  }
+  marketplace = marketplace || resolveTemplateEbayMarketplace(null);
+
   const ebayResult = await addFixedPriceItemListing(token, listingPayload, {
     verifyOnly: Boolean(verifyOnly),
     categoryMappingAllowed: false,
+    siteId: marketplace.siteId,
+    currency: marketplace.currency,
   });
 
-  if (!verifyOnly && ebayResult.itemId) {
-    const asinRef = String(listingPayload._asinReference || asin || '').trim().toUpperCase();
-    const { customFields: _omitCustomFields, ...listingPayloadRest } = listingPayload;
-    await TemplateListing.findOneAndUpdate(
-      { templateId, sellerId, customLabel: listingPayload.customLabel },
-      {
-        $set: {
-          templateId,
-          sellerId,
-          ...listingPayloadRest,
-          customFields: toCustomFieldsMap(listingPayload.customFields || {}),
-          status: 'active',
-          ebayItemId: ebayResult.itemId,
-          ebayListingUrl: ebayResult.listingUrl,
-          ebayPublishedAt: new Date(),
-          _asinReference: asinRef,
-          amazonLink: listingPayload.amazonLink || buildAmazonSupplierLink(asinRef),
-        },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-  }
+  await persistTemplateListingRecord({
+    templateId,
+    sellerId,
+    listingPayload,
+    storeListerApplied,
+    status: verifyOnly ? 'draft' : 'active',
+    ebayResult: verifyOnly ? null : ebayResult,
+    createdBy,
+    amazonData,
+    region,
+  });
 
   return {
     success: true,
@@ -498,9 +649,16 @@ export async function previewDirectListPayload({
   asin = null,
   region = 'US',
   defaults = {},
+  createdBy = null,
 }) {
   const normalizedAsin = String(asin || listing?._asinReference || '').trim().toUpperCase() || null;
-  const { listingPayload, amazonData, storeListerApplied } = await prepareDirectListPayload({
+  const {
+    listingPayload,
+    amazonData,
+    storeListerApplied,
+    reusedFromDatabase,
+    ebayMarketplace,
+  } = await prepareDirectListPayload({
     templateId,
     sellerId,
     listing,
@@ -509,12 +667,27 @@ export async function previewDirectListPayload({
     defaults,
   });
 
+  await persistTemplateListingRecord({
+    templateId,
+    sellerId,
+    listingPayload,
+    storeListerApplied,
+    status: 'draft',
+    createdBy,
+    amazonData,
+    region,
+  });
+
   return {
     success: true,
     listing: formatListingSummary(listingPayload, normalizedAsin),
     storeListerApplied,
+    ebayMarketplace,
     amazonSource: formatAmazonSource(amazonData),
-    message: 'Listing prepared for review — not submitted to eBay.',
+    reusedFromDatabase: Boolean(reusedFromDatabase),
+    message: reusedFromDatabase
+      ? 'Listing prepared from Listings Database (title/description rephrased only) and saved as draft.'
+      : 'Listing prepared for review and saved to Listings Database (draft).',
   };
 }
 
@@ -525,17 +698,29 @@ export async function previewDirectListBulk({
   region = 'US',
   defaults = {},
   concurrency = 2,
+  createdBy = null,
 }) {
   const context = await loadDirectListContext(templateId, sellerId);
+  const { ebayMarketplace } = context;
   const results = await runWithConcurrency(asins, concurrency, async (asin) => {
     try {
-      const { listingPayload, storeListerApplied } = await prepareDirectListPayload({
+      const { listingPayload, storeListerApplied, amazonData } = await prepareDirectListPayload({
         templateId,
         sellerId,
         asin,
         region,
         defaults,
         context,
+      });
+      await persistTemplateListingRecord({
+        templateId,
+        sellerId,
+        listingPayload,
+        storeListerApplied,
+        status: 'draft',
+        createdBy,
+        amazonData,
+        region,
       });
       return {
         asin,
@@ -564,6 +749,7 @@ export async function previewDirectListBulk({
     ready,
     failed,
     results,
+    ebayMarketplace,
     message: `Prepared ${ready}/${results.length} listing(s) for review.`,
   };
 }
@@ -577,11 +763,13 @@ export async function processDirectListBulk({
   defaults = {},
   token,
   concurrency = 2,
+  createdBy = null,
 }) {
   const context = await loadDirectListContext(templateId, sellerId);
+  const { ebayMarketplace } = context;
   const results = await runWithConcurrency(asins, concurrency, async (asin) => {
     try {
-      const { listingPayload, storeListerApplied } = await prepareDirectListPayload({
+      const { listingPayload, storeListerApplied, amazonData, ebayMarketplace } = await prepareDirectListPayload({
         templateId,
         sellerId,
         asin,
@@ -597,6 +785,10 @@ export async function processDirectListBulk({
         sellerId,
         asin,
         storeListerApplied,
+        createdBy,
+        amazonData,
+        region,
+        ebayMarketplace,
       });
       return {
         asin,
@@ -625,6 +817,7 @@ export async function processDirectListBulk({
     failed,
     verifyOnly: Boolean(verifyOnly),
     results,
+    ebayMarketplace,
     message: verifyOnly
       ? `Validated ${successful}/${results.length} listing(s) on eBay (dry run).`
       : `Published ${successful}/${results.length} listing(s) on eBay.`,

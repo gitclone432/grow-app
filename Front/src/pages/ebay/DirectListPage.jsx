@@ -519,21 +519,28 @@ export default function DirectListPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [storeListerDefaults, setStoreListerDefaults] = useState(null);
+  const [ebayMarketplace, setEbayMarketplace] = useState(null);
 
   const loadStoreListerDefaults = useCallback(async () => {
     if (!selectedSeller) {
       setStoreListerDefaults(null);
+      setEbayMarketplace(null);
       return;
     }
     try {
       const { data } = await api.get('/template-listings/direct-list/store-lister-defaults', {
-        params: { sellerId: selectedSeller, region: 'US' },
+        params: {
+          sellerId: selectedSeller,
+          ...(selectedTemplate ? { templateId: selectedTemplate } : {}),
+        },
       });
       setStoreListerDefaults(data.storeListerApplied || null);
+      setEbayMarketplace(data.ebayMarketplace || null);
     } catch {
       setStoreListerDefaults(null);
+      setEbayMarketplace(null);
     }
-  }, [selectedSeller]);
+  }, [selectedSeller, selectedTemplate]);
 
   useEffect(() => {
     void loadStoreListerDefaults();
@@ -894,14 +901,26 @@ export default function DirectListPage() {
               </Select>
             </FormControl>
             <FormControl size="small" sx={{ minWidth: 120 }}>
-              <InputLabel>Region</InputLabel>
-              <Select value={region} label="Region" onChange={(e) => setRegion(e.target.value)}>
+              <InputLabel>Amazon region</InputLabel>
+              <Select value={region} label="Amazon region" onChange={(e) => setRegion(e.target.value)}>
                 <MenuItem value="US">US</MenuItem>
                 <MenuItem value="UK">UK</MenuItem>
                 <MenuItem value="AU">AU</MenuItem>
               </Select>
             </FormControl>
           </Stack>
+          {ebayMarketplace?.marketplaceLabel && (
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Chip
+                size="small"
+                color={ebayMarketplace.isMotors ? 'secondary' : 'primary'}
+                label={`eBay marketplace: ${ebayMarketplace.marketplaceLabel}`}
+              />
+              <Typography variant="caption" color="text.secondary">
+                From template Action Field — used when listing on eBay
+              </Typography>
+            </Stack>
+          )}
         </Stack>
       </Paper>
 

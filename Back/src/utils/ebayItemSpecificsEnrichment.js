@@ -18,7 +18,9 @@ const STORAGE_CAPACITY_PI_PATHS = [
   'storage',
 ];
 
-export function applyCustomColumnDefaults(customFieldsMerged, customColumns = []) {
+export function applyCustomColumnDefaults(customFieldsMerged, customColumns = [], options = {}) {
+  if (options.reuseMode) return;
+
   for (const col of customColumns) {
     const defaultValue = String(col?.defaultValue ?? '').trim();
     if (!defaultValue || !col?.name) continue;
@@ -76,7 +78,14 @@ function readStorageCapacityFromAmazon(amazonData = {}) {
 /**
  * Ensure template custom columns and common category aspects are populated before Trading API list.
  */
-export function enrichListingItemSpecifics(listing = {}, customColumns = [], amazonData = null) {
+export function enrichListingItemSpecifics(listing = {}, customColumns = [], amazonData = null, options = {}) {
+  if (options.reuseMode) {
+    return {
+      ...listing,
+      customFields: filterCustomFieldsToTemplateColumns(listing.customFields || {}, customColumns),
+    };
+  }
+
   const customFields = { ...(listing.customFields || {}) };
 
   for (const col of customColumns) {

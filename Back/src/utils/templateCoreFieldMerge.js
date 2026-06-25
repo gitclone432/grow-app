@@ -12,29 +12,37 @@ export function coreFieldHasDescriptionDefault(coreFieldDefaults = {}) {
   return String(coreFieldDefaults?.description || '').trim().length > 0;
 }
 
-export function mergeTemplateCoreFields(coreFieldDefaults = {}, autoCoreFields = {}, amazonData = {}) {
+export function mergeTemplateCoreFields(
+  coreFieldDefaults = {},
+  autoCoreFields = {},
+  amazonData = {},
+  options = {}
+) {
+  const reuseMode = Boolean(options.reuseMode);
   const defaultDescription = String(coreFieldDefaults?.description || '').trim();
   const merged = {
     ...(coreFieldDefaults || {}),
     ...(autoCoreFields || {}),
   };
 
-  if (!String(merged.title || '').trim() && String(amazonData?.title || '').trim()) {
-    merged.title = String(amazonData.title).trim().slice(0, 80);
-  }
+  if (!reuseMode) {
+    if (!String(merged.title || '').trim() && String(amazonData?.title || '').trim()) {
+      merged.title = String(amazonData.title).trim().slice(0, 80);
+    }
 
-  if (!String(merged.itemPhotoUrl || '').trim() && Array.isArray(amazonData?.images) && amazonData.images.length) {
-    merged.itemPhotoUrl = joinItemPhotoUrls(amazonData.images);
-  }
+    if (!String(merged.itemPhotoUrl || '').trim() && Array.isArray(amazonData?.images) && amazonData.images.length) {
+      merged.itemPhotoUrl = joinItemPhotoUrls(amazonData.images);
+    }
 
-  if (merged.startPrice === undefined || merged.startPrice === null || merged.startPrice === '') {
-    const parsedAmazonPrice = parseAmazonPriceToNumber(amazonData?.price);
-    merged.startPrice = parsedAmazonPrice ? parsedAmazonPrice.toFixed(2) : '0.01';
+    if (merged.startPrice === undefined || merged.startPrice === null || merged.startPrice === '') {
+      const parsedAmazonPrice = parseAmazonPriceToNumber(amazonData?.price);
+      merged.startPrice = parsedAmazonPrice ? parsedAmazonPrice.toFixed(2) : '0.01';
+    }
   }
 
   if (defaultDescription) {
     merged.description = coreFieldDefaults.description;
-  } else if (!String(merged.description || '').trim()) {
+  } else if (!reuseMode && !String(merged.description || '').trim()) {
     const fromAmazon = String(amazonData?.description || '').trim();
     if (fromAmazon) merged.description = fromAmazon;
   }

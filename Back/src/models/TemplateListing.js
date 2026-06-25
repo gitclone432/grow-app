@@ -102,6 +102,20 @@ const templateListingSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+
+  /** Cached ScraperAPI/ScrapingDog payload for cross-store ASIN reuse (not eBay listing fields). */
+  amazonSourceSnapshot: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+    select: false,
+  },
+  amazonSourceRegion: {
+    type: String,
+    default: 'US',
+    trim: true,
+    uppercase: true,
+    select: false,
+  },
   
   // Listing status for database tracking
   status: {

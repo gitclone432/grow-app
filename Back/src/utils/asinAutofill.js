@@ -15,6 +15,11 @@ import {
 } from './customColumnAmazonMapping.js';
 import { trackApiUsage } from './apiUsageTracker.js';
 import { getCachedAsinData, setCachedAsinData } from './asinCache.js';
+import {
+  getAmazonDataFromListingsDatabase,
+  rememberAmazonSourceSnapshot,
+  isAiFieldAllowedInReuse,
+} from './listingDatabaseAmazonCache.js';
 import { createEbayImageWithOverlay } from './imageProcessor.js';
 import { getImageOverlayRuntimeConfig } from './overlaySettings.js';
 
@@ -91,15 +96,24 @@ export async function fetchAmazonData(asin, region = 'US') {
   try {
     console.log(`[fetchAmazonData] 🔍 Fetching product data for ASIN: ${asin} (${region})`);
     
-    // Check cache first
+    // Check in-memory cache first
     const cached = getCachedAsinData(asin, region);
     if (cached) {
       const cacheTime = Date.now() - startTime;
       console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${region}, ${cacheTime}ms)`);
       return cached;
     }
+
+    // Reuse Amazon scrape saved on any Listings Database row for this ASIN
+    const fromListingsDb = await getAmazonDataFromListingsDatabase(asin, region);
+    if (fromListingsDb) {
+      setCachedAsinData(asin, fromListingsDb, region);
+      const dbTime = Date.now() - startTime;
+      console.log(`[fetchAmazonData] 📚 Listings Database reused for ${asin} (${region}, ${dbTime}ms)`);
+      return fromListingsDb;
+    }
     
-    // Single ScraperAPI call for ALL data
+    // Live ScraperAPI / ScrapingDog scrape
     const scrapedData = await scrapeAmazonProductWithScraperAPI(asin, region);
     
     const responseTime = Date.now() - startTime;
@@ -192,6 +206,7 @@ export async function fetchAmazonData(asin, region = 'US') {
     // triggers a fresh scrape rather than serving a stale empty-description entry
     if (result.description) {
       setCachedAsinData(asin, result, region);
+      await rememberAmazonSourceSnapshot(asin, region, result);
     } else {
       console.log(`[fetchAmazonData] ⚠️ Skipping cache for ${asin} (no description) — will retry on next request`);
     }
@@ -223,10 +238,37 @@ function promoteMisroutedCustomFields(coreFields, customFields) {
   }
 }
 
-export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig = null, customColumns = []) {
+export async function applyFieldConfigs(
+  amazonData,
+  fieldConfigs,
+  pricingConfig = null,
+  customColumns = [],
+  options = {}
+) {
   const coreFields = {};
   const customFields = {};
   let pricingCalculation = null;
+
+  const {
+    reuseFromPriorListing = null,
+    aiFieldsOnly = ['title', 'description'],
+  } = options;
+
+  const reuseMode = Boolean(
+    reuseFromPriorListing
+    && (
+      Object.keys(reuseFromPriorListing.coreFields || {}).length > 0
+      || Object.keys(reuseFromPriorListing.customFields || {}).length > 0
+    )
+  );
+
+  if (reuseMode) {
+    Object.assign(coreFields, reuseFromPriorListing.coreFields || {});
+    Object.assign(customFields, reuseFromPriorListing.customFields || {});
+    console.log(
+      `[ASIN: ${amazonData.asin}] ♻️ Reusing Listings Database row — OpenAI rephrase only for: ${aiFieldsOnly.join(', ')}`
+    );
+  }
 
   const plainFieldConfigs = (Array.isArray(fieldConfigs) ? fieldConfigs : []).map(toPlainFieldConfig);
   const plainCustomColumns = (Array.isArray(customColumns) ? customColumns : []).map(toPlainFieldConfig);
@@ -346,56 +388,62 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
   }
 
   // Process direct mapping configs (fast, no API calls)
-  for (const config of directConfigs) {
-    const targetObject = isCustomFieldConfig(config) ? customFields : coreFields;
-    
-    try {
-      const amazonKey = resolveAmazonFieldKey(config);
-      let value = amazonKey ? readAmazonFieldByKey(amazonKey, amazonDataForMapping) : undefined;
+  if (!reuseMode) {
+    for (const config of directConfigs) {
+      const targetObject = isCustomFieldConfig(config) ? customFields : coreFields;
 
-      if (isCustomFieldConfig(config) && isEmptyCustomFieldValue(value)) {
-        const fallback = resolveCustomColumnValue(config.ebayField, amazonDataForMapping, config);
-        if (fallback) value = fallback;
-      }
+      try {
+        const amazonKey = resolveAmazonFieldKey(config);
+        let value = amazonKey ? readAmazonFieldByKey(amazonKey, amazonDataForMapping) : undefined;
 
-      // Apply transformations
-      value = applyTransform(value, config.transform);
+        if (isCustomFieldConfig(config) && isEmptyCustomFieldValue(value)) {
+          const fallback = resolveCustomColumnValue(config.ebayField, amazonDataForMapping, config);
+          if (fallback) value = fallback;
+        }
 
-      if (isCustomFieldConfig(config)) {
-        value = trimCustomFieldValue(value, config.ebayField);
+        // Apply transformations
+        value = applyTransform(value, config.transform);
+
+        if (isCustomFieldConfig(config)) {
+          value = trimCustomFieldValue(value, config.ebayField);
+        }
+
+        // Apply image placeholder replacement for description field
+        if (config.ebayField === 'description' && typeof value === 'string') {
+          value = processImagePlaceholders(value, imagesArray);
+        }
+
+        targetObject[config.ebayField] = value;
+
+        // Fallback to default value if mapping resulted in empty value
+        if (!targetObject[config.ebayField] && config.defaultValue) {
+          targetObject[config.ebayField] = config.defaultValue;
+          console.log(`Used default value fallback for ${config.ebayField}: ${config.defaultValue}`);
+        }
+
+        const fieldLabel = isCustomFieldConfig(config) ? `[Custom] ${config.ebayField}` : config.ebayField;
+        const filled = targetObject[config.ebayField];
+        const filledPreview = typeof filled === 'string' ? filled.substring(0, 50) : String(filled ?? '').substring(0, 50);
+        console.log(`Auto-filled ${fieldLabel}: ${filledPreview}...`);
+
+      } catch (error) {
+        console.error(`[ASIN: ${amazonData.asin}] Error processing direct mapping for ${config.ebayField}:`, error);
+        targetObject[config.ebayField] = config.defaultValue || '';
       }
-      
-      // Apply image placeholder replacement for description field
-      if (config.ebayField === 'description' && typeof value === 'string') {
-        value = processImagePlaceholders(value, imagesArray);
-      }
-      
-      targetObject[config.ebayField] = value;
-      
-      // Fallback to default value if mapping resulted in empty value
-      if (!targetObject[config.ebayField] && config.defaultValue) {
-        targetObject[config.ebayField] = config.defaultValue;
-        console.log(`Used default value fallback for ${config.ebayField}: ${config.defaultValue}`);
-      }
-      
-      const fieldLabel = isCustomFieldConfig(config) ? `[Custom] ${config.ebayField}` : config.ebayField;
-      const filled = targetObject[config.ebayField];
-      const filledPreview = typeof filled === 'string' ? filled.substring(0, 50) : String(filled ?? '').substring(0, 50);
-      console.log(`Auto-filled ${fieldLabel}: ${filledPreview}...`);
-      
-    } catch (error) {
-      console.error(`[ASIN: ${amazonData.asin}] Error processing direct mapping for ${config.ebayField}:`, error);
-      targetObject[config.ebayField] = config.defaultValue || '';
     }
   }
 
   promoteMisroutedCustomFields(coreFields, customFields);
   
+  const aiConfigsToRun = reuseMode
+    ? aiConfigs.filter((config) => isAiFieldAllowedInReuse(config, aiFieldsOnly))
+    : aiConfigs;
+
   // Process AI configs in parallel for maximum speed
-  if (aiConfigs.length > 0) {
-    console.log(`\n🤖 [ASIN: ${amazonData.asin}] Generating ${aiConfigs.length} AI fields in parallel...`);
+  if (aiConfigsToRun.length > 0) {
+    console.log(`\n🤖 [ASIN: ${amazonData.asin}] Generating ${aiConfigsToRun.length} AI fields in parallel...`);
     
-    const aiPromises = aiConfigs.map(async (config) => {
+    const aiPromises = aiConfigsToRun.map(async (config) => {
       try {
         console.log(`\n  🔹 Processing AI field: ${config.ebayField} (${config.fieldType})`);
         console.log(`    📝 Original prompt template: "${config.promptTemplate}"`);
@@ -633,7 +681,7 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
   }
   
   // PRIORITY: If pricing config enabled, calculate startPrice (overrides field config)
-  if (pricingConfig?.enabled) {
+  if (pricingConfig?.enabled && !reuseMode) {
     console.log(`[Pricing Calculator] Enabled, Amazon price: "${amazonData.price}"`);
     
     if (!amazonData.price || amazonData.price.trim() === '') {
@@ -687,12 +735,14 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
   }
   
   promoteMisroutedCustomFields(coreFields, customFields);
-  fillMissingCustomColumnsFromAmazon(
-    plainCustomColumns,
-    amazonDataForMapping,
-    customFields,
-    plainFieldConfigs
-  );
+  if (!reuseMode) {
+    fillMissingCustomColumnsFromAmazon(
+      plainCustomColumns,
+      amazonDataForMapping,
+      customFields,
+      plainFieldConfigs
+    );
+  }
 
   // DEBUG: Final results summary
   console.log(`\n✅ [ASIN: ${amazonData.asin}] === FIELD CONFIG DEBUG END ===`);
@@ -702,7 +752,7 @@ export async function applyFieldConfigs(amazonData, fieldConfigs, pricingConfig 
   console.log(`  Pricing calculation:`, pricingCalculation ? 'enabled' : 'disabled');
   console.log(`==========================================\n`);
   
-  return { coreFields, customFields, pricingCalculation };
+  return { coreFields, customFields, pricingCalculation, reusedFromDatabase: reuseMode };
 }
 
 /**
