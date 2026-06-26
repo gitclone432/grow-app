@@ -39,7 +39,7 @@ import DirectListJob, {
 } from '../models/DirectListJob.js';
 import { chunkDirectListAsins } from '../lib/directListJobRunner.js';
 import { enrichListingItemSpecifics, applyCustomColumnDefaults } from '../utils/ebayItemSpecificsEnrichment.js';
-import { joinItemPhotoUrls, mergeItemPhotoUrls } from '../utils/itemPhotoUrls.js';
+import { joinItemPhotoUrls, mergeItemPhotoUrls, normalizeItemPhotoUrl } from '../utils/itemPhotoUrls.js';
 
 const router = express.Router();
 
@@ -2013,6 +2013,10 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
     // Process each listing
     for (const listingData of listings) {
       try {
+        if (listingData.itemPhotoUrl) {
+          listingData.itemPhotoUrl = normalizeItemPhotoUrl(listingData.itemPhotoUrl);
+        }
+
         // Validate required fields
         if (!listingData.title) {
           errors.push({
@@ -2701,6 +2705,10 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
     // Process each listing
     for (const listingData of listings) {
       try {
+        if (listingData.itemPhotoUrl) {
+          listingData.itemPhotoUrl = normalizeItemPhotoUrl(listingData.itemPhotoUrl);
+        }
+
         // Check for cross-template ASIN duplicate FIRST
         if (listingData._asinReference && crossTemplateAsinMap.has(listingData._asinReference)) {
           const existingTemplateId = crossTemplateAsinMap.get(listingData._asinReference);
@@ -3597,7 +3605,7 @@ router.post('/reprocess-overlay-images', requireAuth, async (req, res) => {
         }
 
         const processedUrls = await applyOverlayToScrapedImages(urls);
-        const nextValue = processedUrls.join(' | ');
+        const nextValue = joinItemPhotoUrls(processedUrls);
 
         if (!nextValue || nextValue === String(listing.itemPhotoUrl || '').trim()) {
           skipped += 1;
@@ -3802,7 +3810,7 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
         listing.epid || '',
         listing.startPrice || '',
         listing.quantity || '',
-        listing.itemPhotoUrl || '',
+        joinItemPhotoUrls(listing.itemPhotoUrl || ''),
         listing.videoId || '',
         listing.conditionId || '1000-New',
         listing.description || '',
@@ -4040,7 +4048,7 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
         categoryName, listing.title || '', listing.relationship || '',
         listing.relationshipDetails || '', listing.scheduleTime || '',
         listing.upc || '', listing.epid || '', listing.startPrice || '',
-        listing.quantity || '', listing.itemPhotoUrl || '', listing.videoId || '',
+        listing.quantity || '', joinItemPhotoUrls(listing.itemPhotoUrl || ''), listing.videoId || '',
         listing.conditionId || '1000-New', listing.description || '',
         listing.format || 'FixedPrice', listing.duration || 'GTC',
         listing.buyItNowPrice || '', listing.bestOfferEnabled || '',
@@ -4366,7 +4374,7 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
         listing.epid || '',
         listing.startPrice || '',
         listing.quantity || '',
-        listing.itemPhotoUrl || '',
+        joinItemPhotoUrls(listing.itemPhotoUrl || ''),
         listing.videoId || '',
         listing.conditionId || '1000-New',
         listing.description || '',

@@ -22,6 +22,7 @@ import {
 } from './listingDatabaseAmazonCache.js';
 import { createEbayImageWithOverlay } from './imageProcessor.js';
 import { getImageOverlayRuntimeConfig } from './overlaySettings.js';
+import { joinItemPhotoUrls } from './itemPhotoUrls.js';
 
 /** Long Amazon descriptions can break or silently fail LLM calls; truncate only inside AI prompts */
 const AI_PROMPT_DESCRIPTION_MAX_CHARS = Math.max(
@@ -763,13 +764,7 @@ function applyTransform(value, transform) {
   
   switch (transform) {
     case 'pipeSeparated':
-      if (Array.isArray(value)) {
-        return value.map((item) => String(item ?? '').trim()).filter(Boolean).join(' | ');
-      }
-      if (typeof value === 'string' && value.includes(',')) {
-        return value.split(',').map((item) => item.trim()).filter(Boolean).join(' | ');
-      }
-      return value;
+      return joinItemPhotoUrls(value);
       
     case 'removeSymbol':
       return typeof value === 'string' ? value.replace(/[$€£¥]/g, '') : value;

@@ -11,8 +11,16 @@ export function splitItemPhotoUrls(value) {
     .slice(0, 12);
 }
 
+/** Normalize any stored/legacy photo URL string to eBay File Exchange format (no spaces around pipes). */
+export function normalizeItemPhotoUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return text;
+  return joinItemPhotoUrls(text);
+}
+
+/** eBay File Exchange: pipe-separated URLs with no spaces (url1|url2|url3). */
 export function joinItemPhotoUrls(urls) {
-  return splitItemPhotoUrls(urls).join(' | ');
+  return splitItemPhotoUrls(urls).join('|');
 }
 
 /** Merge existing listing photos with additional URLs, preserving order and deduping. */
