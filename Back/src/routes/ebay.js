@@ -36,6 +36,7 @@ import {
   enrichOrderLikeAllOrdersSheet,
   prefetchExchangeRatesForOrders,
 } from '../utils/allOrdersSheetEnrichment.js';
+import { parsePagination } from '../utils/pagination.js';
 import {
   applyManualFieldUpdatesToOrder,
   importFulfillmentRows,
@@ -1494,25 +1495,150 @@ function moneyFromNumber(value, currency = 'USD') {
   return { value: v.toFixed(2), currency: currency || 'USD' };
 }
 
-/** Paginate GET /sell/finances/v1/transaction with a single filter (e.g. transactionStatus:{FUNDS_PROCESSING}). */
-async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filter) {
+/** Paginate GET /sell/finances/v1/transaction with one or more filters. */
+async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filterOrFilters) {
   const all = [];
   let offset = 0;
   const limit = 200;
   let hasMore = true;
   const mp = normalizeFinancesMarketplaceId(marketplaceId);
+  const filters = (Array.isArray(filterOrFilters) ? filterOrFilters : [filterOrFilters])
+    .filter((f) => f != null && String(f).trim() !== '');
 
   while (hasMore) {
-    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
-      headers: financesApiHeaders(accessToken, mp),
-      params: { filter, limit, offset }
-    });
-    const batch = response.data?.transactions || [];
-    all.push(...batch);
-    if (batch.length < limit) hasMore = false;
-    else offset += limit;
+    try {
+      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+        headers: financesApiHeaders(accessToken, mp),
+        params: { filter: filters, limit, offset },
+        paramsSerializer: (params) => qs.stringify(params, { arrayFormat: 'repeat' })
+      });
+      const batch = response.data?.transactions || [];
+      all.push(...batch);
+      if (batch.length < limit) hasMore = false;
+      else offset += limit;
+    } catch (err) {
+      if (err.response?.status === 204) {
+        hasMore = false;
+        break;
+      }
+      throw err;
+    }
   }
   return all;
+}
+
+async function fetchFinancesTransactionsAllPagesSafe(accessToken, marketplaceId, filterOrFilters, label) {
+  try {
+    return await fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filterOrFilters);
+  } catch (err) {
+    console.warn(`[Finances API] ${label} failed:`, err.response?.data || err.message);
+    return [];
+  }
+}
+
+function parseFinancesTxnUsdAmount(txn) {
+  const converted = txn?.amount?.convertedToValue;
+  if (converted != null && String(converted).trim() !== '') {
+    return parseFloat(converted) || 0;
+  }
+  return parseFloat(txn?.amount?.value || 0) || 0;
+}
+
+function getFinancesReturnReference(txn) {
+  return (txn?.references || []).find((r) => r.referenceType === 'RETURN_ID') || null;
+}
+
+/** Include order holds (FUNDS_ON_HOLD) and return-related holds shown on eBay's On hold page. */
+function isOnHoldFinancesTransaction(txn) {
+  const status = String(txn?.transactionStatus || '').toUpperCase();
+  if (status === 'FUNDS_ON_HOLD') return true;
+
+  const returnRef = getFinancesReturnReference(txn);
+  if (!returnRef) return false;
+
+  const memo = String(txn?.transactionMemo || '');
+  if (/held/i.test(memo) || /hold/i.test(memo)) return true;
+
+  const txnType = String(txn?.transactionType || '').toUpperCase();
+  if (txnType === 'HOLD') return true;
+  if (txnType === 'RETURN' && (status === 'FUNDS_ON_HOLD' || /held/i.test(memo))) return true;
+  if (txnType === 'RETURN' && parseFinancesTxnUsdAmount(txn) > 0) return true;
+
+  return false;
+}
+
+function buildOnHoldTransactionRow(txn) {
+  const returnRef = getFinancesReturnReference(txn);
+  const orderRef = (txn?.references || []).find((r) => r.referenceType === 'ORDER_ID');
+  const displayId = txn.orderId
+    || orderRef?.referenceId
+    || (returnRef ? `Return ${returnRef.referenceId}` : txn.transactionId);
+
+  let transactionMemo = txn.transactionMemo || null;
+  if (returnRef && transactionMemo && !transactionMemo.includes(returnRef.referenceId)) {
+    transactionMemo = `${transactionMemo} (Return ${returnRef.referenceId})`;
+  } else if (returnRef && !transactionMemo) {
+    transactionMemo = `Held for return ID ${returnRef.referenceId}`;
+  }
+
+  return {
+    orderId: displayId,
+    transactionId: txn.transactionId || null,
+    returnId: returnRef?.referenceId || null,
+    amount: parseFloat(parseFinancesTxnUsdAmount(txn).toFixed(2)),
+    currency: 'USD',
+    transactionDate: txn.transactionDate,
+    buyer: txn.buyer?.username || 'N/A',
+    transactionMemo,
+    transactionType: txn.transactionType || null
+  };
+}
+
+async function fetchAllOnHoldFinancesTransactions(accessToken, marketplaceId = 'EBAY_US') {
+  const mp = normalizeFinancesMarketplaceId(marketplaceId);
+  const byTxnId = new Map();
+
+  const addTransactions = (transactions) => {
+    for (const txn of transactions || []) {
+      if (!txn?.transactionId || byTxnId.has(txn.transactionId)) continue;
+      if (!isOnHoldFinancesTransaction(txn)) continue;
+      byTxnId.set(txn.transactionId, txn);
+    }
+  };
+
+  addTransactions(
+    await fetchFinancesTransactionsAllPagesSafe(
+      accessToken,
+      mp,
+      'transactionStatus:{FUNDS_ON_HOLD}',
+      'on-hold status filter'
+    )
+  );
+
+  const lookbackDays = 180;
+  const fromIso = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+  const toIso = new Date().toISOString();
+  const dateRangeFilter = `transactionDate:[${fromIso}..${toIso}]`;
+
+  addTransactions(
+    await fetchFinancesTransactionsAllPagesSafe(
+      accessToken,
+      mp,
+      ['transactionType:{RETURN}', dateRangeFilter],
+      'on-hold return filter'
+    )
+  );
+
+  addTransactions(
+    await fetchFinancesTransactionsAllPagesSafe(
+      accessToken,
+      mp,
+      ['transactionType:{HOLD}', dateRangeFilter],
+      'on-hold HOLD type filter'
+    )
+  );
+
+  return [...byTxnId.values()];
 }
 
 /**
@@ -2699,6 +2825,9 @@ router.get('/order/:orderId', requireAuth, requirePageAccess('Fulfillment'), asy
 });
 
 
+// List view: omit large eBay blobs not needed for fulfillment tables (saves bandwidth + JSON parse time).
+const STORED_ORDER_LIST_OMIT = '-paymentSummary -fulfillmentStartInstructions -ebayCollectAndRemitTax -totalFeeBasisAmount -totalMarketplaceFee';
+
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
   const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient } = req.query;
@@ -2967,35 +3096,36 @@ router.get('/stored-orders', async (req, res) => {
       });
     }
 
-    // Calculate pagination
-    const pageNum = parseInt(page, 10);
-    const limitNum = parseInt(limit, 10);
-    const skip = (pageNum - 1) * limitNum;
+    // Calculate pagination (max 200 rows per request)
+    const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
+    const includeSupplierLinks = req.query.includeSupplierLinks !== 'false';
 
-    const totalOrders = await Order.countDocuments(query);
+    const [totalOrders, orders] = await Promise.all([
+      Order.countDocuments(query),
+      Order.find(query)
+        .select(STORED_ORDER_LIST_OMIT)
+        .populate({
+          path: 'seller',
+          populate: {
+            path: 'user',
+            select: 'username email'
+          }
+        })
+        .populate('orderCategoryId', 'name')
+        .populate('orderRangeId', 'name')
+        .populate('orderProductId', 'name')
+        .sort(
+          awaitingShipment === 'true'
+            ? { shipByDate: 1 }
+            : amazonArriving === 'true'
+              ? { arrivingDate: arrivalSort === 'desc' ? -1 : 1 }
+              : { creationDate: -1 }
+        )
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+    ]);
     const totalPages = Math.ceil(totalOrders / limitNum);
-
-    const orders = await Order.find(query)
-      .populate({
-        path: 'seller',
-        populate: {
-          path: 'user',
-          select: 'username email'
-        }
-      })
-      .populate('orderCategoryId', 'name')
-      .populate('orderRangeId', 'name')
-      .populate('orderProductId', 'name')
-      // Sorting: ShipBy Date for awaiting (Oldest First), Arriving Date for Amazon Arrivals, Creation Date otherwise (Newest First)
-      .sort(
-        awaitingShipment === 'true'
-          ? { shipByDate: 1 }
-          : amazonArriving === 'true'
-            ? { arrivingDate: arrivalSort === 'desc' ? -1 : 1 }
-            : { creationDate: -1 }
-      )
-      .skip(skip)
-      .limit(limitNum);
 
     // Lookup ConversationMeta for each order to get category (Case) and caseStatus
     const orderIds = orders.map(order => order.orderId).filter(Boolean);
@@ -3013,15 +3143,18 @@ router.get('/stored-orders', async (req, res) => {
     });
 
     // Add fromConvoManagement fields to each order
-    const ordersWithConvoData = orders.map(order => {
-      const orderObj = order.toObject();
+  const ordersWithConvoData = orders.map((order) => {
       const convoData = conversationMetaMap.get(order.orderId);
-      orderObj.convoCategory = convoData?.category || null;
-      orderObj.convoCaseStatus = convoData?.caseStatus || null;
-      return orderObj;
+      return {
+        ...order,
+        convoCategory: convoData?.category || null,
+        convoCaseStatus: convoData?.caseStatus || null,
+      };
     });
 
-    const ordersWithSupplierLinks = await enrichOrdersWithSupplierLinks(ordersWithConvoData);
+    const ordersWithSupplierLinks = includeSupplierLinks
+      ? await enrichOrdersWithSupplierLinks(ordersWithConvoData)
+      : ordersWithConvoData;
 
     console.log(`[Stored Orders] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${totalOrders} orders`);
 
@@ -3290,10 +3423,8 @@ router.get('/all-orders-usd', async (req, res) => {
       }
     }
 
-    // Calculate pagination
-    const pageNum = parseInt(page, 10);
-    const limitNum = parseInt(limit, 10);
-    const skip = (pageNum - 1) * limitNum;
+    // Calculate pagination (max 200 rows per request)
+    const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
     const includeCounts = req.query.includeCounts !== 'false';
 
     const [totalOrders, orders, categoryData, rangeData, productData] = await Promise.all([
@@ -6786,9 +6917,7 @@ router.get('/stored-returns', async (req, res) => {
       query.returnStatus = { $ne: 'CLOSED' };
     }
 
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const skip = (pageNum - 1) * limitNum;
+    const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
 
     const returns = await Return.find(query)
       .populate({
@@ -7317,8 +7446,18 @@ router.get('/stored-payment-disputes', async (req, res) => {
 
 // Get a lightweight index of all issues (INR/SNAD cases, returns, disputes) keyed by orderId
 // Used by Fulfillment Dashboard to show an "Issues" column
+let issuesByOrderCache = { at: 0, index: null };
+const ISSUES_BY_ORDER_CACHE_MS = 2 * 60 * 1000;
+
 router.get('/issues-by-order', requireAuth, async (req, res) => {
   try {
+    if (
+      issuesByOrderCache.index
+      && Date.now() - issuesByOrderCache.at < ISSUES_BY_ORDER_CACHE_MS
+    ) {
+      return res.json({ index: issuesByOrderCache.index, cached: true });
+    }
+
     const [cases, returns, disputes, conversationMeta] = await Promise.all([
       Case.find({}, { orderId: 1, caseType: 1, status: 1, _id: 0 }).lean(),
       Return.find({}, { orderId: 1, returnStatus: 1, _id: 0 }).lean(),
@@ -7355,6 +7494,7 @@ router.get('/issues-by-order', requireAuth, async (req, res) => {
       addIssue(d.orderId, { type: 'Dispute', status: d.paymentDisputeStatus, reason: d.reason });
     });
 
+    issuesByOrderCache = { at: Date.now(), index };
     res.json({ index });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -12882,7 +13022,6 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
 // ============================================
 router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
   try {
-    // Get all sellers with eBay tokens
     const sellers = await Seller.find({
       'ebayTokens.access_token': { $exists: true, $ne: null },
       'ebayTokens.refresh_token': { $exists: true, $ne: null }
@@ -12894,81 +13033,43 @@ router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'
       const sellerName = seller.user?.username || seller._id.toString();
       try {
         const accessToken = await ensureValidToken(seller);
-        const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller);
 
-        // Optional eBay wallet snapshot (used only for fallback / currency hints)
-        let ebaySnapshot = null;
-        try {
-          const summaryRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/seller_funds_summary', {
-            headers: financesApiHeaders(accessToken, marketplaceId)
-          });
-          ebaySnapshot = summaryRes.data || null;
-        } catch (sumErr) {
-          if (sumErr.response?.status !== 204) {
-            throw sumErr;
-          }
-        }
-
-        const [procTx, holdTx] = await Promise.all([
-          fetchFinancesTransactionsAllPages(accessToken, marketplaceId, 'transactionStatus:{FUNDS_PROCESSING}'),
-          fetchFinancesTransactionsAllPages(accessToken, marketplaceId, 'transactionStatus:{FUNDS_ON_HOLD}')
-        ]);
-
-        const procAgg = sumOrderMapAmounts(mergeFinancesTransactionsByOrder(procTx));
-        const holdAgg = sumOrderMapAmounts(mergeFinancesTransactionsByOrder(holdTx));
-
-        let availAgg = { sum: 0, currency: procAgg.currency || holdAgg.currency || 'USD' };
-        let availableSource = 'transactions';
-        try {
-          const availTx = await fetchFinancesTransactionsAllPages(
-            accessToken,
-            marketplaceId,
-            'transactionStatus:{FUNDS_AVAILABLE}'
-          );
-          availAgg = sumOrderMapAmounts(mergeFinancesTransactionsByOrder(availTx));
-        } catch {
-          availableSource = 'ebay_summary';
-          const a = ebaySnapshot?.availableFunds;
-          availAgg = {
-            sum: parseFloat(a?.value || 0) || 0,
-            currency: a?.currency || procAgg.currency || holdAgg.currency || 'USD'
-          };
-        }
-
-        const cur = availAgg.currency || procAgg.currency || holdAgg.currency || 'USD';
-        const availNum = parseFloat(availAgg.sum) || 0;
-        const procNum = parseFloat(procAgg.sum) || 0;
-        const holdNum = parseFloat(holdAgg.sum) || 0;
-        const totalNum = parseFloat((availNum + procNum + holdNum).toFixed(2));
+        const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/seller_funds_summary', {
+          headers: financesApiHeaders(accessToken, 'EBAY_US')
+        });
 
         results.push({
           sellerId: seller._id,
           sellerName,
-          financesMarketplaceId: marketplaceId,
-          totalFunds: moneyFromNumber(totalNum, cur),
-          availableFunds: moneyFromNumber(availNum, cur),
-          processingFunds: moneyFromNumber(procNum, cur),
-          fundsOnHold: moneyFromNumber(holdNum, cur),
-          fundsAlignment: {
-            availableSource,
-            processingSource: 'transactions',
-            onHoldSource: 'transactions',
-            totalSource: 'sum_of_buckets'
-          },
+          totalFunds: response.data.totalFunds || { value: '0.00', currency: 'USD' },
+          availableFunds: response.data.availableFunds || { value: '0.00', currency: 'USD' },
+          processingFunds: response.data.processingFunds || { value: '0.00', currency: 'USD' },
+          fundsOnHold: response.data.fundsOnHold || { value: '0.00', currency: 'USD' },
           error: null
         });
       } catch (err) {
-        console.error(`[Seller Funds] Error for ${sellerName}:`, err.response?.data || err.message);
-        results.push({
-          sellerId: seller._id,
-          sellerName,
-          financesMarketplaceId: resolvePrimaryFinancesMarketplaceId(seller),
-          totalFunds: null,
-          availableFunds: null,
-          processingFunds: null,
-          fundsOnHold: null,
-          error: err.response?.data?.errors?.[0]?.message || err.message
-        });
+        if (err.response?.status === 204) {
+          results.push({
+            sellerId: seller._id,
+            sellerName,
+            totalFunds: { value: '0.00', currency: 'USD' },
+            availableFunds: { value: '0.00', currency: 'USD' },
+            processingFunds: { value: '0.00', currency: 'USD' },
+            fundsOnHold: { value: '0.00', currency: 'USD' },
+            error: null
+          });
+        } else {
+          console.error(`[Seller Funds] Error for ${sellerName}:`, err.response?.data || err.message);
+          results.push({
+            sellerId: seller._id,
+            sellerName,
+            totalFunds: null,
+            availableFunds: null,
+            processingFunds: null,
+            fundsOnHold: null,
+            error: err.response?.data?.errors?.[0]?.message || err.message
+          });
+        }
       }
     }
 
@@ -13163,7 +13264,6 @@ router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess(
     if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
 
     const accessToken = await ensureValidToken(seller);
-    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
     const sellerName = (seller.user?.username || '').toLowerCase();
 
     // Available date rules per seller
@@ -13191,32 +13291,13 @@ router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess(
 
     const rule = availableDateRules[sellerName] || { base: 'txn', days: 1 }; // default 24hrs after txn
 
-    let allTransactions = [];
-    let offset = 0;
-    const limit = 200;
-    let hasMore = true;
+    let allTransactions = await fetchFinancesTransactionsAllPages(
+      accessToken,
+      'EBAY_US',
+      'transactionStatus:{FUNDS_PROCESSING}'
+    );
 
-    while (hasMore) {
-      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
-        headers: financesApiHeaders(accessToken, marketplaceId),
-        params: {
-          filter: 'transactionStatus:{FUNDS_PROCESSING}',
-          limit,
-          offset
-        }
-      });
-
-      const transactions = response.data?.transactions || [];
-      allTransactions = allTransactions.concat(transactions);
-
-      if (transactions.length < limit) {
-        hasMore = false;
-      } else {
-        offset += limit;
-      }
-    }
-
-    // Extract order-level info
+    // Extract order-level info (skip manual pagination — helper handles 204 + pages)
     const orderMap = new Map();
     for (const txn of allTransactions) {
       const orderId = txn.orderId || null;
@@ -13287,7 +13368,6 @@ router.get('/processing-transactions/:sellerId', requireAuth, requirePageAccess(
     res.json({
       sellerId: seller._id,
       sellerName: seller.user?.username || seller._id.toString(),
-      financesMarketplaceId: marketplaceId,
       availableDateRule: rule,
       totalProcessingTransactions: result.length,
       transactions: result
@@ -13677,66 +13757,16 @@ router.get('/onhold-transactions/:sellerId', requireAuth, requirePageAccess('Sel
     if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
 
     const accessToken = await ensureValidToken(seller);
-    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
 
-    let allTransactions = [];
-    let offset = 0;
-    const limit = 200;
-    let hasMore = true;
+    const allTransactions = await fetchAllOnHoldFinancesTransactions(accessToken, 'EBAY_US');
 
-    while (hasMore) {
-      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
-        headers: financesApiHeaders(accessToken, marketplaceId),
-        params: {
-          filter: 'transactionStatus:{FUNDS_ON_HOLD}',
-          limit,
-          offset
-        }
-      });
-
-      const transactions = response.data?.transactions || [];
-      allTransactions = allTransactions.concat(transactions);
-
-      if (transactions.length < limit) {
-        hasMore = false;
-      } else {
-        offset += limit;
-      }
-    }
-
-    // Extract order-level info
-    const orderMap = new Map();
-    for (const txn of allTransactions) {
-      const orderId = txn.orderId || null;
-      const orderRef = txn.references?.find(r => r.referenceType === 'ORDER_ID');
-      const effectiveOrderId = orderId || orderRef?.referenceId || txn.transactionId;
-
-      if (!orderMap.has(effectiveOrderId)) {
-        orderMap.set(effectiveOrderId, {
-          orderId: effectiveOrderId,
-          amount: parseFloat(txn.amount?.value || 0),
-          currency: txn.amount?.currency || 'USD',
-          transactionDate: txn.transactionDate,
-          buyer: txn.buyer?.username || 'N/A',
-          transactionMemo: txn.transactionMemo || null
-        });
-      } else {
-        const existing = orderMap.get(effectiveOrderId);
-        existing.amount += parseFloat(txn.amount?.value || 0);
-      }
-    }
-
-    const result = [...orderMap.values()].map(o => ({
-      ...o,
-      amount: parseFloat(o.amount.toFixed(2))
-    }));
-
-    result.sort((a, b) => new Date(b.transactionDate) - new Date(a.transactionDate));
+    const result = allTransactions
+      .map(buildOnHoldTransactionRow)
+      .sort((a, b) => new Date(b.transactionDate) - new Date(a.transactionDate));
 
     res.json({
       sellerId: seller._id,
       sellerName: seller.user?.username || seller._id.toString(),
-      financesMarketplaceId: marketplaceId,
       totalOnHoldTransactions: result.length,
       transactions: result
     });

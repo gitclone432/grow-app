@@ -39,6 +39,7 @@ import {
   WarningAmber as WarningAmberIcon
 } from '@mui/icons-material';
 import api from '../../lib/api.js';
+import { fetchAllPages } from '../../lib/fetchAllPages.js';
 import AsinBulkAddDialog from '../../components/AsinBulkAddDialog.jsx';
 import AsinCsvImportDialog from '../../components/AsinCsvImportDialog.jsx';
 import AsinExportDialog from '../../components/AsinExportDialog.jsx';
@@ -208,14 +209,11 @@ export default function AsinDirectoryPage() {
 
   const handleExport = async () => {
     try {
-      const { data } = await api.get('/asin-directory', {
-        params: {
-          limit: 999999,
-          showMoved: 'true',
-          addedByUserId: addedByUserId || undefined
-        }
-      });
-      const csv = generateCsvContent(data.asins);
+      const asins = await fetchAllPages('/asin-directory', {
+        showMoved: 'true',
+        addedByUserId: addedByUserId || undefined,
+      }, { itemsKey: 'asins', pagesKey: 'totalPages' });
+      const csv = generateCsvContent(asins);
       const date = new Date().toISOString().split('T')[0];
       downloadCsv(csv, `asin-directory-${date}.csv`);
       setSuccess('ASINs exported successfully');

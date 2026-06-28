@@ -946,9 +946,77 @@ router.get('/daily-statistics', requireAuth, requirePageAccess('OrderAnalytics')
   }
 });
 
+const CRP_GROUP_FIELD_MAP = {
+  category: { field: 'orderCategoryId', from: 'asinlistcategories' },
+  range: { field: 'orderRangeId', from: 'asinlistranges' },
+  product: { field: 'orderProductId', from: 'asinlistproducts' },
+};
+
+const CRP_VALUE_BAND_SWITCH = {
+  $switch: {
+    branches: [
+      { case: { $lt: ['$amount', 30] }, then: 'low' },
+      { case: { $lt: ['$amount', 60] }, then: 'mid' },
+      { case: { $lt: ['$amount', 100] }, then: 'high' },
+    ],
+    default: 'extraHigh',
+  },
+};
+
+function mapCrpCategoryRows(rows = []) {
+  return rows.map((r) => ({
+    id: r._id ? r._id.toString() : null,
+    name: r.name || 'Unassigned',
+    count: r.count,
+  }));
+}
+
+function mapCrpValueBandRows(rows = []) {
+  const bands = { low: 0, mid: 0, high: 0, extraHigh: 0 };
+  rows.forEach((row) => {
+    if (row._id && Object.prototype.hasOwnProperty.call(bands, row._id)) {
+      bands[row._id] = row.count;
+    }
+  });
+  return bands;
+}
+
+function buildCrpCategoryFacetStages(field, from) {
+  return [
+    {
+      $group: {
+        _id: { $ifNull: [`$${field}`, null] },
+        count: { $sum: 1 },
+      },
+    },
+    {
+      $lookup: {
+        from,
+        localField: '_id',
+        foreignField: '_id',
+        as: 'taxDoc',
+      },
+    },
+    {
+      $project: {
+        _id: 1,
+        count: 1,
+        name: {
+          $cond: {
+            if: { $eq: ['$_id', null] },
+            then: 'Unassigned',
+            else: { $arrayElemAt: ['$taxDoc.name', 0] },
+          },
+        },
+      },
+    },
+    { $sort: { count: -1 } },
+  ];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CRP Analytics  GET /orders/crp-analytics
-// Groups orders by Category, Range, or Product and returns counts.
+// Returns category/range/product distribution plus order value bands.
 // Query params: startDate, endDate, sellerId, marketplace, groupBy (category|range|product),
 //               excludeClient, excludeLowValue (true/false)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -965,56 +1033,122 @@ router.get('/crp-analytics', requireAuth, requirePageAccess('CRPAnalytics'), asy
       excludeLowValue,
     });
 
-    // Determine which field and lookup collection to use
-    const groupFieldMap = {
-      category: { field: 'orderCategoryId', from: 'asinlistcategories' },
-      range: { field: 'orderRangeId', from: 'asinlistranges' },
-      product: { field: 'orderProductId', from: 'asinlistproducts' },
-    };
-    const { field, from } = groupFieldMap[groupBy] || groupFieldMap.category;
+    const { field, from } = CRP_GROUP_FIELD_MAP[groupBy] || CRP_GROUP_FIELD_MAP.category;
 
-    const pipeline = [
+    const [result] = await Order.aggregate([
       { $match: match },
       {
-        $group: {
-          _id: { $ifNull: [`$${field}`, null] },
-          count: { $sum: 1 },
-        }
+        $facet: {
+          categories: buildCrpCategoryFacetStages(field, from),
+          valueBands: [
+            {
+              $addFields: {
+                amount: { $ifNull: ['$subtotalUSD', { $ifNull: ['$subtotal', 0] }] },
+              },
+            },
+            {
+              $group: {
+                _id: CRP_VALUE_BAND_SWITCH,
+                count: { $sum: 1 },
+              },
+            },
+          ],
+        },
       },
-      {
-        $lookup: {
-          from,
-          localField: '_id',
-          foreignField: '_id',
-          as: 'taxDoc'
-        }
-      },
-      {
-        $project: {
-          _id: 1,
-          count: 1,
-          name: {
-            $cond: {
-              if: { $eq: ['$_id', null] },
-              then: 'Unassigned',
-              else: { $arrayElemAt: ['$taxDoc.name', 0] }
-            }
-          }
-        }
-      },
-      { $sort: { count: -1 } }
-    ];
+    ]);
 
-    const results = await Order.aggregate(pipeline);
-
-    res.json(results.map(r => ({
-      id: r._id ? r._id.toString() : null,
-      name: r.name || 'Unassigned',
-      count: r.count,
-    })));
+    res.json({
+      categories: mapCrpCategoryRows(result?.categories || []),
+      valueBands: mapCrpValueBandRows(result?.valueBands || []),
+    });
   } catch (error) {
     console.error('Error fetching CRP analytics:', error);
     res.status(500).json({ error: 'Failed to fetch CRP analytics' });
+  }
+});
+
+// CRP Analytics drill-down for a single category/range/product bucket
+router.get('/crp-analytics/details', requireAuth, requirePageAccess('CRPAnalytics'), async (req, res) => {
+  try {
+    const {
+      startDate,
+      endDate,
+      sellerId,
+      marketplace,
+      groupBy = 'category',
+      excludeClient,
+      excludeLowValue,
+      categoryId,
+      rangeId,
+      productId,
+      page = 1,
+      limit = 10,
+    } = req.query;
+
+    const safePage = Math.max(parseInt(page, 10) || 1, 1);
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 50);
+    const skip = (safePage - 1) * safeLimit;
+
+    const match = await buildOrdersCrpMatch({
+      startDate,
+      endDate,
+      sellerId,
+      marketplace,
+      excludeClient,
+      excludeLowValue,
+    });
+
+    const groupFieldMap = {
+      category: 'orderCategoryId',
+      range: 'orderRangeId',
+      product: 'orderProductId',
+    };
+    const idField = groupFieldMap[groupBy] || groupFieldMap.category;
+    const idParamMap = {
+      orderCategoryId: categoryId,
+      orderRangeId: rangeId,
+      orderProductId: productId,
+    };
+    match[idField] = normalizeObjectIdOrNull(idParamMap[idField], idField);
+
+    const result = await Order.aggregate([
+      { $match: match },
+      { $sort: { dateSold: -1 } },
+      {
+        $facet: {
+          items: [
+            { $skip: skip },
+            { $limit: safeLimit },
+            {
+              $project: {
+                _id: 1,
+                orderId: 1,
+                dateSold: 1,
+                productName: 1,
+                amount: { $ifNull: ['$subtotalUSD', '$subtotal'] },
+              },
+            },
+          ],
+          total: [{ $count: 'count' }],
+        },
+      },
+    ]);
+
+    const payload = result[0] || { items: [], total: [] };
+    const total = payload.total[0]?.count || 0;
+
+    res.json({
+      items: payload.items,
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        pages: Math.ceil(total / safeLimit),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching CRP analytics details:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to fetch CRP analytics details' });
   }
 });
 

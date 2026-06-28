@@ -81,6 +81,7 @@ import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import ColumnSelector from '../../components/ColumnSelector';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import api from '../../lib/api';
+import { fetchAllPages } from '../../lib/fetchAllPages';
 import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderSyncEvents';
 import TemplateManagementModal from '../../components/TemplateManagementModal';
 import { CHAT_TEMPLATES, personalizeTemplate } from '../../constants/chatTemplates';
@@ -1667,9 +1668,17 @@ function FulfillmentDashboard() {
       const templates = await loadRemarkTemplates();
       if (mounted) setRemarkTemplates(templates);
     };
-    load();
+    if (typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(() => load(), { timeout: 3000 });
+      return () => {
+        mounted = false;
+        cancelIdleCallback(id);
+      };
+    }
+    const timer = setTimeout(load, 200);
     return () => {
       mounted = false;
+      clearTimeout(timer);
     };
   }, []);
 
@@ -1969,17 +1978,29 @@ function FulfillmentDashboard() {
     dateFilter
   });
 
-  // Fetch amazon accounts, CRP data, and issues index once on mount
+  // Fetch amazon accounts, CRP data, and issues index once on mount (deferred so orders load first)
   useEffect(() => {
     if (!hasFetchedInitialData.current) {
-      api.get('/amazon-accounts').then(({ data }) => setAmazonAccounts(data || [])).catch(console.error);
-      api.get('/credit-card-names').then(({ data }) => setCreditCards(data || [])).catch(console.error);
-
-      loadResolutionOptions();
+      const loadSecondaryData = () => {
+        api.get('/amazon-accounts').then(({ data }) => setAmazonAccounts(data || [])).catch(console.error);
+        api.get('/credit-card-names').then(({ data }) => setCreditCards(data || [])).catch(console.error);
+        loadResolutionOptions();
+      };
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(loadSecondaryData, { timeout: 2500 });
+      } else {
+        setTimeout(loadSecondaryData, 150);
+      }
     }
-    // Issues index is always fetched fresh (independent of hasFetchedInitialData)
-    api.get('/ebay/issues-by-order').then(({ data }) => setIssuesIndex(data?.index || {})).catch(console.error);
   }, [loadResolutionOptions]);
+
+  // Issues index is heavy — load after the table has had time to paint
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      api.get('/ebay/issues-by-order').then(({ data }) => setIssuesIndex(data?.index || {})).catch(console.error);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Initial load - fetch sellers and orders once
   useEffect(() => {
@@ -2095,6 +2116,7 @@ function FulfillmentDashboard() {
       params.excludeClient = excludeClient;
       params.excludeLowValue = excludeLowValue;
       params.missingAmazonAccount = missingAmazonAccount;
+      params.includeSupplierLinks = visibleColumnsSet.has('supplierLink');
 
       // --- NEW DATE LOGIC START ---
       if (dateFilter.mode === 'single' && dateFilter.single) {
@@ -2173,15 +2195,18 @@ function FulfillmentDashboard() {
 
 
 
+  const thumbnailFetchStarted = useRef(new Set());
+
   // Function to fetch ONLY thumbnail (first image) for display
-  const fetchThumbnail = async (order) => {
+  const fetchThumbnail = useCallback(async (order) => {
     const orderId = order._id;
     const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
     const sellerId = order.seller?._id || order.seller;
 
-    if (!itemId || !sellerId || thumbnailImages[orderId]) {
-      return; // Skip if no item ID, no seller, or already loaded
+    if (!itemId || !sellerId || thumbnailFetchStarted.current.has(orderId)) {
+      return;
     }
+    thumbnailFetchStarted.current.add(orderId);
 
     setLoadingThumbnails(prev => ({ ...prev, [orderId]: true }));
 
@@ -2189,7 +2214,6 @@ function FulfillmentDashboard() {
       const { data } = await api.get(`/ebay/item-images/${itemId}?sellerId=${sellerId}&thumbnail=true`);
       if (data.images && data.images.length > 0) {
         setThumbnailImages(prev => ({ ...prev, [orderId]: data.images[0] }));
-        // Store the total count so we know if there are more images
         if (data.total > 1) {
           setItemImages(prev => ({ ...prev, [orderId]: { count: data.total } }));
         }
@@ -2199,7 +2223,7 @@ function FulfillmentDashboard() {
     } finally {
       setLoadingThumbnails(prev => ({ ...prev, [orderId]: false }));
     }
-  };
+  }, []);
 
   // Function to fetch ALL images when user clicks (only called on demand)
   const fetchAllImages = async (order) => {
@@ -2227,15 +2251,27 @@ function FulfillmentDashboard() {
     }
   };
 
-  // Fetch thumbnails for visible orders when they load
+  // Fetch thumbnails in small batches so we don't hammer the API with 50 parallel calls
   useEffect(() => {
-    if (orders.length > 0) {
-      orders.forEach(order => {
-        fetchThumbnail(order);
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orders]);
+    if (!orders.length) return;
+
+    let cancelled = false;
+    const queue = orders.filter((order) => {
+      const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
+      const sellerId = order.seller?._id || order.seller;
+      return itemId && sellerId && !thumbnailFetchStarted.current.has(order._id);
+    });
+
+    const concurrency = 6;
+    (async () => {
+      while (!cancelled && queue.length) {
+        const batch = queue.splice(0, concurrency);
+        await Promise.all(batch.map((order) => fetchThumbnail(order)));
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [orders, fetchThumbnail]);
 
   // Function to open image viewer (fetches all images on demand)
   const handleViewImages = async (order) => {
@@ -3066,10 +3102,8 @@ function FulfillmentDashboard() {
         if (dateFilter.to) params.endDate = dateFilter.to;
       }
 
-      // Fetch ALL orders with current filters (no pagination limit)
-      params.limit = 999999; // Ensure we get all results
-      const { data } = await api.get('/ebay/stored-orders', { params });
-      const allOrders = data?.orders || [];
+      // Fetch all orders with current filters (paginated on server, max 200/page)
+      const allOrders = await fetchAllPages('/ebay/stored-orders', params, { itemsKey: 'orders' });
 
       if (allOrders.length === 0) {
         setSnackbarMsg('No orders found to export');

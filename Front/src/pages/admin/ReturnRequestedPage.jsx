@@ -38,6 +38,7 @@ import ClearIcon from '@mui/icons-material/Clear';
 import ChatIcon from '@mui/icons-material/Chat';
 import DownloadIcon from '@mui/icons-material/Download';
 import api from '../../lib/api';
+import { fetchAllPages } from '../../lib/fetchAllPages';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ChatModal from '../../components/ChatModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
@@ -464,7 +465,7 @@ export default function ReturnRequestedPage({
         exportData = returns;
       } else {
         // Fetch data with custom date filter
-        const params = { limit: 10000 }; // High limit to get all results
+        const params = {};
         if (statusFilter) params.status = statusFilter;
         if (sellerFilter) params.sellerId = sellerFilter;
         if (reasonFilter.length > 0) params.reason = reasonFilter.join(',');
@@ -478,8 +479,10 @@ export default function ReturnRequestedPage({
           if (exportToDate) params.endDate = exportToDate;
         }
 
-        const res = await api.get('/ebay/stored-returns', { params });
-        exportData = res.data.returns || [];
+        exportData = await fetchAllPages('/ebay/stored-returns', params, {
+          itemsKey: 'returns',
+          pagesKey: 'totalPages',
+        });
       }
 
       if (exportData.length === 0) {

@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import compression from 'compression';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -117,6 +118,7 @@ import imageCache from './lib/imageCache.js';
 const app = express();
 
 app.use(helmet());
+app.use(compression());
 // CORS: allowed origins are driven by CLIENT_ORIGIN env var (comma-separated) + localhost defaults
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',

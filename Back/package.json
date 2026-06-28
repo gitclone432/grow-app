@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch --watch-path=.env src/index.js",
+    "dev": "node --watch --watch-path=src src/index.js",
     "dev:test": "node --env-file=.env.test --watch src/index.js",
     "start": "node src/index.js",
     "start:test": "node --env-file=.env.test src/index.js",
@@ -16,6 +16,7 @@
     "@google/generative-ai": "^0.24.1",
     "axios": "^1.13.4",
     "bcryptjs": "^2.4.3",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "cron-parser": "^5.5.0",
     "dotenv": "^16.4.5",

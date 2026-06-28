@@ -4,6 +4,7 @@ import AsinDirectory from '../models/AsinDirectory.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import { requireAuth, requireAuthSSE } from '../middleware/auth.js';
 import { fetchAmazonData } from '../utils/asinAutofill.js';
+import { parsePagination } from '../utils/pagination.js';
 
 // Scrape a batch of ASINs in parallel (max 5 at a time) and return enrichment map
 // onAsinDone(completedSoFar, total) is called as each individual ASIN settles (optional)
@@ -37,8 +38,7 @@ const router = express.Router();
 // Get all ASINs with pagination and search
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 25;
+    const { page, limit, skip } = parsePagination(req.query, { defaultLimit: 25 });
     const search = req.query.search || '';
     const sortBy = req.query.sortBy || '-addedAt'; // Default: newest first
     const listProductId = req.query.listProductId || '';
@@ -46,8 +46,6 @@ router.get('/', requireAuth, async (req, res) => {
     const priceMin = req.query.priceMin !== undefined && req.query.priceMin !== '' ? parseFloat(req.query.priceMin) : null;
     const priceMax = req.query.priceMax !== undefined && req.query.priceMax !== '' ? parseFloat(req.query.priceMax) : null;
     const addedByUserId = req.query.addedByUserId || '';
-
-    const skip = (page - 1) * limit;
 
     // Build query
     let query = {};

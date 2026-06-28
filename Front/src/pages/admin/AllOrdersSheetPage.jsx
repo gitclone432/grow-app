@@ -38,6 +38,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import api from '../../lib/api';
+import { fetchAllPages } from '../../lib/fetchAllPages';
 import AllOrdersSheetSkeleton from '../../components/skeletons/AllOrdersSheetSkeleton';
 
 const EXCHANGE_RATE_OPTIONS = [
@@ -359,18 +360,19 @@ export default function AllOrdersSheetPage() {
       
       // If custom date range is selected, fetch all orders in that range
       if (useCustomRange && csvStartDate && csvEndDate) {
-        const params = {
-          page: 1,
-          limit: 10000, // Large limit to get all orders
+        const exportParams = {
           startDate: csvStartDate,
-          endDate: csvEndDate
+          endDate: csvEndDate,
+          excludeCancelled: true,
         };
-        
-        if (selectedSeller) params.sellerId = selectedSeller;
-        if (searchMarketplace) params.searchMarketplace = searchMarketplace;
-        
-        const { data } = await api.get('/ebay/all-orders-usd', { params });
-        ordersToExport = data.orders || [];
+
+        if (selectedSeller) exportParams.sellerId = selectedSeller;
+        if (searchMarketplace) exportParams.searchMarketplace = searchMarketplace;
+
+        ordersToExport = await fetchAllPages('/ebay/all-orders-usd', exportParams, {
+          itemsKey: 'orders',
+          pagesKey: 'totalPages',
+        });
         
         if (ordersToExport.length === 0) {
           alert('No orders found in the selected date range');
@@ -536,12 +538,9 @@ export default function AllOrdersSheetPage() {
     setError('');
     
     try {
-      // For single date, fetch all orders without pagination
-      const isSingleDate = dateFilter.mode === 'single' && dateFilter.single;
-      
       const params = {
-        page: isSingleDate ? 1 : currentPage,
-        limit: isSingleDate ? 10000 : ordersPerPage, // High limit for single date to get all
+        page: currentPage,
+        limit: ordersPerPage,
         excludeCancelled: true, // Exclude cancelled orders
         includeCounts: false, // Count aggregations are slow on large datasets; load table first
       };

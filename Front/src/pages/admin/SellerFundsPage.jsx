@@ -83,6 +83,7 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
   const [holdTransactions, setHoldTransactions] = useState([]);
   const [loadingHold, setLoadingHold] = useState(false);
   const [errorHold, setErrorHold] = useState(null);
+  const [holdFetched, setHoldFetched] = useState(false);
 
   const processingValue = parseFloat(seller.processingFunds?.value || 0);
   const canExpandProcessing = processingValue > 0;
@@ -92,13 +93,11 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
 
 
   const fetchTransactions = async () => {
-    if (!canExpandProcessing || transactions.length > 0) return;
+    if (!canExpandProcessing) return;
     setLoadingProcessing(true);
     setErrorProcessing(null);
     try {
-      const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`, {
-        params: seller.financesMarketplaceId ? { marketplace: seller.financesMarketplaceId } : undefined
-      });
+      const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`);
       setTransactions(res.data.transactions || []);
     } catch (err) {
       setErrorProcessing(err.response?.data?.error || 'Failed to load transactions');
@@ -108,18 +107,18 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
   };
 
   const fetchHoldTransactions = async () => {
-    if (!canExpandHold || holdTransactions.length > 0) return;
+    if (!canExpandHold) return;
     setLoadingHold(true);
     setErrorHold(null);
+    setHoldFetched(false);
     try {
-      const res = await api.get(`/ebay/onhold-transactions/${seller.sellerId}`, {
-        params: seller.financesMarketplaceId ? { marketplace: seller.financesMarketplaceId } : undefined
-      });
+      const res = await api.get(`/ebay/onhold-transactions/${seller.sellerId}`);
       setHoldTransactions(res.data.transactions || []);
     } catch (err) {
       setErrorHold(err.response?.data?.error || 'Failed to load on-hold transactions');
     } finally {
       setLoadingHold(false);
+      setHoldFetched(true);
     }
   };
 
@@ -128,14 +127,19 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
     if (!canExpandProcessing) return;
     const willOpen = !processingOpen;
     setProcessingOpen(willOpen);
-    if (willOpen && transactions.length === 0) fetchTransactions();
+    if (willOpen) fetchTransactions();
   };
 
   const handleToggleHold = () => {
     if (!canExpandHold) return;
     const willOpen = !onHoldExpanded;
     onToggleHold(seller.sellerId);
-    if (willOpen && holdTransactions.length === 0) fetchHoldTransactions();
+    if (willOpen) fetchHoldTransactions();
+    if (!willOpen) {
+      setHoldTransactions([]);
+      setHoldFetched(false);
+      setErrorHold(null);
+    }
   };
 
   if (seller.error) {
@@ -317,8 +321,12 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
 
               {errorHold && <Alert severity="error" sx={{ mb: 1 }}>{errorHold}</Alert>}
 
-              {!loadingHold && holdTransactions.length === 0 && !errorHold && (
-                <Typography variant="body2" color="text.secondary">No on-hold transactions found.</Typography>
+              {!loadingHold && holdTransactions.length === 0 && !errorHold && holdFetched && (
+                <Typography variant="body2" color="text.secondary">
+                  {holdValue > 0
+                    ? `eBay reports ${formatCurrency(seller.fundsOnHold)} on hold, but no order-level FUNDS_ON_HOLD transactions were returned. This may be an account-level hold not tied to a specific order.`
+                    : 'No on-hold transactions found.'}
+                </Typography>
               )}
 
               {!loadingHold && holdTransactions.length > 0 && (
@@ -326,7 +334,7 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
                   <Table size="small">
                     <TableHead>
                       <TableRow sx={{ backgroundColor: '#fee2e2' }}>
-                        <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Order ID</TableCell>
+                        <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Order / Return ID</TableCell>
                         <TableCell align="right" sx={{ fontWeight: 700, fontSize: 12 }}>Amount</TableCell>
                         <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Buyer</TableCell>
                         <TableCell sx={{ fontWeight: 700, fontSize: 12 }}>Transaction Date (PST)</TableCell>
@@ -397,9 +405,7 @@ const ProcessingByDateSection = ({ sellers }) => {
 
     for (const seller of sellers.filter(s => !s.error)) {
       try {
-        const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`, {
-          params: seller.financesMarketplaceId ? { marketplace: seller.financesMarketplaceId } : undefined
-        });
+        const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`);
         const txns = res.data.transactions || [];
 
         const matchingTxns = txns.filter(txn => {
@@ -620,7 +626,7 @@ const SellerFundsPage = () => {
               <TableBody>
                 {sellers.map((seller) => (
                   <SellerRow
-                    key={seller.sellerId}
+                    key={`${seller.sellerId}-${lastRefresh?.getTime() || 0}`}
                     seller={seller}
                     onHoldExpanded={!!expandedHolds[seller.sellerId]}
                     onToggleHold={toggleHold}
