@@ -327,11 +327,7 @@ router.post('/', requireAuth, requirePageAccess('ExtraExpenses'), validate(creat
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
-        const expense = new ExtraExpense(payload);
-        await expense.save();
-        await expense.populate('bankAccount', 'name accountNumber');
-
-        // If payment method is 'Cash', deduct from credit
+        // If payment method is 'Cash', check credit availability BEFORE saving
         if (payload.paymentMethod && payload.paymentMethod.toLowerCase() === 'cash') {
             const expenseMonth = getYearMonth(payload.date);
             const monthlyBalances = await getMonthlyBalances();
@@ -346,12 +342,19 @@ router.post('/', requireAuth, requirePageAccess('ExtraExpenses'), validate(creat
 
             // Check if sufficient credit available in this month
             if (monthBalance.netBalance < payload.amount) {
-                // Delete the expense since there's insufficient credit
-                await ExtraExpense.findByIdAndDelete(expense._id);
                 return res.status(400).json({ 
                     error: `Insufficient credit for ${expenseMonth}. Available: ${monthBalance.netBalance}, Required: ${payload.amount}` 
                 });
             }
+        }
+
+        // Now save the expense after validation
+        const expense = new ExtraExpense(payload);
+        await expense.save();
+        await expense.populate('bankAccount', 'name accountNumber');
+
+        // If payment method is 'Cash', deduct from credit
+        if (payload.paymentMethod && payload.paymentMethod.toLowerCase() === 'cash') {
 
             // Update global cash credit
             const cashCredit = await getOrCreateCashCredit();
@@ -422,15 +425,7 @@ router.put('/:id', requireAuth, requirePageAccess('ExtraExpenses'), validate(upd
             const expenseDate = req.body.date || expense.date;
             const expenseMonth = getYearMonth(expenseDate);
 
-            // If it was a cash expense before, remove the old deduction
-            if (wasCardExpense) {
-                await CreditHistory.findOneAndDelete({
-                    expenseId: id,
-                    type: 'CREDIT_USED',
-                });
-            }
-
-            // If it's now a cash expense, check and deduct the new amount
+            // If it's now a cash expense, check credit availability BEFORE making changes
             if (isNowCashExpense) {
                 const monthlyBalances = await getMonthlyBalances();
                 
@@ -442,12 +437,31 @@ router.put('/:id', requireAuth, requirePageAccess('ExtraExpenses'), validate(upd
                     monthBalance = await calculateMonthlyBalance(expenseMonth);
                 }
 
+                // Calculate available credit based on whether this was already a cash expense
+                // If it was already cash, the old amount is already deducted in the balance
+                // So we need to add it back before checking if we can afford the new amount
+                const availableCredit = wasCardExpense 
+                    ? monthBalance.netBalance + oldAmount 
+                    : monthBalance.netBalance;
+
                 // Check if sufficient credit available in this month
-                if (monthBalance.netBalance < newAmount) {
+                if (availableCredit < newAmount) {
                     return res.status(400).json({ 
-                        error: `Insufficient credit for ${expenseMonth}. Available: ${monthBalance.netBalance}, Required: ${newAmount}` 
+                        error: `Insufficient credit for ${expenseMonth}. Available: ${availableCredit}, Required: ${newAmount}` 
                     });
                 }
+            }
+
+            // If it was a cash expense before, remove the old deduction
+            if (wasCardExpense) {
+                await CreditHistory.findOneAndDelete({
+                    expenseId: id,
+                    type: 'CREDIT_USED',
+                });
+            }
+
+            // If it's now a cash expense, deduct the new amount
+            if (isNowCashExpense) {
 
                 // Create new credit history for the updated expense
                 const history = new CreditHistory({
