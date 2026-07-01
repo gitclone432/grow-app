@@ -167,6 +167,7 @@ router.post('/', requireAuth, requirePageAccess('Payoneer'), async (req, res) =>
 
         const marketplaceValue = marketplace && ['ebay', 'etsy', 'walmart'].includes(marketplace) ? marketplace : 'ebay';
 
+        // Payout ID is optional, but if provided and duplicate exists, reject
         const payoutIdTrim = typeof ebayPayoutId === 'string' && ebayPayoutId.trim() ? ebayPayoutId.trim() : null;
         if (payoutIdTrim) {
             const dup = await PayoneerRecord.findOne({ ebayPayoutId: payoutIdTrim }).select('_id').lean();

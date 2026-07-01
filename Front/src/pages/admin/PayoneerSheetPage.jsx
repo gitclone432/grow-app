@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams, Link as RouterLink } from 'react-router-dom';
 import {
     Box,
@@ -31,7 +31,8 @@ import {
     CircularProgress,
     Alert,
     Tabs,
-    Tab
+    Tab,
+    InputAdornment
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import SyncIcon from '@mui/icons-material/Sync';
@@ -362,6 +363,9 @@ const PayoneerSheetPage = () => {
 
     /** Hint after auto-fill from Bank Accounts + Seller Funds / eBay APIs */
     const [autoFillHint, setAutoFillHint] = useState('');
+
+    /** Track if user manually cleared payout ID to prevent auto-fill re-trigger */
+    const payoutIdManuallyClearedRef = useRef(false);
 
     // Calculated Preview for "Add New"
     const [preview, setPreview] = useState({
@@ -720,6 +724,7 @@ const PayoneerSheetPage = () => {
     const openAddDialog = useCallback(() => {
         const bid = searchParams.get('bankAccount') || filters.bankAccount || '';
         setAutoFillHint('');
+        payoutIdManuallyClearedRef.current = false; // Reset flag for new dialog
         setFormData({
             ...EMPTY_PAYONEER_FORM(),
             bankAccount: bid,
@@ -731,6 +736,7 @@ const PayoneerSheetPage = () => {
 
     const openAddFromFeedRow = useCallback((row) => {
         setAutoFillHint('Prefilled from eBay Recently completed payout. Enter exchange rate, then save.');
+        payoutIdManuallyClearedRef.current = false; // Reset flag for new dialog
         setFormData({
             ...EMPTY_PAYONEER_FORM(),
             bankAccount: row.suggestedBankAccountId ? String(row.suggestedBankAccountId) : '',
@@ -746,6 +752,8 @@ const PayoneerSheetPage = () => {
     useEffect(() => {
         if (!openDialog || !formData.bankAccount || !sellers.length || marketplace !== 'ebay') return;
         if (formData.ebayPayoutId) return;
+        // Don't auto-fill if user manually cleared the payout ID
+        if (payoutIdManuallyClearedRef.current) return;
         void runBankAccountLinkedAutoFill(formData.bankAccount);
     }, [openDialog, formData.bankAccount, formData.ebayPayoutId, sellers.length, runBankAccountLinkedAutoFill, marketplace]);
 
@@ -1553,6 +1561,7 @@ const PayoneerSheetPage = () => {
                 onClose={() => {
                     setOpenDialog(false);
                     setAutoFillHint('');
+                    payoutIdManuallyClearedRef.current = false; // Reset flag on close
                 }}
                 maxWidth="sm"
                 fullWidth
@@ -1574,6 +1583,7 @@ const PayoneerSheetPage = () => {
                             value={formData.bankAccount}
                             onChange={(e) => {
                                 const v = e.target.value;
+                                payoutIdManuallyClearedRef.current = false; // Reset flag when bank account changes
                                 setFormData((prev) => ({
                                     ...prev,
                                     bankAccount: v,
@@ -1615,6 +1625,7 @@ const PayoneerSheetPage = () => {
                             value={formData.store}
                             onChange={(e) => {
                                 const v = e.target.value;
+                                payoutIdManuallyClearedRef.current = false; // Reset flag when store changes
                                 setFormData((prev) => ({ ...prev, store: v, ebayPayoutId: '' }));
                                 setAutoFillHint('');
                                 // Only auto-fill from Seller Funds for eBay
@@ -1645,14 +1656,32 @@ const PayoneerSheetPage = () => {
                             helperText="Calendar date is US Pacific (America/Los_Angeles)."
                         />
 
-                        {/* eBay: Read-only payout ID from feed */}
+                        {/* eBay: Read-only payout ID from feed with clear button */}
                         {marketplace === 'ebay' && formData.ebayPayoutId ? (
                             <TextField
                                 label="eBay payout ID (Recently completed)"
                                 fullWidth
                                 value={formData.ebayPayoutId}
-                                InputProps={{ readOnly: true }}
-                                helperText="From eBay Finances; stored with this row."
+                                InputProps={{
+                                    readOnly: true,
+                                    endAdornment: (
+                                        <InputAdornment position="end">
+                                            <Tooltip title="Clear payout ID to create new record">
+                                                <IconButton
+                                                    size="small"
+                                                    onClick={() => {
+                                                        payoutIdManuallyClearedRef.current = true;
+                                                        setFormData({ ...formData, ebayPayoutId: '' });
+                                                    }}
+                                                    edge="end"
+                                                >
+                                                    <CancelIcon fontSize="small" />
+                                                </IconButton>
+                                            </Tooltip>
+                                        </InputAdornment>
+                                    )
+                                }}
+                                helperText="From eBay Finances; stored with this row. Click X to remove and create new record."
                             />
                         ) : null}
 
