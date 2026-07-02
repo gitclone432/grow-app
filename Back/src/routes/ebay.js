@@ -162,6 +162,11 @@ async function buildPayoneerSucceededPayoutFeedRows() {
   };
 
   const cutoff = Date.now() - PAYONEER_FEED_MAX_AGE_MS;
+  const cutoffIso = new Date(cutoff).toISOString();
+  const nowIso = new Date().toISOString();
+  // Only SUCCEEDED payouts — unfiltered responses are dominated by INITIATED (future)
+  // payouts at the top of -payoutDate sort and can push completed payouts past our page cap.
+  const payoutFilter = `payoutStatus:{SUCCEEDED},payoutDate:[${cutoffIso}..${nowIso}]`;
   const rows = [];
 
   for (let i = 0; i < sellers.length; i += PAYONEER_FEED_SELLER_CONCURRENCY) {
@@ -176,21 +181,15 @@ async function buildPayoneerSucceededPayoutFeedRows() {
           const limit = 200;
           let offset = 0;
           let guard = 0;
-          let hitAgeCutoff = false;
 
-          while (guard < PAYONEER_FEED_MAX_PAGES_PER_SELLER && !hitAgeCutoff) {
+          while (guard < PAYONEER_FEED_MAX_PAGES_PER_SELLER) {
             const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
               headers: financesApiHeaders(accessToken, marketplaceId),
-              params: { sort: '-payoutDate', limit, offset },
+              params: { sort: '-payoutDate', limit, offset, filter: payoutFilter },
             });
             const pageRows = payoutsRes.data?.payouts || [];
             for (const p of pageRows) {
-              if (p.payoutStatus !== 'SUCCEEDED' || !p.payoutDate) continue;
-              const pd = new Date(p.payoutDate).getTime();
-              if (pd < cutoff) {
-                hitAgeCutoff = true;
-                break;
-              }
+              if (!p.payoutDate) continue;
               sellerRows.push({
                 payoutId: p.payoutId,
                 payoutDate: p.payoutDate,
@@ -204,7 +203,7 @@ async function buildPayoneerSucceededPayoutFeedRows() {
                 financesMarketplaceId: marketplaceId,
               });
             }
-            if (pageRows.length < limit || hitAgeCutoff) break;
+            if (pageRows.length < limit) break;
             offset += limit;
             guard += 1;
           }

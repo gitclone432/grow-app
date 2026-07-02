@@ -37,8 +37,6 @@ import {
     useTheme,
     CircularProgress,
     Alert,
-    FormControl,
-    FormLabel
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -49,23 +47,8 @@ import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
 import PaymentsIcon from '@mui/icons-material/Payments';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import api from '../../lib/api';
-import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
-import { splitBankSellersField, isMongoIdString } from '../../lib/bankAccountSellers.js';
-
-function buildSellerOptions(sellersList) {
-    return (sellersList || [])
-        .map((s) => {
-            const username = (s.user?.username || '').trim();
-            const email = (s.user?.email || '').trim();
-            const label =
-                username && email && username.toLowerCase() !== email.toLowerCase()
-                    ? `${username} (${email})`
-                    : username || email;
-            if (!label) return null;
-            return { id: String(s._id), label };
-        })
-        .filter(Boolean);
-}
+import { bankAccountMenuLabel, bankAccountUniqueLabel, bankAccountLedgerKey, uniqueBankAccountsByLedger } from '../../lib/bankAccountLabel.js';
+import { splitBankSellersField, isMongoIdString, buildSellerOptions, filterSellersLinkedToBankField } from '../../lib/bankAccountSellers.js';
 
 function formatStoresOnBank(bankAccount, sellerOptions) {
     if (!bankAccount?.sellers?.trim()) return '';
@@ -91,7 +74,7 @@ function balanceColor(value) {
 }
 
 // Mobile Transaction Card Component
-const MobileTransactionCard = ({ txn, storesLabel, balanceMode, onEdit, onDelete }) => {
+const MobileTransactionCard = ({ txn, storesLabel, balanceMode, sellerOptions, onEdit, onDelete }) => {
     const dateStr = txn.date ? new Date(txn.date).toLocaleDateString() : '-';
 
     return (
@@ -153,7 +136,7 @@ const MobileTransactionCard = ({ txn, storesLabel, balanceMode, onEdit, onDelete
                     <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
                         Bank Account
                     </Typography>
-                    <Typography variant="body2">{bankAccountMenuLabel(txn.bankAccount) || '-'}</Typography>
+                    <Typography variant="body2">{bankAccountMenuLabel(txn.bankAccount, sellerOptions) || '-'}</Typography>
                     {storesLabel ? (
                         <Typography variant="caption" color="text.secondary" display="block">
                             Stores: {storesLabel}
@@ -223,6 +206,7 @@ const TransactionPage = () => {
     const [filterStartDate, setFilterStartDate] = useState('');
     const [filterEndDate, setFilterEndDate] = useState('');
     const [filterBankAccount, setFilterBankAccount] = useState('');
+    const [filterStore, setFilterStore] = useState('');
     const [filterType, setFilterType] = useState('');
     const [dateSortOrder, setDateSortOrder] = useState('desc');
     const [groupByBank, setGroupByBank] = useState(false);
@@ -253,6 +237,16 @@ const TransactionPage = () => {
 
     const sellerOptions = useMemo(() => buildSellerOptions(sellers), [sellers]);
 
+    const bankAccountsForFilter = useMemo(() => {
+        let list = bankAccounts;
+        if (filterStore) {
+            const seller = sellers.find((s) => String(s._id) === String(filterStore));
+            if (!seller) return uniqueBankAccountsByLedger(list);
+            list = bankAccounts.filter((acc) => filterSellersLinkedToBankField(acc, [seller]).length > 0);
+        }
+        return uniqueBankAccountsByLedger(list);
+    }, [bankAccounts, filterStore, sellers]);
+
     // Deep link from Payoneer / Bank Accounts: /admin/transactions?bankAccount=<id>
     useEffect(() => {
         const bid = searchParams.get('bankAccount') || '';
@@ -261,7 +255,7 @@ const TransactionPage = () => {
 
     useEffect(() => {
         fetchTransactions();
-    }, [page, rowsPerPage, dateMode, filterSingleDate, filterStartDate, filterEndDate, filterBankAccount, filterType, dateSortOrder, groupByBank]);
+    }, [page, rowsPerPage, dateMode, filterSingleDate, filterStartDate, filterEndDate, filterBankAccount, filterStore, filterType, dateSortOrder, groupByBank]);
 
     const fetchCreditCards = async () => {
         try {
@@ -286,10 +280,11 @@ const TransactionPage = () => {
         ...(dateMode === 'range' && filterEndDate && { endDate: filterEndDate }),
         ...(dateMode === 'single' && filterSingleDate && { startDate: filterSingleDate, endDate: filterSingleDate }),
         ...(filterBankAccount && { bankAccount: filterBankAccount }),
+        ...(filterStore && { sellerId: filterStore }),
         ...(filterType && { transactionType: filterType }),
         sortBy: 'date',
         sortOrder: dateSortOrder,
-        ...(!filterBankAccount && groupByBank ? { groupByBank: '1' } : {})
+        ...(!filterBankAccount && !filterStore && groupByBank ? { groupByBank: '1' } : {})
     });
 
     const fetchTransactions = async () => {
@@ -327,6 +322,7 @@ const TransactionPage = () => {
         setFilterStartDate('');
         setFilterEndDate('');
         setFilterBankAccount('');
+        setFilterStore('');
         setFilterType('');
         setGroupByBank(false);
         setDateMode('range');
@@ -512,13 +508,29 @@ const TransactionPage = () => {
     }, [transactions]);
 
     const visibleBalanceSummary = useMemo(() => {
-        if (!filterBankAccount) return balanceSummary;
-        const fid = String(filterBankAccount);
-        return balanceSummary.filter(
-            (item) =>
-                item.bankAccountIds?.some((id) => String(id) === fid) || String(item._id) === fid
-        );
-    }, [balanceSummary, filterBankAccount]);
+        if (!filterBankAccount && !filterStore) return balanceSummary;
+        let items = balanceSummary;
+        if (filterBankAccount) {
+            const fid = String(filterBankAccount);
+            items = items.filter(
+                (item) =>
+                    item.bankAccountIds?.some((id) => String(id) === fid) || String(item._id) === fid
+            );
+        }
+        if (filterStore) {
+            items = items.filter((item) => {
+                const tokens = splitBankSellersField(item.sellers);
+                return tokens.some((t) =>
+                    isMongoIdString(t) ? t === filterStore : false
+                ) || tokens.some((t) => {
+                    if (isMongoIdString(t)) return false;
+                    const opt = sellerOptions.find((o) => o.id === filterStore);
+                    return opt?.bankToken?.toLowerCase() === t.toLowerCase();
+                });
+            });
+        }
+        return items;
+    }, [balanceSummary, filterBankAccount, filterStore, sellerOptions]);
 
     const totalAllBanksBalance = useMemo(
         () => balanceSummary.reduce((sum, item) => sum + (Number(item.balance) || 0), 0),
@@ -614,132 +626,171 @@ const TransactionPage = () => {
             </Alert>
 
             {/* Filters Section */}
-            <Paper sx={{ p: 2, mb: 3 }}>
-                <Grid container spacing={2} alignItems="center">
-                    <Grid item xs={12} sm={6} md={2}>
+            <Paper sx={{ p: { xs: 1.5, sm: 2 }, mb: 3 }}>
+                <Stack spacing={1.5}>
+                    <Stack
+                        direction="row"
+                        spacing={1}
+                        flexWrap="wrap"
+                        useFlexGap
+                        alignItems="center"
+                    >
                         <TextField
                             select
+                            size="small"
                             label="Date Mode"
-                            fullWidth
                             value={dateMode}
                             onChange={(e) => {
                                 setDateMode(e.target.value);
                                 setPage(0);
                             }}
+                            sx={{ width: { xs: '100%', sm: 132 } }}
                         >
                             <MenuItem value="single">Single Date</MenuItem>
                             <MenuItem value="range">Date Range</MenuItem>
                         </TextField>
-                    </Grid>
-                    {dateMode === 'single' ? (
-                        <Grid item xs={12} sm={6} md={2}>
+
+                        {dateMode === 'single' ? (
                             <TextField
                                 label="Date"
                                 type="date"
-                                fullWidth
+                                size="small"
                                 InputLabelProps={{ shrink: true }}
                                 value={filterSingleDate}
                                 onChange={(e) => { setFilterSingleDate(e.target.value); setPage(0); }}
+                                sx={{ width: { xs: '100%', sm: 150 } }}
                             />
-                        </Grid>
-                    ) : (
-                        <>
-                            <Grid item xs={12} sm={6} md={2}>
+                        ) : (
+                            <>
                                 <TextField
-                                    label="Start Date"
+                                    label="Start"
                                     type="date"
-                                    fullWidth
+                                    size="small"
                                     InputLabelProps={{ shrink: true }}
                                     value={filterStartDate}
                                     onChange={(e) => { setFilterStartDate(e.target.value); setPage(0); }}
+                                    sx={{ width: { xs: '100%', sm: 150 } }}
                                 />
-                            </Grid>
-                            <Grid item xs={12} sm={6} md={2}>
                                 <TextField
-                                    label="End Date"
+                                    label="End"
                                     type="date"
-                                    fullWidth
+                                    size="small"
                                     InputLabelProps={{ shrink: true }}
                                     value={filterEndDate}
                                     onChange={(e) => { setFilterEndDate(e.target.value); setPage(0); }}
+                                    sx={{ width: { xs: '100%', sm: 150 } }}
                                 />
-                            </Grid>
-                        </>
-                    )}
-                    <Grid item xs={12} sm={6} md={2}>
+                            </>
+                        )}
+
                         <TextField
                             select
-                            label="Bank Account"
-                            fullWidth
-                            value={filterBankAccount}
-                            onChange={(e) => { setFilterBankAccount(e.target.value); setPage(0); }}
+                            size="small"
+                            label="Store"
+                            value={filterStore}
+                            onChange={(e) => {
+                                const nextStore = e.target.value;
+                                setFilterStore(nextStore);
+                                if (nextStore && filterBankAccount) {
+                                    const seller = sellers.find((s) => String(s._id) === String(nextStore));
+                                    const stillValid = seller && bankAccounts.some(
+                                        (acc) => String(acc._id) === String(filterBankAccount)
+                                            && filterSellersLinkedToBankField(acc, [seller]).length > 0
+                                    );
+                                    if (!stillValid) setFilterBankAccount('');
+                                }
+                                setPage(0);
+                            }}
+                            sx={{ width: { xs: '100%', sm: 148 }, flex: { md: '1 1 140px' }, maxWidth: { md: 200 } }}
                         >
-                            <MenuItem value="">All Accounts</MenuItem>
-                            {bankAccounts.map((acc) => (
-                                <MenuItem key={acc._id} value={acc._id}>
-                                    {bankAccountMenuLabel(acc)}
+                            <MenuItem value="">All Stores</MenuItem>
+                            {sellerOptions.map((opt) => (
+                                <MenuItem key={opt.id} value={opt.id}>
+                                    {opt.bankToken || opt.label}
                                 </MenuItem>
                             ))}
                         </TextField>
-                    </Grid>
-                    {!filterBankAccount && (
-                        <Grid item xs={12} sm={6} md={3}>
-                            <FormControl fullWidth size="small">
-                                <FormLabel sx={{ fontSize: '0.75rem', mb: 0.5 }}>List layout</FormLabel>
-                                <ToggleButtonGroup
-                                    exclusive
-                                    fullWidth
-                                    size="small"
-                                    value={groupByBank ? 'bank' : 'date'}
-                                    onChange={(_, val) => {
-                                        if (!val) return;
-                                        setGroupByBank(val === 'bank');
-                                        setPage(0);
-                                    }}
-                                >
-                                    <ToggleButton value="date">By date</ToggleButton>
-                                    <ToggleButton value="bank">Group by bank</ToggleButton>
-                                </ToggleButtonGroup>
-                            </FormControl>
-                        </Grid>
-                    )}
-                    <Grid item xs={12} sm={6} md={2}>
+
                         <TextField
                             select
+                            size="small"
+                            label="Bank Account"
+                            value={filterBankAccount}
+                            onChange={(e) => { setFilterBankAccount(e.target.value); setPage(0); }}
+                            sx={{ width: { xs: '100%', sm: 220 }, flex: { md: '2 1 220px' }, maxWidth: { md: 360 } }}
+                        >
+                            <MenuItem value="">All Accounts</MenuItem>
+                            {bankAccountsForFilter.map((acc) => (
+                                <MenuItem key={bankAccountLedgerKey(acc)} value={acc._id}>
+                                    {bankAccountUniqueLabel(acc)}
+                                </MenuItem>
+                            ))}
+                        </TextField>
+
+                        <TextField
+                            select
+                            size="small"
                             label="Type"
-                            fullWidth
                             value={filterType}
                             onChange={(e) => { setFilterType(e.target.value); setPage(0); }}
+                            sx={{ width: { xs: '100%', sm: 120 } }}
                         >
                             <MenuItem value="">All Types</MenuItem>
                             <MenuItem value="Credit">Credit</MenuItem>
                             <MenuItem value="Debit">Debit</MenuItem>
                         </TextField>
-                    </Grid>
-                    <Grid item xs={12} sm={6} md={2}>
-                        <TextField
-                            label="Rows Per Page"
-                            type="number"
-                            fullWidth
-                            inputProps={{ min: 1 }}
-                            value={rowsPerPage === -1 ? '' : rowsPerPage}
-                            onChange={(e) => { 
-                                const val = parseInt(e.target.value, 10);
-                                if (!isNaN(val) && val > 0) {
-                                    setRowsPerPage(val);
-                                } else if (e.target.value === '') {
-                                    setRowsPerPage(50);
-                                }
-                                setPage(0);
-                            }}
-                        />
-                    </Grid>
-                    <Grid item xs={12} sm={12} md={12} display="flex" justifyContent="flex-end">
-                         <Button variant="outlined" onClick={clearFilters} color="secondary" fullWidth={isMobile}>
-                             Clear Filters
-                         </Button>
-                    </Grid>
-                </Grid>
+                    </Stack>
+
+                    <Stack
+                        direction="row"
+                        spacing={1}
+                        alignItems="center"
+                        justifyContent="space-between"
+                        flexWrap="wrap"
+                        useFlexGap
+                    >
+                        {!filterBankAccount && !filterStore ? (
+                            <ToggleButtonGroup
+                                exclusive
+                                size="small"
+                                value={groupByBank ? 'bank' : 'date'}
+                                onChange={(_, val) => {
+                                    if (!val) return;
+                                    setGroupByBank(val === 'bank');
+                                    setPage(0);
+                                }}
+                            >
+                                <ToggleButton value="date">By date</ToggleButton>
+                                <ToggleButton value="bank">Group by bank</ToggleButton>
+                            </ToggleButtonGroup>
+                        ) : (
+                            <Box />
+                        )}
+
+                        <Stack direction="row" spacing={1} alignItems="center" sx={{ ml: 'auto' }}>
+                            <TextField
+                                label="Rows"
+                                type="number"
+                                size="small"
+                                inputProps={{ min: 1 }}
+                                value={rowsPerPage === -1 ? '' : rowsPerPage}
+                                onChange={(e) => {
+                                    const val = parseInt(e.target.value, 10);
+                                    if (!isNaN(val) && val > 0) {
+                                        setRowsPerPage(val);
+                                    } else if (e.target.value === '') {
+                                        setRowsPerPage(50);
+                                    }
+                                    setPage(0);
+                                }}
+                                sx={{ width: 88 }}
+                            />
+                            <Button variant="outlined" size="small" onClick={clearFilters} color="secondary">
+                                Clear Filters
+                            </Button>
+                        </Stack>
+                    </Stack>
+                </Stack>
             </Paper>
 
             <Accordion sx={{ mb: 3 }} defaultExpanded={false}>
@@ -749,7 +800,7 @@ const TransactionPage = () => {
                 <AccordionDetails>
                     {/* Balance Summary Cards */}
                     <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold' }}>Bank Accounts</Typography>
-            {!filterBankAccount && balanceSummary.length > 0 && (
+            {!filterBankAccount && !filterStore && balanceSummary.length > 0 && (
                 <Card sx={{ mb: 2, bgcolor: 'primary.50', border: '1px solid', borderColor: 'primary.light' }}>
                     <CardContent sx={{ py: 1.5 }}>
                         <Typography variant="body2" color="text.secondary">
@@ -912,6 +963,7 @@ const TransactionPage = () => {
                                 txn={txn}
                                 storesLabel={formatStoresOnBank(txn.bankAccount, sellerOptions)}
                                 balanceMode={balanceMode}
+                                sellerOptions={sellerOptions}
                                 onEdit={() => startEdit(txn)}
                                 onDelete={() => handleDelete(txn._id)}
                             />
@@ -935,8 +987,8 @@ const TransactionPage = () => {
                 <Table>
                     <TableHead>
                         <TableRow sx={{ bgcolor: '#f5f5f5' }}>
-                            <TableCell sortDirection={groupByBank && !filterBankAccount ? 'asc' : dateSortOrder}>
-                                {groupByBank && !filterBankAccount ? (
+                            <TableCell sortDirection={groupByBank && !filterBankAccount && !filterStore ? 'asc' : dateSortOrder}>
+                                {groupByBank && !filterBankAccount && !filterStore ? (
                                     <Tooltip title="Grouped by bank: oldest first within each account (for Balance column)">
                                         <span>Date</span>
                                     </Tooltip>
@@ -976,7 +1028,7 @@ const TransactionPage = () => {
                                 <TableCell>{new Date(txn.date).toLocaleDateString()}</TableCell>
                                 <TableCell>
                                     <Typography variant="body2">
-                                        {bankAccountMenuLabel(txn.bankAccount)}
+                                        {bankAccountMenuLabel(txn.bankAccount, sellerOptions)}
                                     </Typography>
                                     {formatStoresOnBank(txn.bankAccount, sellerOptions) ? (
                                         <Typography variant="caption" color="text.secondary" display="block">
@@ -1119,7 +1171,7 @@ const TransactionPage = () => {
                         >
                             {bankAccounts.map((acc) => (
                                 <MenuItem key={acc._id} value={acc._id}>
-                                    {bankAccountMenuLabel(acc)}
+                                    {bankAccountMenuLabel(acc, sellerOptions)}
                                 </MenuItem>
                             ))}
                         </TextField>

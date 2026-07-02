@@ -49,7 +49,7 @@ import {
     getTodayPtDateString,
     ptYyyyMmDdToIsoString,
 } from '../../lib/pacificDate.js';
-import { filterSellersLinkedToBankField } from '../../lib/bankAccountSellers.js';
+import { filterSellersLinkedToBankField, buildSellerOptions } from '../../lib/bankAccountSellers.js';
 import { bankAccountMenuLabel } from '../../lib/bankAccountLabel.js';
 
 /** MUI menus default to a portal behind modal dialogs; keep them inside the dialog. */
@@ -394,7 +394,8 @@ const PayoneerSheetPage = () => {
             setPayoutFeedCachedAt(data?.cache?.cachedAt || null);
             setPayoutFeedCacheEmpty(Boolean(data?.cache?.empty));
             if (forceRefresh && data?.cache?.savedToDatabase) {
-                setAutoFillHint('eBay payouts fetched from eBay and saved to the database.');
+                const n = data?.total ?? data?.rows?.length ?? 0;
+                setAutoFillHint(`eBay payouts fetched (${n} rows) and saved to the database.`);
             }
         } catch (e) {
             const msg =
@@ -412,6 +413,7 @@ const PayoneerSheetPage = () => {
     }, [loadPayoutFeed]);
 
     const payoutFeedLookup = useMemo(() => buildPayoutFeedLookup(payoutFeedRows), [payoutFeedRows]);
+    const sellerOptions = useMemo(() => buildSellerOptions(sellers), [sellers]);
 
     const filteredPayoutFeed = useMemo(() => {
         let rows = payoutFeedRows;
@@ -886,7 +888,7 @@ const PayoneerSheetPage = () => {
                 >
                     {bankAccounts.map((acc) => (
                         <MenuItem key={acc._id} value={acc._id}>
-                            {bankAccountMenuLabel(acc)}
+                            {bankAccountMenuLabel(acc, sellerOptions)}
                         </MenuItem>
                     ))}
                 </TextField>
@@ -1078,7 +1080,7 @@ const PayoneerSheetPage = () => {
                             </MenuItem>
                             {bankAccounts.map((acc) => (
                                 <MenuItem key={acc._id} value={acc._id}>
-                                    {bankAccountMenuLabel(acc)}
+                                    {bankAccountMenuLabel(acc, sellerOptions)}
                                 </MenuItem>
                             ))}
                         </TextField>
@@ -1596,7 +1598,7 @@ const PayoneerSheetPage = () => {
                         >
                             {bankAccounts.map((acc) => (
                                 <MenuItem key={acc._id} value={acc._id}>
-                                    {bankAccountMenuLabel(acc)}
+                                    {bankAccountMenuLabel(acc, sellerOptions)}
                                 </MenuItem>
                             ))}
                         </TextField>

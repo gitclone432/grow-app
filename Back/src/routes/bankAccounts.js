@@ -1,9 +1,11 @@
 import express from 'express';
 import BankAccount from '../models/BankAccount.js';
 import PayoneerRecord from '../models/PayoneerRecord.js';
+import Seller from '../models/Seller.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { createBankAccountSchema } from '../schemas/index.js';
+import { formatLinkedSellerHint } from '../utils/bankAccountSellerHint.js';
 
 const router = express.Router();
 
@@ -11,14 +13,18 @@ const router = express.Router();
 // Accessible from both BankAccounts page and Transactions page (for dropdown)
 router.get('/', requireAuth, requirePageAccess(['BankAccounts', 'Transactions', 'Payoneer', 'ExtraExpenses']), async (req, res) => {
     try {
-        const accounts = await BankAccount.find().sort({ name: 1, createdAt: 1 }).lean();
-        const countAgg = await PayoneerRecord.aggregate([
-            { $group: { _id: '$bankAccount', count: { $sum: 1 } } }
+        const [accounts, sellers, countAgg] = await Promise.all([
+            BankAccount.find().sort({ name: 1, createdAt: 1 }).lean(),
+            Seller.find().populate('user', 'username email').select('user').lean(),
+            PayoneerRecord.aggregate([
+                { $group: { _id: '$bankAccount', count: { $sum: 1 } } }
+            ]),
         ]);
         const countMap = new Map(countAgg.map((d) => [d._id.toString(), d.count]));
         const withCounts = accounts.map((a) => ({
             ...a,
-            payoneerRecordCount: countMap.get(a._id.toString()) || 0
+            payoneerRecordCount: countMap.get(a._id.toString()) || 0,
+            linkedSellerHint: formatLinkedSellerHint(a.sellers, sellers),
         }));
         res.json(withCounts);
     } catch (err) {
