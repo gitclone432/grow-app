@@ -204,6 +204,7 @@ export default function BuyerChatPage() {
   const messagesEndRef = useRef(null);
   const pollingIntervalRef = useRef(null);
   const hasFetchedInitialData = useRef(false);
+  const didAutoSync = useRef(false);
   const fileInputRef = useRef(null);
 
   const handleCopy = (text) => {
@@ -397,7 +398,12 @@ export default function BuyerChatPage() {
     if (!hasFetchedInitialData.current) {
       hasFetchedInitialData.current = true;
       fetchSellers();
-      loadAllThreadPages();
+      loadAllThreadPages().then((count) => {
+        if (count === 0 && !didAutoSync.current) {
+          didAutoSync.current = true;
+          handleManualSync();
+        }
+      });
       loadChatTemplates();
       fetchAgents();
 
@@ -529,18 +535,19 @@ export default function BuyerChatPage() {
 
   // API CALLS
   async function handleManualSync() {
+    if (syncingInbox) return;
     setSyncingInbox(true);
     try {
-      const res = await api.post('/ebay/sync-inbox');
-      if (res.data.success) {
-        // PASS TRUE TO RESET THE LIST AND SHOW NEWEST MESSAGES AT TOP
-        setPage(1);
-        loadAllThreadPages();
+      const res = await api.post('/ebay/sync-inbox', {}, { timeout: 180000 });
+      setPage(1);
+      await loadAllThreadPages();
 
-        // Show snackbar with results
+      if (res.data.success) {
         const { syncResults, totalNewMessages } = res.data;
+        const commerceCount = (syncResults || []).reduce((sum, r) => sum + (r.commerceConversations || 0), 0);
+        const commerceErrors = (syncResults || []).filter((r) => r.commerceError).map((r) => `${r.sellerName}: ${r.commerceError}`);
+
         if (totalNewMessages > 0 && syncResults) {
-          // Build summary by seller
           const sellerSummary = syncResults
             .filter(r => r.newMessages > 0)
             .map(r => `${r.sellerName}: ${r.newMessages} new`)
@@ -548,6 +555,12 @@ export default function BuyerChatPage() {
 
           setSnackbarMsg(`Found ${totalNewMessages} new message${totalNewMessages > 1 ? 's' : ''}!\n\n${sellerSummary}`);
           setSnackbarSeverity('success');
+        } else if (commerceCount > 0) {
+          setSnackbarMsg(`Synced ${commerceCount} conversation${commerceCount === 1 ? '' : 's'} from eBay.`);
+          setSnackbarSeverity('success');
+        } else if (commerceErrors.length > 0) {
+          setSnackbarMsg(`Commerce API sync issue:\n${commerceErrors.join('\n')}`);
+          setSnackbarSeverity('warning');
         } else {
           setSnackbarMsg('No new messages found.');
           setSnackbarSeverity('info');
@@ -555,13 +568,13 @@ export default function BuyerChatPage() {
         setSnackbarOpen(true);
       }
     } catch (e) {
-      // Don't log 401 errors - they're handled by the interceptor
       if (e.response?.status !== 401) {
-        console.error("Inbox Sync failed", e);
+        console.error('Inbox Sync failed', e);
         setSnackbarMsg('Sync failed: ' + (e.response?.data?.error || e.message));
         setSnackbarSeverity('error');
         setSnackbarOpen(true);
       }
+      await loadAllThreadPages();
     } finally {
       setSyncingInbox(false);
     }
@@ -676,11 +689,13 @@ export default function BuyerChatPage() {
       setThreadTotal(total);
       setHasMore(combined.length < total);
       setPage(pageNum + 1);
+      return combined.length;
     } catch (e) {
       if (e.response?.status !== 401) {
         console.error('Failed to load threads', e);
       }
       setThreads([]);
+      return 0;
     } finally {
       setLoadingThreads(false);
     }
@@ -764,6 +779,8 @@ export default function BuyerChatPage() {
         orderId: selectedThread.orderId,
         itemId: selectedThread.itemId,
         buyerUsername: selectedThread.buyerUsername,
+        sellerId: selectedThread.sellerId,
+        conversationId: selectedThread.conversationId,
         body: newMessage,
         mediaUrls: attachments.map(a => a.url)
       });
@@ -774,8 +791,10 @@ export default function BuyerChatPage() {
 
       if (selectedThread.isNew) {
         loadThreads();
-        const newThread = { ...selectedThread, isNew: false };
+        const newThread = { ...selectedThread, isNew: false, conversationId: res.data.message?.conversationId || selectedThread.conversationId };
         setSelectedThread(newThread);
+      } else if (res.data.message?.conversationId && !selectedThread.conversationId) {
+        setSelectedThread({ ...selectedThread, conversationId: res.data.message.conversationId });
       }
     } catch (e) {
       alert('Failed to send: ' + (e.response?.data?.error || e.message));
@@ -1172,7 +1191,9 @@ export default function BuyerChatPage() {
           {/* EMPTY STATE */}
           {threads.length === 0 && !loadingThreads && (
             <Typography variant="caption" sx={{ p: 3, display: 'block', textAlign: 'center', color: 'text.secondary' }}>
-              No conversations found. Click <strong>Check New</strong> to sync messages from eBay.
+              {syncingInbox
+                ? 'Syncing conversations from eBay...'
+                : 'No conversations yet. Click Check New to sync from eBay.'}
             </Typography>
           )}
         </List>

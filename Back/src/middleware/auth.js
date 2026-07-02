@@ -76,6 +76,7 @@ export const PAGE_DEFAULT_ROLES = {
   // eBay Parameters
   'SellingPrivileges': ['superadmin', 'listingadmin'],
   'EbayApiUsage': ['superadmin', 'listingadmin'],
+  'Analytics': ['superadmin', 'listingadmin'],
   'EbayApiTester': ['superadmin', 'listingadmin'],
   'SellerFunds': ['superadmin', 'listingadmin'],
 

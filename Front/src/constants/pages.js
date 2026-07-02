@@ -119,6 +119,7 @@ export const PAGE_REGISTRY = [
   // ====== EBAY PARAMETERS ======
   { id: 'SellingPrivileges', name: 'Seller Privileges', path: '/selling-privileges', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayApiUsage', name: 'eBay API Usage', path: '/ebay-api-usage', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'Analytics', name: 'Analytics', path: '/analytics', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayApiTester', name: 'eBay API Tester', path: '/ebay-api-tester', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'SellerFunds', name: 'Seller Funds', path: '/seller-funds', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
 

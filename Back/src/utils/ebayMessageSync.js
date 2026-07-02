@@ -146,7 +146,8 @@ async function saveThreadMessage({
   mediaUrls = [],
   read,
   messageDate,
-  externalMessageId
+  externalMessageId,
+  conversationId
 }) {
   const normalized = normalizeBody(body);
   if (!normalized) return false;
@@ -166,6 +167,7 @@ async function saveThreadMessage({
     itemId,
     itemTitle,
     buyerUsername,
+    conversationId: conversationId || undefined,
     externalMessageId: externalMessageId || undefined,
     sender,
     subject: subject || (sender === 'SELLER' ? 'Reply' : 'Message'),
@@ -175,6 +177,21 @@ async function saveThreadMessage({
     messageType,
     messageDate: messageDate || new Date()
   });
+
+  if (conversationId) {
+    const threadMatch = {
+      seller: sellerId,
+      buyerUsername,
+      $or: [{ conversationId: null }, { conversationId: '' }, { conversationId: { $exists: false } }]
+    };
+    const scope = [];
+    if (orderId) scope.push({ orderId });
+    if (itemId) scope.push({ itemId });
+    if (scope.length > 0) {
+      threadMatch.$and = [{ $or: scope }];
+    }
+    await Message.updateMany(threadMatch, { $set: { conversationId } });
+  }
 
   return true;
 }
@@ -547,5 +564,273 @@ export async function backfillThreadOrderId({ sellerId, buyerUsername, itemId, o
     { $set: { orderId, messageType } }
   );
 
+  return result.modifiedCount || 0;
+}
+
+const COMMERCE_MESSAGE_BASE = 'https://api.ebay.com/commerce/message/v1';
+
+async function fetchSellerEbayUserId(token) {
+  try {
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetUserRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <DetailLevel>ReturnSummary</DetailLevel>
+</GetUserRequest>`;
+
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: { ...EBAY_XML_HEADERS, 'X-EBAY-API-CALL-NAME': 'GetUser' }
+    });
+    const result = await parseStringPromise(response.data);
+    if (result.GetUserResponse?.Ack?.[0] === 'Failure') return null;
+    return result.GetUserResponse?.User?.[0]?.UserID?.[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveBuyerFromCommerceMessage(msg, sellerEbayUserId, sellerAppUsername) {
+  const sender = String(msg?.senderUsername || '');
+  const recipient = String(msg?.recipientUsername || '');
+  const sellerIds = [sellerEbayUserId, sellerAppUsername].filter(Boolean).map((s) => s.toLowerCase());
+
+  if (sellerIds.includes(sender.toLowerCase())) return recipient;
+  if (sellerIds.includes(recipient.toLowerCase())) return sender;
+  return sender || recipient;
+}
+
+function resolveSenderFromCommerceMessage(msg, buyerUsername) {
+  const sender = String(msg?.senderUsername || '');
+  if (sender.toLowerCase() === String(buyerUsername || '').toLowerCase()) return 'BUYER';
+  return 'SELLER';
+}
+
+async function saveCommerceMessage(seller, msg, conversationSummary, sellerEbayUserId) {
+  const conversationId = conversationSummary.conversationId || null;
+  const itemId = conversationSummary.referenceType === 'LISTING'
+    ? conversationSummary.referenceId
+    : null;
+  const itemTitle = conversationSummary.conversationTitle || null;
+  const buyerUsername = resolveBuyerFromCommerceMessage(msg, sellerEbayUserId, seller.user?.username);
+  const body = extractTextFromHtml(msg?.messageBody || '');
+  if (!buyerUsername || !body) return { buyerNew: false, sellerNew: false };
+
+  const context = await resolveThreadContext({ itemID: itemId, senderID: buyerUsername, itemTitle });
+  const sender = resolveSenderFromCommerceMessage(msg, buyerUsername);
+  const read = sender === 'SELLER' || String(msg?.readStatus || '').toUpperCase() === 'READ';
+
+  const saved = await saveThreadMessage({
+    sellerId: seller._id,
+    buyerUsername,
+    orderId: context.orderId,
+    itemId: context.finalItemId || itemId,
+    itemTitle: context.finalItemTitle || itemTitle,
+    messageType: context.messageType,
+    sender,
+    subject: msg?.subject || 'Message',
+    body,
+    read,
+    messageDate: parseXmlDate(msg?.createdDate) || new Date(),
+    externalMessageId: msg?.messageId ? `commerce-${msg.messageId}` : undefined,
+    conversationId
+  });
+
+  return {
+    buyerNew: saved && sender === 'BUYER',
+    sellerNew: saved && sender === 'SELLER'
+  };
+}
+
+async function syncCommerceConversationMessages(seller, token, conversationSummary, sellerEbayUserId) {
+  const conversationId = conversationSummary.conversationId;
+  if (!conversationId) return { buyerNew: 0, sellerNew: 0 };
+
+  let offset = 0;
+  let buyerNew = 0;
+  let sellerNew = 0;
+
+  while (offset < 500) {
+    let messages = [];
+    try {
+      const res = await axios.get(`${COMMERCE_MESSAGE_BASE}/conversation/${conversationId}`, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        params: { conversation_type: 'FROM_MEMBERS', limit: 50, offset }
+      });
+      messages = res.data?.messages || [];
+    } catch (err) {
+      console.error(`[Commerce Sync] getConversation ${conversationId}:`, err.response?.data || err.message);
+      break;
+    }
+
+    if (messages.length === 0 && offset === 0 && conversationSummary.latestMessage) {
+      const one = await saveCommerceMessage(seller, conversationSummary.latestMessage, conversationSummary, sellerEbayUserId);
+      buyerNew += one.buyerNew ? 1 : 0;
+      sellerNew += one.sellerNew ? 1 : 0;
+      break;
+    }
+
+    for (const msg of messages) {
+      const one = await saveCommerceMessage(seller, msg, conversationSummary, sellerEbayUserId);
+      buyerNew += one.buyerNew ? 1 : 0;
+      sellerNew += one.sellerNew ? 1 : 0;
+    }
+
+    if (messages.length < 50) break;
+    offset += messages.length;
+  }
+
+  return { buyerNew, sellerNew };
+}
+
+export async function syncCommerceConversationsForSeller(seller, token, {
+  buyerUsername,
+  summaryOnly = false,
+  maxConversations = 200
+} = {}) {
+  const sellerName = seller.user?.username || seller._id;
+  const sellerEbayUserId = summaryOnly ? null : await fetchSellerEbayUserId(token);
+  const now = new Date();
+  const startTime = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
+
+  let offset = 0;
+  let buyerNew = 0;
+  let sellerNew = 0;
+  let conversationsFetched = 0;
+
+  while (offset < 1000 && conversationsFetched < maxConversations) {
+    const params = {
+      conversation_type: 'FROM_MEMBERS',
+      start_time: startTime,
+      end_time: now.toISOString(),
+      limit: 50,
+      offset
+    };
+    if (buyerUsername) params.other_party_username = buyerUsername;
+
+    let conversations = [];
+    let total = 0;
+    try {
+      const res = await axios.get(`${COMMERCE_MESSAGE_BASE}/conversation`, {
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        params
+      });
+      conversations = res.data?.conversations || [];
+      total = res.data?.total ?? conversations.length;
+    } catch (err) {
+      const detail = err.response?.data || err.message;
+      console.error(`[Commerce Sync] getConversations failed for ${sellerName}:`, detail);
+      return {
+        buyerNew,
+        sellerNew,
+        conversationsFetched,
+        error: typeof detail === 'string' ? detail : JSON.stringify(detail)
+      };
+    }
+
+    let processedThisPage = 0;
+    for (const conv of conversations) {
+      if (conversationsFetched + processedThisPage >= maxConversations) break;
+
+      if (summaryOnly) {
+        if (!conv.latestMessage) continue;
+        const one = await saveCommerceMessage(seller, conv.latestMessage, conv, sellerEbayUserId);
+        buyerNew += one.buyerNew ? 1 : 0;
+        sellerNew += one.sellerNew ? 1 : 0;
+        processedThisPage++;
+        continue;
+      }
+
+      const result = await syncCommerceConversationMessages(seller, token, conv, sellerEbayUserId);
+      buyerNew += result.buyerNew;
+      sellerNew += result.sellerNew;
+      processedThisPage++;
+    }
+
+    conversationsFetched += processedThisPage;
+    offset += conversations.length;
+    if (conversations.length === 0 || offset >= total || conversationsFetched >= maxConversations) break;
+  }
+
+  console.log(`[Commerce Sync] ${sellerName}: ${conversationsFetched} conversations (${summaryOnly ? 'summary' : 'full'}), saved ${buyerNew} buyer + ${sellerNew} seller messages`);
+  return { buyerNew, sellerNew, conversationsFetched };
+}
+
+export async function resolveCommerceConversationId(token, { sellerId, buyerUsername, itemId, orderId }) {
+  const dbQuery = {
+    seller: sellerId,
+    buyerUsername,
+    conversationId: { $nin: [null, ''] }
+  };
+  const scope = [];
+  if (orderId) scope.push({ orderId });
+  if (itemId) scope.push({ itemId });
+  if (scope.length > 0) dbQuery.$or = scope;
+
+  const existing = await Message.findOne(dbQuery).sort({ messageDate: -1 }).select('conversationId').lean();
+  if (existing?.conversationId) return existing.conversationId;
+
+  const params = {
+    conversation_type: 'FROM_MEMBERS',
+    other_party_username: buyerUsername,
+    limit: 50
+  };
+
+  const res = await axios.get(`${COMMERCE_MESSAGE_BASE}/conversation`, {
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    params
+  });
+
+  const conversations = res.data?.conversations || [];
+  if (itemId) {
+    const byItem = conversations.find((c) => c.referenceId === itemId);
+    if (byItem?.conversationId) return byItem.conversationId;
+  }
+  return conversations[0]?.conversationId || null;
+}
+
+export async function sendCommerceMessage(token, {
+  conversationId,
+  otherPartyUsername,
+  messageText,
+  referenceId,
+  messageMedia = []
+}) {
+  const payload = { messageText };
+
+  if (conversationId) {
+    payload.conversationId = conversationId;
+  } else if (otherPartyUsername) {
+    payload.otherPartyUsername = otherPartyUsername;
+    if (referenceId) {
+      payload.reference = { referenceId, referenceType: 'LISTING' };
+    }
+  } else {
+    throw new Error('conversationId or otherPartyUsername is required');
+  }
+
+  if (messageMedia.length > 0) {
+    payload.messageMedia = messageMedia;
+  }
+
+  const res = await axios.post(`${COMMERCE_MESSAGE_BASE}/send_message`, payload, {
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+  });
+
+  return res.data;
+}
+
+export async function backfillConversationId({ sellerId, buyerUsername, itemId, orderId, conversationId }) {
+  if (!conversationId) return 0;
+
+  const filter = {
+    seller: sellerId,
+    buyerUsername,
+    $or: [{ conversationId: null }, { conversationId: '' }, { conversationId: { $exists: false } }]
+  };
+  const scope = [];
+  if (orderId) scope.push({ orderId });
+  if (itemId) scope.push({ itemId });
+  if (scope.length > 0) filter.$and = [{ $or: scope }];
+
+  const result = await Message.updateMany(filter, { $set: { conversationId } });
   return result.modifiedCount || 0;
 }

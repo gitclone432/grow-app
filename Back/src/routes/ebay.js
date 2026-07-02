@@ -22,6 +22,7 @@ import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
 import ActiveListing from '../models/ActiveListing.js';
+import CustomerServiceMetricSnapshot from '../models/CustomerServiceMetricSnapshot.js';
 import CashflowEntry from '../models/CashflowEntry.js';
 import SyncAllSellersLock from '../models/SyncAllSellersLock.js';
 import SyncAllSellersStatusCache from '../models/SyncAllSellersStatusCache.js';
@@ -36,7 +37,11 @@ import {
   enrichThreadFromMyMessages,
   collectExternalMessageIdsFromExchanges,
   syncMyMessagesForThread,
-  backfillThreadOrderId
+  backfillThreadOrderId,
+  syncCommerceConversationsForSeller,
+  resolveCommerceConversationId,
+  sendCommerceMessage,
+  backfillConversationId
 } from '../utils/ebayMessageSync.js';
 import {
   applyUsdFieldsSync,
@@ -7367,15 +7372,24 @@ router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), asyn
     console.log('[Sync Inbox] Starting smart message sync...');
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } }).populate('user', 'username email');
     let totalNew = 0;
-    const syncResults = []; // Track per-seller results
+    const syncResults = [];
 
     for (const seller of sellers) {
       const sellerName = seller.user?.username || seller.user?.email || seller._id;
       try {
-        // 1. Ensure Token is Valid
         const token = await ensureValidToken(seller);
 
-        // 2. Determine Time Window — always look back at least 90 days on manual sync
+        // 1. Commerce API first — fast summary (latest message per conversation)
+        const commerceResult = await syncCommerceConversationsForSeller(seller, token, {
+          summaryOnly: true,
+          maxConversations: 200
+        });
+
+        let newForThisSeller = commerceResult.buyerNew || 0;
+        let newSellerForThisSeller = commerceResult.sellerNew || 0;
+        totalNew += newForThisSeller;
+
+        // 2. Trading API — supplemental historical messages
         const now = new Date();
         const minLookback = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
         let startTime;
@@ -7451,9 +7465,7 @@ router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), asyn
 
         const messages = allMessages;
 
-        // 4. Process Messages
-        let newForThisSeller = 0;
-        let newSellerForThisSeller = 0;
+        // 4. Process Trading messages
         for (const msg of messages) {
           const result = await processEbayMessage(msg, seller);
           if (result.buyerNew) {
@@ -7463,12 +7475,15 @@ router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), asyn
           newSellerForThisSeller += result.sellerNew;
         }
 
-        console.log(`[Sync Inbox] Seller ${sellerName}: Fetched ${messages.length}. Saved ${newForThisSeller} new buyer + ${newSellerForThisSeller} seller messages.`);
+        console.log(`[Sync Inbox] Seller ${sellerName}: Commerce ${commerceResult.conversationsFetched || 0} threads, Trading ${messages.length} msgs.`);
+
         syncResults.push({
           sellerName,
           newMessages: newForThisSeller,
           newSellerMessages: newSellerForThisSeller,
-          fetched: messages.length
+          fetched: messages.length,
+          commerceConversations: commerceResult.conversationsFetched || 0,
+          commerceError: commerceResult.error || null
         });
 
         // 5. Update Polling Timestamp (Only on success)
@@ -7618,6 +7633,14 @@ router.post('/sync-thread', requireAuth, requirePageAccess('BuyerMessages'), asy
       messageType
     });
 
+    const commerceResult = await syncCommerceConversationsForSeller(seller, token, {
+      buyerUsername,
+      summaryOnly: false,
+      maxConversations: 20
+    });
+    buyerNew += commerceResult.buyerNew || 0;
+    sellerNew += commerceResult.sellerNew || 0;
+
     res.json({
       success: true,
       newMessagesFound: buyerNew > 0 || sellerNew > 0,
@@ -7733,7 +7756,16 @@ async function uploadImageToEbay(token, filePath) {
 
 // 3. SEND MESSAGE (Chat Window)
 router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
-  const { orderId, buyerUsername, itemId, body, subject, mediaUrls } = req.body;
+  const {
+    orderId,
+    buyerUsername,
+    itemId,
+    body,
+    subject,
+    mediaUrls,
+    conversationId: reqConversationId,
+    sellerId: reqSellerId
+  } = req.body;
 
   try {
     let seller = null;
@@ -7743,21 +7775,22 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
     let isDirect = false;
     let parentMessageId = null;
 
-    // Check if this is a DIRECT message (no item)
     if (itemId === 'DIRECT_MESSAGE' || !itemId) {
       isDirect = true;
     }
 
-    // Determine if this is a transaction (ORDER), inquiry (INQUIRY), or direct (DIRECT)
     if (orderId) {
       const order = await Order.findOne({ orderId }).populate('seller');
       if (!order) return res.status(404).json({ error: 'Order not found' });
       seller = order.seller;
       finalItemId = order.lineItems?.[0]?.legacyItemId;
       finalBuyer = order.buyer.username;
-      isTransaction = true; // This is a real transaction
+      isTransaction = true;
+    } else if (reqSellerId) {
+      seller = await Seller.findById(reqSellerId);
+      finalBuyer = buyerUsername;
+      isTransaction = Boolean(orderId);
     } else {
-      // Get the most recent message from this buyer
       const query = isDirect
         ? { buyerUsername, itemId: 'DIRECT_MESSAGE', sender: 'BUYER' }
         : { buyerUsername, itemId, sender: 'BUYER' };
@@ -7768,22 +7801,20 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
 
       if (prevMsg) {
         seller = prevMsg.seller;
-        parentMessageId = prevMsg.externalMessageId; // eBay's message ID
+        parentMessageId = prevMsg.externalMessageId;
 
-        // Check if this inquiry is related to an order
         if (prevMsg.orderId) {
           isTransaction = true;
         } else if (prevMsg.messageType === 'DIRECT') {
           isDirect = true;
         } else {
-          isTransaction = false; // Pre-sale inquiry
+          isTransaction = false;
         }
       }
     }
 
     if (!seller) return res.status(400).json({ error: 'Could not determine seller context' });
 
-    // DIRECT messages: Cannot reply via API (eBay limitation)
     if (isDirect) {
       return res.status(400).json({
         error: 'Cannot reply to direct messages via API. These are account-level messages that must be replied to through eBay\'s messaging center.',
@@ -7795,62 +7826,106 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
       return res.status(400).json({ error: 'ItemID required to send message' });
     }
 
-    // For inquiries (RTQ), we need the parent message ID
-    if (!isTransaction && !parentMessageId) {
-      return res.status(400).json({ error: 'Cannot reply to inquiry: Original message ID not found' });
-    }
-
-    // Ensure Token is Valid
     const token = await ensureValidToken(seller);
 
-    let xmlRequest;
-    let callName;
-
-    // Construct Media XML if images are present
     let finalMediaUrls = [];
     if (mediaUrls && mediaUrls.length > 0) {
-      console.log(`[Send Message] Processing ${mediaUrls.length} images...`);
-
-      // Convert local URLs to file paths and upload to eBay
       for (const url of mediaUrls) {
         try {
-          // Extract filename from URL (e.g., http://localhost:5000/uploads/123.jpg -> 123.jpg)
           const filename = url.split('/').pop();
           const filePath = path.join(process.cwd(), 'public/uploads', filename);
 
           if (fs.existsSync(filePath)) {
-            console.log(`[Send Message] Uploading ${filename} to eBay...`);
             const ebayUrl = await uploadImageToEbay(token, filePath);
-            console.log(`[Send Message] Uploaded: ${ebayUrl}`);
             finalMediaUrls.push(ebayUrl);
-          } else {
-            console.warn(`[Send Message] File not found: ${filePath}`);
           }
         } catch (err) {
           console.error(`[Send Message] Failed to upload image: ${err.message}`);
-          // Continue with other images if one fails
         }
       }
     }
 
-    // Prepare message body with image URLs (eBay APIs don't support MessageMedia for sending)
-    // Always escape the original message body first
-    let finalBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
+    let messageText = body;
     if (finalMediaUrls.length > 0) {
-      // Format image URLs as clickable links
-      // Try multiple formats to ensure maximum compatibility:
-      // 1. Plain URL (eBay should auto-detect)
-      // 2. With descriptive text
-      const imageLinks = finalMediaUrls.map((url, index) => {
-        return `Image ${index + 1}: ${url}`;
-      }).join('\n');
-
-      finalBody += '\n\n---\nAttached Image(s):\n' + imageLinks;
-      console.log('[Send Message] ⚠️ eBay APIs do not support MessageMedia for outgoing messages. Added URLs to message body.');
+      const imageLinks = finalMediaUrls.map((url, index) => `Image ${index + 1}: ${url}`).join('\n');
+      messageText += '\n\n---\nAttached Image(s):\n' + imageLinks;
     }
 
-    // CASE 1: Transaction Message (Use AddMemberMessageAAQToPartner)
+    const messageMedia = finalMediaUrls.map((url) => ({
+      mediaType: 'IMAGE',
+      mediaUrl: url
+    }));
+
+    // --- Primary: eBay Commerce Message API (POST /send_message) ---
+    try {
+      let commerceConversationId = reqConversationId || null;
+      if (!commerceConversationId) {
+        commerceConversationId = await resolveCommerceConversationId(token, {
+          sellerId: seller._id,
+          buyerUsername: finalBuyer,
+          itemId: finalItemId,
+          orderId: orderId || null
+        });
+      }
+
+      const commerceResult = await sendCommerceMessage(token, {
+        conversationId: commerceConversationId || undefined,
+        otherPartyUsername: commerceConversationId ? undefined : finalBuyer,
+        messageText,
+        referenceId: commerceConversationId ? undefined : finalItemId,
+        messageMedia
+      });
+
+      const resolvedConversationId = commerceResult.conversationId || commerceConversationId;
+      if (resolvedConversationId) {
+        await backfillConversationId({
+          sellerId: seller._id,
+          buyerUsername: finalBuyer,
+          itemId: finalItemId,
+          orderId: orderId || null,
+          conversationId: resolvedConversationId
+        });
+      }
+
+      const newMsg = await Message.create({
+        seller: seller._id,
+        orderId: orderId || null,
+        itemId: finalItemId,
+        buyerUsername: finalBuyer,
+        conversationId: resolvedConversationId || null,
+        sender: 'SELLER',
+        subject: subject || 'Reply',
+        body,
+        mediaUrls: finalMediaUrls,
+        read: true,
+        messageType: isTransaction ? 'ORDER' : 'INQUIRY',
+        messageDate: new Date(),
+        externalMessageId: commerceResult.messageId ? `commerce-${commerceResult.messageId}` : undefined
+      });
+
+      console.log('[Send Message] ✅ Sent via Commerce Message API');
+      return res.json({ success: true, message: newMsg, via: 'commerce' });
+    } catch (commerceErr) {
+      console.warn(
+        '[Send Message] Commerce API failed, falling back to Trading API:',
+        commerceErr.response?.data || commerceErr.message
+      );
+    }
+
+    // --- Fallback: Trading API (legacy XML) ---
+    if (!isTransaction && !parentMessageId) {
+      return res.status(400).json({ error: 'Cannot reply to inquiry: Original message ID not found' });
+    }
+
+    let finalBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (finalMediaUrls.length > 0) {
+      const imageLinks = finalMediaUrls.map((url, index) => `Image ${index + 1}: ${url}`).join('\n');
+      finalBody += '\n\n---\nAttached Image(s):\n' + imageLinks;
+    }
+
+    let xmlRequest;
+    let callName;
+
     if (isTransaction) {
       callName = 'AddMemberMessageAAQToPartner';
 
@@ -7910,7 +7985,7 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
         buyerUsername: finalBuyer,
         sender: 'SELLER',
         subject: subject || 'Reply',
-        body: body,
+        body,
         mediaUrls: finalMediaUrls || [],
         read: true,
         messageType: isTransaction ? 'ORDER' : 'INQUIRY',
@@ -7918,7 +7993,7 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
       });
 
       console.log(`[Send Message] ✅ Message sent successfully using ${callName}`);
-      return res.json({ success: true, message: newMsg });
+      return res.json({ success: true, message: newMsg, via: 'trading' });
     } else {
       const errMsg = result[responseKey].Errors?.[0]?.LongMessage?.[0] || 'eBay API Error';
       throw new Error(errMsg);
@@ -7981,6 +8056,7 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         sender: { $first: "$sender" },
         itemTitle: { $first: "$itemTitle" },
         messageType: { $first: "$messageType" },
+        conversationIds: { $push: "$conversationId" },
         unreadCount: {
           $sum: { $cond: [{ $and: [{ $eq: ["$read", false] }, { $eq: ["$sender", "BUYER"] }] }, 1, 0] }
         }
@@ -8009,6 +8085,25 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         sender: 1,
         itemTitle: 1,
         messageType: 1,
+        conversationId: {
+          $let: {
+            vars: {
+              ids: {
+                $filter: {
+                  input: '$conversationIds',
+                  as: 'cid',
+                  cond: {
+                    $and: [
+                      { $ne: ['$$cid', null] },
+                      { $ne: ['$$cid', ''] }
+                    ]
+                  }
+                }
+              }
+            },
+            in: { $arrayElemAt: ['$$ids', 0] }
+          }
+        },
         unreadCount: 1,
         buyerName: { $arrayElemAt: ["$orderDetails.buyer.buyerRegistrationAddress.fullName", 0] },
         // NEW: Get Marketplace ID from Order
@@ -11387,6 +11482,945 @@ router.get('/seller-analytics', requireAuth, requirePageAccess('SellerAnalytics'
   }
 });
 
+function toEbayTrafficDateYmd(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^\d{8}$/.test(raw)) return raw;
+  return raw.replace(/-/g, '');
+}
+
+function ebayTrafficMaxEndDateYmd() {
+  const pt = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  pt.setDate(pt.getDate() - 1);
+  const y = pt.getFullYear();
+  const m = String(pt.getMonth() + 1).padStart(2, '0');
+  const d = String(pt.getDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
+}
+
+function clampTrafficReportEndDate(endDate) {
+  const endYmd = toEbayTrafficDateYmd(endDate);
+  if (!endYmd) return endYmd;
+  const maxYmd = ebayTrafficMaxEndDateYmd();
+  return endYmd > maxYmd ? maxYmd : endYmd;
+}
+
+function buildTrafficReportFilter({ marketplace, startDate, endDate, listingIds }) {
+  const startYmd = toEbayTrafficDateYmd(startDate);
+  const endYmd = clampTrafficReportEndDate(endDate);
+  if (!startYmd || !endYmd) {
+    throw new Error('startDate and endDate are required (YYYY-MM-DD or YYYYMMDD)');
+  }
+  const mp = String(marketplace || 'EBAY_US').trim();
+  const datePart = `date_range:[${startYmd}..${endYmd}]`;
+  if (listingIds) {
+    const ids = String(listingIds)
+      .split(/[,|\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join('|');
+    if (ids) {
+      return `marketplace_ids:{${mp}},listing_ids:{${ids}},${datePart}`;
+    }
+  }
+  return `marketplace_ids:{${mp}},${datePart}`;
+}
+
+const TRAFFIC_REPORT_LISTING_BATCH_SIZE = 200;
+const TRAFFIC_REPORT_BATCH_MAX_RETRIES = 6;
+const TRAFFIC_REPORT_429_DELAYS_MS = [5000, 15000, 30000, 45000, 60000, 90000];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchTrafficReportWithRetry(fetchFn, { maxRetries = TRAFFIC_REPORT_BATCH_MAX_RETRIES } = {}) {
+  let lastRes;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    lastRes = await fetchFn();
+    if (lastRes.status >= 200 && lastRes.status < 300) return lastRes;
+    const retryable = lastRes.status === 429 || lastRes.status === 503;
+    if (!retryable || attempt === maxRetries) return lastRes;
+    const waitMs = TRAFFIC_REPORT_429_DELAYS_MS[Math.min(attempt, TRAFFIC_REPORT_429_DELAYS_MS.length - 1)];
+    await sleep(waitMs);
+  }
+  return lastRes;
+}
+
+function chunkStrings(items, size) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+function mergeTrafficReports(reports) {
+  const valid = (reports || []).filter((r) => r && Array.isArray(r.records));
+  if (!valid.length) return null;
+
+  const merged = { ...valid[0], records: [] };
+  const metadataByListingId = new Map();
+
+  for (const report of valid) {
+    merged.records.push(...report.records);
+    for (const block of report.dimensionMetadata || []) {
+      for (const rec of block.metadataRecords || []) {
+        const listingId = rec?.value?.value != null ? String(rec.value.value) : '';
+        if (listingId && !metadataByListingId.has(listingId)) {
+          metadataByListingId.set(listingId, rec);
+        }
+      }
+    }
+  }
+
+  if (metadataByListingId.size && merged.dimensionMetadata?.length) {
+    merged.dimensionMetadata = merged.dimensionMetadata.map((block, index) =>
+      index === 0
+        ? { ...block, metadataRecords: Array.from(metadataByListingId.values()) }
+        : block
+    );
+  }
+
+  return merged;
+}
+
+async function getSellerActiveListingIds(sellerId) {
+  const active = await ActiveListing.find({ seller: sellerId, listingStatus: 'Active' })
+    .select('itemId')
+    .lean();
+  if (active.length) {
+    return active.map((row) => String(row.itemId)).filter(Boolean);
+  }
+  const legacy = await Listing.find({ seller: sellerId, listingStatus: 'Active' })
+    .select('itemId')
+    .lean();
+  return legacy.map((row) => String(row.itemId)).filter(Boolean);
+}
+
+function trafficReportRowsAllZero(report) {
+  const records = report?.records || [];
+  if (!records.length) return true;
+  return records.every((record) =>
+    (record.metricValues || []).every((cell) => {
+      const n = Number(cell?.value);
+      return cell?.value == null || cell?.value === '' || (!Number.isNaN(n) && n === 0);
+    })
+  );
+}
+
+const ANALYTICS_MARKETPLACE_SITE_ID = {
+  EBAY_US: '0',
+  EBAY_GB: '3',
+  EBAY_DE: '77',
+  EBAY_AU: '15',
+  EBAY_CA: '2',
+  EBAY_FR: '71',
+  EBAY_IT: '101',
+  EBAY_ES: '186',
+  EBAY_MOTORS_US: '0',
+};
+
+const CORE_SINGLE_LISTING_METRICS = [
+  'LISTING_IMPRESSION_SEARCH_RESULTS_PAGE',
+  'LISTING_IMPRESSION_STORE',
+  'LISTING_IMPRESSION_TOTAL',
+  'LISTING_VIEWS_TOTAL',
+  'SALES_CONVERSION_RATE',
+  'TRANSACTION'
+].join(',');
+
+async function lookupListingInDatabase(itemId) {
+  const id = String(itemId || '').trim();
+  if (!id) return null;
+  const active = await ActiveListing.findOne({ itemId: id })
+    .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+    .lean();
+  if (active) return { source: 'ActiveListing', listing: active };
+  const legacy = await Listing.findOne({ itemId: id })
+    .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+    .lean();
+  if (legacy) return { source: 'Listing', listing: legacy };
+  return null;
+}
+
+async function fetchSellerEbayUserIdForAnalytics(token) {
+  try {
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetUserRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <DetailLevel>ReturnSummary</DetailLevel>
+</GetUserRequest>`;
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: {
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'GetUser',
+        'Content-Type': 'text/xml',
+      },
+      timeout: 30000,
+    });
+    const result = await parseStringPromise(response.data);
+    if (result.GetUserResponse?.Ack?.[0] === 'Failure') return null;
+    return result.GetUserResponse?.User?.[0]?.UserID?.[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function verifyListingForSellerAnalytics(token, itemId, marketplace = 'EBAY_US') {
+  const id = String(itemId || '').trim();
+  if (!id) return { found: false, message: 'Listing ID is required' };
+
+  const siteId = ANALYTICS_MARKETPLACE_SITE_ID[String(marketplace || 'EBAY_US').trim()] || '0';
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <ItemID>${escapeXml(id)}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetItemRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-SITEID': siteId,
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'GetItem',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 45000,
+  });
+
+  const result = await parseStringPromise(response.data);
+  const ack = result?.GetItemResponse?.Ack?.[0];
+  if (ack === 'Failure') {
+    const errNode = result?.GetItemResponse?.Errors;
+    const err = Array.isArray(errNode) ? errNode[0] : errNode;
+    return {
+      found: false,
+      listingId: id,
+      siteId,
+      message: err?.LongMessage?.[0] || err?.ShortMessage?.[0] || 'GetItem failed for this seller/token',
+      errorCode: err?.ErrorCode?.[0] || null,
+    };
+  }
+
+  const item = result?.GetItemResponse?.Item?.[0];
+  if (!item) {
+    return { found: false, listingId: id, siteId, message: 'GetItem returned no item payload' };
+  }
+
+  return {
+    found: true,
+    listingId: id,
+    siteId,
+    title: item.Title?.[0] || null,
+    ebaySellerUserId: item.Seller?.[0]?.UserID?.[0] || null,
+    listingStatus: item.SellingStatus?.[0]?.ListingStatus?.[0] || null,
+    startTime: item.ListingDetails?.[0]?.StartTime?.[0] || null,
+    viewItemUrl: item.ListingDetails?.[0]?.ViewItemURL?.[0] || `https://www.ebay.com/itm/${id}`,
+  };
+}
+
+// Lookup listing owner in local DB (for Analytics single-listing seller auto-select)
+router.get('/analytics/listing-lookup', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+  try {
+    const itemId = String(req.query.itemId || '').trim();
+    if (!itemId) {
+      return res.status(400).json({ error: 'itemId is required' });
+    }
+    const dbListing = await lookupListingInDatabase(itemId);
+    if (!dbListing?.listing) {
+      return res.json({ success: true, found: false, itemId });
+    }
+    const sellerDoc = dbListing.listing.seller;
+    const sellerUsername =
+      sellerDoc?.user?.username || sellerDoc?.user?.email || null;
+    return res.json({
+      success: true,
+      found: true,
+      itemId,
+      source: dbListing.source,
+      title: dbListing.listing.title || null,
+      listingStatus: dbListing.listing.listingStatus || null,
+      views30d: dbListing.listing.views30d ?? null,
+      sellerId: sellerDoc?._id ? String(sellerDoc._id) : null,
+      sellerUsername,
+    });
+  } catch (err) {
+    console.error('[Analytics Listing Lookup] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Listing lookup failed' });
+  }
+});
+
+// eBay Sell Analytics — Traffic Report (getTrafficReport)
+router.get('/analytics/traffic-report', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      marketplace = 'EBAY_US',
+      dimension = 'DAY',
+      metrics,
+      startDate,
+      endDate,
+      sort,
+      listingIds,
+      limit,
+      offset,
+      batchMode,
+      batchIndex: batchIndexQuery
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
+      ? await Seller.findById(sellerLookup).populate('user')
+      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const upperDimension = String(dimension || 'DAY').toUpperCase();
+    if (!['DAY', 'LISTING'].includes(upperDimension)) {
+      return res.status(400).json({ error: 'dimension must be DAY or LISTING' });
+    }
+
+    const defaultMetrics = [
+      'LISTING_IMPRESSION_SEARCH_RESULTS_PAGE',
+      'LISTING_IMPRESSION_STORE',
+      'LISTING_IMPRESSION_TOTAL',
+      'LISTING_VIEWS_SOURCE_DIRECT',
+      'LISTING_VIEWS_SOURCE_OFF_EBAY',
+      'LISTING_VIEWS_SOURCE_OTHER_EBAY',
+      'LISTING_VIEWS_SOURCE_SEARCH_RESULTS_PAGE',
+      'LISTING_VIEWS_SOURCE_STORE',
+      'LISTING_VIEWS_TOTAL',
+      'SALES_CONVERSION_RATE',
+      'TOTAL_IMPRESSION_TOTAL',
+      'TRANSACTION'
+    ].join(',');
+    const metricList = String(metrics || defaultMetrics).trim();
+    const singleListingId = String(listingIds || '')
+      .split(/[,|\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const isSingleListing = singleListingId.length === 1;
+    const effectiveMetrics = isSingleListing ? CORE_SINGLE_LISTING_METRICS : metricList;
+
+    let filter;
+    try {
+      filter = buildTrafficReportFilter({
+        marketplace: String(marketplace || 'EBAY_US').trim(),
+        startDate,
+        endDate,
+        listingIds
+      });
+    } catch (filterErr) {
+      return res.status(400).json({ error: filterErr.message });
+    }
+
+    const params = {
+      dimension: upperDimension,
+      metric: effectiveMetrics,
+      filter
+    };
+
+    const firstMetric = effectiveMetrics.split(',')[0]?.trim();
+    const sortMetric = effectiveMetrics.includes('LISTING_IMPRESSION_TOTAL')
+      ? 'LISTING_IMPRESSION_TOTAL'
+      : (effectiveMetrics.includes('LISTING_VIEWS_TOTAL') ? 'LISTING_VIEWS_TOTAL' : firstMetric);
+    if (sort) {
+      params.sort = String(sort).trim();
+    } else if (upperDimension === 'DAY' && sortMetric) {
+      params.sort = `-${sortMetric}`;
+    } else if (upperDimension === 'LISTING' && sortMetric) {
+      params.sort = sortMetric;
+    }
+
+    if (limit != null && limit !== '') params.limit = Number(limit);
+    if (offset != null && offset !== '') params.offset = Number(offset);
+
+    const accessToken = await ensureValidToken(seller);
+
+    const fetchTrafficReport = async (dimensionValue, sortValue, filterOverride) => {
+      const p = { ...params, dimension: dimensionValue };
+      if (sortValue) p.sort = sortValue;
+      if (filterOverride) p.filter = filterOverride;
+      return axios.get('https://api.ebay.com/sell/analytics/v1/traffic_report', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json'
+        },
+        params: p,
+        timeout: 60000,
+        validateStatus: () => true
+      });
+    };
+
+    const shouldBatchAllListings =
+      !isSingleListing &&
+      upperDimension === 'LISTING' &&
+      !String(listingIds || '').trim();
+
+    let reportData;
+    let usedDimension = upperDimension;
+    let batchFetch = null;
+    let response;
+
+    if (shouldBatchAllListings) {
+      const allListingIds = await getSellerActiveListingIds(seller._id);
+      if (allListingIds.length > 0) {
+        const batches = chunkStrings(allListingIds, TRAFFIC_REPORT_LISTING_BATCH_SIZE);
+        const useSingleBatchMode = String(batchMode || 'single').trim() !== 'all';
+        const batchIndex = batchIndexQuery != null && batchIndexQuery !== '' && !Number.isNaN(Number(batchIndexQuery))
+          ? Math.max(0, Math.min(Number(batchIndexQuery), batches.length - 1))
+          : 0;
+        const batchIds = batches[batchIndex];
+        const batchFilter = buildTrafficReportFilter({
+          marketplace: String(marketplace || 'EBAY_US').trim(),
+          startDate,
+          endDate,
+          listingIds: batchIds.join('|')
+        });
+
+        if (useSingleBatchMode) {
+          const batchRes = await fetchTrafficReportWithRetry(() =>
+            fetchTrafficReport(upperDimension, params.sort, batchFilter)
+          );
+          if (batchRes.status < 200 || batchRes.status >= 300) {
+            const ebayError = batchRes.data?.errors?.[0];
+            const rateLimited = batchRes.status === 429;
+            return res.status(batchRes.status).json({
+              success: false,
+              error: rateLimited
+                ? 'eBay rate limit on this batch. The app will wait and retry automatically — or wait 1–2 minutes and click Run Report again.'
+                : (ebayError?.message || ebayError?.longMessage || batchRes.statusText || 'eBay traffic report failed'),
+              details: batchRes.data,
+              request: {
+                dimension: upperDimension,
+                metric: effectiveMetrics,
+                filter: `batch ${batchIndex + 1}/${batches.length} (${batchIds.length} listings)`,
+                sort: params.sort || null
+              },
+              batchFetch: {
+                enabled: true,
+                mode: 'single',
+                batchIndex,
+                totalBatches: batches.length,
+                totalListings: allListingIds.length,
+                hasMore: batchIndex < batches.length - 1,
+                completedBatches: batchIndex,
+                listingCount: batchIds.length
+              }
+            });
+          }
+          reportData = batchRes.data;
+          batchFetch = {
+            enabled: true,
+            mode: 'single',
+            batchIndex,
+            totalBatches: batches.length,
+            totalListings: allListingIds.length,
+            hasMore: batchIndex < batches.length - 1,
+            completedBatches: batchIndex + 1,
+            recordsReturned: reportData?.records?.length || 0,
+            listingCount: batchIds.length
+          };
+          response = { status: 200, data: reportData };
+        } else {
+          const mergedChunks = [];
+          let failedBatch = null;
+          for (let i = 0; i < batches.length; i++) {
+            const ids = batches[i];
+            const multiFilter = buildTrafficReportFilter({
+              marketplace: String(marketplace || 'EBAY_US').trim(),
+              startDate,
+              endDate,
+              listingIds: ids.join('|')
+            });
+            const batchRes = await fetchTrafficReportWithRetry(() =>
+              fetchTrafficReport(upperDimension, params.sort, multiFilter)
+            );
+            if (batchRes.status < 200 || batchRes.status >= 300) {
+              failedBatch = { index: i + 1, total: batches.length, status: batchRes.status };
+              if (!mergedChunks.length) {
+                const ebayError = batchRes.data?.errors?.[0];
+                const rateLimited = batchRes.status === 429;
+                return res.status(batchRes.status).json({
+                  success: false,
+                  error: rateLimited
+                    ? 'eBay rate limit — use sequential batch mode (default in Analytics UI).'
+                    : (ebayError?.message || ebayError?.longMessage || batchRes.statusText || 'eBay traffic report failed'),
+                  details: batchRes.data,
+                  request: {
+                    dimension: upperDimension,
+                    metric: effectiveMetrics,
+                    filter: `batch ${i + 1}/${batches.length} (${ids.length} listings)`,
+                    sort: params.sort || null
+                  },
+                  batchFetch: {
+                    totalListings: allListingIds.length,
+                    batches: batches.length,
+                    completedBatches: mergedChunks.length,
+                    failedBatch
+                  }
+                });
+              }
+              break;
+            }
+            mergedChunks.push(batchRes.data);
+            if (i < batches.length - 1) await sleep(8000);
+          }
+          reportData = mergeTrafficReports(mergedChunks);
+          batchFetch = {
+            enabled: true,
+            mode: 'all',
+            totalListings: allListingIds.length,
+            batches: batches.length,
+            completedBatches: mergedChunks.length,
+            recordsReturned: reportData?.records?.length || 0,
+            partial: failedBatch != null
+          };
+          response = { status: 200, data: reportData };
+        }
+      } else {
+        response = await fetchTrafficReport(upperDimension, params.sort);
+        reportData = response.data;
+        batchFetch = {
+          enabled: false,
+          reason: 'no_active_listings_in_database',
+          ebayCap: TRAFFIC_REPORT_LISTING_BATCH_SIZE
+        };
+      }
+    } else {
+      response = await fetchTrafficReport(upperDimension, params.sort);
+      reportData = response.data;
+    }
+
+    if (!shouldBatchAllListings || batchFetch?.enabled === false) {
+      if (response.status < 200 || response.status >= 300) {
+        const ebayError = response.data?.errors?.[0];
+        return res.status(response.status).json({
+          success: false,
+          error: ebayError?.message || ebayError?.longMessage || response.statusText || 'eBay traffic report failed',
+          details: response.data,
+          request: { dimension: upperDimension, metric: effectiveMetrics, filter, sort: params.sort || null }
+        });
+      }
+    }
+
+    if (shouldBatchAllListings && batchFetch?.enabled) {
+      // reportData already set from merged batches
+    } else if (!reportData) {
+      reportData = response.data;
+    }
+
+    const listingIdList = singleListingId;
+    const singleId = isSingleListing ? listingIdList[0] : null;
+
+    let listingCheck = null;
+    let dbListing = null;
+    if (singleId) {
+      dbListing = await lookupListingInDatabase(singleId);
+      try {
+        listingCheck = await verifyListingForSellerAnalytics(
+          accessToken,
+          singleId,
+          String(marketplace || 'EBAY_US').trim()
+        );
+        const tokenEbayUserId = await fetchSellerEbayUserIdForAnalytics(accessToken);
+        if (tokenEbayUserId) {
+          listingCheck = { ...listingCheck, tokenEbayUserId };
+        }
+
+        if (listingCheck.found && listingCheck.ebaySellerUserId && tokenEbayUserId) {
+          const ebayMatch =
+            listingCheck.ebaySellerUserId.toLowerCase() === tokenEbayUserId.toLowerCase();
+          if (!ebayMatch) {
+            listingCheck = {
+              ...listingCheck,
+              ownerMismatch: true,
+              message: `This listing is owned by eBay user "${listingCheck.ebaySellerUserId}", but the selected seller token is for "${tokenEbayUserId}".`,
+            };
+          }
+        } else if (!listingCheck.found && dbListing?.listing?.seller) {
+          const dbSellerId = String(dbListing.listing.seller._id);
+          if (dbSellerId !== String(seller._id)) {
+            const ownerName =
+              dbListing.listing.seller?.user?.username ||
+              dbListing.listing.seller?.user?.email ||
+              dbSellerId;
+            listingCheck = {
+              ...listingCheck,
+              ownerMismatch: true,
+              dbOwnerSellerId: dbSellerId,
+              dbOwnerUsername: ownerName,
+              message: `GetItem failed for the selected seller. In your database this listing belongs to "${ownerName}".`,
+            };
+          }
+        }
+      } catch (verifyErr) {
+        listingCheck = {
+          found: false,
+          listingId: singleId,
+          message: verifyErr.message || 'Could not verify listing',
+        };
+      }
+    }
+
+    let dailyReport = null;
+    if (singleId) {
+      const dayRes = await fetchTrafficReport('DAY', sortMetric ? `-${sortMetric}` : undefined);
+      if (dayRes.status >= 200 && dayRes.status < 300) {
+        dailyReport = dayRes.data;
+      }
+      const primaryEmpty = !reportData?.records?.length;
+      const dayHasRows = (dailyReport?.records || []).length > 0;
+      if (primaryEmpty && dayHasRows) {
+        reportData = dailyReport;
+        usedDimension = 'DAY';
+      }
+    }
+
+    const allZero = trafficReportRowsAllZero(reportData);
+    const noRows = !(reportData?.records || []).length;
+    let dataHint = null;
+    if (singleId && listingCheck?.ownerMismatch) {
+      dataHint =
+        listingCheck.message ||
+        `This listing belongs to seller "${listingCheck.dbOwnerUsername}" — not the seller you selected. Switch seller and retry.`;
+    } else if (singleId && listingCheck && !listingCheck.found) {
+      dataHint =
+        listingCheck.message ||
+        'Listing not found for the selected seller token. Confirm the item ID and seller account.';
+    } else if (singleId && listingCheck?.found && noRows) {
+      dataHint =
+        'Listing verified for this seller, but eBay returned no traffic rows for this date range. Use last 30 days ending yesterday (Pacific). Compare with Seller Hub if numbers still differ.';
+    } else if (singleId && listingCheck?.found && allZero) {
+      dataHint =
+        'Listing verified for this seller. eBay reports all metrics as 0 for these dates — common for low traffic or if the listing was recently listed.';
+    } else if (singleId && noRows) {
+      dataHint =
+        'eBay returned no traffic rows for this listing ID. Confirm the ID from the listing URL (ebay.com/itm/…), use last 30 days, and pick the seller that owns the listing.';
+    } else if (singleId && allZero) {
+      dataHint =
+        'eBay returned this listing but all metrics are 0 for the selected dates. Try last 30 days. Note: traffic data is typically available through yesterday (Pacific time), not today.';
+    } else if (!singleId && allZero) {
+      dataHint = 'All metrics are 0 for this date range — try wider dates or a different marketplace.';
+    } else if (batchFetch?.enabled) {
+      const completed = batchFetch.completedBatches ?? (batchFetch.batchIndex != null ? batchFetch.batchIndex + 1 : batchFetch.batches);
+      const total = batchFetch.totalBatches ?? batchFetch.batches;
+      if (batchFetch.partial) {
+        dataHint = `Partial results: fetched ${batchFetch.recordsReturned?.toLocaleString?.() ?? batchFetch.recordsReturned} listings from ${completed} of ${total} batches before eBay rate-limited. Run again to continue.`;
+      } else if (batchFetch.mode === 'single' && batchFetch.hasMore) {
+        dataHint = `Batch ${completed} of ${total} loaded (${batchFetch.recordsReturned ?? 0} listings in this batch).`;
+      } else {
+        dataHint = `Fetched traffic for ${batchFetch.recordsReturned?.toLocaleString?.() ?? batchFetch.recordsReturned} listings across ${completed} batch${completed === 1 ? '' : 'es'} (${batchFetch.totalListings?.toLocaleString?.() ?? batchFetch.totalListings} active in database).`;
+      }
+    } else if (batchFetch?.reason === 'no_active_listings_in_database' && !singleId && upperDimension === 'LISTING') {
+      dataHint = `No active listings found in your database — eBay returns at most ${TRAFFIC_REPORT_LISTING_BATCH_SIZE} listings. Run a listing sync to fetch all stores.`;
+    }
+
+    const localListing = dbListing?.listing
+      ? {
+          source: dbListing.source,
+          title: dbListing.listing.title,
+          listingStatus: dbListing.listing.listingStatus,
+          views30d: dbListing.listing.views30d ?? null,
+          sellerId: dbListing.listing.seller?._id ? String(dbListing.listing.seller._id) : null,
+          sellerUsername:
+            dbListing.listing.seller?.user?.username ||
+            dbListing.listing.seller?.user?.email ||
+            null,
+        }
+      : null;
+
+    return res.json({
+      success: true,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id)
+      },
+      request: {
+        dimension: usedDimension,
+        metrics: effectiveMetrics.split(',').map((m) => m.trim()).filter(Boolean),
+        marketplace: String(marketplace || 'EBAY_US').trim(),
+        startDate: toEbayTrafficDateYmd(startDate),
+        endDate: clampTrafficReportEndDate(endDate),
+        filter: batchFetch?.enabled
+          ? `batch ${(batchFetch.batchIndex ?? 0) + 1}/${batchFetch.totalBatches ?? batchFetch.batches} (${batchFetch.listingCount ?? TRAFFIC_REPORT_LISTING_BATCH_SIZE} listings)`
+          : filter,
+        sort: params.sort || null,
+        limit: params.limit ?? null,
+        offset: params.offset ?? null
+      },
+      listingCheck,
+      localListing,
+      dataHint,
+      allMetricsZero: allZero,
+      noRows,
+      batchFetch,
+      dailyReport: usedDimension === 'DAY' ? null : dailyReport,
+      report: reportData
+    });
+  } catch (err) {
+    console.error('[Analytics Traffic Report] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch traffic report'
+    });
+  }
+});
+
+async function refreshCustomerServiceMetricForSeller(seller, { upperMetric, upperEval, mp }) {
+  const sellerName =
+    seller.user?.username || seller.user?.email || seller.username || String(seller._id);
+  const cacheFilter = {
+    seller: seller._id,
+    marketplace: mp,
+    metricType: upperMetric,
+    evaluationType: upperEval,
+  };
+
+  if (!seller.ebayTokens?.access_token) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      skipped: true,
+      error: 'Seller not connected to eBay',
+    };
+  }
+
+  try {
+    const accessToken = await ensureValidToken(seller);
+    const apiPath = `/sell/analytics/v1/customer_service_metric/${upperMetric}/${upperEval}`;
+    const response = await axios.get(`https://api.ebay.com${apiPath}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+      params: { evaluation_marketplace_id: mp },
+      timeout: 60000,
+      validateStatus: () => true,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      const ebayError = response.data?.errors?.[0];
+      return {
+        success: false,
+        sellerId: String(seller._id),
+        sellerName,
+        status: response.status,
+        error:
+          ebayError?.longMessage ||
+          ebayError?.message ||
+          response.statusText ||
+          'eBay customer service metric failed',
+      };
+    }
+
+    const fetchedAt = new Date();
+    const evaluationDate = response.data?.evaluationCycle?.evaluationDate || null;
+    const snapshot = await CustomerServiceMetricSnapshot.findOneAndUpdate(
+      cacheFilter,
+      {
+        $set: {
+          report: response.data,
+          evaluationDate,
+          fetchedAt,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    return {
+      success: true,
+      sellerId: String(seller._id),
+      sellerName,
+      fetchedAt: snapshot.fetchedAt,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      error: err.message || 'Failed to fetch customer service metric',
+    };
+  }
+}
+
+const CSM_REFRESH_DELAY_MS = 1200;
+
+// eBay Sell Analytics — Customer Service Metric (getCustomerServiceMetric)
+router.get('/analytics/customer-service-metric', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      metricType = 'ITEM_NOT_RECEIVED',
+      evaluationType = 'PROJECTED',
+      marketplace = 'EBAY_US',
+      refresh
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const upperMetric = String(metricType || '').toUpperCase();
+    const upperEval = String(evaluationType || '').toUpperCase();
+    if (!['ITEM_NOT_RECEIVED', 'ITEM_NOT_AS_DESCRIBED'].includes(upperMetric)) {
+      return res.status(400).json({ error: 'metricType must be ITEM_NOT_RECEIVED or ITEM_NOT_AS_DESCRIBED' });
+    }
+    if (!['CURRENT', 'PROJECTED'].includes(upperEval)) {
+      return res.status(400).json({ error: 'evaluationType must be CURRENT or PROJECTED' });
+    }
+
+    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
+      ? await Seller.findById(sellerLookup).populate('user')
+      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const mp = String(marketplace || 'EBAY_US').trim();
+    const cacheFilter = {
+      seller: seller._id,
+      marketplace: mp,
+      metricType: upperMetric,
+      evaluationType: upperEval,
+    };
+    const shouldRefresh = ['true', '1', 'yes'].includes(String(refresh || '').toLowerCase());
+
+    const respondWithSnapshot = (snapshot, { fromCache }) => res.json({
+      success: true,
+      fromCache,
+      fetchedAt: snapshot.fetchedAt,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+      },
+      request: { metricType: upperMetric, evaluationType: upperEval, marketplace: mp },
+      report: snapshot.report,
+    });
+
+    if (!shouldRefresh) {
+      const cached = await CustomerServiceMetricSnapshot.findOne(cacheFilter).lean();
+      if (cached?.report) {
+        return respondWithSnapshot(cached, { fromCache: true });
+      }
+      return res.json({
+        success: true,
+        fromCache: false,
+        noData: true,
+        seller: {
+          id: seller._id,
+          username: seller.user?.username || seller.username || String(seller._id),
+        },
+        request: { metricType: upperMetric, evaluationType: upperEval, marketplace: mp },
+        report: null,
+      });
+    }
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const refreshResult = await refreshCustomerServiceMetricForSeller(seller, {
+      upperMetric,
+      upperEval,
+      mp,
+    });
+
+    if (!refreshResult.success) {
+      const cached = await CustomerServiceMetricSnapshot.findOne(cacheFilter).lean();
+      return res.status(refreshResult.status || 400).json({
+        success: false,
+        error: refreshResult.error || 'eBay customer service metric failed',
+        hint: refreshResult.status === 409
+          ? 'Seller may have no transactions on this marketplace in the past 12 months, or is not eligible for this evaluation type yet. Try CURRENT vs PROJECTED or another marketplace.'
+          : null,
+        cachedReport: cached?.report || null,
+        fetchedAt: cached?.fetchedAt || null,
+      });
+    }
+
+    const snapshot = await CustomerServiceMetricSnapshot.findOne(cacheFilter).lean();
+    return respondWithSnapshot(snapshot, { fromCache: false });
+  } catch (err) {
+    console.error('[Analytics Customer Service Metric] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch customer service metric',
+    });
+  }
+});
+
+router.post('/analytics/customer-service-metric/refresh-all', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+  try {
+    const {
+      metricType = 'ITEM_NOT_RECEIVED',
+      evaluationType = 'PROJECTED',
+      marketplace = 'EBAY_US',
+    } = req.body || {};
+
+    const upperMetric = String(metricType || '').toUpperCase();
+    const upperEval = String(evaluationType || '').toUpperCase();
+    if (!['ITEM_NOT_RECEIVED', 'ITEM_NOT_AS_DESCRIBED'].includes(upperMetric)) {
+      return res.status(400).json({ error: 'metricType must be ITEM_NOT_RECEIVED or ITEM_NOT_AS_DESCRIBED' });
+    }
+    if (!['CURRENT', 'PROJECTED'].includes(upperEval)) {
+      return res.status(400).json({ error: 'evaluationType must be CURRENT or PROJECTED' });
+    }
+
+    const mp = String(marketplace || 'EBAY_US').trim();
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email')
+      : [];
+
+    const results = [];
+    for (let i = 0; i < sellers.length; i++) {
+      const result = await refreshCustomerServiceMetricForSeller(sellers[i], {
+        upperMetric,
+        upperEval,
+        mp,
+      });
+      results.push(result);
+      if (i < sellers.length - 1) {
+        await sleep(CSM_REFRESH_DELAY_MS);
+      }
+    }
+
+    const succeeded = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success && !r.skipped).length;
+    const skipped = results.filter((r) => r.skipped).length;
+
+    return res.json({
+      success: true,
+      request: { metricType: upperMetric, evaluationType: upperEval, marketplace: mp },
+      summary: {
+        total: sellers.length,
+        succeeded,
+        failed,
+        skipped,
+      },
+      results,
+    });
+  } catch (err) {
+    console.error('[Analytics Customer Service Metric Refresh All] Error:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to refresh customer service metrics for all sellers',
+    });
+  }
+});
+
 // Update worksheet status for an order (cancellation)
 router.patch('/orders/:orderId/worksheet-status', requireAuth, async (req, res) => {
   try {
@@ -12200,6 +13234,158 @@ router.get('/selling/summary/all', requireAuth, requirePageAccess('SellingPrivil
   }
 });
 
+async function getEbayClientCredentialsToken(scope = 'https://api.ebay.com/oauth/api_scope') {
+  const response = await axios.post(
+    'https://api.ebay.com/identity/v1/oauth2/token',
+    qs.stringify({ grant_type: 'client_credentials', scope }),
+    {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64')
+      },
+      timeout: 15000
+    }
+  );
+  return response.data.access_token;
+}
+
+function buildEbayRawHeaders({ accessToken, method, path, marketplace }) {
+  const isPostOrder = /^\/post-order\//i.test(path);
+  const headers = {
+    Authorization: isPostOrder ? `IAF ${accessToken}` : `Bearer ${accessToken}`,
+    Accept: 'application/json'
+  };
+  if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    headers['Content-Type'] = 'application/json';
+  }
+  // Analytics + commerce APIs encode marketplace in query params — do not send conflicting header.
+  const usesMarketplaceHeader = /^\/sell\/(negotiation|inventory|account|fulfillment|marketing|finances)\//i.test(path);
+  if (marketplace && usesMarketplaceHeader) {
+    headers['X-EBAY-C-MARKETPLACE-ID'] = String(marketplace);
+  }
+  return headers;
+}
+
+function extractEbayApiErrors(data) {
+  if (!data) return [];
+  if (Array.isArray(data.errors)) return data.errors;
+  if (Array.isArray(data.error)) return data.error;
+  return [];
+}
+
+function parseEbayRawResponseData(response) {
+  let parsedData = response.data;
+  if (typeof parsedData === 'string' && parsedData.trim()) {
+    try {
+      parsedData = JSON.parse(parsedData);
+    } catch {
+      parsedData = { _rawBody: parsedData };
+    }
+  } else if (parsedData === '' || parsedData == null) {
+    parsedData = {
+      _note: 'Empty response body from eBay',
+      requestId: response.headers?.['x-ebay-c-request-id'] || response.headers?.['x-ebay-request-id'] || null
+    };
+  }
+  return parsedData;
+}
+
+function buildRawCallHint({ statusCode, path, method, params }) {
+  if (/^\/commerce\/notification\//i.test(path)) {
+    if (statusCode === 409 || statusCode === 403) {
+      return 'Notification API: seller token only returns user-based webhook subscriptions (scope: commerce.notification.subscription). If the seller connected before that scope was added, disconnect & reconnect eBay OAuth. App-level subscriptions use a client-credentials token — the tester will retry automatically on failure.';
+    }
+    if (method === 'GET' && /\/subscription\/?$/i.test(path)) {
+      return 'This lists webhook notification subscriptions, not buyer messages. For inbox threads use GET /commerce/message/v1/conversation with { "conversation_type": "FROM_MEMBERS", "limit": 50 }.';
+    }
+  }
+  if (/^\/commerce\/message\//i.test(path) && (statusCode === 403 || statusCode === 401)) {
+    return 'Message API requires commerce.message scope. Disconnect & reconnect the seller on eBay OAuth, then retry.';
+  }
+  if (/^\/sell\/analytics\/v1\/customer_service_metric\//i.test(path) && statusCode === 409) {
+    return 'eBay business error (409): metric not available for this seller/marketplace/evaluation type. Common causes: no transactions on that marketplace in the past 12 months, or seller not active long enough for CURRENT. Try evaluation_type=CURRENT, another marketplace, or a seller with recent sales on EBAY_US.';
+  }
+  if (/^\/sell\/analytics\//i.test(path) && (statusCode === 403 || statusCode === 401)) {
+    return 'Analytics API requires sell.analytics.readonly scope. Disconnect & reconnect the seller on eBay OAuth.';
+  }
+  if (/^\/sell\/analytics\/v1\/traffic_report\/?$/i.test(path) && statusCode === 400) {
+    const dim = String(params?.dimension || '').trim();
+    if (/^\d{10,}$/.test(dim)) {
+      return `dimension must be DAY or LISTING — not a listing ID. Put the listing ID in filter: listing_ids:{${dim}} with dimension "DAY" or "LISTING".`;
+    }
+    if (dim && !['DAY', 'LISTING'].includes(dim.toUpperCase())) {
+      return `dimension must be DAY or LISTING (got "${dim}"). Listing IDs belong in filter as listing_ids:{ID}.`;
+    }
+    return 'Traffic report filter format: marketplace_ids:{EBAY_US},listing_ids:{ITEM_ID},date_range:[YYYYMMDD..YYYYMMDD]. Data is through yesterday (Pacific).';
+  }
+  return null;
+}
+
+function normalizeTrafficReportParams(params) {
+  const fixes = [];
+  const p = params && typeof params === 'object' ? { ...params } : {};
+  const dim = String(p.dimension || '').trim();
+
+  if (/^\d{10,}$/.test(dim)) {
+    const listingId = dim;
+    p.dimension = 'DAY';
+    fixes.push(`dimension was listing ID "${listingId}" — changed to "DAY".`);
+
+    let filterStr = String(p.filter || '');
+    if (!/listing_ids:\{/i.test(filterStr)) {
+      const mp = filterStr.match(/marketplace_ids:\{([^}]+)\}/)?.[1] || 'EBAY_US';
+      const datePart = filterStr.match(/date_range:\[([^\]]+)\]/)?.[1];
+      const dateRange = datePart || 'YYYYMMDD..YYYYMMDD';
+      p.filter = `marketplace_ids:{${mp}},listing_ids:{${listingId}},date_range:[${dateRange}]`;
+      fixes.push(`Added listing_ids:{${listingId}} to filter.`);
+    }
+  }
+
+  const upperDim = String(p.dimension || '').toUpperCase();
+  if (upperDim === 'DAY' && !p.sort && p.metric) {
+    const firstMetric = String(p.metric).split(',')[0].trim();
+    if (firstMetric) {
+      p.sort = `-${firstMetric}`;
+      fixes.push(`Added sort "-${firstMetric}" (required for DAY dimension).`);
+    }
+  }
+
+  return { params: p, fixes };
+}
+
+async function executeEbayRawRequest({ method, targetUrl, path, params, body, accessToken, marketplace }) {
+  const upperMethod = String(method || 'GET').toUpperCase();
+  const headers = buildEbayRawHeaders({ accessToken, method: upperMethod, path, marketplace });
+  const safeParams = params && typeof params === 'object' ? params : {};
+  const safeBody = ['POST', 'PUT', 'PATCH'].includes(upperMethod) ? (body && typeof body === 'object' ? body : {}) : undefined;
+  const requestUrlWithParams = axios.getUri({ url: targetUrl, params: safeParams });
+
+  const response = await axios.request({
+    method: upperMethod,
+    url: targetUrl,
+    params: safeParams,
+    data: safeBody,
+    headers,
+    timeout: 45000,
+    validateStatus: () => true,
+    transformResponse: [(data) => data]
+  });
+
+  return {
+    ok: response.status >= 200 && response.status < 300,
+    statusCode: response.status,
+    statusText: response.statusText,
+    targetUrl: requestUrlWithParams,
+    request: {
+      method: upperMethod,
+      params: safeParams,
+      body: safeBody,
+      marketplace: headers['X-EBAY-C-MARKETPLACE-ID'] || null
+    },
+    data: parseEbayRawResponseData(response)
+  };
+}
+
 /**
  * Dev-only generic eBay API proxy for internal tester page.
  * Lets admins call arbitrary eBay REST paths with a selected seller token.
@@ -12253,48 +13439,90 @@ router.post('/dev/raw-call', requireAuth, requirePageAccess('EbayApiTester'), as
     }
 
     const normalizedEndpointPath = endpointText.startsWith('/') ? endpointText : `/${endpointText}`;
-    const isPostOrder = /^\/post-order\//i.test(normalizedEndpointPath);
-    const headers = {
-      Authorization: isPostOrder ? `IAF ${accessToken}` : `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    };
-    const inferredMarketplace =
-      marketplace ||
-      (Array.isArray(seller?.ebayMarketplaces) && seller.ebayMarketplaces[0]) ||
-      'EBAY_US';
-    if (marketplace || /^\/sell\/(negotiation|inventory|account|fulfillment|marketing)\//i.test(normalizedEndpointPath)) {
-      headers['X-EBAY-C-MARKETPLACE-ID'] = String(inferredMarketplace);
+    const explicitMarketplace = marketplace ? String(marketplace).trim() : null;
+
+    const safeParams = params && typeof params === 'object' ? { ...params } : {};
+    if (
+      upperMethod === 'GET' &&
+      /^\/commerce\/notification\/v1\/subscription\/?$/i.test(normalizedEndpointPath) &&
+      safeParams.limit == null
+    ) {
+      safeParams.limit = 20;
     }
 
-    const safeParams = params && typeof params === 'object' ? params : {};
+    if (
+      upperMethod === 'GET' &&
+      /^\/sell\/analytics\/v1\/customer_service_metric\//i.test(normalizedEndpointPath) &&
+      !safeParams.evaluation_marketplace_id
+    ) {
+      safeParams.evaluation_marketplace_id =
+        explicitMarketplace ||
+        (Array.isArray(seller?.ebayMarketplaces) && seller.ebayMarketplaces[0]) ||
+        'EBAY_US';
+    }
+
     const safeBody = ['POST', 'PUT', 'PATCH'].includes(upperMethod) ? (body && typeof body === 'object' ? body : {}) : undefined;
-    const requestUrlWithParams = axios.getUri({
-      url: targetUrl,
+
+    let trafficReportFixes = [];
+    if (
+      upperMethod === 'GET' &&
+      /^\/sell\/analytics\/v1\/traffic_report\/?$/i.test(normalizedEndpointPath)
+    ) {
+      const normalized = normalizeTrafficReportParams(safeParams);
+      Object.assign(safeParams, normalized.params);
+      trafficReportFixes = normalized.fixes;
+    }
+
+    const result = await executeEbayRawRequest({
+      method: upperMethod,
+      targetUrl,
+      path: normalizedEndpointPath,
+      params: safeParams,
+      body: safeBody,
+      accessToken,
+      marketplace: explicitMarketplace
+    });
+
+    let appTokenAttempt = null;
+    if (
+      !result.ok &&
+      upperMethod === 'GET' &&
+      /^\/commerce\/notification\/v1\/subscription\/?$/i.test(normalizedEndpointPath)
+    ) {
+      try {
+        const appToken = await getEbayClientCredentialsToken();
+        appTokenAttempt = await executeEbayRawRequest({
+          method: upperMethod,
+          targetUrl,
+          path: normalizedEndpointPath,
+          params: safeParams,
+          body: safeBody,
+          accessToken: appToken,
+          marketplace: explicitMarketplace
+        });
+        appTokenAttempt.tokenType = 'application (client_credentials)';
+      } catch (appErr) {
+        appTokenAttempt = {
+          ok: false,
+          error: appErr.message || 'App token retry failed'
+        };
+      }
+    }
+
+    const hint = buildRawCallHint({
+      statusCode: result.statusCode,
+      path: normalizedEndpointPath,
+      method: upperMethod,
       params: safeParams
     });
-
-    const response = await axios.request({
-      method: upperMethod,
-      url: targetUrl,
-      params: safeParams,
-      data: safeBody,
-      headers,
-      timeout: 45000,
-      validateStatus: () => true
-    });
+    const ebayErrors = extractEbayApiErrors(result.data);
 
     return res.status(200).json({
-      ok: response.status >= 200 && response.status < 300,
-      statusCode: response.status,
-      statusText: response.statusText,
-      targetUrl: requestUrlWithParams,
-      request: {
-        method: upperMethod,
-        params: safeParams,
-        body: safeBody,
-        marketplace: headers['X-EBAY-C-MARKETPLACE-ID'] || null
-      },
-      data: response.data
+      ...result,
+      hint,
+      ebayErrors,
+      appTokenAttempt,
+      trafficReportFixes: trafficReportFixes.length ? trafficReportFixes : undefined
     });
   } catch (err) {
     console.error('[eBay Raw Call] Error:', err.response?.data || err.message);
@@ -12481,7 +13709,7 @@ router.get('/best-offers/eligible/all', requireAuth, requirePageAccess('StoreLis
 });
 
 /** Trading API GetItem → normalized fields for eligible-offers UI when Mongo has no row yet */
-async function fetchTradingGetItemListingSnapshot(token, itemId) {
+async function fetchTradingGetItemListingSnapshot(token, itemId, siteId = '0') {
   const id = String(itemId || '').trim();
   if (!id) return null;
   const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
@@ -12495,7 +13723,7 @@ async function fetchTradingGetItemListingSnapshot(token, itemId) {
 
   const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
     headers: {
-      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-SITEID': String(siteId || '0'),
       'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
       'X-EBAY-API-CALL-NAME': 'GetItem',
       'Content-Type': 'text/xml',
