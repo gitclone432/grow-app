@@ -32,6 +32,13 @@ import { getOrderQtyExcludedLegacyIdSet } from '../utils/orderQtyExcludeLegacyCa
 import { enrichOrdersWithSupplierLinks } from '../utils/supplierLinkFromListings.js';
 import { buildSellerAnalyticsFromOrders } from '../utils/sellerAnalyticsFinancials.js';
 import {
+  processEbayMessage,
+  enrichThreadFromMyMessages,
+  collectExternalMessageIdsFromExchanges,
+  syncMyMessagesForThread,
+  backfillThreadOrderId
+} from '../utils/ebayMessageSync.js';
+import {
   applyUsdFieldsSync,
   enrichOrderLikeAllOrdersSheet,
   prefetchExchangeRatesForOrders,
@@ -2157,154 +2164,6 @@ async function sendAutoWelcomeMessage(seller, order) {
     // Don't throw error here, so we don't stop the polling process
   }
 }
-
-// HELPER: Extract clean text from HTML email bodies
-function extractTextFromHtml(html) {
-  if (!html) return '';
-
-  // Check if it's actually HTML (contains tags)
-  if (!/<[^>]+>/.test(html)) {
-    return html.trim();
-  }
-
-  let cleanText = '';
-
-  // Strategy 1: Try to extract from UserInputtedText div (buyer's actual message)
-  const userInputMatch = html.match(/<div\s+id=["']UserInputtedText["'][^>]*>(.*?)<\/div>/is);
-  if (userInputMatch && userInputMatch[1]) {
-    cleanText = userInputMatch[1];
-  } else {
-    // Strategy 2: Try to extract from V4PrimaryMessage hidden div
-    const v4Match = html.match(/<div\s+id=["']V4PrimaryMessage["'][^>]*>.*?<strong>Dear[^<]*<\/strong>\s*(?:<br\s*\/?>)*\s*(.*?)\s*(?:<br\s*\/?>)*\s*<\/font>/is);
-    if (v4Match && v4Match[1]) {
-      cleanText = v4Match[1];
-    } else {
-      // Strategy 3: Strip all HTML tags
-      cleanText = html;
-    }
-  }
-
-  // Remove all HTML tags
-  cleanText = cleanText.replace(/<[^>]+>/g, ' ');
-
-  // Decode common HTML entities
-  cleanText = cleanText
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'");
-
-  // Clean up whitespace
-  cleanText = cleanText
-    .replace(/\s+/g, ' ')  // Multiple spaces to single space
-    .replace(/\n\s*\n/g, '\n')  // Multiple newlines to single
-    .trim();
-
-  return cleanText;
-}
-
-// HELPER: Process a single eBay XML Message and save to DB
-async function processEbayMessage(msg, seller) {
-  try {
-    const question = msg.Question?.[0];
-    if (!question) return false;
-
-    const msgID = question.MessageID?.[0];
-    const senderID = question.SenderID?.[0];
-    const senderEmail = question.SenderEmail?.[0];
-    const rawBody = question.Body?.[0];
-    const body = extractTextFromHtml(rawBody); // Clean HTML if present
-    const subject = question.Subject?.[0];
-    const itemID = msg.Item?.[0]?.ItemID?.[0];
-    const itemTitle = msg.Item?.[0]?.Title?.[0];
-
-    // --- EXTRACT IMAGES (NEW) ---
-    const mediaUrls = [];
-    // Check if MessageMedia exists and is an array
-    if (msg.MessageMedia && Array.isArray(msg.MessageMedia)) {
-      msg.MessageMedia.forEach(media => {
-        if (media.MediaURL && media.MediaURL[0]) {
-          mediaUrls.push(media.MediaURL[0]);
-        }
-      });
-    }
-    // Sometimes it's inside the Question tag as well
-    if (question.MessageMedia && Array.isArray(question.MessageMedia)) {
-      question.MessageMedia.forEach(media => {
-        if (media.MediaURL && media.MediaURL[0]) {
-          mediaUrls.push(media.MediaURL[0]);
-        }
-      });
-    }
-    // ----------------------------
-
-    // --- DATE PARSING ---
-    const rawDate = question.CreationDate?.[0];
-    let messageDate = new Date();
-    if (rawDate) {
-      const parsedDate = new Date(rawDate);
-      if (!isNaN(parsedDate.getTime())) messageDate = parsedDate;
-    }
-
-    // 1. Prevent Duplicates
-    const exists = await Message.findOne({ externalMessageId: msgID });
-    if (exists) return false;
-
-    // 2. Determine Message Type (ORDER, INQUIRY, or DIRECT)
-    let orderId = null;
-    let messageType = 'INQUIRY'; // Default
-    let finalItemId = itemID;
-    let finalItemTitle = itemTitle;
-
-    if (itemID && senderID) {
-      // HAS ITEM: Check if it's an order or inquiry
-      const order = await Order.findOne({
-        'lineItems.legacyItemId': itemID,
-        'buyer.username': senderID
-      });
-      if (order) {
-        orderId = order.orderId;
-        messageType = 'ORDER';
-        console.log(`[Message] ORDER message for item ${itemID} from ${senderID}`);
-      } else {
-        messageType = 'INQUIRY';
-        console.log(`[Message] INQUIRY about item ${itemID} from ${senderID}`);
-      }
-    } else if (!itemID && senderID) {
-      // NO ITEM: Direct message to seller account
-      messageType = 'DIRECT';
-      finalItemId = 'DIRECT_MESSAGE';
-      finalItemTitle = 'Direct Message (No Item)';
-      console.log(`[Message] DIRECT message from ${senderID}: ${subject}`);
-    }
-
-    // 3. Save to DB
-    await Message.create({
-      seller: seller._id,
-      orderId,
-      itemId: finalItemId,
-      itemTitle: finalItemTitle,
-      buyerUsername: senderID,
-      externalMessageId: msgID,
-      sender: 'BUYER',
-      subject: subject,
-      body: body,
-      mediaUrls: mediaUrls,
-      read: false,
-      messageType,
-      messageDate: messageDate
-    });
-
-    return true;
-  } catch (err) {
-    console.error('Error processing message:', err.message);
-    return false;
-  }
-}
-
 
 // Helper function to extract tracking number from fulfillmentHrefs
 async function extractTrackingNumber(fulfillmentHrefs, accessToken) {
@@ -7516,74 +7375,101 @@ router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), asyn
         // 1. Ensure Token is Valid
         const token = await ensureValidToken(seller);
 
-        // 2. Determine Time Window (Smart Polling)
+        // 2. Determine Time Window — always look back at least 90 days on manual sync
         const now = new Date();
+        const minLookback = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
         let startTime;
 
         if (seller.lastMessagePolledAt) {
-          // INCREMENTAL SYNC: Fetch from last poll time
-          // We subtract 15 minutes overlap to ensure no messages are missed due to server latency
-          startTime = new Date(new Date(seller.lastMessagePolledAt).getTime() - 15 * 60 * 1000);
-          console.log(`[${sellerName}] Incremental sync from: ${startTime.toISOString()}`);
+          const incremental = new Date(new Date(seller.lastMessagePolledAt).getTime() - 15 * 60 * 1000);
+          startTime = new Date(Math.min(incremental.getTime(), minLookback.getTime()));
         } else {
-          // INITIAL SYNC: Fetch last 12 Days
-          startTime = new Date(now.getTime() - 12 * 24 * 60 * 60 * 1000);
-          console.log(`[${sellerName}] First-time sync from: ${startTime.toISOString()} (Last 10 Days)`);
+          startTime = minLookback;
+          console.log(`[${sellerName}] First-time sync from: ${startTime.toISOString()} (Last 90 Days)`);
+        }
+
+        if (seller.lastMessagePolledAt) {
+          console.log(`[${sellerName}] Sync from: ${startTime.toISOString()} (90-day lookback)`);
         }
 
         const startTimeStr = startTime.toISOString();
         const endTimeStr = now.toISOString();
 
-        // 3. XML Request
-        const xmlRequest = `
+        const fetchMemberMessagesPage = async (pageNumber) => {
+          const xmlRequest = `
           <?xml version="1.0" encoding="utf-8"?>
           <GetMemberMessagesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
             <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-            
             <MailMessageType>All</MailMessageType>
-            
             <StartCreationTime>${startTimeStr}</StartCreationTime>
             <EndCreationTime>${endTimeStr}</EndCreationTime>
-            
             <Pagination>
               <EntriesPerPage>200</EntriesPerPage>
-              <PageNumber>1</PageNumber>
+              <PageNumber>${pageNumber}</PageNumber>
             </Pagination>
+            <DetailLevel>ReturnAll</DetailLevel>
           </GetMemberMessagesRequest>
         `;
 
-        const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-          headers: {
-            'X-EBAY-API-SITEID': '0',
-            'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-            'X-EBAY-API-CALL-NAME': 'GetMemberMessages',
-            'Content-Type': 'text/xml'
+          const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+            headers: {
+              'X-EBAY-API-SITEID': '0',
+              'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+              'X-EBAY-API-CALL-NAME': 'GetMemberMessages',
+              'Content-Type': 'text/xml'
+            }
+          });
+
+          return parseStringPromise(response.data);
+        };
+
+        let pageNumber = 1;
+        let totalPages = 1;
+        let allMessages = [];
+        let syncFailed = false;
+
+        do {
+          const result = await fetchMemberMessagesPage(pageNumber);
+
+          if (result.GetMemberMessagesResponse.Ack[0] === 'Failure') {
+            const error = result.GetMemberMessagesResponse.Errors?.[0]?.LongMessage?.[0];
+            console.error(`eBay API Failure for seller ${seller._id}:`, error);
+            syncResults.push({ sellerName, newMessages: 0, error: error });
+            syncFailed = true;
+            break;
           }
-        });
 
-        const result = await parseStringPromise(response.data);
+          const pageMessages = result.GetMemberMessagesResponse.MemberMessage?.[0]?.MemberMessageExchange || [];
+          allMessages = allMessages.concat(pageMessages);
 
-        if (result.GetMemberMessagesResponse.Ack[0] === 'Failure') {
-          const error = result.GetMemberMessagesResponse.Errors?.[0]?.LongMessage?.[0];
-          console.error(`eBay API Failure for seller ${seller._id}:`, error);
-          syncResults.push({ sellerName, newMessages: 0, error: error });
-          continue;
-        }
+          const pagination = result.GetMemberMessagesResponse.PaginationResult?.[0];
+          totalPages = parseInt(pagination?.TotalNumberOfPages?.[0] || '1', 10);
+          pageNumber++;
+        } while (pageNumber <= totalPages && pageNumber <= 10);
 
-        const messages = result.GetMemberMessagesResponse.MemberMessage?.[0]?.MemberMessageExchange || [];
+        if (syncFailed) continue;
+
+        const messages = allMessages;
 
         // 4. Process Messages
         let newForThisSeller = 0;
+        let newSellerForThisSeller = 0;
         for (const msg of messages) {
-          const isNew = await processEbayMessage(msg, seller);
-          if (isNew) {
+          const result = await processEbayMessage(msg, seller);
+          if (result.buyerNew) {
             newForThisSeller++;
             totalNew++;
           }
+          newSellerForThisSeller += result.sellerNew;
         }
 
-        console.log(`[Sync Inbox] Seller ${sellerName}: Fetched ${messages.length}. Saved ${newForThisSeller} new.`);
-        syncResults.push({ sellerName, newMessages: newForThisSeller, fetched: messages.length });
+        console.log(`[Sync Inbox] Seller ${sellerName}: Fetched ${messages.length}. Saved ${newForThisSeller} new buyer + ${newSellerForThisSeller} seller messages.`);
+        syncResults.push({
+          sellerName,
+          newMessages: newForThisSeller,
+          newSellerMessages: newSellerForThisSeller,
+          fetched: messages.length
+        });
 
         // 5. Update Polling Timestamp (Only on success)
         seller.lastMessagePolledAt = now;
@@ -7608,59 +7494,137 @@ router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), asyn
 // Filters by SenderID to be lightweight
 // 2. LIGHT SYNC: Active Thread Poll
 router.post('/sync-thread', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
-  const { sellerId, buyerUsername, itemId } = req.body;
+  const { sellerId, buyerUsername, itemId, orderId } = req.body;
 
   if (!sellerId || !buyerUsername) return res.status(400).json({ error: 'Missing identifiers' });
 
   try {
-    const seller = await Seller.findById(sellerId);
+    const seller = await Seller.findById(sellerId).populate('user', 'username email');
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
 
-    // 1. Ensure Token is Valid
     const token = await ensureValidToken(seller);
 
-    // 2. Time Filters
     const now = new Date();
-    const startTime = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const startTime = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
     const endTime = now.toISOString();
 
-    const xmlRequest = `
+    const fetchThreadMessagesPage = async (pageNumber) => {
+      const xmlRequest = `
       <?xml version="1.0" encoding="utf-8"?>
       <GetMemberMessagesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
         <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-        
         <MailMessageType>All</MailMessageType>
-        
         <SenderID>${buyerUsername}</SenderID>
-        
         <StartCreationTime>${startTime}</StartCreationTime>
         <EndCreationTime>${endTime}</EndCreationTime>
-        
         ${itemId ? `<ItemID>${itemId}</ItemID>` : ''}
-        
-        <Pagination><EntriesPerPage>50</EntriesPerPage><PageNumber>1</PageNumber></Pagination>
+        <Pagination><EntriesPerPage>200</EntriesPerPage><PageNumber>${pageNumber}</PageNumber></Pagination>
+        <DetailLevel>ReturnAll</DetailLevel>
       </GetMemberMessagesRequest>
     `;
 
-    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-      headers: {
-        'X-EBAY-API-SITEID': '0',
-        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-        'X-EBAY-API-CALL-NAME': 'GetMemberMessages',
-        'Content-Type': 'text/xml'
-      }
-    });
+      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+        headers: {
+          'X-EBAY-API-SITEID': '0',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+          'X-EBAY-API-CALL-NAME': 'GetMemberMessages',
+          'Content-Type': 'text/xml'
+        }
+      });
 
-    const result = await parseStringPromise(response.data);
-    const messages = result.GetMemberMessagesResponse.MemberMessage?.[0]?.MemberMessageExchange || [];
+      return parseStringPromise(response.data);
+    };
 
-    let hasNew = false;
+    let pageNumber = 1;
+    let totalPages = 1;
+    let messages = [];
+
+    do {
+      const result = await fetchThreadMessagesPage(pageNumber);
+      if (result.GetMemberMessagesResponse.Ack[0] === 'Failure') break;
+
+      const pageMessages = result.GetMemberMessagesResponse.MemberMessage?.[0]?.MemberMessageExchange || [];
+      messages = messages.concat(pageMessages);
+
+      const pagination = result.GetMemberMessagesResponse.PaginationResult?.[0];
+      totalPages = parseInt(pagination?.TotalNumberOfPages?.[0] || '1', 10);
+      pageNumber++;
+    } while (pageNumber <= totalPages && pageNumber <= 10);
+
+    let buyerNew = 0;
+    let sellerNew = 0;
     for (const msg of messages) {
-      const isNew = await processEbayMessage(msg, seller);
-      if (isNew) hasNew = true;
+      const syncResult = await processEbayMessage(msg, seller);
+      buyerNew += syncResult.buyerNew ? 1 : 0;
+      sellerNew += syncResult.sellerNew;
     }
 
-    res.json({ success: true, newMessagesFound: hasNew });
+    let threadOrderId = orderId || null;
+    let finalItemId = itemId;
+    let itemTitle = null;
+    let messageType = 'INQUIRY';
+
+    if (threadOrderId) {
+      const order = await Order.findOne({ orderId: threadOrderId }).select('lineItems productName').lean();
+      finalItemId = order?.lineItems?.[0]?.legacyItemId || itemId;
+      itemTitle = order?.productName || null;
+      messageType = 'ORDER';
+    } else if (itemId && itemId !== 'DIRECT_MESSAGE') {
+      const order = await Order.findOne({
+        'lineItems.legacyItemId': itemId,
+        'buyer.username': buyerUsername
+      }).select('orderId productName').lean();
+      if (order) {
+        threadOrderId = order.orderId;
+        itemTitle = order.productName || null;
+        messageType = 'ORDER';
+      }
+    } else if (!itemId || itemId === 'DIRECT_MESSAGE') {
+      messageType = 'DIRECT';
+      finalItemId = 'DIRECT_MESSAGE';
+    }
+
+    const externalIds = collectExternalMessageIdsFromExchanges(messages);
+    const myMsgResult = await enrichThreadFromMyMessages({
+      token,
+      seller,
+      externalMessageIds: externalIds,
+      buyerUsername,
+      orderId: threadOrderId,
+      itemId: finalItemId,
+      itemTitle,
+      messageType
+    });
+    buyerNew += myMsgResult.buyerNew;
+    sellerNew += myMsgResult.sellerNew;
+
+    const myMailResult = await syncMyMessagesForThread({
+      token,
+      seller,
+      buyerUsername,
+      orderId: threadOrderId,
+      itemId: finalItemId,
+      itemTitle,
+      messageType
+    });
+    buyerNew += myMailResult.buyerNew;
+    sellerNew += myMailResult.sellerNew;
+
+    await backfillThreadOrderId({
+      sellerId: seller._id,
+      buyerUsername,
+      itemId: finalItemId,
+      orderId: threadOrderId,
+      messageType
+    });
+
+    res.json({
+      success: true,
+      newMessagesFound: buyerNew > 0 || sellerNew > 0,
+      buyerMessagesSynced: buyerNew,
+      sellerMessagesSynced: sellerNew,
+      myMessagesFetched: myMailResult.fetched
+    });
   } catch (err) {
     console.error('Thread sync error:', err.message);
     res.status(500).json({ error: err.message });
@@ -7971,23 +7935,29 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
 // 4. GET THREADS (With Pagination & Search)
 router.get('/chat/threads', requireAuth, async (req, res) => {
   try {
-    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false' } = req.query;
+    const {
+      sellerId,
+      page = 1,
+      limit = 20,
+      search = '',
+      filterType = 'ALL',
+      filterMarketplace = '',
+      showUnreadOnly = 'false',
+      includeResolved = 'true',
+      maxAgeDays = '365'
+    } = req.query;
 
+    const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
+    const ageDays = parseInt(maxAgeDays, 10);
 
     // Build the aggregation pipeline
     const pipeline = [];
 
-    // 0. ALWAYS limit to recent messages to prevent sort memory overflow
-    //    (MongoDB free-tier has a 32MB sort limit and no allowDiskUse)
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - 45);
-    pipeline.push({ $match: { messageDate: { $gte: cutoffDate } } });
-
-    // 1. FILTER BY SELLER
+    // 1. FILTER BY SELLER (optional — applied before sort/group)
     if (sellerId) {
       pipeline.push({
         $match: { seller: new mongoose.Types.ObjectId(sellerId) }
@@ -8144,25 +8114,37 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       }
     });
 
-    // 5.2. FILTER BY TYPE
+    // 5.15 LOOKUP SELLER (for search by store / seller username)
+    pipeline.push({
+      $lookup: {
+        from: 'sellers',
+        localField: 'sellerId',
+        foreignField: '_id',
+        as: 'sellerDoc'
+      }
+    });
+    pipeline.push({
+      $lookup: {
+        from: 'users',
+        localField: 'sellerDoc.user',
+        foreignField: '_id',
+        as: 'sellerUser'
+      }
+    });
+    pipeline.push({
+      $addFields: {
+        sellerUsername: { $arrayElemAt: ['$sellerUser.username', 0] },
+        sellerEmail: { $arrayElemAt: ['$sellerUser.email', 0] }
+      }
+    });
+
+    // 5.2. FILTER BY TYPE (use computed type — order linkage can change after sync)
     if (filterType === 'ORDER') {
-      pipeline.push({
-        $match: {
-          $or: [
-            { messageType: 'ORDER' },
-            { orderId: { $ne: null } }
-          ]
-        }
-      });
+      pipeline.push({ $match: { actualMessageType: 'ORDER' } });
     } else if (filterType === 'INQUIRY') {
-      pipeline.push({
-        $match: {
-          $and: [
-            { messageType: { $ne: 'ORDER' } },
-            { orderId: null }
-          ]
-        }
-      });
+      pipeline.push({ $match: { actualMessageType: 'INQUIRY' } });
+    } else if (filterType === 'DIRECT') {
+      pipeline.push({ $match: { actualMessageType: 'DIRECT' } });
     }
 
     // 5.3 FILTER BY MARKETPLACE (NEW)
@@ -8225,29 +8207,42 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       }
     });
 
-    // Exclude threads where ConversationMeta exists and status is 'Resolved'
-    pipeline.push({
-      $match: {
-        $or: [
-          { 'conversationMeta': { $size: 0 } },          // No meta record → not resolved
-          { 'conversationMeta.0.status': { $ne: 'Resolved' } } // Meta exists but not resolved
-        ]
-      }
-    });
+    // Exclude resolved threads unless explicitly opted out
+    if (includeResolved === 'false') {
+      pipeline.push({
+        $match: {
+          $or: [
+            { conversationMeta: { $size: 0 } },
+            { 'conversationMeta.0.status': { $ne: 'Resolved' } }
+          ]
+        }
+      });
+    }
 
     // 6. SEARCH FILTER (Applied AFTER grouping so we search distinct threads)
     if (search && search.trim() !== '') {
-      const regex = new RegExp(search.trim(), 'i'); // Case-insensitive
+      const regex = new RegExp(escapeRegex(search.trim()), 'i');
       pipeline.push({
         $match: {
           $or: [
             { orderId: regex },
             { buyerUsername: regex },
             { buyerName: regex },
-            { itemId: regex }
+            { itemId: regex },
+            { itemTitle: regex },
+            { lastMessage: regex },
+            { sellerUsername: regex },
+            { sellerEmail: regex }
           ]
         }
       });
+    }
+
+    // 6.5 Optional age filter on thread last activity (after grouping — keeps full threads)
+    if (!Number.isNaN(ageDays) && ageDays > 0) {
+      const threadCutoff = new Date();
+      threadCutoff.setDate(threadCutoff.getDate() - ageDays);
+      pipeline.push({ $match: { lastDate: { $gte: threadCutoff } } });
     }
 
     // 7. FINAL SORT & PAGINATION
@@ -8275,22 +8270,35 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
     // This handles the case where an order exists but has never had a message synced.
     if (search && search.trim() !== '') {
       const searchTrim = search.trim();
-      const regex = new RegExp(searchTrim, 'i');
+      const regex = new RegExp(escapeRegex(searchTrim), 'i');
+
+      // Sellers whose username/email matches search (e.g. store name in user account)
+      const matchingSellerDocs = await Seller.find()
+        .populate('user', 'username email')
+        .lean();
+      const sellerIdsFromSearch = matchingSellerDocs
+        .filter((s) => regex.test(s.user?.username || '') || regex.test(s.user?.email || ''))
+        .map((s) => s._id);
 
       // Build order query
-      const orderQuery = {
-        $or: [
-          { orderId: regex },
-          { legacyOrderId: regex },
-          { 'buyer.username': regex },
-          { 'buyer.buyerRegistrationAddress.fullName': regex }
-        ]
-      };
+      const orderOr = [
+        { orderId: regex },
+        { legacyOrderId: regex },
+        { 'buyer.username': regex },
+        { 'buyer.buyerRegistrationAddress.fullName': regex },
+        { productName: regex },
+        { 'lineItems.title': regex }
+      ];
+      if (sellerIdsFromSearch.length > 0) {
+        orderOr.push({ seller: { $in: sellerIdsFromSearch } });
+      }
+
+      const orderQuery = { $or: orderOr };
       if (sellerId) {
         orderQuery.seller = new mongoose.Types.ObjectId(sellerId);
       }
 
-      const matchingOrders = await Order.find(orderQuery).limit(20).lean();
+      const matchingOrders = await Order.find(orderQuery).limit(50).lean();
 
       // Get the set of orderIds already in message threads
       const existingOrderIds = new Set(threads.map(t => t.orderId).filter(Boolean));
@@ -8410,41 +8418,16 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       }
     }
 
-    // Process in parallel
-    await Promise.all(threads.map(async (thread) => {
-      // Use computed value from aggregation if available and valid
+    // Resolve marketplace from aggregation only — skip per-thread eBay API calls on list load
+    threads.forEach((thread) => {
       if (thread.computedMarketplaceId && thread.computedMarketplaceId !== 'Unknown') {
         thread.marketplaceId = thread.computedMarketplaceId;
-        return;
-      }
-
-      // Fallback: Check if we have valid IDs to check API (Only if computed was Unknown)
-      if (thread.itemId && thread.itemId !== 'DIRECT_MESSAGE') {
-        const apiResult = await fetchItemSiteFromApi(thread.itemId, thread.sellerId);
-        if (apiResult) {
-          thread.marketplaceId = apiResult.marketplaceId;
-
-          // Save to Listing DB so next time it's fast
-          try {
-            await Listing.findOneAndUpdate(
-              { itemId: thread.itemId },
-              {
-                seller: thread.sellerId,
-                itemId: thread.itemId,
-                currency: apiResult.currency,
-              },
-              { upsert: true, setDefaultsOnInsert: true }
-            );
-          } catch (e) {
-            console.error('Failed to cache listing marketplace', e);
-          }
-        } else {
-          thread.marketplaceId = 'Unknown';
-        }
+      } else if (!thread.itemId || thread.itemId === 'DIRECT_MESSAGE') {
+        thread.marketplaceId = 'System';
       } else {
-        thread.marketplaceId = 'System'; // Direct messages
+        thread.marketplaceId = 'Unknown';
       }
-    }));
+    });
 
     res.json({ threads, total, page: pageNum, pages: Math.ceil(total / limitNum) });
 
@@ -8459,17 +8442,27 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
 
 // 5. GET MESSAGES (Chat Window)
 router.get('/chat/messages', requireAuth, async (req, res) => {
-  const { orderId, buyerUsername, itemId } = req.query;
+  const { orderId, buyerUsername, itemId, sellerId } = req.query;
 
   try {
-    let query = {};
-    if (orderId) {
-      query.orderId = orderId;
-    } else if (buyerUsername && itemId) {
-      query.buyerUsername = buyerUsername;
-      query.itemId = itemId;
-    } else {
-      return res.status(400).json({ error: 'Invalid query params' });
+    if (!buyerUsername) {
+      return res.status(400).json({ error: 'buyerUsername is required' });
+    }
+
+    const matchClauses = [];
+    if (orderId) matchClauses.push({ orderId });
+    if (itemId) matchClauses.push({ itemId });
+    if (matchClauses.length === 0) {
+      return res.status(400).json({ error: 'orderId or itemId is required' });
+    }
+
+    const query = {
+      buyerUsername,
+      $or: matchClauses
+    };
+
+    if (sellerId) {
+      query.seller = new mongoose.Types.ObjectId(sellerId);
     }
 
     const messages = await Message.find(query).sort({ messageDate: 1 });

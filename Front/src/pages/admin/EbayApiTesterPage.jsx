@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import {
   Alert,
@@ -298,6 +298,9 @@ const PRESETS = [
   { group: 'Messages', label: 'Chat Threads', method: 'GET', path: '/ebay/chat/threads', params: { page: 1, limit: 20 } },
   { group: 'Messages', label: 'Chat Messages', method: 'GET', path: '/ebay/chat/messages', params: { sellerId: '<sellerId>', orderId: '<orderId>' } },
   { group: 'Messages', label: 'Chat Search by Order', method: 'GET', path: '/ebay/chat/search-order', params: { orderId: '<orderId>' } },
+  { group: 'Messages', label: 'Commerce: List Conversations (buyers)', method: 'GET', path: '/commerce/message/v1/conversation', params: { conversation_type: 'FROM_MEMBERS', limit: 50 } },
+  { group: 'Messages', label: 'Commerce: List Conversations (by buyer)', method: 'GET', path: '/commerce/message/v1/conversation', params: { conversation_type: 'FROM_MEMBERS', other_party_username: '<buyerUsername>', limit: 50 } },
+  { group: 'Messages', label: 'Commerce: Get Conversation Messages', method: 'GET', path: '/commerce/message/v1/conversation/<conversationId>', params: { conversation_type: 'FROM_MEMBERS', limit: 50 } },
 
   // Master data
   { group: 'Master Data', label: 'Categories', method: 'GET', path: '/categories', params: {} },
@@ -426,6 +429,10 @@ function safeJsonParse(text, fallback = {}) {
   }
 }
 
+function isInternalAppPath(pathValue) {
+  return /^\/ebay\//i.test(String(pathValue || '').trim());
+}
+
 function replaceSellerIdPlaceholders(value, sellerId) {
   if (typeof value === 'string') {
     return value.replace(/<sellerId>/g, sellerId || '');
@@ -468,7 +475,8 @@ export default function EbayApiTesterPage() {
   const [bodyText, setBodyText] = useState('{}');
   const [selectedPresetLabel, setSelectedPresetLabel] = useState(initialPreset.label);
   const [rawEbayMode, setRawEbayMode] = useState(false);
-  const [sellerId, setSellerId] = useState('69f452ccccbff2f8810fcbdc');
+  const [sellerId, setSellerId] = useState('');
+  const [sellers, setSellers] = useState([]);
   const [orderId, setOrderId] = useState('');
   const [marketplaceId, setMarketplaceId] = useState('');
   const [tradingCallName, setTradingCallName] = useState('GetBestOffers');
@@ -492,6 +500,18 @@ export default function EbayApiTesterPage() {
   const [copyStatus, setCopyStatus] = useState('');
   const copyStatusTimerRef = useRef(null);
 
+  useEffect(() => {
+    api.get('/sellers/all')
+      .then(({ data }) => {
+        const list = data || [];
+        setSellers(list);
+        if (list.length > 0) {
+          setSellerId((prev) => prev || list[0]._id);
+        }
+      })
+      .catch(() => setSellers([]));
+  }, []);
+
   const prettyResponse = useMemo(() => responseText || 'Run a request to see response.', [responseText]);
   const pathText = String(path || '').trim();
   const isLikelyExternalEbayPath =
@@ -504,6 +524,9 @@ export default function EbayApiTesterPage() {
     setSelectedPresetLabel(preset.label);
     setMethod(preset.method);
     setPath(preset.path);
+    if (isInternalAppPath(preset.path)) {
+      setRawEbayMode(false);
+    }
     setParamsText(JSON.stringify(preset.params || {}, null, 2));
     if (preset.label === 'Negotiation: Send Offer to Interested Buyers') {
       setBodyText(JSON.stringify({
@@ -1315,7 +1338,6 @@ export default function EbayApiTesterPage() {
     try {
       let statusCode;
       let payload;
-      const shouldUseRawProxy = rawEbayMode || isLikelyExternalEbayPath;
 
       const resolvedPath = String(replaceRuntimePlaceholders(path, placeholderMap) || '').trim();
       if (/<[^>]+>/.test(resolvedPath)) {
@@ -1323,6 +1345,9 @@ export default function EbayApiTesterPage() {
         setLoading(false);
         return;
       }
+
+      const shouldUseRawProxy =
+        !isInternalAppPath(resolvedPath) && (rawEbayMode || isLikelyExternalEbayPath);
 
       if (path === '/ebay/dev/trading-call') {
         const proxyRes = await api.post('/ebay/dev/trading-call', {
@@ -1392,6 +1417,11 @@ export default function EbayApiTesterPage() {
         control={<Switch checked={rawEbayMode} onChange={(e) => setRawEbayMode(e.target.checked)} />}
         label="Use Raw eBay API mode (calls eBay directly via seller token)"
       />
+      {rawEbayMode && isInternalAppPath(pathText) && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Raw eBay mode is ignored for <code>/ebay/*</code> paths — those call your app backend, not eBay directly.
+        </Alert>
+      )}
 
       <Paper sx={{ p: 2, mb: 2 }}>
         <Stack spacing={2}>
@@ -1428,12 +1458,21 @@ export default function EbayApiTesterPage() {
             {(rawEbayMode || path === '/ebay/dev/trading-call' || isLikelyExternalEbayPath) && (
               <>
                 <TextField
-                  label="Seller ID (required)"
+                  select
+                  label="Seller"
                   value={sellerId}
                   onChange={(e) => setSellerId(e.target.value)}
                   size="small"
                   sx={{ minWidth: 260 }}
-                />
+                  helperText={sellerId ? `ID: ${sellerId}` : 'Select a seller'}
+                >
+                  <MenuItem value=""><em>Select seller...</em></MenuItem>
+                  {sellers.map((s) => (
+                    <MenuItem key={s._id} value={s._id}>
+                      {s.user?.username || s.user?.email || s._id}
+                    </MenuItem>
+                  ))}
+                </TextField>
                 <TextField
                   label="Order ID (optional)"
                   value={orderId}

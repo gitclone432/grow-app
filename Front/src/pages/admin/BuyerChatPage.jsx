@@ -1,9 +1,9 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo, memo } from 'react';
 import {
   Avatar, TextField, Button, Divider, Badge, Stack, CircularProgress,
-  IconButton, Chip, Alert, FormControl, Select, MenuItem, InputLabel, Link,
+  IconButton, Chip, Alert,   FormControl, Select, MenuItem, InputLabel, Link,
   Snackbar, ListItemButton, Box, Paper, Typography, List, ListItem, ListItemText, ListItemAvatar,
-  useTheme, useMediaQuery, Menu, ListSubheader, Tooltip
+  useTheme, useMediaQuery, Menu, ListSubheader, Tooltip, Card, CardContent, FormControlLabel, Checkbox
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import PersonIcon from '@mui/icons-material/Person';
@@ -21,18 +21,23 @@ import AttachFileIcon from '@mui/icons-material/AttachFile';
 import MarkAsUnreadIcon from '@mui/icons-material/MarkAsUnread';
 import MenuIcon from '@mui/icons-material/Menu';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import FilterAltOffIcon from '@mui/icons-material/FilterAltOff';
 import SettingsIcon from '@mui/icons-material/Settings';
 import api from '../../lib/api';
 import TemplateManagementModal from '../../components/TemplateManagementModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 
-// Session storage key for persisting state
-const CHAT_STORAGE_KEY = 'buyer_chat_page_state';
+// Session storage key for persisting state (v2: only restore selected thread, not filters)
+const CHAT_STORAGE_KEY = 'buyer_chat_page_state_v2';
+
+// Keys restored from session — filters are intentionally excluded so stale searches don't hide threads
+const SESSION_RESTORE_KEYS = new Set(['selectedThread']);
 
 // CHAT_TEMPLATES are now fetched from API - see chatTemplates state in component
 
 // Helper to get initial state from sessionStorage
 const getInitialState = (key, defaultValue) => {
+  if (!SESSION_RESTORE_KEYS.has(key)) return defaultValue;
   try {
     const stored = sessionStorage.getItem(CHAT_STORAGE_KEY);
     if (stored) {
@@ -44,6 +49,112 @@ const getInitialState = (key, defaultValue) => {
   }
   return defaultValue;
 };
+
+const KpiCard = ({ label, value, color, bgcolor = '#f8fafc' }) => (
+  <Card sx={{ borderRadius: 2, bgcolor, height: '100%' }}>
+    <CardContent sx={{ py: 1.5, px: 2, '&:last-child': { pb: 1.5 } }}>
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+        {label}
+      </Typography>
+      <Typography variant="h6" sx={{ fontWeight: 800, color, lineHeight: 1.2 }}>
+        {value}
+      </Typography>
+    </CardContent>
+  </Card>
+);
+
+const ThreadListItem = memo(function ThreadListItem({
+  thread, index, isSelected, imageUrl, isLoadingImage, onSelect
+}) {
+  const msgType = thread.actualMessageType || thread.messageType;
+  const isOrder = msgType === 'ORDER';
+  const isDirect = msgType === 'DIRECT';
+
+  return (
+    <ListItem disablePadding dense>
+      <ListItemButton
+        selected={isSelected}
+        onClick={() => onSelect(thread)}
+        alignItems="flex-start"
+        sx={{ py: 0.75, px: 1.25, borderBottom: '1px solid', borderColor: 'divider' }}
+      >
+        <ListItemAvatar sx={{ minWidth: 44, mt: 0.25 }}>
+          <Badge color="error" badgeContent={thread.unreadCount || null} max={99}>
+            {isOrder && imageUrl ? (
+              <Avatar
+                src={imageUrl}
+                variant="rounded"
+                sx={{ width: 40, height: 40, border: '1px solid', borderColor: 'divider' }}
+              />
+            ) : isOrder && isLoadingImage ? (
+              <Avatar variant="rounded" sx={{ width: 40, height: 40, bgcolor: 'action.hover' }}>
+                <CircularProgress size={16} />
+              </Avatar>
+            ) : (
+              <Avatar sx={{ width: 40, height: 40, bgcolor: isOrder ? 'primary.main' : isDirect ? 'warning.main' : 'secondary.main' }}>
+                {isOrder ? <ShoppingBagIcon sx={{ fontSize: 18 }} /> : isDirect ? <EmailIcon sx={{ fontSize: 18 }} /> : <QuestionAnswerIcon sx={{ fontSize: 18 }} />}
+              </Avatar>
+            )}
+          </Badge>
+        </ListItemAvatar>
+        <ListItemText
+          disableTypography
+          primary={
+            <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.5}>
+              <Typography variant="body2" noWrap sx={{ fontWeight: thread.unreadCount > 0 ? 700 : 600, flex: 1 }}>
+                {thread.buyerName || thread.buyerUsername || 'Unknown Buyer'}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
+                {new Date(thread.lastDate).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })}
+              </Typography>
+            </Stack>
+          }
+          secondary={
+            <Box sx={{ mt: 0.25 }}>
+              <Stack direction="row" spacing={0.5} alignItems="center">
+                {thread.marketplaceId && thread.marketplaceId !== 'Unknown' && thread.marketplaceId !== 'System' && (
+                  <Chip
+                    label={thread.marketplaceId.replace('EBAY_', '')}
+                    size="small"
+                    sx={{
+                      height: 14, fontSize: '0.6rem', '& .MuiChip-label': { px: 0.5 },
+                      bgcolor: thread.marketplaceId === 'EBAY_US' ? '#e3f2fd' : '#fff3e0',
+                      color: thread.marketplaceId === 'EBAY_US' ? '#1565c0' : '#e65100',
+                    }}
+                  />
+                )}
+                <Typography variant="caption" color="text.secondary" noWrap>
+                  {thread.orderId ? `#${thread.orderId}` : isDirect ? 'Direct' : 'Inquiry'}
+                </Typography>
+              </Stack>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                noWrap
+                sx={{ display: 'block', lineHeight: 1.2 }}
+              >
+                {thread.itemId === 'DIRECT_MESSAGE' ? 'No item' : (thread.itemTitle || thread.itemId)}
+              </Typography>
+              <Typography
+                variant="caption"
+                noWrap
+                sx={{
+                  display: 'block',
+                  fontWeight: thread.unreadCount > 0 ? 600 : 400,
+                  color: 'text.primary',
+                  lineHeight: 1.3,
+                  mt: 0.25
+                }}
+              >
+                {thread.sender === 'SELLER' ? 'You: ' : ''}{thread.lastMessage}
+              </Typography>
+            </Box>
+          }
+        />
+      </ListItemButton>
+    </ListItem>
+  );
+});
 
 export default function BuyerChatPage() {
   const [threads, setThreads] = useState([]);
@@ -60,8 +171,10 @@ export default function BuyerChatPage() {
   const [filterType, setFilterType] = useState(() => getInitialState('filterType', 'ALL'));
   const [filterMarketplace, setFilterMarketplace] = useState(() => getInitialState('filterMarketplace', ''));
   const [showUnreadOnly, setShowUnreadOnly] = useState(() => getInitialState('showUnreadOnly', false));
+  const [includeResolved, setIncludeResolved] = useState(() => getInitialState('includeResolved', true));
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
+  const [threadTotal, setThreadTotal] = useState(0);
   const [loadingThreads, setLoadingThreads] = useState(false);
 
   const [metaCategory, setMetaCategory] = useState('');
@@ -136,22 +249,15 @@ export default function BuyerChatPage() {
     }
   }, [isTablet, selectedThread]);
 
-  // Persist state to sessionStorage
+  // Persist state to sessionStorage (selected thread only — filters reset on reload)
   useEffect(() => {
-    const stateToSave = {
-      selectedThread,
-      searchQuery,
-      selectedSeller,
-      filterType,
-      filterMarketplace,
-      showUnreadOnly
-    };
+    const stateToSave = { selectedThread };
     try {
       sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(stateToSave));
     } catch (e) {
       console.error('Error saving to sessionStorage:', e);
     }
-  }, [selectedThread, searchQuery, selectedSeller]);
+  }, [selectedThread]);
 
 
 
@@ -291,7 +397,7 @@ export default function BuyerChatPage() {
     if (!hasFetchedInitialData.current) {
       hasFetchedInitialData.current = true;
       fetchSellers();
-      loadThreads(true);
+      loadAllThreadPages();
       loadChatTemplates();
       fetchAgents();
 
@@ -309,6 +415,7 @@ export default function BuyerChatPage() {
   const prevFilterType = useRef(filterType);
   const prevFilterMarketplace = useRef(filterMarketplace);
   const prevShowUnreadOnly = useRef(showUnreadOnly);
+  const prevIncludeResolved = useRef(includeResolved);
   const isFirstRender = useRef(true);
 
   useEffect(() => {
@@ -319,21 +426,29 @@ export default function BuyerChatPage() {
     }
 
     // Only reload if values actually changed
-    if (prevSearchQuery.current !== searchQuery || prevSelectedSeller.current !== selectedSeller || prevFilterType.current !== filterType || prevFilterMarketplace.current !== filterMarketplace || prevShowUnreadOnly.current !== showUnreadOnly) {
+    if (
+      prevSearchQuery.current !== searchQuery ||
+      prevSelectedSeller.current !== selectedSeller ||
+      prevFilterType.current !== filterType ||
+      prevFilterMarketplace.current !== filterMarketplace ||
+      prevShowUnreadOnly.current !== showUnreadOnly ||
+      prevIncludeResolved.current !== includeResolved
+    ) {
       prevSearchQuery.current = searchQuery;
       prevSelectedSeller.current = selectedSeller;
       prevFilterType.current = filterType;
       prevFilterMarketplace.current = filterMarketplace;
       prevShowUnreadOnly.current = showUnreadOnly;
+      prevIncludeResolved.current = includeResolved;
 
       const delayDebounceFn = setTimeout(() => {
         setPage(1);
-        loadThreads(true);
+        loadAllThreadPages();
       }, 500);
 
       return () => clearTimeout(delayDebounceFn);
     }
-  }, [searchQuery, selectedSeller, filterType, filterMarketplace, showUnreadOnly]);
+  }, [searchQuery, selectedSeller, filterType, filterMarketplace, showUnreadOnly, includeResolved]);
 
   // 2. Scroll Effect
   useEffect(() => {
@@ -355,11 +470,11 @@ export default function BuyerChatPage() {
     };
   }, [selectedThread]);
 
-  // 4. FETCH MISSING PRODUCT IMAGES (from eBay API)
+  // 4. FETCH MISSING PRODUCT IMAGES — only for first visible threads
   useEffect(() => {
     const fetchMissingImages = async () => {
-      // Find threads that need images (ORDER type without productImageUrl)
-      const threadsNeedingImages = threads.filter(thread => {
+      const visibleThreads = threads.slice(0, 12);
+      const threadsNeedingImages = visibleThreads.filter(thread => {
         const msgType = thread.actualMessageType || thread.messageType;
         return (
           msgType === 'ORDER' &&
@@ -367,23 +482,20 @@ export default function BuyerChatPage() {
           thread.itemId &&
           thread.itemId !== 'DIRECT_MESSAGE' &&
           thread.sellerId &&
-          !threadImages[thread.itemId] && // Not already fetched
-          !fetchingImages.has(thread.itemId) // Not currently fetching
+          !threadImages[thread.itemId] &&
+          !fetchingImages.has(thread.itemId)
         );
       });
 
       if (threadsNeedingImages.length === 0) return;
 
-      // Mark as fetching
       const newFetching = new Set(fetchingImages);
       threadsNeedingImages.forEach(t => newFetching.add(t.itemId));
       setFetchingImages(newFetching);
 
-      // Fetch images in parallel (max 5 at a time to avoid overwhelming the server)
-      const batchSize = 5;
+      const batchSize = 4;
       for (let i = 0; i < threadsNeedingImages.length; i += batchSize) {
         const batch = threadsNeedingImages.slice(i, i + batchSize);
-        
         await Promise.all(
           batch.map(async (thread) => {
             try {
@@ -391,15 +503,12 @@ export default function BuyerChatPage() {
                 params: { sellerId: thread.sellerId, thumbnail: true }
               });
               const url = res.data?.thumbnail || res.data?.images?.[0] || null;
-              
               if (url) {
                 setThreadImages(prev => ({ ...prev, [thread.itemId]: url }));
               }
             } catch (err) {
-              // Silently fail - just won't show image for this thread
               console.debug(`Failed to fetch image for ${thread.itemId}`, err.message);
             } finally {
-              // Remove from fetching set
               setFetchingImages(prev => {
                 const updated = new Set(prev);
                 updated.delete(thread.itemId);
@@ -412,7 +521,7 @@ export default function BuyerChatPage() {
     };
 
     fetchMissingImages();
-  }, [threads]); // Re-run when threads change
+  }, [threads]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -426,7 +535,7 @@ export default function BuyerChatPage() {
       if (res.data.success) {
         // PASS TRUE TO RESET THE LIST AND SHOW NEWEST MESSAGES AT TOP
         setPage(1);
-        loadThreads(true);
+        loadAllThreadPages();
 
         // Show snackbar with results
         const { syncResults, totalNewMessages } = res.data;
@@ -465,15 +574,14 @@ export default function BuyerChatPage() {
     }
 
     try {
-      const res = await api.post('/ebay/sync-thread', {
+      await api.post('/ebay/sync-thread', {
         sellerId: selectedThread.sellerId,
         buyerUsername: selectedThread.buyerUsername,
-        itemId: selectedThread.itemId
+        itemId: selectedThread.itemId,
+        orderId: selectedThread.orderId || undefined
       });
 
-      if (res.data.newMessagesFound) {
-        loadMessages(selectedThread, false);
-      }
+      await loadMessages(selectedThread, false);
     } catch (e) {
       // Don't log 401 errors - they're handled by the interceptor
       // Use silent error logging to avoid spamming console if it's just a timeout or 400
@@ -486,7 +594,7 @@ export default function BuyerChatPage() {
   async function loadThreads(reset = false) {
     if (loadingThreads) return;
     setLoadingThreads(true);
-    if (reset) setThreads([]); // Clear immediately so stale results don't show during load
+    if (reset) setThreads([]);
 
     try {
       const currentPage = reset ? 1 : page;
@@ -496,32 +604,83 @@ export default function BuyerChatPage() {
         search: searchQuery,
         filterType: filterType,
         filterMarketplace: filterMarketplace,
-        showUnreadOnly: showUnreadOnly
+        showUnreadOnly: showUnreadOnly,
+        includeResolved: includeResolved,
+        maxAgeDays: 0
       };
 
       if (selectedSeller) params.sellerId = selectedSeller;
 
       const res = await api.get('/ebay/chat/threads', { params });
       const newThreads = res.data.threads;
+      const total = res.data.total ?? 0;
 
       if (reset) {
         setThreads(newThreads);
+        setThreadTotal(total);
+        setHasMore(newThreads.length < total);
       } else {
-        setThreads(prev => [...prev, ...newThreads]);
+        setThreads(prev => {
+          const combined = [...prev, ...newThreads];
+          setHasMore(combined.length < total);
+          return combined;
+        });
       }
 
-      setHasMore(newThreads.length === 50); // If we got full page, assume more exists
       setPage(currentPage + 1);
-
     } catch (e) {
-      // Don't log 401 errors - they're handled by the interceptor
       if (e.response?.status !== 401) {
         console.error('Failed to load threads', e);
       }
-      // Set empty array on error to prevent crashes
       if (reset) {
         setThreads([]);
       }
+    } finally {
+      setLoadingThreads(false);
+    }
+  }
+
+  async function loadAllThreadPages() {
+    if (loadingThreads) return;
+    setLoadingThreads(true);
+    setThreads([]);
+
+    try {
+      let pageNum = 1;
+      let combined = [];
+      let total = 0;
+
+      while (pageNum <= 40) {
+        const params = {
+          page: pageNum,
+          limit: 50,
+          search: searchQuery,
+          filterType: filterType,
+          filterMarketplace: filterMarketplace,
+          showUnreadOnly: showUnreadOnly,
+          includeResolved: includeResolved,
+          maxAgeDays: 0
+        };
+        if (selectedSeller) params.sellerId = selectedSeller;
+
+        const res = await api.get('/ebay/chat/threads', { params });
+        const batch = res.data.threads || [];
+        total = res.data.total ?? 0;
+        combined = [...combined, ...batch];
+
+        if (batch.length === 0 || combined.length >= total) break;
+        pageNum += 1;
+      }
+
+      setThreads(combined);
+      setThreadTotal(total);
+      setHasMore(combined.length < total);
+      setPage(pageNum + 1);
+    } catch (e) {
+      if (e.response?.status !== 401) {
+        console.error('Failed to load threads', e);
+      }
+      setThreads([]);
     } finally {
       setLoadingThreads(false);
     }
@@ -553,8 +712,20 @@ export default function BuyerChatPage() {
       );
     }
 
-    // 2. Load Messages (Backend will mark as read in DB)
+    // 2. Sync from eBay then load messages from DB
     if (!thread.isNew) {
+      try {
+        await api.post('/ebay/sync-thread', {
+          sellerId: thread.sellerId,
+          buyerUsername: thread.buyerUsername,
+          itemId: thread.itemId,
+          orderId: thread.orderId || undefined
+        });
+      } catch (e) {
+        if (e.response?.status !== 401 && e.response?.status !== 400) {
+          console.error('Thread sync failed', e);
+        }
+      }
       await loadMessages(thread, true);
     } else {
       setMessages([]);
@@ -564,12 +735,12 @@ export default function BuyerChatPage() {
   async function loadMessages(thread, showLoading = true) {
     if (showLoading) setLoadingMessages(true);
     try {
-      const params = {};
+      const params = {
+        buyerUsername: thread.buyerUsername
+      };
       if (thread.orderId) params.orderId = thread.orderId;
-      else {
-        params.buyerUsername = thread.buyerUsername;
-        params.itemId = thread.itemId;
-      }
+      if (thread.itemId) params.itemId = thread.itemId;
+      if (thread.sellerId) params.sellerId = thread.sellerId;
 
       const res = await api.get('/ebay/chat/messages', { params });
       setMessages(res.data);
@@ -756,14 +927,146 @@ export default function BuyerChatPage() {
     }
   }
 
+  const narrowingFiltersActive = useMemo(() => (
+    Boolean(searchQuery.trim()) ||
+    Boolean(selectedSeller) ||
+    filterType !== 'ALL' ||
+    Boolean(filterMarketplace) ||
+    showUnreadOnly
+  ), [searchQuery, selectedSeller, filterType, filterMarketplace, showUnreadOnly]);
+
+  const hasActiveFilters = narrowingFiltersActive || includeResolved;
+
+  const clearAllFilters = () => {
+    setSearchQuery('');
+    setSelectedSeller('');
+    setFilterType('ALL');
+    setFilterMarketplace('');
+    setShowUnreadOnly(false);
+    setIncludeResolved(true);
+    setPage(1);
+  };
+
+  const inboxStats = useMemo(() => ({
+    unreadThreads: threads.filter(t => t.unreadCount > 0).length,
+    unreadMessages: threads.reduce((sum, t) => sum + (t.unreadCount || 0), 0),
+    loaded: threads.length
+  }), [threads]);
+
   return (
     <Box sx={{
       display: 'flex',
-      flexDirection: { xs: 'column', md: 'row' },
+      flexDirection: 'column',
       height: { xs: '100vh', md: '85vh' },
-      gap: { xs: 0, md: 2 },
+      gap: 1.5,
       position: 'relative'
     }}>
+      {/* KPI + compact filters */}
+      <Box sx={{ px: { xs: 1, md: 0 }, flexShrink: 0 }}>
+        {!loadingThreads && (threads.length > 0 || threadTotal > 0) && (
+          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 1.5, mb: 1.5 }}>
+            <KpiCard label="Conversations" value={threadTotal.toLocaleString()} color="#3b82f6" bgcolor="#eff6ff" />
+            <KpiCard label="Unread Threads" value={inboxStats.unreadThreads} color="#ef4444" bgcolor="#fef2f2" />
+            <KpiCard label="Unread Messages" value={inboxStats.unreadMessages} color="#f59e0b" bgcolor="#fffbeb" />
+            <KpiCard label="Loaded" value={`${inboxStats.loaded} / ${threadTotal}`} color="#64748b" bgcolor="#f8fafc" />
+          </Box>
+        )}
+
+        {narrowingFiltersActive && !loadingThreads && (
+          <Alert
+            severity="info"
+            sx={{ mb: 1.5, py: 0.25, alignItems: 'center' }}
+            action={
+              <Button color="inherit" size="small" startIcon={<FilterAltOffIcon />} onClick={clearAllFilters}>
+                Clear filters
+              </Button>
+            }
+          >
+            Filters are narrowing results — showing {threadTotal.toLocaleString()} conversation{threadTotal === 1 ? '' : 's'}.
+            {searchQuery.trim() && ' Search matches buyer, order, item title, seller, or message text.'}
+          </Alert>
+        )}
+
+        <Paper sx={{ p: 1.5, borderRadius: 2 }}>
+          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1} alignItems={{ lg: 'center' }}>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', lg: 140 }, flex: { lg: 1 } }}>
+              <InputLabel>Seller</InputLabel>
+              <Select value={selectedSeller} label="Seller" onChange={(e) => setSelectedSeller(e.target.value)}>
+                <MenuItem value=""><em>All Sellers</em></MenuItem>
+                {sellers.map((s) => (
+                  <MenuItem key={s._id} value={s._id}>{s.user?.username || s.user?.email}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', lg: 130 } }}>
+              <InputLabel>Type</InputLabel>
+              <Select value={filterType} label="Type" onChange={(e) => setFilterType(e.target.value)}>
+                <MenuItem value="ALL">All Messages</MenuItem>
+                <MenuItem value="ORDER">Order Related</MenuItem>
+                <MenuItem value="INQUIRY">Inquiries Only</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', lg: 140 } }}>
+              <InputLabel>Marketplace</InputLabel>
+              <Select value={filterMarketplace} label="Marketplace" onChange={(e) => setFilterMarketplace(e.target.value)}>
+                <MenuItem value="">All</MenuItem>
+                <MenuItem value="EBAY_US">US</MenuItem>
+                <MenuItem value="EBAY_CA">CA</MenuItem>
+                <MenuItem value="EBAY_AU">AU</MenuItem>
+                <MenuItem value="EBAY_GB">GB</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', lg: 130 } }}>
+              <InputLabel>Show</InputLabel>
+              <Select value={showUnreadOnly} label="Show" onChange={(e) => setShowUnreadOnly(e.target.value)}>
+                <MenuItem value={false}>All</MenuItem>
+                <MenuItem value={true}>Unread Only</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  size="small"
+                  checked={includeResolved}
+                  onChange={(e) => setIncludeResolved(e.target.checked)}
+                />
+              }
+              label={<Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>Include resolved</Typography>}
+              sx={{ ml: 0, flexShrink: 0 }}
+            />
+            <TextField
+              size="small"
+              placeholder="Search buyer, order, item, seller..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              sx={{ minWidth: { xs: '100%', lg: 200 }, flex: { lg: 2 } }}
+            />
+            <Button
+              size="small"
+              startIcon={syncingInbox ? <CircularProgress size={16} /> : <RefreshIcon />}
+              onClick={handleManualSync}
+              disabled={syncingInbox}
+              variant="outlined"
+              sx={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+            >
+              {syncingInbox ? 'Syncing...' : 'Check New'}
+            </Button>
+          </Stack>
+        </Paper>
+      </Box>
+
+      <Paper
+        elevation={2}
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          borderRadius: 2,
+          position: 'relative'
+        }}
+      >
       {/* Mobile & Tablet: Backdrop overlay when sidebar is open */}
       {(isMobile || isTablet) && sidebarOpen && (
         <Box
@@ -781,302 +1084,75 @@ export default function BuyerChatPage() {
         />
       )}
 
-      {/* LEFT: SIDEBAR */}
-      <Paper sx={{
-        width: { xs: '100%', sm: sidebarOpen ? '100%' : 0, md: 340 },
+      <Box sx={{
+        flex: 1,
+        minHeight: 0,
+        display: 'grid',
+        gridTemplateColumns: { xs: '1fr', md: 'minmax(280px, 300px) 1fr' },
+        overflow: 'hidden'
+      }}>
+      {/* LEFT: INBOX */}
+      <Box sx={{
         display: { xs: sidebarOpen ? 'flex' : 'none', sm: sidebarOpen ? 'flex' : 'none', md: 'flex' },
         flexDirection: 'column',
-        height: { xs: '100%', sm: '100%', md: '100%' },
-        position: { xs: 'fixed', sm: 'fixed', md: 'relative' },
-        top: { xs: 0, sm: 0, md: 'auto' },
-        left: { xs: 0, sm: 0, md: 'auto' },
-        zIndex: { xs: 1600, sm: 1600, md: 1 },
+        minHeight: 0,
         overflow: 'hidden',
-        boxShadow: { xs: 3, sm: 3, md: 1 }
+        borderRight: { md: 1 },
+        borderColor: 'divider',
+        bgcolor: '#fafafa',
+        position: { xs: 'fixed', sm: 'fixed', md: 'relative' },
+        top: { xs: 0, sm: 0 },
+        left: { xs: 0, sm: 0 },
+        width: { xs: '100%', sm: '100%', md: 'auto' },
+        height: { xs: '100%', sm: '100%', md: 'auto' },
+        zIndex: { xs: 1600, sm: 1600, md: 1 }
       }}>
         <Box sx={{
-          p: { xs: 1.5, md: 2 },
-          bgcolor: '#f5f5f5',
+          px: 1.5,
+          py: 1,
           borderBottom: 1,
-          borderColor: 'divider'
+          borderColor: 'divider',
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          bgcolor: '#fff'
         }}>
-          {/* Mobile & Tablet: Close button */}
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <Typography variant="subtitle2" fontWeight={700}>Inbox</Typography>
+            {inboxStats.unreadThreads > 0 && (
+              <Chip label={inboxStats.unreadThreads} size="small" color="error" sx={{ height: 20, fontSize: '0.7rem' }} />
+            )}
+            <Typography variant="caption" color="text.secondary">
+              {threadTotal > 0 ? `${inboxStats.loaded}/${threadTotal}` : ''}
+            </Typography>
+          </Stack>
           {(isMobile || isTablet) && (
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.5 }}>
-              <Typography variant="h6" sx={{ fontSize: '1rem' }}>Conversations</Typography>
-              <IconButton
-                onClick={() => setSidebarOpen(false)}
-                size="small"
-              >
-                <CloseIcon />
-              </IconButton>
-            </Box>
+            <IconButton onClick={() => setSidebarOpen(false)} size="small">
+              <CloseIcon fontSize="small" />
+            </IconButton>
           )}
-
-          {/* Filters - Vertically stacked, full width */}
-          <Stack
-            direction="column"
-            spacing={1.5}
-            sx={{ mb: 2 }}
-          >
-            <FormControl
-              fullWidth
-              size="small"
-              sx={{
-                bgcolor: 'white'
-              }}
-            >
-              <InputLabel>Filter by Seller</InputLabel>
-              <Select
-                value={selectedSeller}
-                label="Filter by Seller"
-                onChange={(e) => setSelectedSeller(e.target.value)}
-              >
-                <MenuItem value="">
-                  <em>All Sellers</em>
-                </MenuItem>
-                {sellers.map((s) => (
-                  <MenuItem key={s._id} value={s._id}>
-                    {s.user?.username || s.user?.email}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            <FormControl
-              fullWidth
-              size="small"
-              sx={{
-                bgcolor: 'white'
-              }}
-            >
-              <InputLabel>Filter by Type</InputLabel>
-              <Select
-                value={filterType}
-                label="Filter by Type"
-                onChange={(e) => setFilterType(e.target.value)}
-              >
-                <MenuItem value="ALL">All Messages</MenuItem>
-                <MenuItem value="ORDER">Order Related</MenuItem>
-                <MenuItem value="INQUIRY">Inquiries Only</MenuItem>
-              </Select>
-            </FormControl>
-
-            <FormControl
-              fullWidth
-              size="small"
-              sx={{
-                bgcolor: 'white'
-              }}
-            >
-              <InputLabel>Filter by Marketplace</InputLabel>
-              <Select
-                value={filterMarketplace}
-                label="Filter by Marketplace"
-                onChange={(e) => setFilterMarketplace(e.target.value)}
-              >
-                <MenuItem value="">All Marketplaces</MenuItem>
-                <MenuItem value="EBAY_US">United States (US)</MenuItem>
-                <MenuItem value="EBAY_CA">Canada (CA)</MenuItem>
-                <MenuItem value="EBAY_AU">Australia (AU)</MenuItem>
-                <MenuItem value="EBAY_GB">United Kingdom (GB)</MenuItem>
-              </Select>
-            </FormControl>
-
-            <FormControl
-              fullWidth
-              size="small"
-              sx={{
-                bgcolor: 'white'
-              }}
-            >
-              <InputLabel>Show Only</InputLabel>
-              <Select
-                value={showUnreadOnly}
-                label="Show Only"
-                onChange={(e) => setShowUnreadOnly(e.target.value)}
-              >
-                <MenuItem value={false}>All Conversations</MenuItem>
-                <MenuItem value={true}>Unread Messages Only</MenuItem>
-              </Select>
-            </FormControl>
-          </Stack>
-
-          <Stack
-            direction={{ xs: 'column', sm: 'row' }}
-            justifyContent="space-between"
-            alignItems={{ xs: 'stretch', sm: 'center' }}
-            spacing={1}
-            mb={2}
-          >
-            {!isMobile && <Typography variant="h6" sx={{ fontSize: { xs: '1rem', md: '1.25rem' } }}>Inbox</Typography>}
-            <Button
-              size="small"
-              startIcon={syncingInbox ? <CircularProgress size={16} /> : <RefreshIcon />}
-              onClick={handleManualSync}
-              disabled={syncingInbox}
-              variant="outlined"
-              fullWidth={isMobile}
-              sx={{ minWidth: { sm: 'auto', md: 'auto' } }}
-            >
-              {syncingInbox ? 'Syncing...' : 'Check New'}
-            </Button>
-          </Stack>
-
-          {/* SEARCH INPUT (Automatic Debounce) */}
-          <TextField
-            size="small"
-            fullWidth
-            placeholder="Search User, Order, or Item..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
+          {loadingThreads && <CircularProgress size={14} />}
         </Box>
 
-        {/* THREAD LIST */}
-        <List sx={{ overflow: 'auto', flex: 1 }}>
+        <List dense sx={{ overflow: 'auto', flex: 1, py: 0 }}>
           {threads.map((thread, index) => {
-            // Unique Key: OrderID + ItemID (handles multi-item orders correctly)
-            const uniqueKey = `${thread.orderId || 'inq'}-${thread.itemId || index}`;
-
-            // Selection Logic: Matches if OrderID matches OR (Buyer + Item) matches
             const isSelected = selectedThread && (
               (selectedThread.orderId && selectedThread.orderId === thread.orderId) ||
               (!selectedThread.orderId && selectedThread.buyerUsername === thread.buyerUsername && selectedThread.itemId === thread.itemId)
             );
+            const imageUrl = thread.productImageUrl || threadImages[thread.itemId] || null;
 
             return (
-              <React.Fragment key={uniqueKey}>
-                <ListItem disablePadding>
-                  <ListItemButton
-                    selected={isSelected}
-                    onClick={() => handleThreadSelect(thread)}
-                    alignItems="flex-start"
-                  >
-                    <ListItemAvatar>
-                      <Badge color="error" badgeContent={thread.unreadCount}>
-                        {/* Use actualMessageType (computed in real-time) if available, else fallback to messageType */}
-                        {(() => {
-                          const msgType = thread.actualMessageType || thread.messageType;
-                          const isOrder = msgType === 'ORDER';
-                          const isDirect = msgType === 'DIRECT';
-
-                          // Get image URL from DB or fetched state
-                          const imageUrl = thread.productImageUrl || threadImages[thread.itemId] || null;
-                          const isLoadingImage = fetchingImages.has(thread.itemId);
-
-                          // Show product thumbnail for ORDER messages if image is available
-                          if (isOrder && imageUrl) {
-                            return (
-                              <Avatar
-                                src={imageUrl}
-                                variant="rounded"
-                                sx={{
-                                  width: 48,
-                                  height: 48,
-                                  border: '2px solid',
-                                  borderColor: 'primary.main'
-                                }}
-                              />
-                            );
-                          }
-
-                          // Show loading spinner if fetching image for ORDER
-                          if (isOrder && isLoadingImage) {
-                            return (
-                              <Avatar
-                                variant="rounded"
-                                sx={{
-                                  width: 48,
-                                  height: 48,
-                                  border: '2px solid',
-                                  borderColor: 'primary.main',
-                                  bgcolor: 'primary.lighter'
-                                }}
-                              >
-                                <CircularProgress size={20} />
-                              </Avatar>
-                            );
-                          }
-
-                          // Otherwise show icon
-                          return (
-                            <Avatar sx={{
-                              bgcolor: isOrder
-                                ? 'primary.main'
-                                : isDirect
-                                  ? 'warning.main'
-                                  : 'secondary.main'
-                            }}>
-                              {isOrder
-                                ? <ShoppingBagIcon fontSize="small" />
-                                : isDirect
-                                  ? <EmailIcon fontSize="small" />
-                                  : <QuestionAnswerIcon fontSize="small" />
-                              }
-                            </Avatar>
-                          );
-                        })()}
-                      </Badge>
-                    </ListItemAvatar>
-                    <ListItemText
-                      primaryTypographyProps={{ component: 'div' }}
-                      secondaryTypographyProps={{ component: 'div' }}
-                      primary={
-                        <Stack direction="row" justifyContent="space-between">
-                          <Typography variant="subtitle2" noWrap sx={{ maxWidth: 140, fontWeight: 'bold' }}>
-                            {thread.buyerName || thread.buyerUsername || 'Unknown Buyer'}
-                          </Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {new Date(thread.lastDate).toLocaleDateString()}
-                          </Typography>
-                        </Stack>
-                      }
-                      secondary={
-                        <Box>
-                          <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mb: 0.5 }}>
-                            {/* MARKETPLACE BADGE */}
-                            {thread.marketplaceId && (
-                              <Chip
-                                label={thread.marketplaceId.replace('EBAY_', '')}
-                                size="small"
-                                sx={{
-                                  height: 16,
-                                  fontSize: '0.65rem',
-                                  minWidth: 24,
-                                  px: 0,
-                                  '& .MuiChip-label': { px: 0.5 },
-                                  bgcolor: thread.marketplaceId === 'EBAY_US' ? '#e3f2fd' : '#fff3e0',
-                                  color: thread.marketplaceId === 'EBAY_US' ? '#1565c0' : '#e65100',
-                                  fontWeight: 'bold'
-                                }}
-                              />
-                            )}
-                            <Typography variant="caption" display="block" color="text.secondary" noWrap>
-                              {thread.orderId
-                                ? `#${thread.orderId}`
-                                : thread.messageType === 'DIRECT'
-                                  ? 'Direct Message'
-                                  : 'Inquiry'
-                              }
-                            </Typography>
-                          </Stack>
-                          <Stack direction="row" alignItems="center">
-                            <Typography variant="caption" color="text.secondary" noWrap sx={{ flex: 1, mr: 1 }}>
-                              {thread.itemId === 'DIRECT_MESSAGE' ? 'No Item' : (thread.itemTitle || thread.itemId)}
-                            </Typography>
-                          </Stack>
-
-                          <Typography variant="body2" noWrap sx={{ fontWeight: thread.unreadCount > 0 ? 'bold' : 'normal', color: 'text.primary', mt: 0.5 }}>
-                            {thread.sender === 'SELLER' ? 'You: ' : ''}{thread.lastMessage}
-                          </Typography>
-                        </Box>
-                      }
-                    />
-                  </ListItemButton>
-                </ListItem>
-                <Divider component="li" />
-              </React.Fragment>
+              <ThreadListItem
+                key={`${thread.orderId || 'inq'}-${thread.itemId || index}`}
+                thread={thread}
+                index={index}
+                isSelected={isSelected}
+                imageUrl={imageUrl}
+                isLoadingImage={fetchingImages.has(thread.itemId)}
+                onSelect={handleThreadSelect}
+              />
             );
           })}
 
@@ -1096,257 +1172,204 @@ export default function BuyerChatPage() {
           {/* EMPTY STATE */}
           {threads.length === 0 && !loadingThreads && (
             <Typography variant="caption" sx={{ p: 3, display: 'block', textAlign: 'center', color: 'text.secondary' }}>
-              No conversations found.
+              No conversations found. Click <strong>Check New</strong> to sync messages from eBay.
             </Typography>
           )}
         </List>
-      </Paper>
-
-      {/* Button to open sidebar when closed */}
-      {!sidebarOpen && !selectedThread && (
-        <Box sx={{ p: 2, width: '100%' }}>
-          <Button
-            fullWidth
-            variant="contained"
-            startIcon={<QuestionAnswerIcon />}
-            onClick={() => setSidebarOpen(true)}
-          >
-            View Conversations
-          </Button>
-        </Box>
-      )}
+      </Box>
 
       {/* RIGHT: CHAT AREA */}
-      <Paper sx={{
-        flex: 1,
+      <Box sx={{
         display: 'flex',
         flexDirection: 'column',
-        width: { xs: '100%', md: 'auto' },
-        height: { xs: '100vh', md: '100%' },
-        minWidth: 0
+        minHeight: 0,
+        minWidth: 0,
+        overflow: 'hidden',
+        bgcolor: '#fff'
       }}>
         {/* ... existing chat area code ... */}
         {
           selectedThread ? (
             <>
               <Box sx={{
-                p: { xs: 1.5, md: 2 },
+                px: { xs: 1.5, md: 2 },
+                py: 1,
                 borderBottom: 1,
                 borderColor: 'divider',
                 bgcolor: '#fff',
-                position: 'relative'
+                flexShrink: 0
               }}>
-                {/* Mobile & Tablet: Back button */}
                 {(isMobile || isTablet) && (
                   <IconButton
-                    onClick={() => {
-                      setSelectedThread(null);
-                      setSidebarOpen(true);
-                    }}
-                    sx={{ mb: 1 }}
+                    onClick={() => { setSelectedThread(null); setSidebarOpen(true); }}
+                    size="small"
+                    sx={{ mb: 0.5 }}
                   >
-                    <CloseIcon />
+                    <CloseIcon fontSize="small" />
                   </IconButton>
                 )}
 
-                {/* TOP LEFT CORNER - Responsive Stack */}
+                {/* Row 1: Meta + actions */}
                 <Stack
-                  direction={{ xs: 'column', sm: 'row' }}
-                  spacing={1}
-                  alignItems={{ xs: 'stretch', sm: 'center' }}
+                  direction="row"
+                  spacing={0.75}
+                  alignItems="center"
                   flexWrap="wrap"
-                  sx={{
-                    position: 'static',
-                    mb: 2,
-                    maxWidth: '100%',
-                    justifyContent: 'flex-start',
-                    gap: 1,
-                    zIndex: 10
-                  }}
+                  useFlexGap
+                  sx={{ mb: 1, gap: 0.75 }}
                 >
+                  <FormControl size="small" sx={{ minWidth: 110, '& .MuiInputBase-root': { height: 32 } }}>
+                    <InputLabel shrink sx={{ fontSize: '0.75rem' }}>About</InputLabel>
+                    <Select
+                      value={metaCategory}
+                      label="About"
+                      displayEmpty
+                      notched
+                      onChange={(e) => setMetaCategory(e.target.value)}
+                      sx={{ fontSize: '0.75rem' }}
+                      renderValue={(selected) => selected || <em style={{ color: '#999' }}>Not a Case</em>}
+                    >
+                      <MenuItem value=""><em>Not a Case</em></MenuItem>
+                      <MenuItem value="INR">INR</MenuItem>
+                      <MenuItem value="Cancellation">Cancellation</MenuItem>
+                      <MenuItem value="Return">Return</MenuItem>
+                      <MenuItem value="Refund">Refund</MenuItem>
+                      <MenuItem value="Replace">Replace</MenuItem>
+                      <MenuItem value="Out of Stock">Out of Stock</MenuItem>
+                      <MenuItem value="Issue with Product">Issue with Product</MenuItem>
+                      <MenuItem value="Inquiry">Inquiry</MenuItem>
+                    </Select>
+                  </FormControl>
 
-                  {/* Meta dropdowns - Stack on mobile */}
-                  <Stack
-                    direction={{ xs: 'column', sm: 'row' }}
-                    spacing={1}
-                    flexWrap="wrap"
-                    sx={{
-                      width: { xs: '100%', sm: 'auto' },
-                      maxWidth: { md: '100%' },
-                      gap: 1
-                    }}
+                  <FormControl size="small" sx={{ minWidth: 110, '& .MuiInputBase-root': { height: 32 } }}>
+                    <InputLabel sx={{ fontSize: '0.75rem' }}>Status</InputLabel>
+                    <Select value={metaCaseStatus} label="Status" onChange={(e) => setMetaCaseStatus(e.target.value)} sx={{ fontSize: '0.75rem' }}>
+                      <MenuItem value="Case Not Opened">Case Not Opened</MenuItem>
+                      <MenuItem value="Open">Open</MenuItem>
+                      <MenuItem value="In Progress">In Progress</MenuItem>
+                      <MenuItem value="Resolved">Resolved</MenuItem>
+                    </Select>
+                  </FormControl>
+
+                  <FormControl size="small" sx={{ minWidth: 120, '& .MuiInputBase-root': { height: 32 } }}>
+                    <InputLabel shrink sx={{ fontSize: '0.75rem' }}>Picked Up By</InputLabel>
+                    <Select
+                      value={metaPickedUpBy}
+                      label="Picked Up By"
+                      onChange={(e) => setMetaPickedUpBy(e.target.value)}
+                      sx={{ fontSize: '0.75rem' }}
+                      displayEmpty
+                      renderValue={(selected) => selected || 'Unassigned'}
+                    >
+                      <MenuItem value=""><em>Unassigned</em></MenuItem>
+                      {chatAgents.map(agent => (
+                        <MenuItem key={agent._id} value={agent.name}>{agent.name}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+
+                  <Button variant="contained" size="small" onClick={handleSaveMeta} disabled={savingMeta} sx={{ minWidth: 36, height: 32, px: 1 }}>
+                    {savingMeta ? <CircularProgress size={14} color="inherit" /> : <SaveIcon sx={{ fontSize: 18 }} />}
+                  </Button>
+
+                  <Box sx={{ flex: 1 }} />
+
+                  <Chip
+                    label={getSellerName(selectedThread.sellerId)}
+                    size="small"
+                    icon={<PersonIcon sx={{ fontSize: '16px !important' }} />}
+                    sx={{ bgcolor: '#e3f2fd', color: '#1565c0', fontWeight: 600, height: 28 }}
+                  />
+
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={handleTemplateClick}
+                    disabled={sending}
+                    sx={{ height: 28, fontSize: '0.7rem', px: 1 }}
+                    endIcon={<ExpandMoreIcon sx={{ fontSize: 16 }} />}
                   >
-                    <FormControl
-                      size="small"
-                      fullWidth={isMobile}
-                      sx={{
-                        minWidth: { xs: '100%', sm: 120, md: 140 },
-                        maxWidth: { md: 180 },
-                        '& .MuiInputBase-root': { height: { xs: 40, sm: 32 } }
-                      }}
-                    >
-                      <InputLabel shrink sx={{ fontSize: '0.8rem' }}>About</InputLabel>
-                      <Select
-                        value={metaCategory}
-                        label="About"
-                        displayEmpty
-                        notched
-                        onChange={(e) => setMetaCategory(e.target.value)}
-                        sx={{ fontSize: '0.8rem' }}
-                        renderValue={(selected) => selected ? selected : <em style={{ color: '#999', fontSize: '0.8rem' }}>— Not a Case —</em>}
-                      >
-                        <MenuItem value=""><em>— Not a Case —</em></MenuItem>
-                        <MenuItem value="INR">INR</MenuItem>
-                        <MenuItem value="Cancellation">Cancellation</MenuItem>
-                        <MenuItem value="Return">Return</MenuItem>
-                        <MenuItem value="Refund">Refund</MenuItem>
-                        <MenuItem value="Replace">Replace</MenuItem>
-                        <MenuItem value="Out of Stock">Out of Stock</MenuItem>
-                        <MenuItem value="Issue with Product">Issue with Product</MenuItem>
-                        <MenuItem value="Inquiry">Inquiry</MenuItem>
-                      </Select>
-                    </FormControl>
+                    Templates
+                  </Button>
 
-                    <FormControl
-                      size="small"
-                      fullWidth={isMobile}
-                      sx={{
-                        minWidth: { xs: '100%', sm: 120, md: 140 },
-                        maxWidth: { md: 180 },
-                        '& .MuiInputBase-root': { height: { xs: 40, sm: 32 } }
-                      }}
-                    >
-                      <InputLabel sx={{ fontSize: '0.8rem' }}>Status</InputLabel>
-                      <Select
-                        value={metaCaseStatus}
-                        label="Status"
-                        onChange={(e) => setMetaCaseStatus(e.target.value)}
-                        sx={{ fontSize: '0.8rem' }}
-                      >
-                        <MenuItem value="Case Not Opened">Case Not Opened</MenuItem>
-                        <MenuItem value="Open">Open</MenuItem>
-                        <MenuItem value="In Progress">In Progress</MenuItem>
-                        <MenuItem value="Resolved">Resolved</MenuItem>
-                      </Select>
-                    </FormControl>
-
-                    <FormControl
-                      size="small"
-                      fullWidth={isMobile}
-                      sx={{
-                        minWidth: { xs: '100%', sm: 130, md: 150 },
-                        maxWidth: { md: 200 },
-                        '& .MuiInputBase-root': { height: { xs: 40, sm: 32 } }
-                      }}
-                    >
-                      <InputLabel shrink sx={{ fontSize: '0.8rem' }}>Picked Up By</InputLabel>
-                      <Select
-                        value={metaPickedUpBy}
-                        label="Picked Up By"
-                        onChange={(e) => setMetaPickedUpBy(e.target.value)}
-                        sx={{ fontSize: '0.8rem' }}
-                        displayEmpty
-                        renderValue={(selected) => (selected ? selected : '— Unassigned —')}
-                      >
-                        <MenuItem value=""><em>— Unassigned —</em></MenuItem>
-                        {chatAgents.map(agent => (
-                          <MenuItem key={agent._id} value={agent.name}>{agent.name}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-
+                  {!selectedThread.isNew && (
                     <Button
-                      variant="contained"
+                      variant="outlined"
                       size="small"
-                      onClick={handleSaveMeta}
-                      disabled={savingMeta}
-                      fullWidth={isMobile}
-                      sx={{
-                        minWidth: { xs: '100%', sm: 40 },
-                        height: { xs: 40, sm: 32 },
-                        px: { xs: 2, sm: 1 }
-                      }}
+                      onClick={handleMarkAsUnread}
+                      disabled={markingUnread}
+                      startIcon={markingUnread ? <CircularProgress size={12} /> : <MarkAsUnreadIcon sx={{ fontSize: 16 }} />}
+                      sx={{ height: 28, fontSize: '0.7rem', px: 1 }}
                     >
-                      {savingMeta ? <CircularProgress size={16} color="inherit" /> : <SaveIcon fontSize="small" />}
+                      Unread
                     </Button>
-                  </Stack>
+                  )}
 
-                  {/* Seller chip and actions */}
-                  <Stack
-                    direction={{ xs: 'column', sm: 'row' }}
-                    spacing={1}
-                    alignItems={{ xs: 'stretch', sm: 'center' }}
-                    sx={{ width: { xs: '100%', sm: 'auto' } }}
-                  >
+                  {!isMobile && (
+                    <IconButton onClick={() => setSelectedThread(null)} size="small" sx={{ color: 'text.disabled' }}>
+                      <CloseIcon fontSize="small" />
+                    </IconButton>
+                  )}
+                </Stack>
+
+                {/* Row 2: Buyer + product context */}
+                <Stack direction="row" alignItems="center" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', gap: 1 }}>
+                  <Typography variant="body2" fontWeight={600} noWrap>
+                    {selectedThread.buyerName || selectedThread.buyerUsername}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+                    @{selectedThread.buyerUsername}
+                  </Typography>
+
+                  {selectedThread.itemId !== 'DIRECT_MESSAGE' && (
+                    <>
+                      <Divider orientation="vertical" flexItem sx={{ height: 16, alignSelf: 'center' }} />
+                      {threadThumbnail && (
+                        <Box
+                          component="img"
+                          src={threadThumbnail}
+                          alt=""
+                          sx={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 0.5, border: '1px solid', borderColor: 'divider', flexShrink: 0 }}
+                        />
+                      )}
+                      <Link
+                        href={`https://www.ebay.com/itm/${selectedThread.itemId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        underline="hover"
+                        sx={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 0.25 }}
+                      >
+                        <Typography variant="caption" noWrap sx={{ color: 'primary.main', fontWeight: 600 }}>
+                          {selectedThread.itemTitle || selectedThread.itemId}
+                        </Typography>
+                        <OpenInNewIcon sx={{ fontSize: 12, flexShrink: 0 }} />
+                      </Link>
+                      <IconButton size="small" onClick={() => handleCopy(selectedThread.itemTitle || selectedThread.itemId)} sx={{ p: 0.25 }}>
+                        <ContentCopyIcon sx={{ fontSize: 14 }} />
+                      </IconButton>
+                    </>
+                  )}
+
+                  {selectedThread.orderId && (
                     <Chip
-                      label={getSellerName(selectedThread.sellerId)}
+                      label={`#${selectedThread.orderId}`}
                       size="small"
-                      icon={<PersonIcon style={{ fontSize: 20 }} />}
+                      variant="outlined"
+                      onClick={() => setSelectedOrderId(selectedThread.orderId)}
+                      sx={{ height: 24, fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer' }}
+                    />
+                  )}
+                  {selectedThread.marketplaceId && selectedThread.marketplaceId !== 'Unknown' && (
+                    <Chip
+                      label={selectedThread.marketplaceId.replace('EBAY_', '')}
+                      size="small"
                       sx={{
-                        bgcolor: '#e3f2fd',
-                        color: '#1565c0',
-                        fontWeight: 'bold',
-                        height: { xs: 36, sm: 30 },
-                        fontSize: { xs: '0.9rem', sm: '1rem' },
-                        justifyContent: { xs: 'flex-start', sm: 'center' }
+                        height: 24, fontSize: '0.7rem', fontWeight: 600,
+                        bgcolor: selectedThread.marketplaceId === 'EBAY_US' ? '#e3f2fd' : '#fff3e0',
+                        color: selectedThread.marketplaceId === 'EBAY_US' ? '#1565c0' : '#e65100',
                       }}
                     />
-                    {selectedThread.isNew && (
-                      <Chip
-                        label="New"
-                        size="small"
-                        color="success"
-                        sx={{ height: { xs: 36, sm: 24 } }}
-                      />
-                    )}
-
-                    {/* Templates Button */}
-                    <Tooltip title="Choose a response template">
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        onClick={handleTemplateClick}
-                        disabled={sending}
-                        fullWidth={isMobile}
-                        sx={{
-                          height: { xs: 40, sm: 30 },
-                          fontSize: '0.75rem',
-                          minWidth: { xs: '100%', sm: 100 },
-                          bgcolor: 'white'
-                        }}
-                        endIcon={<ExpandMoreIcon fontSize="small" />}
-                      >
-                        Templates
-                      </Button>
-                    </Tooltip>
-
-                    {!selectedThread.isNew && (
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        onClick={handleMarkAsUnread}
-                        disabled={markingUnread}
-                        startIcon={markingUnread ? <CircularProgress size={16} color="inherit" /> : <MarkAsUnreadIcon fontSize="small" />}
-                        fullWidth={isMobile}
-                        sx={{
-                          height: { xs: 40, sm: 30 },
-                          fontSize: '0.75rem'
-                        }}
-                      >
-                        {markingUnread ? 'Marking...' : 'Mark Unread'}
-                      </Button>
-                    )}
-
-                    {!isMobile && (
-                      <IconButton
-                        onClick={() => setSelectedThread(null)}
-                        size="small"
-                        sx={{ color: 'text.disabled', ml: 1 }}
-                      >
-                        <CloseIcon />
-                      </IconButton>
-                    )}
-                  </Stack>
+                  )}
                 </Stack>
 
                 {/* Templates Menu - Positioned outside the header Stack */}
@@ -1450,161 +1473,17 @@ export default function BuyerChatPage() {
                   }}
                 />
 
-                {/* MAIN CONTENT - Responsive padding */}
-                <Stack spacing={1.5} sx={{
-                  pl: { xs: 0, md: 0 },
-                  pr: { xs: 0, md: 0 },
-                  mt: { xs: 1, md: 1 },
-                  mb: { md: 0 }
-                }}>
-
-                  {/* 1. BUYER IDENTITY - Stack on mobile */}
-                  <Stack
-                    direction={{ xs: 'column', sm: 'row' }}
-                    alignItems={{ xs: 'flex-start', sm: 'center' }}
-                    spacing={{ xs: 1, sm: 3 }}
-                  >
-                    <Box>
-                      <Typography variant="caption" display="block" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 'bold', textTransform: 'uppercase' }}>
-                        Buyer Name
-                      </Typography>
-                      <Typography variant="subtitle1" sx={{ fontWeight: 600, lineHeight: 1.1, fontSize: { xs: '0.9rem', md: '1rem' } }}>
-                        {selectedThread.buyerName || '-'}
-                      </Typography>
-                    </Box>
-
-                    {!isMobile && (
-                      <Divider orientation="vertical" flexItem sx={{ height: 20, alignSelf: 'center', opacity: 0.5 }} />
-                    )}
-
-                    <Box>
-                      <Typography variant="caption" display="block" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 'bold', textTransform: 'uppercase' }}>
-                        Username
-                      </Typography>
-                      <Typography variant="body2" sx={{ fontFamily: 'monospace', bgcolor: 'rgba(0,0,0,0.05)', px: 0.5, borderRadius: 0.5, fontSize: { xs: '0.8rem', md: '0.875rem' } }}>
-                        {selectedThread.buyerUsername}
-                      </Typography>
-                    </Box>
-                  </Stack>
-
-
-                  {/* 2. PRODUCT & ORDER */}
-                  <Box>
-                    {/* DIRECT MESSAGE - No item link */}
-                    {selectedThread.itemId === 'DIRECT_MESSAGE' ? (
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                        <EmailIcon sx={{ fontSize: 20, color: 'warning.main' }} />
-                        <Typography
-                          variant="subtitle2"
-                          sx={{
-                            color: 'warning.main',
-                            fontWeight: 600,
-                            lineHeight: 1.3
-                          }}
-                        >
-                          Direct Message (No Item Context)
-                        </Typography>
-                        <Chip
-                          label="Cannot Reply via API"
-                          size="small"
-                          color="warning"
-                          sx={{ height: 24, fontSize: '0.7rem' }}
-                        />
-                      </Box>
-                    ) : (
-                      /* REGULAR ITEM LINK */
-                      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, mb: 0.5 }}>
-                        {/* Product thumbnail */}
-                        {threadThumbnail && (
-                          <Box
-                            component="img"
-                            src={threadThumbnail}
-                            alt="Product"
-                            sx={{
-                              width: 44,
-                              height: 44,
-                              objectFit: 'cover',
-                              borderRadius: 1,
-                              border: '1px solid',
-                              borderColor: 'grey.300',
-                              flexShrink: 0,
-                              mr: 0.5
-                            }}
-                          />
-                        )}
-                        <Link
-                          href={`https://www.ebay.com/itm/${selectedThread.itemId}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          underline="hover"
-                          sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}
-                        >
-                          <Typography
-                            variant="subtitle2"
-                            sx={{
-                              color: 'primary.main',
-                              fontWeight: 600,
-                              lineHeight: 1.3
-                            }}
-                          >
-                            {selectedThread.itemTitle || `Item ID: ${selectedThread.itemId}`}
-                          </Typography>
-                          <OpenInNewIcon sx={{ fontSize: 16, color: 'primary.main', mt: 0.3 }} />
-                        </Link>
-                        <IconButton
-                          size="small"
-                          onClick={() => handleCopy(selectedThread.itemTitle || `Item ID: ${selectedThread.itemId}`)}
-                          aria-label="copy product title"
-                          sx={{ p: 0.5, mt: -0.2 }}
-                        >
-                          <ContentCopyIcon sx={{ fontSize: 16 }} />
-                        </IconButton>
-                      </Box>
-                    )}
-
-                    {selectedThread.orderId && (
-                      <Chip
-                        label={`Order #: ${selectedThread.orderId}`}
-                        size="small"
-                        variant="outlined"
-                        onClick={() => setSelectedOrderId(selectedThread.orderId)}
-                        sx={{
-                          borderRadius: 1,
-                          height: 30,
-                          fontSize: '0.75rem',
-                          fontWeight: 'bold',
-                          color: 'primary.main',
-                          borderColor: 'primary.main',
-                          bgcolor: '#f0f7ff',
-                          cursor: 'pointer',
-                          '&:hover': { bgcolor: '#dbeafe' }
-                        }}
-                      />
-                    )}
-                    {/* MARKETPLACE BADGE (In Header) */}
-                    {selectedThread.marketplaceId && (
-                      <Chip
-                        label={selectedThread.marketplaceId.replace('EBAY_', '')}
-                        size="small"
-                        sx={{
-                          ml: 1,
-                          borderRadius: 1,
-                          height: 30,
-                          fontSize: '0.75rem',
-                          fontWeight: 'bold',
-                          bgcolor: selectedThread.marketplaceId === 'EBAY_US' ? '#e3f2fd' : '#fff3e0',
-                          color: selectedThread.marketplaceId === 'EBAY_US' ? '#1565c0' : '#e65100',
-                        }}
-                      />
-                    )}
-                  </Box>
-
-                </Stack>
+                {selectedThread.itemId === 'DIRECT_MESSAGE' && (
+                  <Alert severity="warning" sx={{ mt: 1, py: 0, fontSize: '0.75rem' }}>
+                    Direct messages cannot be replied to via API.
+                  </Alert>
+                )}
               </Box>
 
               <Box sx={{
                 flex: 1,
-                p: { xs: 1.5, md: 2 },
+                minHeight: 0,
+                p: { xs: 1, md: 1.5 },
                 overflowY: 'auto',
                 bgcolor: '#f0f2f5'
               }}>
@@ -1690,13 +1569,14 @@ export default function BuyerChatPage() {
               </Box>
 
               <Box sx={{
-                p: { xs: 1.5, md: 2 },
+                p: { xs: 1, md: 1.5 },
                 borderTop: 1,
                 borderColor: 'divider',
                 bgcolor: '#fff',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: 1
+                gap: 1,
+                flexShrink: 0
               }}>
                 {selectedThread.itemId === 'DIRECT_MESSAGE' ? (
                   <Alert severity="warning" sx={{ width: '100%' }}>
@@ -1794,6 +1674,8 @@ export default function BuyerChatPage() {
             </Box>
           )
         }
+      </Box>
+      </Box>
       </Paper>
 
       {/* Snackbar for sync results */}
