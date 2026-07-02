@@ -13,7 +13,12 @@ async function reconcileModelIndexes() {
 export async function connectToDatabase() {
     const uri = process.env.MONGODB_URI;
     if (!uri) throw new Error('MONGODB_URI is not set');
-    await mongoose.connect(uri, { autoIndex: true });
+    await mongoose.connect(uri, {
+        autoIndex: true,
+        serverSelectionTimeoutMS: 15000,
+        socketTimeoutMS: 45000,
+        maxPoolSize: 20,
+    });
     await reconcileModelIndexes();
     return mongoose.connection;
 }

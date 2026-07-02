@@ -90,6 +90,7 @@ import DirectListPage from '../pages/ebay/DirectListPage.jsx';
 import SellingPrivilegesPage from '../pages/admin/SellingPrivilegesPage.jsx';
 import EbayApiUsagePage from '../pages/admin/EbayApiUsagePage.jsx';
 import AnalyticsPage from '../pages/admin/AnalyticsPage.jsx';
+import SellerStandardsPage from '../pages/admin/SellerStandardsPage.jsx';
 import EbayApiTesterPage from '../pages/admin/EbayApiTesterPage.jsx';
 import StoreListingsPage from '../pages/admin/StoreListingsPage.jsx';
 import SendOfferEligiblePage from '../pages/admin/SendOfferEligiblePage.jsx';
@@ -332,6 +333,7 @@ const COMPONENT_MAP = {
   'SellingPrivileges': SellingPrivilegesPage,
   'EbayApiUsage': EbayApiUsagePage,
   'Analytics': AnalyticsPage,
+  'AnalyticsSellerStandards': SellerStandardsPage,
   'EbayApiTester': EbayApiTesterPage,
   'SellerFunds': SellerFundsPage,
   'IdeasAndIssues': IdeasPage,

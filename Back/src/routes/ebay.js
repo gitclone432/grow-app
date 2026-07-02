@@ -23,6 +23,7 @@ import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
 import ActiveListing from '../models/ActiveListing.js';
 import CustomerServiceMetricSnapshot from '../models/CustomerServiceMetricSnapshot.js';
+import SellerStandardsProfileSnapshot from '../models/SellerStandardsProfileSnapshot.js';
 import CashflowEntry from '../models/CashflowEntry.js';
 import SyncAllSellersLock from '../models/SyncAllSellersLock.js';
 import SyncAllSellersStatusCache from '../models/SyncAllSellersStatusCache.js';
@@ -62,6 +63,7 @@ import UserDailyQuantity from '../models/UserDailyQuantity.js';
 import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
 import { getSellersMatchingAllRoute, resolveStoreDisplayName } from '../utils/sellersAllScope.js';
+import { applySellerStandardsThresholdLabels } from '../utils/sellerStandardsThresholds.js';
 import {
   activeListingStatusFilter,
   getSellersForStoreListings,
@@ -12417,6 +12419,308 @@ router.post('/analytics/customer-service-metric/refresh-all', requireAuth, requi
     return res.status(500).json({
       success: false,
       error: err.message || 'Failed to refresh customer service metrics for all sellers',
+    });
+  }
+});
+
+async function refreshSellerStandardsProfilesForSeller(seller) {
+  const sellerName =
+    seller.user?.username || seller.user?.email || seller.username || String(seller._id);
+
+  if (!seller.ebayTokens?.access_token) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      skipped: true,
+      error: 'Seller not connected to eBay',
+    };
+  }
+
+  try {
+    const accessToken = await ensureValidToken(seller);
+    const apiPath = '/sell/analytics/v1/seller_standards_profile';
+    const response = await axios.get(`https://api.ebay.com${apiPath}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+      timeout: 60000,
+      validateStatus: () => true,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      const ebayError = response.data?.errors?.[0];
+      return {
+        success: false,
+        sellerId: String(seller._id),
+        sellerName,
+        status: response.status,
+        error:
+          ebayError?.longMessage ||
+          ebayError?.message ||
+          response.statusText ||
+          'eBay seller standards profile failed',
+      };
+    }
+
+    const fetchedAt = new Date();
+    const report = applySellerStandardsThresholdLabels(response.data);
+    const snapshot = await SellerStandardsProfileSnapshot.findOneAndUpdate(
+      { seller: seller._id },
+      {
+        $set: {
+          report,
+          fetchedAt,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    return {
+      success: true,
+      sellerId: String(seller._id),
+      sellerName,
+      fetchedAt: snapshot.fetchedAt,
+      profileCount: Array.isArray(response.data?.standardsProfiles)
+        ? response.data.standardsProfiles.length
+        : 0,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      error: err.message || 'Failed to fetch seller standards profiles',
+    };
+  }
+}
+
+async function refreshSellerStandardsProfileSingleForSeller(seller, { program, cycle }) {
+  const sellerName =
+    seller.user?.username || seller.user?.email || seller.username || String(seller._id);
+
+  if (!seller.ebayTokens?.access_token) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      skipped: true,
+      error: 'Seller not connected to eBay',
+    };
+  }
+
+  try {
+    const accessToken = await ensureValidToken(seller);
+    const apiPath = `/sell/analytics/v1/seller_standards_profile/${program}/${cycle}`;
+    const response = await axios.get(`https://api.ebay.com${apiPath}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+      timeout: 60000,
+      validateStatus: () => true,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      const ebayError = response.data?.errors?.[0];
+      return {
+        success: false,
+        sellerId: String(seller._id),
+        sellerName,
+        status: response.status,
+        error:
+          ebayError?.longMessage ||
+          ebayError?.message ||
+          response.statusText ||
+          'eBay seller standards profile failed',
+      };
+    }
+
+    const profile = response.data?.standardsProfiles?.[0] || response.data;
+    if (!profile?.program || !profile?.cycle?.cycleType) {
+      return {
+        success: false,
+        sellerId: String(seller._id),
+        sellerName,
+        error: 'Unexpected eBay response shape for seller standards profile',
+      };
+    }
+    const existing = await SellerStandardsProfileSnapshot.findOne({ seller: seller._id }).lean();
+    const profiles = Array.isArray(existing?.report?.standardsProfiles)
+      ? [...existing.report.standardsProfiles]
+      : [];
+    const idx = profiles.findIndex(
+      (p) => p?.program === program && p?.cycle?.cycleType === cycle
+    );
+    if (idx >= 0) {
+      profiles[idx] = profile;
+    } else {
+      profiles.push(profile);
+    }
+
+    const fetchedAt = new Date();
+    const report = applySellerStandardsThresholdLabels({ standardsProfiles: profiles });
+    const snapshot = await SellerStandardsProfileSnapshot.findOneAndUpdate(
+      { seller: seller._id },
+      { $set: { report, fetchedAt } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    return {
+      success: true,
+      sellerId: String(seller._id),
+      sellerName,
+      fetchedAt: snapshot.fetchedAt,
+      profile,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      error: err.message || 'Failed to fetch seller standards profile',
+    };
+  }
+}
+
+const SSP_REFRESH_DELAY_MS = 1200;
+
+// eBay Sell Analytics — Seller Standards Profile (findSellerStandardsProfiles / getSellerStandardsProfile)
+router.get('/analytics/seller-standards-profiles', requireAuth, requirePageAccess('AnalyticsSellerStandards'), async (req, res) => {
+  try {
+    const { sellerId, refresh, program, cycle } = req.query;
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
+      ? await Seller.findById(sellerLookup).populate('user')
+      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const shouldRefresh = ['true', '1', 'yes'].includes(String(refresh || '').toLowerCase());
+    const upperProgram = String(program || '').trim().toUpperCase();
+    const upperCycle = String(cycle || '').trim().toUpperCase();
+    const singleProfileMode = upperProgram && upperCycle;
+
+    const respondWithSnapshot = (snapshot, { fromCache, profile = null }) => res.json({
+      success: true,
+      fromCache,
+      fetchedAt: snapshot?.fetchedAt || null,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+      },
+      report: applySellerStandardsThresholdLabels(snapshot?.report) || null,
+      profile,
+    });
+
+    if (!shouldRefresh) {
+      const cached = await SellerStandardsProfileSnapshot.findOne({ seller: seller._id }).lean();
+      if (cached?.report) {
+        if (singleProfileMode) {
+          const profiles = cached.report?.standardsProfiles || [];
+          const match = profiles.find(
+            (p) => p?.program === upperProgram && p?.cycle?.cycleType === upperCycle
+          );
+          return res.json({
+            success: true,
+            fromCache: true,
+            fetchedAt: cached.fetchedAt,
+            seller: {
+              id: seller._id,
+              username: seller.user?.username || seller.username || String(seller._id),
+            },
+            report: applySellerStandardsThresholdLabels(cached.report),
+            profile: match || null,
+            noData: !match,
+          });
+        }
+        return respondWithSnapshot(cached, { fromCache: true });
+      }
+      return res.json({
+        success: true,
+        fromCache: false,
+        noData: true,
+        seller: {
+          id: seller._id,
+          username: seller.user?.username || seller.username || String(seller._id),
+        },
+        report: null,
+      });
+    }
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const refreshResult = singleProfileMode
+      ? await refreshSellerStandardsProfileSingleForSeller(seller, {
+        program: upperProgram,
+        cycle: upperCycle,
+      })
+      : await refreshSellerStandardsProfilesForSeller(seller);
+
+    if (!refreshResult.success) {
+      const cached = await SellerStandardsProfileSnapshot.findOne({ seller: seller._id }).lean();
+      return res.status(refreshResult.status || 400).json({
+        success: false,
+        error: refreshResult.error || 'eBay seller standards profile failed',
+        hint: refreshResult.status === 409
+          ? 'Seller may not have standards data for this program/cycle yet. Try CURRENT vs PROJECTED or another program.'
+          : null,
+        cachedReport: applySellerStandardsThresholdLabels(cached?.report) || null,
+        fetchedAt: cached?.fetchedAt || null,
+      });
+    }
+
+    const snapshot = await SellerStandardsProfileSnapshot.findOne({ seller: seller._id }).lean();
+    if (singleProfileMode) {
+      return respondWithSnapshot(snapshot, { fromCache: false, profile: refreshResult.profile || null });
+    }
+    return respondWithSnapshot(snapshot, { fromCache: false });
+  } catch (err) {
+    console.error('[Analytics Seller Standards] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch seller standards profiles',
+    });
+  }
+});
+
+router.post('/analytics/seller-standards-profiles/refresh-all', requireAuth, requirePageAccess('AnalyticsSellerStandards'), async (req, res) => {
+  try {
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email')
+      : [];
+
+    const results = [];
+    for (let i = 0; i < sellers.length; i++) {
+      const result = await refreshSellerStandardsProfilesForSeller(sellers[i]);
+      results.push(result);
+      if (i < sellers.length - 1) {
+        await sleep(SSP_REFRESH_DELAY_MS);
+      }
+    }
+
+    const succeeded = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success && !r.skipped).length;
+    const skipped = results.filter((r) => r.skipped).length;
+
+    return res.json({
+      success: true,
+      summary: { total: sellers.length, succeeded, failed, skipped },
+      results,
+    });
+  } catch (err) {
+    console.error('[Analytics Seller Standards Refresh All] Error:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to refresh seller standards for all sellers',
     });
   }
 });

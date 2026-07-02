@@ -148,19 +148,22 @@ export default function StoresPage() {
     const { data } = await api.get('/sellers/all');
     const list = Array.isArray(data) ? data : [];
     setSellers(list);
-    if (!selectedSellerId && list.length > 0) {
-      setSelectedSellerId(list[0]._id);
-    }
+    setSelectedSellerId((prev) => prev || list[0]?._id || '');
     return list;
-  }, [selectedSellerId]);
+  }, []);
 
   const loadTemplates = useCallback(async () => {
-    const [listingRes, gallery] = await Promise.all([
-      api.get('/listing-templates'),
-      fetchDescriptionTemplateGallery().catch(() => ({ templates: [] })),
-    ]);
-    setListingTemplates(Array.isArray(listingRes.data) ? listingRes.data : []);
-    setDescriptionTemplates(Array.isArray(gallery.templates) ? gallery.templates : []);
+    try {
+      const [listingRes, gallery] = await Promise.all([
+        api.get('/listing-templates', { params: { summary: true }, timeout: 30000 }),
+        fetchDescriptionTemplateGallery().catch(() => ({ templates: [] })),
+      ]);
+      setListingTemplates(Array.isArray(listingRes.data) ? listingRes.data : []);
+      setDescriptionTemplates(Array.isArray(gallery.templates) ? gallery.templates : []);
+    } catch (err) {
+      console.error('Failed to load template lists for Stores page:', err);
+      setError((prev) => prev || err.response?.data?.error || 'Failed to load listing templates');
+    }
   }, []);
 
   const loadPricing = useCallback(async (sellerId, templateId) => {
@@ -209,13 +212,15 @@ export default function StoresPage() {
   useEffect(() => {
     const init = async () => {
       setLoading(true);
+      setError('');
       try {
-        await Promise.all([loadSellers(), loadTemplates()]);
+        await loadSellers();
       } catch (err) {
-        setError(err.response?.data?.error || 'Failed to initialize page');
+        setError(err.response?.data?.error || 'Failed to load stores');
       } finally {
         setLoading(false);
       }
+      void loadTemplates();
     };
     void init();
   }, [loadSellers, loadTemplates]);

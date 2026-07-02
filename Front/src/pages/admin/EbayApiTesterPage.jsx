@@ -15,6 +15,13 @@ import {
 } from '@mui/material';
 import api from '../../lib/api';
 
+const ALL_SELLERS_VALUE = '__all__';
+const BULK_CALL_DELAY_MS = 1200;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const PRESETS = [
   // Sell Account / eBay Parameters
   { group: 'Sell Account', label: 'Selling Privileges (All Stores)', method: 'GET', path: '/ebay/selling/summary/all', params: {} },
@@ -76,6 +83,20 @@ const PRESETS = [
       filter: 'marketplace_ids:{EBAY_US},listing_ids:{127866369320},date_range:[20260601..20260630]',
       sort: '-LISTING_VIEWS_TOTAL'
     },
+  },
+  {
+    group: 'Sell Analytics',
+    label: 'Analytics: Seller Standards (All Profiles)',
+    method: 'GET',
+    path: '/sell/analytics/v1/seller_standards_profile',
+    params: {},
+  },
+  {
+    group: 'Sell Analytics',
+    label: 'Analytics: Seller Standards (US / CURRENT)',
+    method: 'GET',
+    path: '/sell/analytics/v1/seller_standards_profile/PROGRAM_US/CURRENT',
+    params: {},
   },
 
   // Post-Order (Legacy)
@@ -572,6 +593,7 @@ export default function EbayApiTesterPage() {
 </GetBestOffersRequest>`);
 
   const [loading, setLoading] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState('');
   const [error, setError] = useState('');
   const [status, setStatus] = useState(null);
   const [responseText, setResponseText] = useState('');
@@ -1450,6 +1472,7 @@ export default function EbayApiTesterPage() {
     setStatus(null);
     setResponseHint('');
     setCopyStatus('');
+    setBulkProgress('');
 
     try {
       let statusCode;
@@ -1469,6 +1492,7 @@ export default function EbayApiTesterPage() {
 
       const shouldUseRawProxy =
         !isInternalAppPath(resolvedPath) && (rawEbayMode || isLikelyExternalEbayPath);
+      const runForAllSellers = sellerId === ALL_SELLERS_VALUE;
 
       if (shouldUseRawProxy && Object.keys(parsedParams || {}).length === 0) {
         const suggested = suggestParamsForPath(resolvedPath, marketplaceId);
@@ -1491,7 +1515,74 @@ export default function EbayApiTesterPage() {
         return;
       }
 
-      if (path === '/ebay/dev/trading-call') {
+      if (runForAllSellers && path === '/ebay/dev/trading-call') {
+        setError('Select a single seller for Trading API calls');
+        setLoading(false);
+        return;
+      }
+
+      if (runForAllSellers && method !== 'GET') {
+        setError('All sellers mode only supports GET requests');
+        setLoading(false);
+        return;
+      }
+
+      if (runForAllSellers && shouldUseRawProxy) {
+        if (!sellers.length) {
+          setError('No sellers available');
+          setLoading(false);
+          return;
+        }
+
+        const results = [];
+        for (let i = 0; i < sellers.length; i++) {
+          const s = sellers[i];
+          const sellerName = s.user?.username || s.user?.email || s._id;
+          setBulkProgress(`Seller ${i + 1} of ${sellers.length}: ${sellerName}`);
+          try {
+            const proxyRes = await api.post('/ebay/dev/raw-call', {
+              sellerId: s._id,
+              method,
+              endpoint: resolvedPath || pathText,
+              params: parsedParams,
+              body: parsedBody || {},
+              marketplace: marketplaceId || undefined,
+            });
+            results.push({
+              sellerId: s._id,
+              sellerName,
+              ...(proxyRes.data || {}),
+            });
+          } catch (e) {
+            results.push({
+              sellerId: s._id,
+              sellerName,
+              ok: false,
+              statusCode: e?.response?.status || 500,
+              error: e?.response?.data?.error || e.message || 'Request failed',
+              data: e?.response?.data || null,
+            });
+          }
+          if (i < sellers.length - 1) {
+            await sleep(BULK_CALL_DELAY_MS);
+          }
+        }
+
+        const succeeded = results.filter((r) => r.ok && r.statusCode >= 200 && r.statusCode < 300).length;
+        const failed = results.length - succeeded;
+        statusCode = 200;
+        payload = {
+          allSellers: true,
+          endpoint: resolvedPath,
+          summary: { total: sellers.length, succeeded, failed },
+          results,
+        };
+        setResponseHint(
+          failed
+            ? `Fetched ${succeeded} of ${sellers.length} sellers (${failed} failed).`
+            : `Fetched all ${sellers.length} sellers.`
+        );
+      } else if (path === '/ebay/dev/trading-call') {
         const proxyRes = await api.post('/ebay/dev/trading-call', {
           sellerId,
           callName: tradingCallName,
@@ -1545,6 +1636,7 @@ export default function EbayApiTesterPage() {
       setError(e?.response?.data?.error || e.message || 'Request failed');
     } finally {
       setLoading(false);
+      setBulkProgress('');
     }
   };
 
@@ -1565,7 +1657,7 @@ export default function EbayApiTesterPage() {
       <Typography variant="h4" sx={{ mb: 1 }}>eBay API Tester</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         {rawEbayMode
-          ? 'Paste an eBay REST path or full URL, select a seller, optionally set filters, then Run. No preset required.'
+          ? 'Paste an eBay REST path or full URL, select a seller (or All sellers for GET), optionally set filters, then Run. No preset required.'
           : 'Run internal app API calls and inspect responses (orders, seller funds, categories, etc.).'}
       </Typography>
       {rawEbayMode ? (
@@ -1621,9 +1713,18 @@ export default function EbayApiTesterPage() {
                   onChange={(e) => setSellerId(e.target.value)}
                   size="small"
                   sx={{ minWidth: 260 }}
-                  helperText={sellerId ? `ID: ${sellerId}` : 'Required for raw eBay calls'}
+                  helperText={
+                    sellerId === ALL_SELLERS_VALUE
+                      ? `GET only — runs for all ${sellers.length} sellers sequentially`
+                      : sellerId
+                        ? `ID: ${sellerId}`
+                        : 'Required for raw eBay calls'
+                  }
                 >
                   <MenuItem value=""><em>Select seller...</em></MenuItem>
+                  <MenuItem value={ALL_SELLERS_VALUE}>
+                    <em>All sellers ({sellers.length})</em>
+                  </MenuItem>
                   {sellers.map((s) => (
                     <MenuItem key={s._id} value={s._id}>
                       {s.user?.username || s.user?.email || s._id}
@@ -1733,9 +1834,18 @@ export default function EbayApiTesterPage() {
                       onChange={(e) => setSellerId(e.target.value)}
                       size="small"
                       sx={{ minWidth: 260 }}
-                      helperText={sellerId ? `ID: ${sellerId}` : 'Select a seller'}
+                      helperText={
+                        sellerId === ALL_SELLERS_VALUE
+                          ? `GET only — runs for all ${sellers.length} sellers sequentially`
+                          : sellerId
+                            ? `ID: ${sellerId}`
+                            : 'Select a seller'
+                      }
                     >
                       <MenuItem value=""><em>Select seller...</em></MenuItem>
+                      <MenuItem value={ALL_SELLERS_VALUE}>
+                        <em>All sellers ({sellers.length})</em>
+                      </MenuItem>
                       {sellers.map((s) => (
                         <MenuItem key={s._id} value={s._id}>
                           {s.user?.username || s.user?.email || s._id}
@@ -1842,10 +1952,19 @@ export default function EbayApiTesterPage() {
             />
           )}
 
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
             <Button variant="contained" onClick={runRequest} disabled={loading}>
-              {loading ? 'Running...' : 'Run'}
+              {loading
+                ? (bulkProgress || 'Running...')
+                : sellerId === ALL_SELLERS_VALUE
+                  ? 'Run for all sellers'
+                  : 'Run'}
             </Button>
+            {bulkProgress && loading && (
+              <Typography variant="body2" color="text.secondary">
+                {bulkProgress}
+              </Typography>
+            )}
             {status != null && (
               <Typography variant="body2" color={status >= 200 && status < 300 ? 'success.main' : 'error.main'}>
                 Status: {status}
