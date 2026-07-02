@@ -7,6 +7,7 @@ import {
   scheduledRunAutoCompatForDate,
   scheduledPollNewOrders,
   refreshPayoneerFeedCache,
+  processPendingPolicyMessages,
 } from './routes/ebay.js';
 import { importTransactionsFromGmail } from './utils/gmailTransactionImporter.js';
 import { runScheduledDirectListJobs } from './lib/directListJobRunner.js';
@@ -55,6 +56,14 @@ export const CRON_JOB_DEFINITIONS = [
     cronExpr: '*/10 * * * *',
     timezone: 'Asia/Kolkata',
     enabled: false,
+  },
+  {
+    jobKey: 'policyMessages',
+    label: 'Order policy messages',
+    description: 'Send buyer policy messages for eligible eBay orders (~20 min after order).',
+    cronExpr: '*/5 * * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: true,
   },
   {
     jobKey: 'autoCompatRunForDate',
@@ -139,6 +148,12 @@ async function runPollNewOrders() {
   await scheduledPollNewOrders();
 }
 
+async function runPolicyMessages() {
+  console.log('[CRON] Policy messages starting...');
+  const result = await processPendingPolicyMessages(50);
+  console.log(`[CRON] Policy messages: processed=${result.processed}, sent=${result.sent}, failed=${result.failed}`);
+}
+
 async function runAutoCompatForDate() {
   const now = new Date();
   const istNow = new Date(now.getTime() + (330 * 60 * 1000));
@@ -167,6 +182,7 @@ const CRON_JOB_HANDLERS = {
   directListBulkJobs: runDirectListBulkJobs,
   pollAllSellers: runPollAllSellers,
   pollNewOrders: runPollNewOrders,
+  policyMessages: runPolicyMessages,
   autoCompatRunForDate: runAutoCompatForDate,
   gmailImport: runGmailImport,
   payoneerFeedRefresh: runPayoneerFeedRefresh,
