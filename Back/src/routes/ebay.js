@@ -11647,27 +11647,8 @@ async function lookupListingInDatabase(itemId) {
 }
 
 async function fetchSellerEbayUserIdForAnalytics(token) {
-  try {
-    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
-<GetUserRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-  <DetailLevel>ReturnSummary</DetailLevel>
-</GetUserRequest>`;
-    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-      headers: {
-        'X-EBAY-API-SITEID': '0',
-        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-        'X-EBAY-API-CALL-NAME': 'GetUser',
-        'Content-Type': 'text/xml',
-      },
-      timeout: 30000,
-    });
-    const result = await parseStringPromise(response.data);
-    if (result.GetUserResponse?.Ack?.[0] === 'Failure') return null;
-    return result.GetUserResponse?.User?.[0]?.UserID?.[0] || null;
-  } catch {
-    return null;
-  }
+  const profile = await fetchTradingUserProfileSummary(token);
+  return profile?.ebayUserId || null;
 }
 
 async function verifyListingForSellerAnalytics(token, itemId, marketplace = 'EBAY_US') {
@@ -12721,6 +12702,986 @@ router.post('/analytics/seller-standards-profiles/refresh-all', requireAuth, req
     return res.status(500).json({
       success: false,
       error: err.message || 'Failed to refresh seller standards for all sellers',
+    });
+  }
+});
+
+function parseTradingAmount(amount) {
+  if (amount == null || amount === '') return null;
+  if (typeof amount === 'object') {
+    const value = amount._ ?? amount.value ?? amount.amount ?? null;
+    const currency = amount.$?.currencyID || amount.currency || amount.currencyId || 'USD';
+    if (value == null || value === '') return null;
+    return { value, currency };
+  }
+  return { value: amount, currency: 'USD' };
+}
+
+function normalizeTradingAwaitingFeedbackTransactions(transactions) {
+  return transactions.map((tx) => ({
+    listingId: tx.Item?.ItemID || '',
+    itemId: tx.Item?.ItemID || '',
+    title: tx.Item?.Title || '',
+    orderLineItemId: tx.OrderLineItemID || tx.OrderLineItemId || '',
+    transactionId: tx.TransactionID || '',
+    userName: tx.Buyer?.UserID || tx.Item?.Seller?.UserID || '',
+    role: 'SELLER',
+    price: parseTradingAmount(tx.TransactionPrice) || parseTradingAmount(tx.Item?.SellingStatus?.CurrentPrice),
+    endDate: tx.Item?.ListingDetails?.EndTime || tx.CreatedDate || null,
+    transactionEndDate: tx.Item?.ListingDetails?.EndTime || null,
+    raw: tx,
+  }));
+}
+
+async function fetchItemsAwaitingFeedbackTrading(seller, { pageLimit, pageOffset, sort }) {
+  const token = await ensureValidToken(seller);
+  const pageNumber = Math.floor(pageOffset / pageLimit) + 1;
+  const sortValue = String(sort || 'EndTimeDescending').trim() || 'EndTimeDescending';
+
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemsAwaitingFeedbackRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <Pagination>
+    <EntriesPerPage>${pageLimit}</EntriesPerPage>
+    <PageNumber>${pageNumber}</PageNumber>
+  </Pagination>
+  <Sort>${sortValue}</Sort>
+</GetItemsAwaitingFeedbackRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-CALL-NAME': 'GetItemsAwaitingFeedback',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  const parsed = await parseStringPromise(response.data, { explicitArray: false });
+  const payload = parsed?.GetItemsAwaitingFeedbackResponse || {};
+
+  if (payload.Ack === 'Failure') {
+    const err = Array.isArray(payload.Errors) ? payload.Errors[0] : payload.Errors;
+    return {
+      success: false,
+      status: 400,
+      error: err?.LongMessage || err?.ShortMessage || 'GetItemsAwaitingFeedback failed',
+      details: payload,
+    };
+  }
+
+  const iaf = payload.ItemsAwaitingFeedback || {};
+  const pagination = iaf.PaginationResult || {};
+  const rawTx = iaf.TransactionArray?.Transaction || [];
+  const transactions = Array.isArray(rawTx) ? rawTx : [rawTx].filter(Boolean);
+
+  return {
+    success: true,
+    source: 'trading',
+    lineItems: normalizeTradingAwaitingFeedbackTransactions(transactions),
+    summary: {
+      buyerCount: null,
+      sellerCount: null,
+      total: Number(pagination.TotalNumberOfEntries) || transactions.length,
+      totalPages: Number(pagination.TotalNumberOfPages) || 1,
+    },
+    report: payload,
+  };
+}
+
+async function fetchItemsAwaitingFeedbackRest(seller, { pageLimit, pageOffset, filterParts, sortTrim }) {
+  const accessToken = await ensureValidToken(seller);
+  const params = { limit: pageLimit, offset: pageOffset };
+  if (filterParts.length) params.filter = filterParts.join(',');
+  if (sortTrim) params.sort = sortTrim;
+
+  const response = await axios.get('https://api.ebay.com/sell/feedback/v1/awaiting_feedback', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+    params,
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    return {
+      success: false,
+      status: response.status || 400,
+      error:
+        ebayError?.longMessage ||
+        ebayError?.message ||
+        response.statusText ||
+        'eBay awaiting feedback request failed',
+      details: response.data || null,
+      retryable: response.status === 404 || response.status === 405 || response.status === 501,
+    };
+  }
+
+  const payload = response.data || {};
+  const lineItems = Array.isArray(payload.lineItems)
+    ? payload.lineItems
+    : Array.isArray(payload.items)
+      ? payload.items
+      : [];
+
+  return {
+    success: true,
+    source: 'rest',
+    lineItems,
+    summary: {
+      buyerCount: payload.buyerCount ?? payload.buyerRoleCount ?? null,
+      sellerCount: payload.sellerCount ?? payload.sellerRoleCount ?? null,
+      total: payload.total ?? payload.totalCount ?? lineItems.length,
+      href: payload.href || null,
+      next: payload.next || null,
+      prev: payload.prev || null,
+    },
+    report: payload,
+  };
+}
+
+function applyAwaitingFeedbackClientFilters(lineItems, { listingIdTrim, userNameTrim, upperRole }) {
+  let rows = lineItems;
+  if (listingIdTrim) {
+    rows = rows.filter((item) => {
+      const id = String(item.listingId || item.itemId || item.item?.itemId || '').trim();
+      return id === listingIdTrim;
+    });
+  }
+  if (userNameTrim) {
+    const needle = userNameTrim.toLowerCase();
+    rows = rows.filter((item) => {
+      const partner = String(
+        item.userName
+        || item.partnerUserName
+        || item.transactionPartner?.userName
+        || item.buyer?.userName
+        || item.seller?.userName
+        || ''
+      ).toLowerCase();
+      return partner.includes(needle);
+    });
+  }
+  if (upperRole === 'BUYER') {
+    rows = rows.filter((item) => String(item.role || item.userRole || '').toUpperCase() === 'BUYER');
+  } else if (upperRole === 'SELLER') {
+    rows = rows.filter((item) => {
+      const role = String(item.role || item.userRole || 'SELLER').toUpperCase();
+      return role === 'SELLER' || role === '';
+    });
+  }
+  return rows;
+}
+
+function mapFeedbackTypeToTrading(feedbackType) {
+  const key = String(feedbackType || 'FEEDBACK_RECEIVED_AS_SELLER').trim().toUpperCase();
+  const map = {
+    FEEDBACK_RECEIVED_AS_SELLER: 'FeedbackReceivedAsSeller',
+    FEEDBACK_RECEIVED_AS_BUYER: 'FeedbackReceivedAsBuyer',
+    FEEDBACK_RECEIVED: 'FeedbackReceived',
+    FEEDBACK_LEFT: 'FeedbackLeft',
+  };
+  return map[key] || 'FeedbackReceivedAsSeller';
+}
+
+function normalizeTradingFeedbackEntries(entries) {
+  return entries.map((fb) => ({
+    feedbackId: fb.FeedbackID || '',
+    commentType: fb.CommentType || '',
+    commentText: fb.CommentText || '',
+    commentTime: fb.CommentTime || fb.FeedbackDate || null,
+    userName: fb.CommentingUser || fb.FeedbackUser || '',
+    listingId: fb.ItemID || fb.Item?.ItemID || '',
+    title: fb.ItemTitle || fb.Item?.Title || '',
+    role: fb.Role || '',
+    orderLineItemId: fb.OrderLineItemID || fb.OrderLineItemId || '',
+    transactionId: fb.TransactionID || '',
+    response: fb.FeedbackResponse || '',
+    raw: fb,
+  }));
+}
+
+function normalizeRestFeedbackEntries(items) {
+  return (items || []).map((fb) => ({
+    feedbackId: fb.feedbackId || fb.id || '',
+    commentType: fb.commentType || fb.ratingType || fb.type || '',
+    commentText: fb.comment || fb.commentText || fb.text || '',
+    commentTime: fb.commentTime || fb.creationDate || fb.date || null,
+    userName: fb.commentingUser || fb.userId || fb.fromUser || fb.commentingUserName || '',
+    listingId: fb.listingId || fb.itemId || '',
+    title: fb.listingTitle || fb.title || fb.itemTitle || '',
+    role: fb.role || fb.feedbackRole || '',
+    orderLineItemId: fb.orderLineItemId || '',
+    transactionId: fb.transactionId || '',
+    response: fb.response || fb.feedbackResponse || '',
+    raw: fb,
+  }));
+}
+
+async function resolveSellerEbayUserId(seller) {
+  if (seller.ebayUserId) return String(seller.ebayUserId).trim();
+  const token = await ensureValidToken(seller);
+  const profile = await fetchTradingUserProfileSummary(token);
+  if (profile?.ebayUserId) return profile.ebayUserId;
+  return null;
+}
+
+async function fetchTradingUserProfileSummary(token, { userId } = {}) {
+  try {
+    const userIdXml = userId ? `<UserID>${String(userId).replace(/[<>&]/g, '')}</UserID>` : '';
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetUserRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <DetailLevel>ReturnAll</DetailLevel>
+  ${userIdXml}
+</GetUserRequest>`;
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: {
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'GetUser',
+        'Content-Type': 'text/xml',
+      },
+      timeout: 30000,
+      validateStatus: () => true,
+    });
+    const parsed = await parseStringPromise(response.data, { explicitArray: false });
+    const payload = parsed?.GetUserResponse || {};
+    if (payload.Ack === 'Failure') return null;
+    const user = payload.User || {};
+    return {
+      ebayUserId: user.UserID || userId || null,
+      overview: {
+        feedbackScore: user.FeedbackScore ?? null,
+        positiveFeedbackPercent: user.PositiveFeedbackPercent ?? null,
+        uniquePositive: user.UniquePositiveFeedbackCount ?? null,
+        uniqueNeutral: user.UniqueNeutralFeedbackCount ?? null,
+        uniqueNegative: user.UniqueNegativeFeedbackCount ?? null,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchFeedbackTrading(seller, {
+  pageLimit,
+  pageOffset,
+  feedbackType,
+  userId,
+  listingId,
+  commentType,
+}) {
+  const token = await ensureValidToken(seller);
+  const ebayUserId = userId || await resolveSellerEbayUserId(seller);
+  if (!ebayUserId) {
+    return { success: false, status: 400, error: 'Could not resolve eBay user ID for seller' };
+  }
+
+  const pageNumber = Math.floor(pageOffset / pageLimit) + 1;
+  const tradingFeedbackType = mapFeedbackTypeToTrading(feedbackType);
+  const commentTypeXml = commentType ? `<CommentType>${commentType}</CommentType>` : '';
+  const itemIdXml = listingId ? `<ItemID>${listingId}</ItemID>` : '';
+
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetFeedbackRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <UserID>${ebayUserId}</UserID>
+  <FeedbackType>${tradingFeedbackType}</FeedbackType>
+  ${commentTypeXml}
+  ${itemIdXml}
+  <Pagination>
+    <EntriesPerPage>${pageLimit}</EntriesPerPage>
+    <PageNumber>${pageNumber}</PageNumber>
+  </Pagination>
+</GetFeedbackRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-CALL-NAME': 'GetFeedback',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  const parsed = await parseStringPromise(response.data, { explicitArray: false });
+  const payload = parsed?.GetFeedbackResponse || {};
+
+  if (payload.Ack === 'Failure') {
+    const err = Array.isArray(payload.Errors) ? payload.Errors[0] : payload.Errors;
+    return {
+      success: false,
+      status: 400,
+      error: err?.LongMessage || err?.ShortMessage || 'GetFeedback failed',
+      details: payload,
+    };
+  }
+
+  const rawEntries = payload.FeedbackDetailArray?.FeedbackDetail || [];
+  const entries = Array.isArray(rawEntries) ? rawEntries : [rawEntries].filter(Boolean);
+  const pagination = payload.PaginationResult || {};
+  const feedbackSummary = payload.FeedbackSummary || {};
+
+  return {
+    success: true,
+    source: 'trading',
+    entries: normalizeTradingFeedbackEntries(entries),
+    summary: {
+      total: Number(payload.FeedbackDetailItemTotal)
+        || Number(pagination.TotalNumberOfEntries)
+        || entries.length,
+      totalPages: Number(pagination.TotalNumberOfPages) || 1,
+      feedbackScore: feedbackSummary.FeedbackScore ?? null,
+      positiveFeedbackPercent: feedbackSummary.PositiveFeedbackPercent ?? null,
+    },
+    report: payload,
+  };
+}
+
+async function fetchFeedbackRest(seller, {
+  pageLimit,
+  pageOffset,
+  feedbackType,
+  userId,
+  listingId,
+  transactionId,
+  orderLineItemId,
+  filterParts,
+  sortTrim,
+}) {
+  const accessToken = await ensureValidToken(seller);
+  const ebayUserId = userId || await resolveSellerEbayUserId(seller);
+  if (!ebayUserId) {
+    return { success: false, status: 400, error: 'Could not resolve eBay user ID for seller' };
+  }
+
+  const upperType = String(feedbackType || 'FEEDBACK_RECEIVED').trim().toUpperCase();
+  const restFeedbackType = upperType === 'FEEDBACK_LEFT' ? 'FEEDBACK_LEFT' : 'FEEDBACK_RECEIVED';
+
+  const params = {
+    feedbackType: restFeedbackType,
+    userId: ebayUserId,
+    limit: pageLimit,
+    offset: pageOffset,
+  };
+  if (listingId) params.listingId = listingId;
+  if (transactionId) params.transactionId = transactionId;
+  if (orderLineItemId) params.orderLineItemId = orderLineItemId;
+  if (filterParts.length) params.filter = filterParts.join(',');
+  if (sortTrim) params.sort = sortTrim;
+
+  const response = await axios.get('https://api.ebay.com/sell/feedback/v1/feedback', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+    params,
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    return {
+      success: false,
+      status: response.status || 400,
+      error:
+        ebayError?.longMessage ||
+        ebayError?.message ||
+        response.statusText ||
+        'eBay feedback request failed',
+      details: response.data || null,
+      retryable: response.status === 404 || response.status === 405 || response.status === 501,
+    };
+  }
+
+  const payload = response.data || {};
+  const rawEntries = payload.feedbackEntries
+    || payload.feedbacks
+    || payload.entries
+    || payload.feedback
+    || [];
+
+  return {
+    success: true,
+    source: 'rest',
+    entries: normalizeRestFeedbackEntries(Array.isArray(rawEntries) ? rawEntries : [rawEntries].filter(Boolean)),
+    summary: {
+      total: payload.total ?? payload.totalCount ?? (Array.isArray(rawEntries) ? rawEntries.length : 0),
+      feedbackScore: payload.feedbackScore ?? null,
+      positiveFeedbackPercent: payload.positiveFeedbackPercent ?? null,
+      href: payload.href || null,
+      next: payload.next || null,
+      prev: payload.prev || null,
+    },
+    report: payload,
+  };
+}
+
+function buildFeedbackFilterParts({ feedbackType, commentType, periodDays, role }) {
+  const filterParts = [];
+  const upperType = String(feedbackType || '').trim().toUpperCase();
+
+  if (upperType === 'FEEDBACK_RECEIVED_AS_SELLER') filterParts.push('role:SELLER');
+  if (upperType === 'FEEDBACK_RECEIVED_AS_BUYER') filterParts.push('role:BUYER');
+
+  const upperComment = String(commentType || '').trim().toUpperCase();
+  if (['POSITIVE', 'NEGATIVE', 'NEUTRAL'].includes(upperComment)) {
+    filterParts.push(`commentType:${upperComment}`);
+  }
+
+  const days = Number(periodDays);
+  if (Number.isFinite(days) && days > 0) {
+    filterParts.push(`period:${Math.min(365, Math.floor(days))}`);
+  }
+
+  const upperRole = String(role || '').trim().toUpperCase();
+  if (upperRole && upperRole !== 'ALL' && !filterParts.some((f) => f.startsWith('role:'))) {
+    filterParts.push(`role:${upperRole}`);
+  }
+
+  return filterParts;
+}
+
+function collectTradingFeedbackPeriods(periodArray, type) {
+  const raw = periodArray?.FeedbackPeriod || [];
+  const list = Array.isArray(raw) ? raw : [raw].filter(Boolean);
+  return list.map((p) => ({
+    type,
+    periodDays: Number(p.PeriodInDays) || null,
+    count: Number(p.Count) || 0,
+  }));
+}
+
+function normalizeTradingFeedbackRatingSummary(summary) {
+  if (!summary || typeof summary !== 'object') {
+    return { overview: {}, ratings: [], periods: [] };
+  }
+
+  const overview = {
+    feedbackScore: summary.FeedbackScore ?? null,
+    positiveFeedbackPercent: summary.PositiveFeedbackPercent ?? null,
+    uniquePositive: summary.UniquePositiveFeedbackCount ?? null,
+    uniqueNeutral: summary.UniqueNeutralFeedbackCount ?? null,
+    uniqueNegative: summary.UniqueNegativeFeedbackCount ?? null,
+  };
+
+  const periods = [
+    ...collectTradingFeedbackPeriods(summary.PositiveFeedbackPeriodArray, 'POSITIVE'),
+    ...collectTradingFeedbackPeriods(summary.NegativeFeedbackPeriodArray, 'NEGATIVE'),
+    ...collectTradingFeedbackPeriods(summary.NeutralFeedbackPeriodArray, 'NEUTRAL'),
+    ...collectTradingFeedbackPeriods(summary.TotalFeedbackPeriodArray, 'TOTAL'),
+  ];
+
+  const ratings = [];
+  const dsrArrays = summary.SellerRatingSummaryArray?.AverageRatingSummary || [];
+  const dsrList = Array.isArray(dsrArrays) ? dsrArrays : [dsrArrays].filter(Boolean);
+  for (const block of dsrList) {
+    const period = block.FeedbackSummaryPeriod || '';
+    const details = block.AverageRatingDetails || [];
+    const detailList = Array.isArray(details) ? details : [details].filter(Boolean);
+    for (const d of detailList) {
+      ratings.push({
+        ratingType: d.RatingDetail || 'DSR',
+        role: 'SELLER',
+        period,
+        average: d.Rating != null ? Number(d.Rating) : null,
+        count: d.RatingCount != null ? Number(d.RatingCount) : null,
+        positivePercent: null,
+      });
+    }
+  }
+
+  return { overview, ratings, periods };
+}
+
+function normalizeRestFeedbackRatingSummary(payload) {
+  const overview = {
+    feedbackScore: payload?.feedbackScore ?? payload?.score ?? null,
+    positiveFeedbackPercent: payload?.positiveFeedbackPercent ?? payload?.positivePercent ?? null,
+    uniquePositive: payload?.uniquePositiveCount ?? payload?.positiveCount ?? null,
+    uniqueNeutral: payload?.uniqueNeutralCount ?? payload?.neutralCount ?? null,
+    uniqueNegative: payload?.uniqueNegativeCount ?? payload?.negativeCount ?? null,
+  };
+
+  const rawRatings = payload?.ratingSummaries
+    || payload?.feedbackRatingSummaries
+    || payload?.ratings
+    || payload?.summary
+    || [];
+
+  const ratings = (Array.isArray(rawRatings) ? rawRatings : [rawRatings])
+    .filter(Boolean)
+    .map((r) => ({
+      ratingType: r.ratingType || r.type || r.name || r.metricKey || '—',
+      role: r.role || r.userRole || '',
+      period: r.period || r.lookbackPeriod || r.periodLabel || r.feedbackSummaryPeriod || '',
+      average: r.average ?? r.averageRating ?? r.value ?? r.scalar ?? null,
+      count: r.count ?? r.ratingCount ?? r.totalCount ?? r.uniqueFeedbackGivers ?? null,
+      positivePercent: r.positivePercent ?? r.positiveFeedbackPercent ?? r.positivePercentage ?? null,
+      distribution: r.distribution || r.ratingDistribution || r.values || null,
+      raw: r,
+    }));
+
+  const rawPeriods = payload?.periods || payload?.feedbackPeriods || [];
+  const periods = (Array.isArray(rawPeriods) ? rawPeriods : [rawPeriods])
+    .filter(Boolean)
+    .map((p) => ({
+      type: p.type || p.commentType || p.ratingType || 'TOTAL',
+      periodDays: p.periodDays ?? p.period ?? p.days ?? null,
+      count: p.count ?? p.total ?? 0,
+    }));
+
+  return { overview, ratings, periods };
+}
+
+async function fetchFeedbackRatingSummaryTrading(seller, { userId, role }) {
+  const token = await ensureValidToken(seller);
+  const profile = await fetchTradingUserProfileSummary(token, { userId: userId || undefined });
+  const ebayUserId = userId || profile?.ebayUserId;
+  if (!ebayUserId) {
+    return { success: false, status: 400, error: 'Could not resolve eBay user ID for seller' };
+  }
+
+  const upperRole = String(role || 'SELLER').trim().toUpperCase();
+  const tradingFeedbackType = upperRole === 'BUYER' ? 'FeedbackReceivedAsBuyer' : 'FeedbackReceivedAsSeller';
+  const safeUserId = String(ebayUserId).replace(/[<>&]/g, '');
+
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetFeedbackRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <UserID>${safeUserId}</UserID>
+  <FeedbackType>${tradingFeedbackType}</FeedbackType>
+  <Pagination>
+    <EntriesPerPage>25</EntriesPerPage>
+    <PageNumber>1</PageNumber>
+  </Pagination>
+</GetFeedbackRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-CALL-NAME': 'GetFeedback',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  const parsed = await parseStringPromise(response.data, { explicitArray: false });
+  const payload = parsed?.GetFeedbackResponse || {};
+
+  if (payload.Ack === 'Failure') {
+    const err = Array.isArray(payload.Errors) ? payload.Errors[0] : payload.Errors;
+    if (profile?.overview) {
+      return {
+        success: true,
+        source: 'trading',
+        overview: profile.overview,
+        ratings: [],
+        periods: [],
+        report: { getUser: profile, getFeedbackError: err },
+        warning: err?.LongMessage || err?.ShortMessage || 'GetFeedback failed; showing GetUser summary only',
+      };
+    }
+    return {
+      success: false,
+      status: 400,
+      error: err?.LongMessage || err?.ShortMessage || 'GetFeedback summary failed',
+      details: payload,
+    };
+  }
+
+  const normalized = normalizeTradingFeedbackRatingSummary(payload.FeedbackSummary || {});
+  if (profile?.overview) {
+    normalized.overview = {
+      ...profile.overview,
+      ...Object.fromEntries(
+        Object.entries(normalized.overview || {}).filter(([, v]) => v != null && v !== '')
+      ),
+    };
+  }
+
+  return {
+    success: true,
+    source: 'trading',
+    ...normalized,
+    report: payload,
+  };
+}
+
+async function fetchFeedbackRatingSummaryRest(seller, { userId, filterParts }) {
+  const accessToken = await ensureValidToken(seller);
+  const ebayUserId = userId || await resolveSellerEbayUserId(seller);
+  if (!ebayUserId) {
+    return { success: false, status: 400, error: 'Could not resolve eBay user ID for seller' };
+  }
+
+  const params = { userId: ebayUserId };
+  if (filterParts.length) params.filter = filterParts.join(',');
+
+  const response = await axios.get('https://api.ebay.com/sell/feedback/v1/feedback_rating_summary', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+    params,
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    return {
+      success: false,
+      status: response.status || 400,
+      error:
+        ebayError?.longMessage ||
+        ebayError?.message ||
+        response.statusText ||
+        'eBay feedback rating summary request failed',
+      details: response.data || null,
+      retryable: response.status === 404 || response.status === 405 || response.status === 501,
+    };
+  }
+
+  const normalized = normalizeRestFeedbackRatingSummary(response.data || {});
+
+  return {
+    success: true,
+    source: 'rest',
+    ...normalized,
+    report: response.data || {},
+  };
+}
+
+// eBay Sell Feedback — Items Awaiting Feedback (getItemsAwaitingFeedback)
+// @see https://developer.ebay.com/develop/api/sell/feedback_api#sell-feedback_api-awaiting_feedback-getitemsawaitingfeedback
+router.get('/feedback/awaiting', requireAuth, requirePageAccess(['EbayFeedback', 'AwaitingFeedback', 'EbayFeedbackRatingSummary']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      role = 'SELLER',
+      listingId,
+      userName,
+      sort,
+      limit = '25',
+      offset = '0',
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
+      ? await Seller.findById(sellerLookup).populate('user')
+      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const pageLimit = Math.max(1, Math.min(200, Number(limit) || 25));
+    const pageOffset = Math.max(0, Number(offset) || 0);
+
+    const filterParts = [];
+    const upperRole = String(role || '').trim().toUpperCase();
+    if (upperRole && upperRole !== 'ALL') {
+      if (!['SELLER', 'BUYER'].includes(upperRole)) {
+        return res.status(400).json({ error: 'role must be SELLER, BUYER, or ALL' });
+      }
+      filterParts.push(`role:${upperRole}`);
+    }
+    const listingIdTrim = String(listingId || '').trim();
+    if (listingIdTrim) filterParts.push(`listingId:${listingIdTrim}`);
+    const userNameTrim = String(userName || '').trim();
+    if (userNameTrim) filterParts.push(`userName:${userNameTrim}`);
+
+    const sortTrim = String(sort || '').trim();
+
+    let result = await fetchItemsAwaitingFeedbackTrading(seller, {
+      pageLimit,
+      pageOffset,
+      sort: sortTrim,
+    });
+
+    if (!result.success) {
+      console.warn('[Feedback Awaiting] Trading failed, trying REST API:', result.error);
+      const restResult = await fetchItemsAwaitingFeedbackRest(seller, {
+        pageLimit,
+        pageOffset,
+        filterParts,
+        sortTrim,
+      });
+      result = restResult.success ? restResult : result;
+    }
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error || 'eBay awaiting feedback request failed',
+        details: result.details || null,
+      });
+    }
+
+    const lineItems = applyAwaitingFeedbackClientFilters(result.lineItems, {
+      listingIdTrim,
+      userNameTrim,
+      upperRole,
+    });
+
+    return res.json({
+      success: true,
+      source: result.source,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+      },
+      request: {
+        role: upperRole || 'ALL',
+        listingId: listingIdTrim || null,
+        userName: userNameTrim || null,
+        sort: sortTrim || null,
+        limit: pageLimit,
+        offset: pageOffset,
+        filter: filterParts.length ? filterParts.join(',') : null,
+      },
+      summary: {
+        ...result.summary,
+        total: result.summary?.total ?? lineItems.length,
+        filteredCount: lineItems.length,
+      },
+      lineItems,
+      report: result.report,
+    });
+  } catch (err) {
+    console.error('[Feedback Awaiting] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch awaiting feedback',
+    });
+  }
+});
+
+// eBay Sell Feedback — Get Feedback (getFeedback)
+// @see https://developer.ebay.com/develop/api/sell/feedback_api#sell-feedback_api-feedback-getfeedback
+router.get('/feedback/list', requireAuth, requirePageAccess(['EbayFeedback', 'AwaitingFeedback', 'EbayFeedbackRatingSummary']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      feedbackType = 'FEEDBACK_RECEIVED_AS_SELLER',
+      userId,
+      listingId,
+      transactionId,
+      orderLineItemId,
+      commentType,
+      periodDays,
+      sort,
+      limit = '25',
+      offset = '0',
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
+      ? await Seller.findById(sellerLookup).populate('user')
+      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const pageLimit = Math.max(1, Math.min(200, Number(limit) || 25));
+    const pageOffset = Math.max(0, Number(offset) || 0);
+    const listingIdTrim = String(listingId || '').trim();
+    const transactionIdTrim = String(transactionId || '').trim();
+    const orderLineItemIdTrim = String(orderLineItemId || '').trim();
+    const userIdTrim = String(userId || '').trim();
+    const commentTypeTrim = String(commentType || '').trim();
+    const sortTrim = String(sort || '').trim();
+    const upperFeedbackType = String(feedbackType || 'FEEDBACK_RECEIVED_AS_SELLER').trim().toUpperCase();
+
+    const filterParts = buildFeedbackFilterParts({
+      feedbackType: upperFeedbackType,
+      commentType: commentTypeTrim,
+      periodDays,
+    });
+
+    let result = await fetchFeedbackTrading(seller, {
+      pageLimit,
+      pageOffset,
+      feedbackType: upperFeedbackType,
+      userId: userIdTrim || null,
+      listingId: listingIdTrim || null,
+      commentType: commentTypeTrim || null,
+    });
+
+    if (!result.success) {
+      console.warn('[Feedback List] Trading failed, trying REST API:', result.error);
+      const restResult = await fetchFeedbackRest(seller, {
+        pageLimit,
+        pageOffset,
+        feedbackType: upperFeedbackType,
+        userId: userIdTrim || null,
+        listingId: listingIdTrim || null,
+        transactionId: transactionIdTrim || null,
+        orderLineItemId: orderLineItemIdTrim || null,
+        filterParts,
+        sortTrim,
+      });
+      result = restResult.success ? restResult : result;
+    }
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error || 'eBay feedback request failed',
+        details: result.details || null,
+      });
+    }
+
+    const ebayUserId = userIdTrim || await resolveSellerEbayUserId(seller);
+
+    return res.json({
+      success: true,
+      source: result.source,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+        ebayUserId: ebayUserId || null,
+      },
+      request: {
+        feedbackType: upperFeedbackType,
+        userId: ebayUserId || null,
+        listingId: listingIdTrim || null,
+        transactionId: transactionIdTrim || null,
+        orderLineItemId: orderLineItemIdTrim || null,
+        commentType: commentTypeTrim || null,
+        periodDays: periodDays ? Number(periodDays) : null,
+        sort: sortTrim || null,
+        limit: pageLimit,
+        offset: pageOffset,
+        filter: filterParts.length ? filterParts.join(',') : null,
+      },
+      summary: {
+        ...result.summary,
+        total: result.summary?.total ?? result.entries.length,
+        filteredCount: result.entries.length,
+      },
+      entries: result.entries,
+      report: result.report,
+    });
+  } catch (err) {
+    console.error('[Feedback List] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch feedback',
+    });
+  }
+});
+
+// eBay Sell Feedback — Feedback Rating Summary (getFeedbackRatingSummary)
+// @see https://developer.ebay.com/develop/api/sell/feedback_api#sell-feedback_api-feedback_rating_summary-getfeedbackratingsummary
+router.get('/feedback/rating-summary', requireAuth, requirePageAccess(['EbayFeedback', 'AwaitingFeedback', 'EbayFeedbackRatingSummary']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      userId,
+      role = 'SELLER',
+      periodDays,
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
+      ? await Seller.findById(sellerLookup).populate('user')
+      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const userIdTrim = String(userId || '').trim();
+    const upperRole = String(role || 'SELLER').trim().toUpperCase();
+    if (!['SELLER', 'BUYER', 'ALL'].includes(upperRole)) {
+      return res.status(400).json({ error: 'role must be SELLER, BUYER, or ALL' });
+    }
+
+    const filterParts = buildFeedbackFilterParts({
+      role: upperRole === 'ALL' ? '' : upperRole,
+      periodDays,
+    });
+
+    let result = await fetchFeedbackRatingSummaryTrading(seller, {
+      userId: userIdTrim || null,
+      role: upperRole === 'ALL' ? 'SELLER' : upperRole,
+    });
+
+    if (!result.success) {
+      console.warn('[Feedback Rating Summary] Trading failed, trying REST API:', result.error);
+      const restResult = await fetchFeedbackRatingSummaryRest(seller, {
+        userId: userIdTrim || null,
+        filterParts,
+      });
+      result = restResult.success ? restResult : result;
+    }
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error || 'eBay feedback rating summary request failed',
+        details: result.details || null,
+      });
+    }
+
+    const ebayUserId = userIdTrim || await resolveSellerEbayUserId(seller);
+
+    return res.json({
+      success: true,
+      source: result.source,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+        ebayUserId: ebayUserId || null,
+      },
+      request: {
+        userId: ebayUserId || null,
+        role: upperRole,
+        periodDays: periodDays ? Number(periodDays) : null,
+        filter: filterParts.length ? filterParts.join(',') : null,
+      },
+      overview: result.overview || {},
+      ratings: result.ratings || [],
+      periods: result.periods || [],
+      warning: result.warning || null,
+      report: result.report,
+    });
+  } catch (err) {
+    console.error('[Feedback Rating Summary] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch feedback rating summary',
     });
   }
 });

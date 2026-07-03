@@ -91,6 +91,7 @@ import SellingPrivilegesPage from '../pages/admin/SellingPrivilegesPage.jsx';
 import EbayApiUsagePage from '../pages/admin/EbayApiUsagePage.jsx';
 import AnalyticsPage from '../pages/admin/AnalyticsPage.jsx';
 import SellerStandardsPage from '../pages/admin/SellerStandardsPage.jsx';
+import EbayFeedbackPage from '../pages/admin/EbayFeedbackPage.jsx';
 import EbayApiTesterPage from '../pages/admin/EbayApiTesterPage.jsx';
 import StoreListingsPage from '../pages/admin/StoreListingsPage.jsx';
 import SendOfferEligiblePage from '../pages/admin/SendOfferEligiblePage.jsx';
@@ -334,6 +335,7 @@ const COMPONENT_MAP = {
   'EbayApiUsage': EbayApiUsagePage,
   'Analytics': AnalyticsPage,
   'AnalyticsSellerStandards': SellerStandardsPage,
+  'EbayFeedback': EbayFeedbackPage,
   'EbayApiTester': EbayApiTesterPage,
   'SellerFunds': SellerFundsPage,
   'IdeasAndIssues': IdeasPage,
@@ -943,6 +945,14 @@ export default function AdminLayout({ user, onLogout }) {
           <Route path="/user-performance" element={<UserPerformancePage />} />
 
           <Route path="/credit-card-names" element={<Navigate to="/admin/credit-cards" replace />} />
+
+          {hasAccess('EbayFeedback') && (
+            <>
+              <Route path="/feedback/awaiting" element={<Navigate to="/feedback?tab=awaiting" replace />} />
+              <Route path="/feedback/list" element={<Navigate to="/feedback?tab=history" replace />} />
+              <Route path="/feedback/rating-summary" element={<Navigate to="/feedback?tab=summary" replace />} />
+            </>
+          )}
 
           {/* Dynamic page routes based on access */}
           {PAGE_REGISTRY.map(page => {

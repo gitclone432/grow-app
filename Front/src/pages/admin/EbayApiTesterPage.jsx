@@ -99,6 +99,28 @@ const PRESETS = [
     params: {},
   },
 
+  {
+    group: 'Sell Feedback',
+    label: 'Feedback: Items Awaiting Feedback (seller)',
+    method: 'GET',
+    path: '/sell/feedback/v1/awaiting_feedback',
+    params: { filter: 'role:SELLER', limit: 25, offset: 0 },
+  },
+  {
+    group: 'Sell Feedback',
+    label: 'Feedback: Get Feedback (received)',
+    method: 'GET',
+    path: '/sell/feedback/v1/feedback',
+    params: { feedbackType: 'FEEDBACK_RECEIVED', limit: 25, offset: 0 },
+  },
+  {
+    group: 'Sell Feedback',
+    label: 'Feedback: Rating Summary',
+    method: 'GET',
+    path: '/sell/feedback/v1/feedback_rating_summary',
+    params: { filter: 'role:SELLER' },
+  },
+
   // Post-Order (Legacy)
   {
     group: 'Post-Order: Cancellation',
