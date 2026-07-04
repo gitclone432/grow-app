@@ -1210,6 +1210,7 @@ const EBAY_OAUTH_SCOPES = [
   'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
   'https://api.ebay.com/oauth/api_scope/sell.finances',
+  'https://api.ebay.com/oauth/api_scope/sell.finances.earnings.read',
   'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.reputation',
   'https://api.ebay.com/oauth/api_scope/sell.reputation.readonly',
@@ -12343,6 +12344,68 @@ router.get('/analytics/customer-service-metric', requireAuth, requirePageAccess(
   }
 });
 
+// Cases/orders behind a customer service metric (from stored Post-Order inquiries)
+router.get('/analytics/customer-service-metric/orders', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      metricType = 'ITEM_NOT_RECEIVED',
+      fromDate,
+      toDate,
+      limit = 50,
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ success: false, error: 'sellerId is required' });
+    }
+
+    const upperMetric = String(metricType || '').toUpperCase();
+    if (!['ITEM_NOT_RECEIVED', 'ITEM_NOT_AS_DESCRIBED'].includes(upperMetric)) {
+      return res.status(400).json({ success: false, error: 'metricType must be ITEM_NOT_RECEIVED or ITEM_NOT_AS_DESCRIBED' });
+    }
+
+    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
+      ? await Seller.findById(sellerLookup).select('_id')
+      : await Seller.findOne({ username: sellerLookup }).select('_id');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const caseType = upperMetric === 'ITEM_NOT_AS_DESCRIBED' ? 'SNAD' : 'INR';
+    const query = { seller: seller._id, caseType };
+
+    if (fromDate || toDate) {
+      query.creationDate = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        if (!Number.isNaN(from.getTime())) query.creationDate.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        if (!Number.isNaN(to.getTime())) query.creationDate.$lte = to;
+      }
+      if (!Object.keys(query.creationDate).length) delete query.creationDate;
+    }
+
+    const max = Math.min(200, Math.max(1, parseInt(limit, 10) || 50));
+    const cases = await Case.find(query)
+      .sort({ creationDate: -1 })
+      .limit(max)
+      .select('caseId orderId buyerUsername status creationDate itemTitle itemId claimAmount worksheetStatus')
+      .lean();
+
+    return res.json({
+      success: true,
+      metricType: upperMetric,
+      caseType,
+      total: cases.length,
+      cases,
+    });
+  } catch (err) {
+    console.error('[Analytics CSM Orders] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load metric orders' });
+  }
+});
+
 router.post('/analytics/customer-service-metric/refresh-all', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
   try {
     const {
@@ -15502,6 +15565,256 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
     res.status(500).json({ error: 'Failed to fetch feed upload stats' });
   }
 });
+// ============================================
+// FINANCES TRANSACTION FILTERS (shared by summary + getTransactions)
+// ============================================
+function buildFinancesTransactionFilters({
+  transactionStatus,
+  transactionType,
+  fromDate,
+  toDate,
+  orderId,
+  payoutId,
+  buyerUsername,
+  transactionId,
+  requireStatus = false,
+}) {
+  const filters = [];
+  const status = String(transactionStatus || '').trim();
+  if (requireStatus && !status) throw new Error('transactionStatus is required');
+  if (status) filters.push(`transactionStatus:{${status}}`);
+
+  if (transactionType?.trim()) {
+    filters.push(`transactionType:{${String(transactionType).trim()}}`);
+  }
+  if (fromDate || toDate) {
+    const from = fromDate ? new Date(fromDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const to = toDate ? new Date(toDate) : new Date();
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      throw new Error('Invalid fromDate or toDate');
+    }
+    filters.push(`transactionDate:[${from.toISOString()}..${to.toISOString()}]`);
+  }
+  if (orderId?.trim()) filters.push(`orderId:{${String(orderId).trim()}}`);
+  if (payoutId?.trim()) filters.push(`payoutId:{${String(payoutId).trim()}}`);
+  if (buyerUsername?.trim()) filters.push(`buyerUsername:{${String(buyerUsername).trim()}}`);
+  if (transactionId?.trim()) {
+    if (!transactionType?.trim()) {
+      throw new Error('transactionType is required when filtering by transactionId');
+    }
+    filters.push(`transactionId:{${String(transactionId).trim()}}`);
+  }
+  return filters;
+}
+
+function getFinancesReference(txn, referenceType) {
+  return (txn?.references || []).find((r) => r.referenceType === referenceType) || null;
+}
+
+function parseFeeTransactionItemId(transactionId) {
+  const match = String(transactionId || '').match(/^(?:TAX|FEE)-(\d+)_/);
+  return match?.[1] || null;
+}
+
+function buildFinancesOrderIdIndexes(transactions) {
+  const itemToOrder = new Map();
+  const srrToOrder = new Map();
+  const sales = [];
+
+  for (const txn of transactions || []) {
+    const orderId = txn?.orderId || getFinancesReference(txn, 'ORDER_ID')?.referenceId;
+    if (!orderId) continue;
+
+    const srr = txn.salesRecordReference;
+    if (srr && String(srr) !== '0') srrToOrder.set(String(srr), orderId);
+
+    for (const ref of txn.references || []) {
+      if (ref.referenceType === 'ITEM_ID' && ref.referenceId) {
+        itemToOrder.set(String(ref.referenceId), orderId);
+      }
+    }
+    for (const line of txn.orderLineItems || []) {
+      if (line.lineItemId) itemToOrder.set(String(line.lineItemId), orderId);
+    }
+
+    if (txn.transactionType === 'SALE') {
+      const time = new Date(txn.transactionDate).getTime();
+      if (!Number.isNaN(time)) sales.push({ orderId, time });
+    }
+  }
+
+  sales.sort((a, b) => a.time - b.time);
+  return { itemToOrder, srrToOrder, sales };
+}
+
+function resolveFinancesOrderId(txn, indexes) {
+  if (txn?.orderId) return txn.orderId;
+
+  const orderRef = getFinancesReference(txn, 'ORDER_ID');
+  if (orderRef?.referenceId) return orderRef.referenceId;
+
+  if (!indexes) return null;
+
+  const itemId = getFinancesReference(txn, 'ITEM_ID')?.referenceId || parseFeeTransactionItemId(txn?.transactionId);
+  if (itemId && indexes.itemToOrder.has(String(itemId))) {
+    return indexes.itemToOrder.get(String(itemId));
+  }
+
+  const srr = txn.salesRecordReference;
+  if (srr && String(srr) !== '0' && indexes.srrToOrder.has(String(srr))) {
+    return indexes.srrToOrder.get(String(srr));
+  }
+
+  const txnTime = new Date(txn.transactionDate).getTime();
+  if (Number.isNaN(txnTime) || !indexes.sales?.length) return null;
+
+  let bestOrderId = null;
+  let bestDelta = Infinity;
+  for (const sale of indexes.sales) {
+    if (sale.time > txnTime) continue;
+    const delta = txnTime - sale.time;
+    if (delta > 5 * 60 * 1000) continue;
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      bestOrderId = sale.orderId;
+    }
+  }
+  return bestOrderId;
+}
+
+/** Link tax/fee rows to orders via references, item id, sales record, or nearby SALE. */
+function enrichFinancesTransactions(transactions) {
+  const list = Array.isArray(transactions) ? transactions : [];
+  const indexes = buildFinancesOrderIdIndexes(list);
+  return list.map((txn) => {
+    const orderId = resolveFinancesOrderId(txn, indexes);
+    if (!orderId || orderId === txn.orderId) return txn;
+    return { ...txn, orderId };
+  });
+}
+
+function buildTransactionSummaryFilters(opts) {
+  return buildFinancesTransactionFilters({ ...opts, requireStatus: true });
+}
+
+router.get('/finances/transaction-summary', requireAuth, requirePageAccess('FinancesTransactionSummary'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ success: false, error: 'Seller not connected to eBay' });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
+    const filters = buildTransactionSummaryFilters({
+      transactionStatus: req.query.transactionStatus || 'FUNDS_AVAILABLE_FOR_PAYOUT',
+      transactionType: req.query.transactionType,
+      fromDate: req.query.fromDate,
+      toDate: req.query.toDate,
+      orderId: req.query.orderId,
+      payoutId: req.query.payoutId,
+      buyerUsername: req.query.buyerUsername,
+      transactionId: req.query.transactionId,
+    });
+
+    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction_summary', {
+      headers: financesApiHeaders(accessToken, marketplaceId),
+      params: { filter: filters },
+      paramsSerializer: (params) => qs.stringify(params, { arrayFormat: 'repeat' }),
+      timeout: 90000,
+    });
+
+    return res.json({
+      success: true,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId,
+      filters,
+      summary: response.data || {},
+    });
+  } catch (err) {
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = data?.errors || [];
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to load transaction summary';
+    console.error('[Transaction Summary] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
+// ============================================
+// TRANSACTIONS LIST (Finances API — getTransactions)
+// ============================================
+router.get('/finances/transactions', requireAuth, requirePageAccess('FinancesTransactions'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ success: false, error: 'Seller not connected to eBay' });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit || '50', 10) || 50));
+    const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
+
+    const filters = buildFinancesTransactionFilters({
+      transactionStatus: req.query.transactionStatus,
+      transactionType: req.query.transactionType,
+      fromDate: req.query.fromDate,
+      toDate: req.query.toDate,
+      orderId: req.query.orderId,
+      payoutId: req.query.payoutId,
+      buyerUsername: req.query.buyerUsername,
+      transactionId: req.query.transactionId,
+      requireStatus: false,
+    });
+
+    const params = { limit, offset };
+    if (filters.length) params.filter = filters;
+    if (req.query.sort) params.sort = String(req.query.sort);
+
+    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+      headers: financesApiHeaders(accessToken, marketplaceId),
+      params,
+      paramsSerializer: (p) => qs.stringify(p, { arrayFormat: 'repeat' }),
+      timeout: 90000,
+    });
+
+    const transactions = enrichFinancesTransactions(response.data?.transactions);
+    return res.json({
+      success: true,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId,
+      filters,
+      total: response.data?.total ?? null,
+      limit: response.data?.limit ?? limit,
+      offset: response.data?.offset ?? offset,
+      href: response.data?.href,
+      next: response.data?.next,
+      prev: response.data?.prev,
+      transactions,
+    });
+  } catch (err) {
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = data?.errors || [];
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to load transactions';
+    console.error('[Finances Transactions] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
 // ============================================
 // SELLER FUNDS SUMMARY (All connected sellers)
 // ============================================

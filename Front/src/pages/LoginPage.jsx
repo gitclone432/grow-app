@@ -61,7 +61,17 @@ export default function LoginPage({ onLogin }) {
       const { data } = await api.post('/auth/login', { username, password });
       onLogin(data.token, data.user);
     } catch (e) {
-      const errorMessage = e?.response?.data?.error || e.message || 'Login failed';
+      const status = e?.response?.status;
+      const apiError = e?.response?.data?.error;
+      const errorMessage = apiError
+        || (status === 500 && !apiError
+          ? 'API server unavailable. Restart the backend (cd Back && npm run dev) and try again.'
+          : null)
+        || (e.code === 'ERR_NETWORK'
+          ? 'Cannot reach the API server. Confirm the backend is running on port 5000.'
+          : null)
+        || e.message
+        || 'Login failed';
       console.error('Login error:', e);
       setError(errorMessage);
     } finally {

@@ -78,9 +78,12 @@ export const PAGE_DEFAULT_ROLES = {
   'EbayApiUsage': ['superadmin', 'listingadmin'],
   'Analytics': ['superadmin', 'listingadmin'],
   'AnalyticsSellerStandards': ['superadmin', 'listingadmin'],
+  'EbayAnalyticsHub': ['superadmin', 'listingadmin'],
   'EbayFeedback': ['superadmin', 'listingadmin'],
   'EbayApiTester': ['superadmin', 'listingadmin'],
   'SellerFunds': ['superadmin', 'listingadmin'],
+  'FinancesTransactionSummary': ['superadmin', 'listingadmin'],
+  'FinancesTransactions': ['superadmin', 'listingadmin'],
 
   // HR & Management
   'IdeasAndIssues': ['superadmin', 'hradmin', 'operationhead', 'listingadmin'],

@@ -121,9 +121,12 @@ export const PAGE_REGISTRY = [
   { id: 'EbayApiUsage', name: 'eBay API Usage', path: '/ebay-api-usage', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'Analytics', name: 'Analytics', path: '/analytics', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'AnalyticsSellerStandards', name: 'Seller Standards', path: '/analytics/seller-standards', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'EbayAnalyticsHub', name: 'Analytics Hub', path: '/analytics-hub', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayFeedback', name: 'Feedback', path: '/feedback', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayApiTester', name: 'eBay API Tester', path: '/ebay-api-tester', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'SellerFunds', name: 'Seller Funds', path: '/seller-funds', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'FinancesTransactionSummary', name: 'Transaction Summary', path: '/finances/transaction-summary', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'FinancesTransactions', name: 'Finances Transactions', path: '/finances/transactions', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
 
   // ====== HR & MANAGEMENT ======
   { id: 'IdeasAndIssues', name: 'Ideas and Issues', path: '/ideas', category: 'hrManagement', defaultRoles: ['superadmin', 'hradmin', 'operationhead', 'listingadmin'] },

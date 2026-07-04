@@ -32,6 +32,9 @@ const PRESETS = [
 
   // Payouts / Finances
   { group: 'Payouts & Finances', label: 'Processing Transactions', method: 'GET', path: '/ebay/processing-transactions/<sellerId>', params: {} },
+  { group: 'Payouts & Finances', label: 'Transaction Summary', method: 'GET', path: '/sell/finances/v1/transaction_summary', params: { filter: 'transactionStatus:{FUNDS_AVAILABLE_FOR_PAYOUT},transactionDate:[2026-01-01T00:00:00.000Z..2026-06-30T23:59:59.999Z]' } },
+  { group: 'Payouts & Finances', label: 'Transactions (list)', method: 'GET', path: '/sell/finances/v1/transaction', params: { filter: 'transactionDate:[2026-01-01T00:00:00.000Z..2026-06-30T23:59:59.999Z]', limit: 50, offset: 0 } },
+  { group: 'Payouts & Finances', label: 'Order Earnings (by order ID)', method: 'GET', path: '/sell/finances/v1/order_earnings/<orderId>', params: {} },
   { group: 'Payouts & Finances', label: 'On Hold Transactions', method: 'GET', path: '/ebay/onhold-transactions/<sellerId>', params: {} },
   { group: 'Payouts & Finances', label: 'Upcoming + Recent Payouts', method: 'GET', path: '/ebay/upcoming-payouts/<sellerId>', params: {} },
   { group: 'Payouts & Finances', label: 'Payoneer Recent Completed Feed', method: 'GET', path: '/ebay/payoneer-recent-completed-feed', params: {} },

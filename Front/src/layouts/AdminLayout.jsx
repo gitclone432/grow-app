@@ -91,6 +91,7 @@ import SellingPrivilegesPage from '../pages/admin/SellingPrivilegesPage.jsx';
 import EbayApiUsagePage from '../pages/admin/EbayApiUsagePage.jsx';
 import AnalyticsPage from '../pages/admin/AnalyticsPage.jsx';
 import SellerStandardsPage from '../pages/admin/SellerStandardsPage.jsx';
+import EbayAnalyticsHubPage from '../pages/admin/EbayAnalyticsHubPage.jsx';
 import EbayFeedbackPage from '../pages/admin/EbayFeedbackPage.jsx';
 import EbayApiTesterPage from '../pages/admin/EbayApiTesterPage.jsx';
 import StoreListingsPage from '../pages/admin/StoreListingsPage.jsx';
@@ -98,6 +99,8 @@ import SendOfferEligiblePage from '../pages/admin/SendOfferEligiblePage.jsx';
 import FeedUploadStatsPage from '../pages/admin/FeedUploadStatsPage.jsx';
 import SalaryPage from '../pages/admin/SalaryPage.jsx';
 import SellerFundsPage from '../pages/admin/SellerFundsPage.jsx';
+import TransactionSummaryPage from '../pages/admin/TransactionSummaryPage.jsx';
+import FinancesTransactionsPage from '../pages/admin/FinancesTransactionsPage.jsx';
 import FinanceCashflowPage from '../pages/admin/FinanceCashflowPage.jsx';
 import AffiliateBalancePage from '../pages/admin/AffiliateBalancePage.jsx';
 
@@ -335,9 +338,12 @@ const COMPONENT_MAP = {
   'EbayApiUsage': EbayApiUsagePage,
   'Analytics': AnalyticsPage,
   'AnalyticsSellerStandards': SellerStandardsPage,
+  'EbayAnalyticsHub': EbayAnalyticsHubPage,
   'EbayFeedback': EbayFeedbackPage,
   'EbayApiTester': EbayApiTesterPage,
   'SellerFunds': SellerFundsPage,
+  'FinancesTransactionSummary': TransactionSummaryPage,
+  'FinancesTransactions': FinancesTransactionsPage,
   'IdeasAndIssues': IdeasPage,
   'TeamChat': InternalMessagesPage,
   'LeaveAdmin': LeaveAdminPage,

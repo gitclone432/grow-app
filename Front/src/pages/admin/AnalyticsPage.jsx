@@ -92,11 +92,68 @@ function formatEvalPeriod(cycle) {
   return `${fmt(start)} – ${fmt(end)}`;
 }
 
-const INR_BEST_PRACTICES = [
-  'Upload tracking for every order so buyers can follow delivery.',
-  'Ship on time — meet or beat your stated handling time.',
-  'Choose the right shipping service for the destination and item type.',
-];
+function formatCaseDate(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function MetricCasesPanel({ cases, loading, error, title, emptyHint, expectedCount }) {
+  return (
+    <Paper sx={{ p: 2, height: '100%' }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="baseline" sx={{ mb: 1.5 }}>
+        <Typography variant="subtitle1" fontWeight={700}>{title}</Typography>
+        {expectedCount != null ? (
+          <Chip size="small" label={`${cases.length}${expectedCount != null ? ` / ${expectedCount}` : ''}`} variant="outlined" />
+        ) : null}
+      </Stack>
+      {loading ? (
+        <Stack direction="row" spacing={1} alignItems="center">
+          <CircularProgress size={18} />
+          <Typography variant="body2" color="text.secondary">Loading orders…</Typography>
+        </Stack>
+      ) : null}
+      {error ? <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert> : null}
+      {!loading && !error && cases.length === 0 ? (
+        <Typography variant="body2" color="text.secondary">{emptyHint}</Typography>
+      ) : null}
+      {!loading && cases.length > 0 ? (
+        <Stack spacing={1} sx={{ maxHeight: 320, overflow: 'auto' }}>
+          {cases.map((c) => (
+            <Box
+              key={c.caseId}
+              sx={{
+                p: 1.25,
+                borderRadius: 1,
+                border: 1,
+                borderColor: 'divider',
+                bgcolor: 'background.paper',
+              }}
+            >
+              <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
+                <Typography variant="body2" sx={{ fontFamily: 'monospace', fontWeight: 700, fontSize: '0.8rem' }}>
+                  {c.orderId || c.caseId}
+                </Typography>
+                <Chip size="small" label={(c.status || 'OPEN').replace(/_/g, ' ')} variant="outlined" />
+              </Stack>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.25 }}>
+                {c.buyerUsername ? `@${c.buyerUsername}` : 'Buyer —'}
+                {' · '}
+                {formatCaseDate(c.creationDate)}
+              </Typography>
+              {c.itemTitle ? (
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, fontSize: '0.78rem' }} noWrap title={c.itemTitle}>
+                  {c.itemTitle}
+                </Typography>
+              ) : null}
+            </Box>
+          ))}
+        </Stack>
+      ) : null}
+    </Paper>
+  );
+}
 
 function parseCsDimensionBlocks(report, metricType) {
   const isInad = metricType === 'ITEM_NOT_AS_DESCRIBED';
@@ -146,30 +203,55 @@ function adjustmentHint(block, metricType) {
   return 'eBay applied a rating adjustment for circumstances beyond seller control.';
 }
 
-function PeerScale({ yourRate, peerRate, rating }) {
-  if (yourRate == null && peerRate == null) return null;
+function PeerComparisonBar({ yourRate, peerRate, rating }) {
+  if (yourRate == null && peerRate == null) {
+    return (
+      <Typography variant="body2" color="text.secondary">No peer benchmark for this category.</Typography>
+    );
+  }
   const high = Math.max(yourRate ?? 0, peerRate ?? 0, 0.25) * 1.35 || 1;
   const toPct = (v) => Math.min(100, Math.max(0, ((v ?? 0) / high) * 100));
+  const vsPeer = yourRate != null && peerRate != null ? yourRate - peerRate : null;
 
   return (
-    <Box sx={{ px: 1 }}>
-      <Stack direction="row" justifyContent="space-between" sx={{ mb: 1 }}>
-        <Typography variant="caption" color="error.main">Very high</Typography>
-        <Typography variant="caption" color="warning.main">Average</Typography>
-        <Typography variant="caption" color="success.main">Low</Typography>
+    <Box>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.75 }}>
+        <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.2 }}>
+          Compared to peers
+        </Typography>
+        {rating ? (
+          <Chip
+            size="small"
+            color={RATING_COLORS[rating] || 'default'}
+            label={rating.replace(/_/g, ' ')}
+          />
+        ) : null}
       </Stack>
-      <Box sx={{ position: 'relative', height: 160, borderRadius: 1, overflow: 'visible', mb: 2, mx: 'auto', width: 48 }}>
-        <Box sx={{ position: 'absolute', inset: 0, borderRadius: 1, background: 'linear-gradient(180deg, #f44336 0%, #ffeb3b 55%, #4caf50 100%)' }} />
+      <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
+        <Typography variant="caption" color="success.main" fontWeight={600}>Low</Typography>
+        <Typography variant="caption" color="warning.main">Average</Typography>
+        <Typography variant="caption" color="error.main" fontWeight={600}>Very high</Typography>
+      </Stack>
+      <Box
+        sx={{
+          position: 'relative',
+          height: 10,
+          borderRadius: 1,
+          mb: 1.5,
+          background: 'linear-gradient(90deg, #4caf50 0%, #ffeb3b 50%, #f44336 100%)',
+        }}
+      >
         {peerRate != null && (
           <Box
             sx={{
               position: 'absolute',
-              left: '50%',
-              bottom: `${toPct(peerRate)}%`,
-              width: 56,
-              height: 2,
-              bgcolor: 'grey.800',
-              transform: 'translate(-50%, 1px)',
+              left: `${toPct(peerRate)}%`,
+              top: -3,
+              bottom: -3,
+              width: 2,
+              bgcolor: 'grey.900',
+              transform: 'translateX(-1px)',
+              zIndex: 1,
             }}
             title={`Peers ${formatPercent(peerRate)}`}
           />
@@ -178,32 +260,35 @@ function PeerScale({ yourRate, peerRate, rating }) {
           <Box
             sx={{
               position: 'absolute',
-              left: '50%',
-              bottom: `${toPct(yourRate)}%`,
+              left: `${toPct(yourRate)}%`,
+              top: '50%',
               width: 14,
               height: 14,
               borderRadius: '50%',
               bgcolor: 'primary.main',
               border: '2px solid #fff',
-              transform: 'translate(-50%, 7px)',
-              boxShadow: 1,
+              transform: 'translate(-50%, -50%)',
+              boxShadow: 2,
+              zIndex: 2,
             }}
             title={`You ${formatPercent(yourRate)}`}
           />
         )}
       </Box>
-      <Stack spacing={0.5}>
-        {peerRate != null && (
-          <Typography variant="body2">
-            <strong>Peers =</strong> {formatPercent(peerRate)}
-          </Typography>
-        )}
-        {yourRate != null && (
-          <Typography variant="body2">
-            <strong>You =</strong> {formatPercent(yourRate)}
-            {rating ? (
-              <> · <Chip size="small" color={RATING_COLORS[rating] || 'default'} label={rating.replace(/_/g, ' ')} /></>
-            ) : null}
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} useFlexGap flexWrap="wrap">
+        <Typography variant="body2">
+          <Box component="span" sx={{ color: 'primary.main', fontWeight: 700 }}>You</Box>
+          {' '}{formatPercent(yourRate)}
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          <strong>Peers</strong> {formatPercent(peerRate)}
+        </Typography>
+        {vsPeer != null && (
+          <Typography
+            variant="body2"
+            sx={{ color: vsPeer <= 0 ? 'success.main' : 'error.main', fontWeight: 600 }}
+          >
+            {vsPeer <= 0 ? 'Below' : 'Above'} peers by {formatPercent(Math.abs(vsPeer))}
           </Typography>
         )}
       </Stack>
@@ -211,9 +296,118 @@ function PeerScale({ yourRate, peerRate, rating }) {
   );
 }
 
-export default function AnalyticsPage() {
-  const [sellers, setSellers] = useState([]);
-  const [sellerId, setSellerId] = useState('');
+function MetricOverviewCard({
+  dimensionLabel,
+  metricTitle,
+  caseLabel,
+  sortedBlocks,
+  selectedBlock,
+  onSelectDimension,
+  selectedAdjustmentHint,
+}) {
+  if (!selectedBlock) return null;
+
+  return (
+    <Paper sx={{ p: 2, height: '100%' }}>
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        justifyContent="space-between"
+        alignItems={{ xs: 'stretch', sm: 'flex-start' }}
+        spacing={1.5}
+        sx={{ mb: 2 }}
+      >
+        <FormControl size="small" sx={{ minWidth: { sm: 220 }, flex: 1, maxWidth: 360 }}>
+          <InputLabel>{dimensionLabel}</InputLabel>
+          <Select
+            label={dimensionLabel}
+            value={selectedBlock.categoryId}
+            onChange={(e) => onSelectDimension(e.target.value)}
+          >
+            {sortedBlocks.map((block) => (
+              <MenuItem key={block.categoryId} value={block.categoryId}>
+                {block.categoryName} ({formatCount(block.transactionCount)})
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <Typography variant="caption" color="text.secondary" sx={{ pt: { sm: 0.5 } }}>
+          {metricTitle}
+        </Typography>
+      </Stack>
+
+      <Grid container spacing={2} alignItems="stretch">
+        <Grid item xs={12} md={5}>
+          <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+            <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 0.5 }}>
+              {selectedBlock.categoryName}
+            </Typography>
+            <Stack direction="row" alignItems="baseline" spacing={1.5} sx={{ mb: 1 }}>
+              <Typography variant="h3" fontWeight={800} sx={{ lineHeight: 1 }}>
+                {formatPercent(selectedBlock.rate)}
+              </Typography>
+              {selectedBlock.rating && selectedBlock.rating !== 'NOT_APPLICABLE' ? (
+                <Chip
+                  size="small"
+                  color={RATING_COLORS[selectedBlock.rating] || 'default'}
+                  label={ratingLabel(selectedBlock)}
+                />
+              ) : null}
+            </Stack>
+            <Stack spacing={0.25} sx={{ typography: 'body2', color: 'text.secondary' }}>
+              <Typography>
+                <strong>{formatCount(selectedBlock.transactionCount)}</strong> transactions
+                {' · '}
+                <strong>{formatCount(selectedBlock.count)}</strong> {caseLabel.toLowerCase()}
+              </Typography>
+              {selectedBlock.count != null && selectedBlock.transactionCount > 0 ? (
+                <Typography variant="caption">
+                  {formatCount(selectedBlock.count)} ÷ {formatCount(selectedBlock.transactionCount)} = {formatPercent(selectedBlock.rate)}
+                </Typography>
+              ) : null}
+            </Stack>
+            {selectedAdjustmentHint ? (
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+                {selectedAdjustmentHint}
+              </Typography>
+            ) : null}
+          </Box>
+        </Grid>
+        <Grid item xs={12} md={7}>
+          <Box
+            sx={{
+              height: '100%',
+              pl: { md: 2 },
+              borderLeft: { md: 1 },
+              borderColor: { md: 'divider' },
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+            }}
+          >
+            <PeerComparisonBar
+              yourRate={selectedBlock.rate}
+              peerRate={selectedBlock.peerAverage}
+              rating={selectedBlock.rating}
+            />
+          </Box>
+        </Grid>
+      </Grid>
+    </Paper>
+  );
+}
+
+export default function AnalyticsPage({
+  embedded = false,
+  sellerId: sellerIdProp,
+  sellers: sellersProp,
+  hideSellerFilter = false,
+  active = true,
+} = {}) {
+  const [internalSellers, setInternalSellers] = useState([]);
+  const [internalSellerId, setInternalSellerId] = useState('');
+  const sellers = sellersProp ?? internalSellers;
+  const sellerId = sellerIdProp ?? internalSellerId;
+  const setSellerId = sellerIdProp != null ? () => {} : setInternalSellerId;
   const [marketplace, setMarketplace] = useState('EBAY_US');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -226,16 +420,20 @@ export default function AnalyticsPage() {
   const [fetchedAt, setFetchedAt] = useState(null);
   const [noSavedData, setNoSavedData] = useState(false);
   const [bulkRefreshMessage, setBulkRefreshMessage] = useState('');
+  const [metricCases, setMetricCases] = useState([]);
+  const [metricCasesLoading, setMetricCasesLoading] = useState(false);
+  const [metricCasesError, setMetricCasesError] = useState('');
 
   useEffect(() => {
+    if (sellersProp) return;
     api.get('/sellers/all')
       .then(({ data }) => {
         const list = data || [];
-        setSellers(list);
-        if (list.length > 0) setSellerId((prev) => prev || list[0]._id);
+        setInternalSellers(list);
+        if (list.length > 0) setInternalSellerId((prev) => prev || list[0]._id);
       })
-      .catch(() => setSellers([]));
-  }, []);
+      .catch(() => setInternalSellers([]));
+  }, [sellersProp]);
 
   const dimensionBlocks = useMemo(
     () => parseCsDimensionBlocks(csReport, csMetricType),
@@ -376,12 +574,54 @@ export default function AnalyticsPage() {
   }, [marketplace, csMetricType, csEvaluationType, sellerId, loadCsMetric]);
 
   useEffect(() => {
-    if (!sellerId) return;
+    if (!active || !sellerId) return;
     loadCsMetric({ refresh: false });
-  }, [sellerId, marketplace, csMetricType, csEvaluationType, loadCsMetric]);
+  }, [active, sellerId, marketplace, csMetricType, csEvaluationType, loadCsMetric]);
+
+  const loadMetricCases = useCallback(async () => {
+    if (!sellerId || !csReport?.evaluationCycle) {
+      setMetricCases([]);
+      setMetricCasesError('');
+      return;
+    }
+    setMetricCasesLoading(true);
+    setMetricCasesError('');
+    try {
+      const { data } = await api.get('/ebay/analytics/customer-service-metric/orders', {
+        params: {
+          sellerId,
+          metricType: csMetricType,
+          fromDate: csReport.evaluationCycle.startDate,
+          toDate: csReport.evaluationCycle.endDate,
+          limit: Math.max(50, Number(selectedBlock?.count) || 50),
+        },
+      });
+      if (!data.success) throw new Error(data.error || 'Failed to load orders');
+      setMetricCases(Array.isArray(data.cases) ? data.cases : []);
+    } catch (err) {
+      setMetricCases([]);
+      setMetricCasesError(err.response?.data?.error || err.message || 'Failed to load orders');
+    } finally {
+      setMetricCasesLoading(false);
+    }
+  }, [sellerId, csMetricType, csReport, selectedBlock?.count]);
+
+  useEffect(() => {
+    if (!active || !csReport || csMetricType !== 'ITEM_NOT_RECEIVED') {
+      setMetricCases([]);
+      setMetricCasesError('');
+      return;
+    }
+    void loadMetricCases();
+  }, [active, csReport, csMetricType, loadMetricCases]);
+
+  const rootSx = embedded
+    ? { pt: 2 }
+    : { p: 3 };
 
   return (
-    <Box sx={{ p: 3 }}>
+    <Box sx={rootSx}>
+      {!embedded ? (
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems="flex-start" spacing={2} sx={{ mb: 2 }}>
         <Box>
           <Typography variant="h4" sx={{ fontWeight: 800 }}>Service metrics</Typography>
@@ -400,6 +640,19 @@ export default function AnalyticsPage() {
           {loading ? 'Refreshing all sellers…' : 'Refresh from eBay'}
         </Button>
       </Stack>
+      ) : (
+        <Stack direction="row" justifyContent="flex-end" sx={{ mb: 2 }}>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+            onClick={refreshAllFromEbay}
+            disabled={loading || sellers.length === 0}
+          >
+            {loading ? 'Refreshing…' : 'Refresh all sellers'}
+          </Button>
+        </Stack>
+      )}
 
       <Paper sx={{ p: 2, mb: 2 }}>
         <Tabs
@@ -412,6 +665,7 @@ export default function AnalyticsPage() {
         </Tabs>
 
         <Grid container spacing={2}>
+          {!hideSellerFilter ? (
           <Grid item xs={12} md={3}>
             <FormControl fullWidth size="small">
               <InputLabel>Seller</InputLabel>
@@ -424,6 +678,7 @@ export default function AnalyticsPage() {
               </Select>
             </FormControl>
           </Grid>
+          ) : null}
           <Grid item xs={12} md={3}>
             <FormControl fullWidth size="small">
               <InputLabel>Marketplace</InputLabel>
@@ -495,80 +750,25 @@ export default function AnalyticsPage() {
 
           {sortedBlocks.length > 0 && selectedBlock && (
             <Grid container spacing={2}>
-              <Grid item xs={12} md={4}>
-                <Paper sx={{ p: 2, height: '100%' }}>
-                  <FormControl fullWidth size="small" sx={{ mb: 2 }}>
-                    <InputLabel>{dimensionLabel}</InputLabel>
-                    <Select
-                      label={dimensionLabel}
-                      value={selectedBlock.categoryId}
-                      onChange={(e) => setSelectedDimensionId(e.target.value)}
-                    >
-                      {sortedBlocks.map((block) => (
-                        <MenuItem key={block.categoryId} value={block.categoryId}>
-                          {block.categoryName} ({formatCount(block.transactionCount)})
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-
-                  <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 0.5 }}>
-                    {metricTitle}
-                  </Typography>
-                  <Typography variant="h6" sx={{ mb: 1 }}>{selectedBlock.categoryName}</Typography>
-                  <Typography variant="h3" fontWeight={800} sx={{ mb: 1 }}>
-                    {formatPercent(selectedBlock.rate)}
-                  </Typography>
-                  {selectedBlock.rating && (
-                    <Chip
-                      size="small"
-                      color={RATING_COLORS[selectedBlock.rating] || 'default'}
-                      label={ratingLabel(selectedBlock)}
-                      sx={{ mb: 1 }}
-                    />
-                  )}
-                  {selectedAdjustmentHint && (
-                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
-                      {selectedAdjustmentHint}
-                    </Typography>
-                  )}
-
-                  <Stack spacing={0.5} sx={{ typography: 'body2', color: 'text.secondary' }}>
-                    <Typography>
-                      Total transactions: <strong>{formatCount(selectedBlock.transactionCount)}</strong>
-                    </Typography>
-                    <Typography>
-                      {caseLabel}: <strong>{formatCount(selectedBlock.count)}</strong>
-                    </Typography>
-                    {selectedBlock.count != null && selectedBlock.transactionCount != null && selectedBlock.transactionCount > 0 && (
-                      <Typography variant="caption">
-                        {formatCount(selectedBlock.count)} / {formatCount(selectedBlock.transactionCount)} = {formatPercent(selectedBlock.rate)}
-                      </Typography>
-                    )}
-                  </Stack>
-                </Paper>
+              <Grid item xs={12} md={8}>
+                <MetricOverviewCard
+                  dimensionLabel={dimensionLabel}
+                  metricTitle={metricTitle}
+                  caseLabel={caseLabel}
+                  sortedBlocks={sortedBlocks}
+                  selectedBlock={selectedBlock}
+                  onSelectDimension={setSelectedDimensionId}
+                  selectedAdjustmentHint={selectedAdjustmentHint}
+                />
               </Grid>
 
               <Grid item xs={12} md={4}>
-                <Paper sx={{ p: 2, height: '100%' }}>
-                  <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 2 }}>
-                    Compared to peers
-                  </Typography>
-                  <PeerScale
-                    yourRate={selectedBlock.rate}
-                    peerRate={selectedBlock.peerAverage}
-                    rating={selectedBlock.rating}
-                  />
-                </Paper>
-              </Grid>
-
-              <Grid item xs={12} md={4}>
-                <Paper sx={{ p: 2, height: '100%' }}>
-                  <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 2 }}>
-                    {isInad ? 'Reasons for your returns' : 'Best practices'}
-                  </Typography>
-                  {isInad ? (
-                    selectedBlock.reasons.length === 0 ? (
+                {isInad ? (
+                  <Paper sx={{ p: 2, height: '100%' }}>
+                    <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 2 }}>
+                      Reasons for your returns
+                    </Typography>
+                    {selectedBlock.reasons.length === 0 ? (
                       <Typography variant="body2" color="text.secondary">
                         No reason breakdown for this category.
                       </Typography>
@@ -593,24 +793,25 @@ export default function AnalyticsPage() {
                           ))}
                         </Stack>
                       </>
-                    )
-                  ) : (
-                    <Stack spacing={1.5} component="ul" sx={{ m: 0, pl: 2.5 }}>
-                      {INR_BEST_PRACTICES.map((tip) => (
-                        <Typography key={tip} component="li" variant="body2" color="text.secondary">
-                          {tip}
-                        </Typography>
-                      ))}
-                    </Stack>
-                  )}
-                </Paper>
+                    )}
+                  </Paper>
+                ) : (
+                  <MetricCasesPanel
+                    title="Not received orders"
+                    cases={metricCases}
+                    loading={metricCasesLoading}
+                    error={metricCasesError}
+                    expectedCount={selectedBlock?.count}
+                    emptyHint="No INR cases found in this evaluation period. Sync INR cases from Disputes → Fetch INR Cases, then refresh."
+                  />
+                )}
               </Grid>
             </Grid>
           )}
 
           <Paper sx={{ p: 2 }}>
             <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1 }}>
-              All {dimensionLabel.toLowerCase()}s
+              {isInad ? 'All categories' : 'All regions'}
             </Typography>
             <TableContainer>
               <Table size="small">

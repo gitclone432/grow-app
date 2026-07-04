@@ -310,11 +310,20 @@ const ProfileCard = memo(function ProfileCard({ profile, loading, onRefresh }) {
   );
 });
 
-export default function SellerStandardsPage() {
-  const [sellers, setSellers] = useState([]);
-  const [sellerId, setSellerId] = useState('');
+export default function SellerStandardsPage({
+  embedded = false,
+  sellerId: sellerIdProp,
+  sellers: sellersProp,
+  hideSellerFilter = false,
+  active = true,
+} = {}) {
+  const [internalSellers, setInternalSellers] = useState([]);
+  const [internalSellerId, setInternalSellerId] = useState('');
+  const sellers = sellersProp ?? internalSellers;
+  const sellerId = sellerIdProp ?? internalSellerId;
+  const setSellerId = sellerIdProp != null ? () => {} : setInternalSellerId;
   const [cycleFilter, setCycleFilter] = useState('CURRENT');
-  const [programFilter, setProgramFilter] = useState(ALL_PROGRAMS_VALUE);
+  const [programFilter, setProgramFilter] = useState('PROGRAM_US');
 
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -326,14 +335,15 @@ export default function SellerStandardsPage() {
   const [bulkRefreshMessage, setBulkRefreshMessage] = useState('');
 
   useEffect(() => {
+    if (sellersProp) return;
     api.get('/sellers/all')
       .then(({ data }) => {
         const list = data || [];
-        setSellers(list);
-        if (list.length > 0) setSellerId((prev) => prev || list[0]._id);
+        setInternalSellers(list);
+        if (list.length > 0) setInternalSellerId((prev) => prev || list[0]._id);
       })
-      .catch(() => setSellers([]));
-  }, []);
+      .catch(() => setInternalSellers([]));
+  }, [sellersProp]);
 
   const profiles = useMemo(() => {
     const list = Array.isArray(report?.standardsProfiles) ? report.standardsProfiles : [];
@@ -444,15 +454,20 @@ export default function SellerStandardsPage() {
   }, [sellerId, loadProfiles]);
 
   useEffect(() => {
-    if (!sellerId) return;
+    if (!active || !sellerId) return;
     void loadProfiles({ refresh: false });
-  }, [sellerId, loadProfiles]);
+  }, [active, sellerId, loadProfiles]);
 
   const savedAtLabel = formatSavedAt(fetchedAt);
   const overallLevel = profiles[0]?.standardsLevel;
 
+  const rootSx = embedded
+    ? { pt: 2 }
+    : { p: { xs: 2, sm: 3 }, maxWidth: 1280, mx: 'auto' };
+
   return (
-    <Box sx={{ p: { xs: 2, sm: 3 }, maxWidth: 1280, mx: 'auto' }}>
+    <Box sx={rootSx}>
+      {!embedded ? (
       <Stack
         direction={{ xs: 'column', md: 'row' }}
         justifyContent="space-between"
@@ -486,9 +501,23 @@ export default function SellerStandardsPage() {
           {loading ? 'Refreshing…' : 'Refresh from eBay'}
         </Button>
       </Stack>
+      ) : (
+        <Stack direction="row" justifyContent="flex-end" sx={{ mb: 2 }}>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+            onClick={refreshAllFromEbay}
+            disabled={loading || sellers.length === 0}
+          >
+            {loading ? 'Refreshing…' : 'Refresh all sellers'}
+          </Button>
+        </Stack>
+      )}
 
       <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
         <Grid container spacing={2} alignItems="center">
+          {!hideSellerFilter ? (
           <Grid item xs={12} sm={4}>
             <FormControl fullWidth size="small">
               <InputLabel>Seller</InputLabel>
@@ -501,6 +530,7 @@ export default function SellerStandardsPage() {
               </Select>
             </FormControl>
           </Grid>
+          ) : null}
           <Grid item xs={12} sm={4}>
             <FormControl fullWidth size="small">
               <InputLabel>Cycle</InputLabel>

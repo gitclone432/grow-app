@@ -25,6 +25,9 @@ export default function usePageAccess(user) {
         if (pageId === 'EbayFeedback') {
           return pagePermissions.some((p) => ['AwaitingFeedback', 'EbayFeedbackRatingSummary'].includes(p));
         }
+        if (pageId === 'EbayAnalyticsHub') {
+          return pagePermissions.some((p) => ['Analytics', 'AnalyticsSellerStandards'].includes(p));
+        }
         return false;
       }
 
