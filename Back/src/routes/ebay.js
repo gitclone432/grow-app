@@ -304,6 +304,45 @@ function normalizeEbayOAuthCode(code) {
   return c;
 }
 
+function escapeRegexLiteral(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Resolve Seller by Mongo _id or linked User username/email (Seller has no username field). */
+async function findSellerByIdOrUsername(lookup, { populate = null, select = null } = {}) {
+  const key = String(lookup || '').trim();
+  if (!key) return null;
+
+  let query;
+  if (mongoose.Types.ObjectId.isValid(key)) {
+    query = Seller.findById(key);
+  } else {
+    const user = await User.findOne({
+      $or: [
+        { username: { $regex: new RegExp(`^${escapeRegexLiteral(key)}$`, 'i') } },
+        { email: { $regex: new RegExp(`^${escapeRegexLiteral(key)}$`, 'i') } }
+      ]
+    }).select('_id').lean();
+    if (!user) return null;
+    query = Seller.findOne({ user: user._id });
+  }
+
+  if (select) query = query.select(select);
+  if (populate === true || populate === 'user') {
+    query = query.populate('user', 'username email');
+  } else if (populate) {
+    query = query.populate(populate);
+  }
+
+  return query;
+}
+
+function sendTokenReconnectError(err, res) {
+  if (err?.code !== 'NEEDS_RECONNECT') return false;
+  res.status(401).json({ error: err.message, needsReconnect: true });
+  return true;
+}
+
 // Identifies which server instance owns/resumes batches.
 // Set RUNNER_ID=render in Render's env vars, leave unset (defaults to 'local') locally.
 const RUNNER_ID = process.env.RUNNER_ID || 'local';
@@ -1364,14 +1403,21 @@ async function calculateAmazonFinancials(order) {
 
 // HELPER: Ensure Seller Token is Valid (Refreshes if < 2 mins left)
 export async function ensureValidToken(seller, retries = 3) {
+  const tokens = seller?.ebayTokens;
+  if (!tokens?.refresh_token) {
+    const err = new Error('Seller has no eBay refresh token. Reconnect the eBay account from Seller Profile.');
+    err.code = 'NEEDS_RECONNECT';
+    throw err;
+  }
+
   const now = Date.now();
-  const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-  const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
+  const fetchedAt = tokens.fetchedAt ? new Date(tokens.fetchedAt).getTime() : 0;
+  const expiresInMs = (tokens.expires_in || 0) * 1000;
   const bufferTime = 2 * 60 * 1000; // 2 minutes buffer
 
   // If token is valid, return it
-  if (fetchedAt && (now - fetchedAt < expiresInMs - bufferTime)) {
-    return seller.ebayTokens.access_token;
+  if (tokens.access_token && fetchedAt && (now - fetchedAt < expiresInMs - bufferTime)) {
+    return tokens.access_token;
   }
 
   console.log(`[Token Refresh] Refreshing token for ${seller.user?.username || seller._id}`);
@@ -1416,7 +1462,24 @@ export async function ensureValidToken(seller, retries = 3) {
         continue;
       }
 
+      const oauthError = err.response?.data?.error;
+      const oauthDesc = String(err.response?.data?.error_description || '');
+      const isInvalidGrant = oauthError === 'invalid_grant'
+        || /invalid.?grant|revoked|expired refresh/i.test(oauthDesc);
+
       console.error(`[Token Refresh] ❌ Failed for ${seller._id} after ${attempt} attempts:`, err.message);
+      if (oauthError) {
+        console.error(`[Token Refresh] OAuth error: ${oauthError} — ${oauthDesc}`);
+      }
+
+      if (isInvalidGrant) {
+        const reconnectErr = new Error(
+          'eBay refresh token is invalid or expired. Reconnect the seller\'s eBay account (Seller Profile → Connect eBay).'
+        );
+        reconnectErr.code = 'NEEDS_RECONNECT';
+        throw reconnectErr;
+      }
+
       throw new Error(`Failed to refresh eBay token: ${err.response?.status || err.message}`);
     }
   }
@@ -11708,7 +11771,7 @@ async function verifyListingForSellerAnalytics(token, itemId, marketplace = 'EBA
 }
 
 // Lookup listing owner in local DB (for Analytics single-listing seller auto-select)
-router.get('/analytics/listing-lookup', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+router.get('/analytics/listing-lookup', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
   try {
     const itemId = String(req.query.itemId || '').trim();
     if (!itemId) {
@@ -11739,7 +11802,7 @@ router.get('/analytics/listing-lookup', requireAuth, requirePageAccess('Analytic
 });
 
 // eBay Sell Analytics — Traffic Report (getTrafficReport)
-router.get('/analytics/traffic-report', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+router.get('/analytics/traffic-report', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
   try {
     const {
       sellerId,
@@ -11761,9 +11824,7 @@ router.get('/analytics/traffic-report', requireAuth, requirePageAccess('Analytic
       return res.status(400).json({ error: 'sellerId is required' });
     }
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup).populate('user')
-      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
     if (!seller.ebayTokens?.access_token) {
       return res.status(400).json({ error: 'Seller not connected to eBay' });
@@ -12242,7 +12303,7 @@ async function refreshCustomerServiceMetricForSeller(seller, { upperMetric, uppe
 const CSM_REFRESH_DELAY_MS = 1200;
 
 // eBay Sell Analytics — Customer Service Metric (getCustomerServiceMetric)
-router.get('/analytics/customer-service-metric', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+router.get('/analytics/customer-service-metric', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
   try {
     const {
       sellerId,
@@ -12266,9 +12327,7 @@ router.get('/analytics/customer-service-metric', requireAuth, requirePageAccess(
       return res.status(400).json({ error: 'evaluationType must be CURRENT or PROJECTED' });
     }
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup).populate('user')
-      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
 
     const mp = String(marketplace || 'EBAY_US').trim();
@@ -12345,7 +12404,7 @@ router.get('/analytics/customer-service-metric', requireAuth, requirePageAccess(
 });
 
 // Cases/orders behind a customer service metric (from stored Post-Order inquiries)
-router.get('/analytics/customer-service-metric/orders', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+router.get('/analytics/customer-service-metric/orders', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
   try {
     const {
       sellerId,
@@ -12365,9 +12424,7 @@ router.get('/analytics/customer-service-metric/orders', requireAuth, requirePage
       return res.status(400).json({ success: false, error: 'metricType must be ITEM_NOT_RECEIVED or ITEM_NOT_AS_DESCRIBED' });
     }
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup).select('_id')
-      : await Seller.findOne({ username: sellerLookup }).select('_id');
+    const seller = await findSellerByIdOrUsername(sellerLookup, { select: '_id' });
     if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
 
     const caseType = upperMetric === 'ITEM_NOT_AS_DESCRIBED' ? 'SNAD' : 'INR';
@@ -12406,7 +12463,7 @@ router.get('/analytics/customer-service-metric/orders', requireAuth, requirePage
   }
 });
 
-router.post('/analytics/customer-service-metric/refresh-all', requireAuth, requirePageAccess('Analytics'), async (req, res) => {
+router.post('/analytics/customer-service-metric/refresh-all', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
   try {
     const {
       metricType = 'ITEM_NOT_RECEIVED',
@@ -12631,7 +12688,7 @@ async function refreshSellerStandardsProfileSingleForSeller(seller, { program, c
 const SSP_REFRESH_DELAY_MS = 1200;
 
 // eBay Sell Analytics — Seller Standards Profile (findSellerStandardsProfiles / getSellerStandardsProfile)
-router.get('/analytics/seller-standards-profiles', requireAuth, requirePageAccess('AnalyticsSellerStandards'), async (req, res) => {
+router.get('/analytics/seller-standards-profiles', requireAuth, requirePageAccess(['AnalyticsSellerStandards', 'EbayAnalyticsHub']), async (req, res) => {
   try {
     const { sellerId, refresh, program, cycle } = req.query;
     const sellerLookup = String(sellerId || '').trim();
@@ -12639,9 +12696,7 @@ router.get('/analytics/seller-standards-profiles', requireAuth, requirePageAcces
       return res.status(400).json({ error: 'sellerId is required' });
     }
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup).populate('user')
-      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
 
     const shouldRefresh = ['true', '1', 'yes'].includes(String(refresh || '').toLowerCase());
@@ -12734,7 +12789,7 @@ router.get('/analytics/seller-standards-profiles', requireAuth, requirePageAcces
   }
 });
 
-router.post('/analytics/seller-standards-profiles/refresh-all', requireAuth, requirePageAccess('AnalyticsSellerStandards'), async (req, res) => {
+router.post('/analytics/seller-standards-profiles/refresh-all', requireAuth, requirePageAccess(['AnalyticsSellerStandards', 'EbayAnalyticsHub']), async (req, res) => {
   try {
     const scoped = await getSellersMatchingAllRoute(req);
     const sellerIds = scoped.map((s) => s._id);
@@ -13448,9 +13503,7 @@ router.get('/feedback/awaiting', requireAuth, requirePageAccess(['EbayFeedback',
       return res.status(400).json({ error: 'sellerId is required' });
     }
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup).populate('user')
-      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
 
     if (!seller.ebayTokens?.access_token) {
@@ -13562,9 +13615,7 @@ router.get('/feedback/list', requireAuth, requirePageAccess(['EbayFeedback', 'Aw
       return res.status(400).json({ error: 'sellerId is required' });
     }
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup).populate('user')
-      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
 
     if (!seller.ebayTokens?.access_token) {
@@ -13676,9 +13727,7 @@ router.get('/feedback/rating-summary', requireAuth, requirePageAccess(['EbayFeed
       return res.status(400).json({ error: 'sellerId is required' });
     }
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup).populate('user')
-      : await Seller.findOne({ username: sellerLookup }).populate('user');
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
 
     if (!seller.ebayTokens?.access_token) {
@@ -14738,11 +14787,11 @@ router.post('/dev/raw-call', requireAuth, requirePageAccess('EbayApiTester'), as
       return res.status(400).json({ error: 'endpoint is required' });
     }
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup)
-      : await Seller.findOne({ username: sellerLookup });
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
-    if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
+    if (!seller.ebayTokens?.refresh_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay', needsReconnect: true });
+    }
 
     const accessToken = await ensureValidToken(seller);
     const upperMethod = String(method || 'GET').toUpperCase();
@@ -14854,6 +14903,7 @@ router.post('/dev/raw-call', requireAuth, requirePageAccess('EbayApiTester'), as
     });
   } catch (err) {
     console.error('[eBay Raw Call] Error:', err.response?.data || err.message);
+    if (sendTokenReconnectError(err, res)) return;
     return res.status(500).json({ error: err.message || 'Raw call failed' });
   }
 });
@@ -14881,11 +14931,11 @@ router.post('/dev/trading-call', requireAuth, requirePageAccess('EbayApiTester')
     if (!callNameText) return res.status(400).json({ error: 'callName is required' });
     if (!xmlText) return res.status(400).json({ error: 'requestXml is required' });
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup)
-      : await Seller.findOne({ username: sellerLookup });
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
-    if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
+    if (!seller.ebayTokens?.refresh_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay', needsReconnect: true });
+    }
 
     const token = await ensureValidToken(seller);
     const hasTokenTag = /<eBayAuthToken>[\s\S]*?<\/eBayAuthToken>/i.test(xmlText);
@@ -14913,6 +14963,7 @@ router.post('/dev/trading-call', requireAuth, requirePageAccess('EbayApiTester')
     });
   } catch (err) {
     console.error('[eBay Trading Call] Error:', err.response?.data || err.message);
+    if (sendTokenReconnectError(err, res)) return;
     return res.status(500).json({ error: err.message || 'Trading call failed' });
   }
 });

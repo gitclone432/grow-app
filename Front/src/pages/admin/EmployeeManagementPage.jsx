@@ -1,12 +1,10 @@
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
     Box,
     Paper,
     Typography,
     Grid,
-    Card,
-    CardContent,
     IconButton,
     Dialog,
     DialogTitle,
@@ -27,7 +25,14 @@ import {
     CircularProgress,
     Accordion,
     AccordionSummary,
-    AccordionDetails
+    AccordionDetails,
+    Table,
+    TableBody,
+    TableCell,
+    TableContainer,
+    TableHead,
+    TableRow,
+    Avatar,
 } from '@mui/material';
 import ManageAccountsIcon from '@mui/icons-material/ManageAccounts';
 import SearchIcon from '@mui/icons-material/Search';
@@ -43,8 +48,10 @@ import AssignmentIcon from '@mui/icons-material/Assignment';
 import StarIcon from '@mui/icons-material/Star';
 import BookmarkIcon from '@mui/icons-material/Bookmark';
 import SecurityIcon from '@mui/icons-material/Security';
-import PeopleOutlineIcon from '@mui/icons-material/PeopleOutline';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import AddIcon from '@mui/icons-material/Add';
 import { listEmployeeProfiles, updateEmployeeProfile, getEmployeeFileUrl, deleteEmployeeProfile, toggleEmployeeHidden } from '../../lib/api.js';
+import AddUserForm from '../../components/AddUserForm.jsx';
 
 // TabPanel component for managing tab content
 function TabPanel({ children, value, index }) {
@@ -85,100 +92,138 @@ function sanitizePayload(payload) {
     return sanitized;
 }
 
-// Employee Card Component
-function EmployeeCard({ profile, onEdit, onDelete, onToggleHidden }) {
-    const isHidden = profile.isHidden;
-
-    return (
-        <Card
-            sx={{
-                height: '100%',
-                display: 'flex',
-                flexDirection: 'column',
-                opacity: isHidden ? 0.6 : 1,
-                border: isHidden ? '2px dashed #ff9800' : 'none',
-                position: 'relative'
-            }}
-        >
-            {isHidden && (
-                <Box
-                    sx={{
-                        position: 'absolute',
-                        top: 8,
-                        left: 8,
-                        backgroundColor: '#ff9800',
-                        color: 'white',
-                        px: 1,
-                        py: 0.5,
-                        borderRadius: 1,
-                        fontSize: '0.75rem',
-                        fontWeight: 'bold',
-                        zIndex: 1
-                    }}
-                >
-                    HIDDEN
-                </Box>
-            )}
-            <CardContent sx={{ flexGrow: 1 }}>
-                <Stack spacing={1} direction="row" alignItems="center" justifyContent="space-between">
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexGrow: 1, overflow: 'hidden' }}>
-                        {profile.hasProfilePic && (
-                            <img
+// Employee table row
+function EmployeeTableRows({ profiles, onEdit, onDelete, onToggleHidden, canToggleHidden, startIndex = 0 }) {
+    return profiles.map((profile, index) => {
+        const isHidden = profile.isHidden;
+        const displayName = profile.name || profile.user?.username || '—';
+        return (
+            <TableRow
+                key={profile._id}
+                hover
+                sx={{
+                    opacity: isHidden ? 0.72 : 1,
+                    bgcolor: isHidden ? 'action.hover' : undefined,
+                }}
+            >
+                <TableCell sx={{ color: 'text.secondary', width: 48 }}>{startIndex + index + 1}</TableCell>
+                <TableCell>
+                    <Stack direction="row" alignItems="center" spacing={1.5}>
+                        {profile.hasProfilePic ? (
+                            <Avatar
                                 src={`${import.meta.env.VITE_API_URL}/employee-profiles/${profile._id}/file/profile-pic?token=${localStorage.getItem('auth_token')}&t=${profile.updatedAt || Date.now()}`}
-                                alt="Profile"
-                                style={{
-                                    width: 50,
-                                    height: 50,
-                                    borderRadius: '50%',
-                                    objectFit: 'cover',
-                                    border: '2px solid #1976d2',
-                                    flexShrink: 0,
-                                    opacity: isHidden ? 0.7 : 1
-                                }}
-                                onError={(e) => {
-                                    console.error('Failed to load profile image for:', profile._id);
-                                    e.target.style.display = 'none';
-                                }}
+                                alt=""
+                                sx={{ width: 32, height: 32 }}
                             />
+                        ) : (
+                            <Avatar sx={{ width: 32, height: 32, fontSize: '0.85rem' }}>
+                                {(displayName[0] || '?').toUpperCase()}
+                            </Avatar>
                         )}
-                        <Box sx={{ minWidth: 0 }}>
-                            <Typography variant="h6" noWrap title={profile.user?.username}>{profile.user?.username || 'Unknown'}</Typography>
-                            <Chip label={profile.user?.role || 'N/A'} size="small" color="primary" sx={{ width: 'fit-content', mt: 0.5 }} />
-                            <Typography variant="body2" color="text.secondary" noWrap sx={{ mt: 0.5 }}>{profile.user?.department || '-'}</Typography>
-                        </Box>
-                    </Box>
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-                        <Tooltip title={isHidden ? "Unhide Profile" : "Hide Profile"}>
-                            <IconButton
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    onToggleHidden(profile);
-                                }}
-                                color={isHidden ? "success" : "warning"}
-                                size="small"
-                            >
-                                {isHidden ? <VisibilityIcon /> : <VisibilityOffIcon />}
+                        <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap title={displayName}>
+                            {displayName}
+                        </Typography>
+                    </Stack>
+                </TableCell>
+                <TableCell sx={{ fontWeight: 500 }}>{profile.user?.username || '—'}</TableCell>
+                <TableCell>
+                    <Chip label={profile.user?.role || 'N/A'} size="small" color="primary" variant="outlined" />
+                </TableCell>
+                <TableCell sx={{ color: 'text.secondary' }}>{profile.user?.department || '—'}</TableCell>
+                <TableCell>
+                    {isHidden ? (
+                        <Chip label="Hidden" size="small" color="warning" variant="outlined" />
+                    ) : (
+                        <Chip label="Active" size="small" color="success" variant="filled" />
+                    )}
+                </TableCell>
+                <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                    <Stack direction="row" spacing={0.25} justifyContent="flex-end">
+                        {canToggleHidden ? (
+                            <Tooltip title={isHidden ? 'Unhide profile' : 'Hide profile'}>
+                                <IconButton
+                                    size="small"
+                                    onClick={() => onToggleHidden(profile)}
+                                    color={isHidden ? 'success' : 'warning'}
+                                >
+                                    {isHidden ? <VisibilityIcon fontSize="small" /> : <VisibilityOffIcon fontSize="small" />}
+                                </IconButton>
+                            </Tooltip>
+                        ) : null}
+                        <Tooltip title="Manage employee">
+                            <IconButton size="small" onClick={() => onEdit(profile)} color="primary">
+                                <ManageAccountsIcon fontSize="small" />
                             </IconButton>
                         </Tooltip>
-                        <Tooltip title="Manage Employee Details">
-                            <IconButton onClick={() => onEdit(profile)} color="primary" size="small">
-                                <ManageAccountsIcon />
+                        <Tooltip title="Delete employee">
+                            <IconButton size="small" onClick={() => onDelete(profile)} color="error">
+                                <DeleteForeverIcon fontSize="small" />
                             </IconButton>
                         </Tooltip>
-                        <Tooltip title="Delete Employee (Permanent)">
-                            <IconButton onClick={() => onDelete(profile)} color="error" size="small">
-                                <DeleteForeverIcon />
-                            </IconButton>
-                        </Tooltip>
-                    </Box>
-                </Stack>
-            </CardContent>
-        </Card>
+                    </Stack>
+                </TableCell>
+            </TableRow>
+        );
+    });
+}
+
+function EmployeeTable({ profiles, loading, emptyMessage, onEdit, onDelete, onToggleHidden, canToggleHidden, startIndex = 0 }) {
+    return (
+        <TableContainer sx={{ maxHeight: 'calc(100vh - 320px)' }}>
+            <Table stickyHeader size="small">
+                <TableHead>
+                    <TableRow>
+                        <TableCell sx={{ fontWeight: 600, width: 48 }}>#</TableCell>
+                        <TableCell sx={{ fontWeight: 600 }}>Name</TableCell>
+                        <TableCell sx={{ fontWeight: 600 }}>Username</TableCell>
+                        <TableCell sx={{ fontWeight: 600 }}>Role</TableCell>
+                        <TableCell sx={{ fontWeight: 600 }}>Department</TableCell>
+                        <TableCell sx={{ fontWeight: 600 }}>Status</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 600, minWidth: 120 }}>Actions</TableCell>
+                    </TableRow>
+                </TableHead>
+                <TableBody>
+                    {loading ? (
+                        <TableRow>
+                            <TableCell colSpan={7} align="center" sx={{ py: 6 }}>
+                                <CircularProgress size={28} />
+                            </TableCell>
+                        </TableRow>
+                    ) : profiles.length === 0 ? (
+                        <TableRow>
+                            <TableCell colSpan={7} align="center" sx={{ py: 6, color: 'text.secondary' }}>
+                                {emptyMessage}
+                            </TableCell>
+                        </TableRow>
+                    ) : (
+                        <EmployeeTableRows
+                            profiles={profiles}
+                            onEdit={onEdit}
+                            onDelete={onDelete}
+                            onToggleHidden={onToggleHidden}
+                            canToggleHidden={canToggleHidden}
+                            startIndex={startIndex}
+                        />
+                    )}
+                </TableBody>
+            </Table>
+        </TableContainer>
     );
 }
 
-
 export default function EmployeeManagementPage() {
+    const currentUser = useMemo(() => {
+        try {
+            return JSON.parse(localStorage.getItem('user') || 'null');
+        } catch {
+            return null;
+        }
+    }, []);
+    const userRole = currentUser?.role || '';
+    const canCreateUser = ['superadmin', 'listingadmin', 'hradmin', 'operationhead'].includes(userRole);
+    const canManageRoster = ['superadmin', 'hradmin', 'operationhead'].includes(userRole);
+    const canToggleHidden = ['superadmin', 'hradmin'].includes(userRole);
+
     const [rows, setRows] = useState([]);
     const [editOpen, setEditOpen] = useState(false);
     const [editingProfile, setEditingProfile] = useState(null);
@@ -235,8 +280,12 @@ export default function EmployeeManagementPage() {
     };
 
     useEffect(() => {
-        loadProfiles();
-    }, []);
+        if (canManageRoster) {
+            loadProfiles();
+        } else {
+            setLoading(false);
+        }
+    }, [canManageRoster]);
 
     const openEdit = (profile) => {
         setEditingProfile(profile);
@@ -452,121 +501,113 @@ export default function EmployeeManagementPage() {
     const filteredHiddenCount = hiddenProfiles.length;
 
     return (
-        <Box>
-            <Paper sx={{ p: 3 }}>
-                <Typography variant="h6" gutterBottom sx={{ mb: 3 }}>Employee Management</Typography>
+        <Box sx={{ maxWidth: 1400, mx: 'auto' }}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ mb: 3 }}>
+                <Box>
+                    <Typography variant="h5" sx={{ fontWeight: 700 }}>Team Management</Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                        Create user accounts and manage employee profiles in one place.
+                    </Typography>
+                </Box>
+                {canManageRoster ? (
+                    <Tooltip title="Refresh roster">
+                        <span>
+                            <IconButton onClick={() => loadProfiles()} disabled={loading} sx={{ border: 1, borderColor: 'divider', borderRadius: 1.5 }}>
+                                <RefreshIcon fontSize="small" />
+                            </IconButton>
+                        </span>
+                    </Tooltip>
+                ) : null}
+            </Stack>
 
-                <TextField
-                    placeholder="Search by name, username, role, department"
-                    value={search}
-                    onChange={e => setSearch(e.target.value)}
-                    fullWidth
-                    sx={{ mb: 3 }}
-                    InputProps={{
-                        startAdornment: (
-                            <InputAdornment position="start">
-                                <SearchIcon />
-                            </InputAdornment>
-                        )
-                    }}
+            <Grid container spacing={3}>
+                {canCreateUser ? (
+                    <Grid item xs={12} md={canManageRoster ? 4 : 12} lg={canManageRoster ? 4 : 6}>
+                        <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, position: { md: 'sticky' }, top: 16, maxWidth: canManageRoster ? 'none' : 520, mx: canManageRoster ? 0 : 'auto' }}>
+                            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
+                                <AddIcon color="primary" fontSize="small" />
+                                <Typography variant="h6" sx={{ fontWeight: 600 }}>Add User</Typography>
+                            </Stack>
+                            <AddUserForm onCreated={() => canManageRoster && loadProfiles()} />
+                        </Paper>
+                    </Grid>
+                ) : null}
+
+                {canManageRoster ? (
+                    <Grid item xs={12} md={canCreateUser ? 8 : 12}>
+            <Paper variant="outlined" sx={{ borderRadius: 2, overflow: 'hidden' }}>
+                <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider' }}>
+                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between">
+                        <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                            Employees ({activeProfiles.length}{totalHiddenCount ? ` · ${totalHiddenCount} hidden` : ''})
+                        </Typography>
+                        <TextField
+                            placeholder="Search name, username, role, department..."
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                            size="small"
+                            sx={{ minWidth: { sm: 280 } }}
+                            InputProps={{
+                                startAdornment: (
+                                    <InputAdornment position="start">
+                                        <SearchIcon fontSize="small" color="action" />
+                                    </InputAdornment>
+                                ),
+                            }}
+                        />
+                    </Stack>
+                </Box>
+
+                <EmployeeTable
+                    profiles={activeProfiles}
+                    loading={loading}
+                    emptyMessage={search ? 'No matching employees found' : 'No employees yet — create a user on the left'}
+                    onEdit={openEdit}
+                    onDelete={openDeleteDialog}
+                    onToggleHidden={handleToggleHidden}
+                    canToggleHidden={canToggleHidden}
                 />
 
-                {/* Active Employees Grid */}
-                <Grid container spacing={2}>
-                    {activeProfiles.map((r) => (
-                        <Grid item xs={12} sm={6} md={4} lg={3} key={r._id}>
-                            <EmployeeCard
-                                profile={r}
-                                onEdit={openEdit}
-                                onDelete={openDeleteDialog}
-                                onToggleHidden={handleToggleHidden}
-                            />
-                        </Grid>
-                    ))}
-
-                    {loading && (
-                        <Grid item xs={12}>
-                            <Box sx={{
-                                display: 'flex',
-                                flexDirection: 'column',
-                                justifyContent: 'center',
-                                alignItems: 'center',
-                                py: 8
-                            }}>
-                                <CircularProgress size={60} thickness={4} />
-                                <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-                                    Loading employees...
-                                </Typography>
-                            </Box>
-                        </Grid>
-                    )}
-
-                    {!loading && activeProfiles.length === 0 && totalHiddenCount === 0 && (
-                        <Grid item xs={12}>
-                            <Box sx={{
-                                display: 'flex',
-                                flexDirection: 'column',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                py: 8,
-                                px: 2
-                            }}>
-                                <PeopleOutlineIcon sx={{ fontSize: 80, color: 'text.secondary', opacity: 0.3, mb: 2 }} />
-                                <Typography variant="h6" color="text.secondary" gutterBottom>
-                                    {search ? 'No matching employees found' : 'No employees yet'}
-                                </Typography>
-                                <Typography variant="body2" color="text.secondary">
-                                    {search ? 'Try adjusting your search terms' : 'Employee profiles will appear here once added'}
-                                </Typography>
-                            </Box>
-                        </Grid>
-                    )}
-                </Grid>
-
-                {/* Hidden Accounts Accordion - Only show if there are hidden accounts */}
-                {totalHiddenCount > 0 && (
-                    <Box sx={{ mt: 4 }}>
+                {totalHiddenCount > 0 ? (
+                    <Box sx={{ borderTop: 1, borderColor: 'divider' }}>
                         <Accordion
                             expanded={hiddenAccordionExpanded}
                             onChange={(e, isExpanded) => setHiddenAccordionExpanded(isExpanded)}
+                            disableGutters
+                            elevation={0}
+                            sx={{ '&::before': { display: 'none' } }}
                         >
                             <AccordionSummary
                                 expandIcon={<ExpandMoreIcon />}
                                 sx={{
-                                    backgroundColor: '#fff3e0',
-                                    '&:hover': {
-                                        backgroundColor: '#ffe0b2'
-                                    }
+                                    px: 2,
+                                    bgcolor: 'warning.50',
+                                    '&:hover': { bgcolor: 'warning.100' },
                                 }}
                             >
-                                <Typography variant="subtitle1" fontWeight="bold" color="warning.dark">
-                                    Hidden Accounts ({search ? filteredHiddenCount : totalHiddenCount})
+                                <Typography variant="subtitle2" fontWeight={600} color="warning.dark">
+                                    Hidden accounts ({search ? filteredHiddenCount : totalHiddenCount})
                                 </Typography>
                             </AccordionSummary>
-                            <AccordionDetails sx={{ pt: 2, backgroundColor: '#fafafa' }}>
-                                {hiddenProfiles.length > 0 ? (
-                                    <Grid container spacing={2}>
-                                        {hiddenProfiles.map((r) => (
-                                            <Grid item xs={12} sm={6} md={4} lg={3} key={r._id}>
-                                                <EmployeeCard
-                                                    profile={r}
-                                                    onEdit={openEdit}
-                                                    onDelete={openDeleteDialog}
-                                                    onToggleHidden={handleToggleHidden}
-                                                />
-                                            </Grid>
-                                        ))}
-                                    </Grid>
-                                ) : (
-                                    <Typography variant="body2" color="text.secondary" align="center" sx={{ py: 2 }}>
-                                        No hidden profiles match your search
-                                    </Typography>
-                                )}
+                            <AccordionDetails sx={{ p: 0 }}>
+                                <EmployeeTable
+                                    profiles={hiddenProfiles}
+                                    loading={false}
+                                    emptyMessage="No hidden profiles match your search"
+                                    onEdit={openEdit}
+                                    onDelete={openDeleteDialog}
+                                    onToggleHidden={handleToggleHidden}
+                                    canToggleHidden={canToggleHidden}
+                                    startIndex={activeProfiles.length}
+                                />
                             </AccordionDetails>
                         </Accordion>
                     </Box>
-                )}
+                ) : null}
             </Paper>
+                    </Grid>
+                ) : null}
+            </Grid>
 
             {/* Edit Dialog - Reusing exact same structure from before */}
             <Dialog

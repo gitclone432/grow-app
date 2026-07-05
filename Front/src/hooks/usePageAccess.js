@@ -28,6 +28,9 @@ export default function usePageAccess(user) {
         if (pageId === 'EbayAnalyticsHub') {
           return pagePermissions.some((p) => ['Analytics', 'AnalyticsSellerStandards'].includes(p));
         }
+        if (pageId === 'EmployeeManagement') {
+          return pagePermissions.some((p) => ['EmployeeManagement', 'AddUser'].includes(p));
+        }
         return false;
       }
 

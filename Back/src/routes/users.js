@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess, PAGE_DEFAULT_ROLES } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { createUserSchema } from '../schemas/index.js';
 import User from '../models/User.js';
@@ -22,6 +22,17 @@ function normalizeOptionalEmail(email) {
   if (typeof email !== 'string') return undefined;
   const trimmed = email.trim();
   return trimmed ? trimmed : undefined;
+}
+
+async function userHasPageAccess(req, pageId) {
+  if (req.user?.role === 'superadmin') return true;
+  const actor = await User.findById(req.user.userId).select('pagePermissions useCustomPermissions role').lean();
+  if (!actor) return false;
+  if (actor.useCustomPermissions) {
+    return Array.isArray(actor.pagePermissions) && actor.pagePermissions.includes(pageId);
+  }
+  const defaultRoles = PAGE_DEFAULT_ROLES[pageId] || [];
+  return defaultRoles.includes(actor.role);
 }
 
 async function createUserWithOptionalSeller({
@@ -251,9 +262,34 @@ router.post('/seller', requireAuth, async (req, res) => {
   }
 });
 
-router.get('/listers', requireAuth, requirePageAccess('AddUser'), async (req, res) => {
+router.get('/listers', requireAuth, requirePageAccess('EmployeeManagement'), async (req, res) => {
   const listers = await User.find({ role: 'lister', active: true }).select('email username role');
   res.json(listers);
+});
+
+// All seller accounts for HR seller management page (includes archived stores)
+router.get('/sellers', requireAuth, requirePageAccess('AddSeller'), async (req, res) => {
+  try {
+    const sellers = await Seller.find()
+      .populate('user', 'username email active role department')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json(sellers.map((seller) => ({
+      sellerId: seller._id,
+      userId: seller.user?._id,
+      username: seller.user?.username || '',
+      email: seller.user?.email || '',
+      active: seller.user?.active !== false,
+      isStoreActive: seller.isStoreActive !== false,
+      hasEbayConnection: Boolean(seller.ebayTokens?.refresh_token),
+      createdAt: seller.createdAt,
+      disconnectedAt: seller.disconnectedAt,
+    })));
+  } catch (err) {
+    console.error('Error fetching sellers for management:', err);
+    res.status(500).json({ error: 'Failed to fetch sellers' });
+  }
 });
 
 // List compatibility editors (for superadmin or compatibilityadmin)
@@ -543,8 +579,8 @@ router.put('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessMa
 // PASSWORD MANAGEMENT (Superadmin only)
 // ============================================
 
-// PUT /:id/password - Change a user's password (Superadmin only)
-router.put('/:id/password', requireAuth, requirePageAccess('UserPasswordManagement'), async (req, res) => {
+// PUT /:id/password - Superadmin / User Password Management, or Add Seller page for seller accounts
+router.put('/:id/password', requireAuth, async (req, res) => {
   try {
     const { newPassword } = req.body;
 
@@ -559,6 +595,12 @@ router.put('/:id/password', requireAuth, requirePageAccess('UserPasswordManageme
     const user = await User.findById(req.params.id).select('username email role');
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    const canPasswordMgmt = await userHasPageAccess(req, 'UserPasswordManagement');
+    const canAddSeller = user.role === 'seller' && await userHasPageAccess(req, 'AddSeller');
+    if (!canPasswordMgmt && !canAddSeller) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     // Hash the new password

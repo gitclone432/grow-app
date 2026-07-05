@@ -620,6 +620,7 @@ export default function EbayApiTesterPage() {
   const [loading, setLoading] = useState(false);
   const [bulkProgress, setBulkProgress] = useState('');
   const [error, setError] = useState('');
+  const [needsReconnect, setNeedsReconnect] = useState(false);
   const [status, setStatus] = useState(null);
   const [responseText, setResponseText] = useState('');
   const [responseHint, setResponseHint] = useState('');
@@ -1472,6 +1473,7 @@ export default function EbayApiTesterPage() {
       setBodyText('{}');
     }
     setError('');
+    setNeedsReconnect(false);
     setStatus(null);
   };
 
@@ -1494,6 +1496,7 @@ export default function EbayApiTesterPage() {
 
     setLoading(true);
     setError('');
+    setNeedsReconnect(false);
     setStatus(null);
     setResponseHint('');
     setCopyStatus('');
@@ -1579,10 +1582,13 @@ export default function EbayApiTesterPage() {
               ...(proxyRes.data || {}),
             });
           } catch (e) {
+            const sellerNeedsReconnect = e?.response?.data?.needsReconnect === true;
+            if (sellerNeedsReconnect) setNeedsReconnect(true);
             results.push({
               sellerId: s._id,
               sellerName,
               ok: false,
+              needsReconnect: sellerNeedsReconnect,
               statusCode: e?.response?.status || 500,
               error: e?.response?.data?.error || e.message || 'Request failed',
               data: e?.response?.data || null,
@@ -1658,6 +1664,7 @@ export default function EbayApiTesterPage() {
     } catch (e) {
       setStatus(e?.response?.status || 500);
       setResponseText(JSON.stringify(e?.response?.data || { error: e.message }, null, 2));
+      setNeedsReconnect(e?.response?.data?.needsReconnect === true);
       setError(e?.response?.data?.error || e.message || 'Request failed');
     } finally {
       setLoading(false);
@@ -1999,7 +2006,22 @@ export default function EbayApiTesterPage() {
         </Stack>
       </Paper>
 
-      {error && <Alert severity="warning" sx={{ mb: 2 }}>{error}</Alert>}
+      {error && (
+        <Alert severity={needsReconnect ? 'error' : 'warning'} sx={{ mb: 2 }}>
+          {needsReconnect && (
+            <>
+              <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                eBay reconnect required
+              </Typography>
+              <Typography variant="body2" sx={{ mt: 0.5, mb: 1 }}>
+                Open Seller Profile → Connect eBay for this seller. If reconnect fails, revoke this app under
+                eBay → Account → Third-party app access, then connect again.
+              </Typography>
+            </>
+          )}
+          {error}
+        </Alert>
+      )}
       {responseHint && <Alert severity="info" sx={{ mb: 2 }}>{responseHint}</Alert>}
 
       <Paper sx={{ p: 2 }}>

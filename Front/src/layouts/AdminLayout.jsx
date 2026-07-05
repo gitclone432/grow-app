@@ -38,23 +38,14 @@ import AddSellerPage from '../pages/admin/AddSellerPage.jsx';
 import ListingManagementPage from '../pages/admin/ListingManagementPage.jsx';
 import ManagePlatformsPage from '../pages/admin/ManagePlatformsPage.jsx';
 import ManageStoresPage from '../pages/admin/ManageStoresPage.jsx';
-import AdminAssignmentsPage from '../pages/admin/AdminAssignmentsPage.jsx';
 import ManageRangesPage from '../pages/admin/ManageRangesPage.jsx';
 import ManageCategoriesPage from '../pages/admin/ManageCategoriesPage.jsx';
-import ListingsSummaryPage from '../pages/admin/ListingsSummaryPage.jsx';
 import UserCredentialsPage from '../pages/admin/UserCredentialsPage.jsx';
-import ListingSheetPage from '../pages/admin/ListingSheetPage.jsx';
 import SupervisorAccountIcon from '@mui/icons-material/SupervisorAccount';
 import TaskIcon from '@mui/icons-material/Task';
 import EditIcon from '@mui/icons-material/Edit';
 
-import TaskListPage from '../pages/admin/TaskListPage.jsx';
 import StockLedgerPage from '../pages/admin/StockLedgerPage.jsx';
-import StoreWiseTaskListPage from '../pages/admin/StoreWiseTaskListPage.jsx';
-import StoreTaskDetailPage from '../pages/admin/StoreTaskDetailPage.jsx';
-import StoreDailyTasksPage from '../pages/admin/StoreDailyTasksPage.jsx';
-import ListerInfoPage from '../pages/admin/ListerInfoPage.jsx';
-import ListerInfoDetailPage from '../pages/admin/ListerInfoDetailPage.jsx';
 import AdminTaskList from '../pages/compatibility/AdminTaskList.jsx';
 import EditorDashboard from '../pages/compatibility/EditorDashboard.jsx';
 import ProgressTrackingPage from '../pages/compatibility/ProgressTrackingPage.jsx';
@@ -84,13 +75,10 @@ import AboutMePage from '../pages/AboutMePage.jsx';
 import EmployeeDetailsPage from '../pages/admin/EmployeeDetailsPage.jsx';
 import EmployeeManagementPage from '../pages/admin/EmployeeManagementPage.jsx';
 import BuyerChatPage from '../pages/admin/BuyerChatPage.jsx';
-import RangeAnalyzerPage from '../pages/admin/RangeAnalyzerPage.jsx';
 import FeedUploadPage from '../pages/ebay/FeedUploadPage.jsx';
 import DirectListPage from '../pages/ebay/DirectListPage.jsx';
 import SellingPrivilegesPage from '../pages/admin/SellingPrivilegesPage.jsx';
 import EbayApiUsagePage from '../pages/admin/EbayApiUsagePage.jsx';
-import AnalyticsPage from '../pages/admin/AnalyticsPage.jsx';
-import SellerStandardsPage from '../pages/admin/SellerStandardsPage.jsx';
 import EbayAnalyticsHubPage from '../pages/admin/EbayAnalyticsHubPage.jsx';
 import EbayFeedbackPage from '../pages/admin/EbayFeedbackPage.jsx';
 import EbayApiTesterPage from '../pages/admin/EbayApiTesterPage.jsx';
@@ -144,13 +132,6 @@ import OrdersDepartmentDashboardPage from '../pages/admin/OrdersDepartmentDashbo
 import BarChartIcon from '@mui/icons-material/BarChart';
 import ChatIcon from '@mui/icons-material/Chat';
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings';
-import AmazonLookupPage from '../pages/admin/AmazonLookupPage.jsx';
-import SearchIcon from '@mui/icons-material/Search';
-import ManageProductUmbrellasPage from '../pages/admin/ManageProductUmbrellasPage.jsx';
-import UmbrellaIcon from '@mui/icons-material/Umbrella';
-import ASINStoragePage from '../pages/admin/ASINStoragePage.jsx';
-import StorageIcon from '@mui/icons-material/Storage';
-import ImportExportIcon from '@mui/icons-material/ImportExport';
 import LayersIcon from '@mui/icons-material/Layers';
 import ColumnCreatorPage from '../pages/admin/ColumnCreatorPage.jsx';
 import ViewColumnIcon from '@mui/icons-material/ViewColumn';
@@ -336,8 +317,6 @@ const COMPONENT_MAP = {
   'AffiliateOrders': AffiliateOrdersPage,
   'SellingPrivileges': SellingPrivilegesPage,
   'EbayApiUsage': EbayApiUsagePage,
-  'Analytics': AnalyticsPage,
-  'AnalyticsSellerStandards': SellerStandardsPage,
   'EbayAnalyticsHub': EbayAnalyticsHubPage,
   'EbayFeedback': EbayFeedbackPage,
   'EbayApiTester': EbayApiTesterPage,
@@ -348,7 +327,6 @@ const COMPONENT_MAP = {
   'TeamChat': InternalMessagesPage,
   'LeaveAdmin': LeaveAdminPage,
   'EmployeeManagement': EmployeeManagementPage,
-  'AddUser': AddListerPage,
   'AddSeller': AddSellerPage,
   'UserSellerAssignments': UserSellerAssignmentPage,
   'ViewAllMessages': InternalMessagesAdminPage,
@@ -360,17 +338,6 @@ const COMPONENT_MAP = {
   'ManagePlatforms': ManagePlatformsPage,
   'ManageStores': ManageStoresPage,
   'ProductTable': ListingManagementPage,
-  'TaskList': TaskListPage,
-  'Assignments': AdminAssignmentsPage,
-  'ListingsSummary': ListingsSummaryPage,
-  'ListingSheet': ListingSheetPage,
-  'StoreWiseTasks': StoreWiseTaskListPage,
-  'StoreDailyTasks': StoreDailyTasksPage,
-  'ListerInfo': ListerInfoPage,
-  'RangeAnalyzer': RangeAnalyzerPage,
-  'AmazonLookup': AmazonLookupPage,
-  'ProductUmbrellas': ManageProductUmbrellasPage,
-  'AsinStorage': ASINStoragePage,
   'ColumnCreator': ColumnCreatorPage,
   'ManageRanges': ManageRangesPage,
   'UserCredentials': UserCredentialsPage,
@@ -951,6 +918,14 @@ export default function AdminLayout({ user, onLogout }) {
           <Route path="/user-performance" element={<UserPerformancePage />} />
 
           <Route path="/credit-card-names" element={<Navigate to="/admin/credit-cards" replace />} />
+          <Route path="/add-user" element={<Navigate to="/employee-management" replace />} />
+
+          {hasAccess('EbayAnalyticsHub') && (
+            <>
+              <Route path="/analytics" element={<Navigate to="/admin/analytics-hub?tab=metrics" replace />} />
+              <Route path="/analytics/seller-standards" element={<Navigate to="/admin/analytics-hub?tab=standards" replace />} />
+            </>
+          )}
 
           {hasAccess('EbayFeedback') && (
             <>
@@ -984,14 +959,6 @@ export default function AdminLayout({ user, onLogout }) {
               <Route path="/seller-templates" element={<SellerTemplatesPage />} />
               <Route path="/template-listing-analytics" element={<TemplateListingAnalyticsPage />} />
             </>
-          )}
-
-          {hasAccess('StoreWiseTasks') && (
-            <Route path="/store-wise-tasks/details" element={<StoreTaskDetailPage />} />
-          )}
-
-          {hasAccess('ListerInfo') && (
-            <Route path="/lister-info/details" element={<ListerInfoDetailPage />} />
           )}
 
           {/* Default redirect */}

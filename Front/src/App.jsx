@@ -8,7 +8,6 @@ import ProductResearchPage from './pages/admin/ProductResearchPage.jsx';
 import AddListerPage from './pages/admin/AddListerPage.jsx';
 import ListingAnalyticsPage from './pages/admin/ListingAnalyticsPage.jsx';
 import ListerDashboard from './pages/lister/ListerDashboard.jsx';
-import RangeAnalyzerPage from './pages/admin/RangeAnalyzerPage.jsx';
 import SellerEbayPage from './pages/SellerProfilePage.jsx';
 import AboutMePage from './pages/AboutMePage.jsx';
 import MessageReceivedPage from './pages/admin/MessageReceivedPage.jsx';
@@ -35,7 +34,6 @@ const STATIC_PAGE_TITLES = {
   '/admin/ideas': `Ideas & Issues • ${BASE_DOCUMENT_TITLE}`,
   '/admin/user-performance': `User Performance Logs • ${BASE_DOCUMENT_TITLE}`,
   '/lister': `My Dashboard • ${BASE_DOCUMENT_TITLE}`,
-  '/lister/range-analyzer': `Range Analyzer • ${BASE_DOCUMENT_TITLE}`,
   '/seller-ebay': `Seller Profile • ${BASE_DOCUMENT_TITLE}`,
 };
 
@@ -47,8 +45,6 @@ const ADMIN_ROUTE_TITLE_OVERRIDES = {
   '/admin/template-listings': 'Template Listings',
   '/admin/seller-templates': 'Seller Templates',
   '/admin/template-listing-analytics': 'Template Listing Analytics',
-  '/admin/store-wise-tasks/details': 'Store-Wise Task Details',
-  '/admin/lister-info/details': 'Lister Info Details',
 };
 
 function formatDocumentTitle(pageTitle) {
@@ -187,10 +183,6 @@ export default function App() {
             <Route
               path="/lister"
               element={user.role === 'lister' || user.role === 'advancelister' || user.role === 'trainee' ? <ListerDashboard user={user} onLogout={logout} /> : <Navigate to="/login" replace />}
-            />
-            <Route
-              path="/lister/range-analyzer"
-              element={user.role === 'lister' || user.role === 'advancelister' || user.role === 'trainee' ? <RangeAnalyzerPage /> : <Navigate to="/login" replace />}
             />
             <Route
               path="/seller-ebay"
