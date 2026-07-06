@@ -81,6 +81,7 @@ export const PAGE_DEFAULT_ROLES = {
   'EbayAnalyticsHub': ['superadmin', 'listingadmin'],
   'EbayFeedback': ['superadmin', 'listingadmin'],
   'EbayApiTester': ['superadmin', 'listingadmin'],
+  'MarketingCampaigns': ['superadmin', 'listingadmin'],
   'SellerFunds': ['superadmin', 'listingadmin'],
   'FinancesTransactionSummary': ['superadmin', 'listingadmin'],
   'FinancesTransactions': ['superadmin', 'listingadmin'],
@@ -108,10 +109,7 @@ export const PAGE_DEFAULT_ROLES = {
   'RangeAnalyzer': ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'],
   'ColumnCreator': ['superadmin', 'productadmin'],
   'ManageRanges': ['superadmin', 'productadmin'],
-  'UserCredentials': ['superadmin'],
   'UserPerformance': ['superadmin'],
-  'EmployeeDetails': ['superadmin', 'hradmin', 'operationhead'],
-
   // Etsy
   'EtsyProducts': ['superadmin', 'listingadmin'],
   'EtsyOrderFulfilment': ['superadmin', 'listingadmin'],

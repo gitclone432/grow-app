@@ -15,6 +15,8 @@ import BankAccount from '../models/BankAccount.js';
 import PayoneerFeedCache from '../models/PayoneerFeedCache.js';
 import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.js';
 import { applyActiveSellerScope } from '../utils/activeSellerScope.js';
+import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
+import { postEbayTradingApi } from '../utils/ebayTradingApi.js';
 import Order from '../models/Order.js';
 import Return from '../models/Return.js';
 import Case from '../models/Case.js';
@@ -66,6 +68,7 @@ import { getSellersMatchingAllRoute, resolveStoreDisplayName } from '../utils/se
 import { applySellerStandardsThresholdLabels } from '../utils/sellerStandardsThresholds.js';
 import {
   activeListingStatusFilter,
+  buildStoreListingsMatch,
   getSellersForStoreListings,
   sellerIdsInMatch,
 } from '../utils/storeListingsQuery.js';
@@ -1233,8 +1236,8 @@ router.get('/feed/result/:taskId', requireAuth, async (req, res) => {
 });
 
 // ============================================
-// EBAY OAUTH SCOPES - Single source of truth
-// Used in both initial authorization AND token refresh
+// EBAY OAUTH SCOPES - Single source of truth for OAuth consent (authorize URL + code exchange)
+// Token refresh must NOT send this list — use buildRefreshTokenParams() instead.
 // ============================================
 const EBAY_OAUTH_SCOPES = [
   'https://api.ebay.com/oauth/api_scope',
@@ -1257,7 +1260,7 @@ const EBAY_OAUTH_SCOPES = [
   'https://api.ebay.com/oauth/api_scope/commerce.notification.subscription.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.stores',
   'https://api.ebay.com/oauth/api_scope/sell.stores.readonly',
-  'https://api.ebay.com/oauth/scope/sell.edelivery',
+  'https://api.ebay.com/oauth/api_scope/sell.edelivery',
   'https://api.ebay.com/oauth/api_scope/commerce.vero',
   'https://api.ebay.com/oauth/api_scope/sell.inventory.mapping',
   'https://api.ebay.com/oauth/api_scope/commerce.message',
@@ -1426,11 +1429,7 @@ export async function ensureValidToken(seller, retries = 3) {
     try {
       const refreshRes = await axios.post(
         'https://api.ebay.com/identity/v1/oauth2/token',
-        qs.stringify({
-          grant_type: 'refresh_token',
-          refresh_token: seller.ebayTokens.refresh_token,
-          scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-        }),
+        qs.stringify(buildRefreshTokenParams(seller)),
         {
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -2530,11 +2529,7 @@ router.get('/orders', async (req, res) => {
       try {
         const refreshRes = await axios.post(
           'https://api.ebay.com/identity/v1/oauth2/token',
-          qs.stringify({
-            grant_type: 'refresh_token',
-            refresh_token: seller.ebayTokens.refresh_token,
-            scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-          }),
+          qs.stringify(buildRefreshTokenParams(seller)),
           {
             headers: {
               'Content-Type': 'application/x-www-form-urlencoded',
@@ -4691,11 +4686,7 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
           try {
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -5069,11 +5060,7 @@ export async function scheduledPollNewOrders() {
           console.log(`[${sellerName}] Refreshing token...`);
           const refreshRes = await axios.post(
             'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify({
-              grant_type: 'refresh_token',
-              refresh_token: seller.ebayTokens.refresh_token,
-              scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-            }),
+            qs.stringify(buildRefreshTokenParams(seller)),
             {
               headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -5505,11 +5492,7 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
           console.log(`[${sellerName}] Refreshing token...`);
           const refreshRes = await axios.post(
             'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify({
-              grant_type: 'refresh_token',
-              refresh_token: seller.ebayTokens.refresh_token,
-              scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-            }),
+            qs.stringify(buildRefreshTokenParams(seller)),
             {
               headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -5831,11 +5814,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
           console.log(`[${sellerName}] Refreshing token...`);
           const refreshRes = await axios.post(
             'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify({
-              grant_type: 'refresh_token',
-              refresh_token: seller.ebayTokens.refresh_token,
-              scope: EBAY_OAUTH_SCOPES,
-            }),
+            qs.stringify(buildRefreshTokenParams(seller)),
             {
               headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -6639,11 +6618,7 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
             console.log(`[Fetch Returns] Refreshing token for seller ${sellerName}`);
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -6932,11 +6907,7 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
             console.log(`[Fetch INR Cases] Refreshing token for seller ${sellerName}`);
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -7180,11 +7151,7 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
             console.log(`[Fetch Payment Disputes] Refreshing token for seller ${sellerName}`);
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -8733,11 +8700,7 @@ router.post('/fetch-messages', requireAuth, requirePageAccess('BuyerMessages'), 
             console.log(`[Fetch Messages] Refreshing token for seller ${sellerName}`);
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -8987,13 +8950,13 @@ router.post('/sync-listings', requireAuth, async (req, res) => {
           </GetSellerListRequest>
         `;
 
-      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-        headers: {
-          'X-EBAY-API-SITEID': '100',
-          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-          'X-EBAY-API-CALL-NAME': 'GetSellerList',
-          'Content-Type': 'text/xml'
-        }
+      const response = await postEbayTradingApi(xmlRequest, {
+        'X-EBAY-API-SITEID': '100',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'GetSellerList',
+        'Content-Type': 'text/xml',
+      }, {
+        logLabel: `Sync Listings p${page}`,
       });
 
       const result = await parseStringPromise(response.data);
@@ -9209,7 +9172,10 @@ router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
     });
   }
   try {
-    const sellersTotal = await Seller.countDocuments({ 'ebayTokens.access_token': { $exists: true } });
+    const sellersTotal = await Seller.countDocuments({
+      isStoreActive: { $ne: false },
+      'ebayTokens.refresh_token': { $exists: true, $nin: [null, ''] },
+    });
     if (sellersTotal === 0) {
       await releaseSyncAllSellersLock();
       return res.json({ success: true, message: 'No sellers with eBay tokens found', results: [] });
@@ -10110,7 +10076,7 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
           <WarningLevel>High</WarningLevel>
           <DetailLevel>ItemReturnDescription</DetailLevel>
           <StartTimeFrom>${new Date(startTimeFrom).toISOString()}</StartTimeFrom>
-          <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
+          <StartTimeTo>${new Date().toISOString()}</StartTimeTo>
           <IncludeWatchCount>true</IncludeWatchCount>
           <Pagination>
             <EntriesPerPage>100</EntriesPerPage>
@@ -10132,13 +10098,13 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
         </GetSellerListRequest>
       `;
 
-      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-        headers: {
-          'X-EBAY-API-SITEID': '0', // Use SiteID 0 for all listings (not just Motors)
-          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-          'X-EBAY-API-CALL-NAME': 'GetSellerList',
-          'Content-Type': 'text/xml'
-        }
+      const response = await postEbayTradingApi(xmlRequest, {
+        'X-EBAY-API-SITEID': '0', // Use SiteID 0 for all listings (not just Motors)
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'GetSellerList',
+        'Content-Type': 'text/xml',
+      }, {
+        logLabel: `Sync All Listings p${page}`,
       });
 
       const result = await parseStringPromise(response.data);
@@ -10334,11 +10300,33 @@ router.get('/all-listings', requireAuth, async (req, res) => {
   }
 });
 
-// GET ALL ACTIVE LISTINGS ACROSS ALL STORES/SELLERS
-// Merge ActiveListing + Listing: sync jobs may write to only one collection per store.
-// Old logic picked ActiveListing whenever it had any row, hiding Listing-only stores.
+// GET ALL ACTIVE LISTINGS ACROSS ALL STORES/SELLERS (ActiveListing cache from GetSellerList sync)
 router.get('/all-store-listings', requireAuth, async (req, res) => {
   const { page = 1, limit = 50, search, sellerId, sortBy = 'startDate', sortOrder = 'desc' } = req.query;
+  const emptyPayload = (pageNum, resolvedSortField, resolvedSortOrder) => ({
+    listings: [],
+    sourceCollection: 'ActiveListing',
+    sorting: {
+      sortBy: resolvedSortField,
+      sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
+    },
+    summary: {
+      totalAmount: 0,
+      totalQuantity: 0,
+      totalSoldQuantity: 0,
+      totalViews30d: 0,
+      totalWatchers: 0,
+      promotedCount: 0,
+      inventoryValue: 0,
+      uniqueStoreCount: 0,
+    },
+    pagination: {
+      total: 0,
+      page: pageNum,
+      pages: 0,
+    },
+  });
+
   try {
     const sortFieldMap = {
       currentPrice: 'currentPrice',
@@ -10360,180 +10348,83 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
     const activeSellers = await getSellersForStoreListings(req);
     const activeSellerIds = activeSellers.map((s) => s._id);
     if (activeSellerIds.length === 0) {
-      return res.json({
-        listings: [],
-        sourceCollection: 'ActiveListing+Listing',
-        sorting: {
-          sortBy: resolvedSortField,
-          sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
-        },
-        summary: {
-          totalAmount: 0,
-          totalQuantity: 0,
-          totalSoldQuantity: 0,
-          totalViews30d: 0,
-          totalWatchers: 0,
-          promotedCount: 0,
-          inventoryValue: 0,
-          uniqueStoreCount: 0,
-        },
-        pagination: {
-          total: 0,
-          page: pageNum,
-          pages: 0,
-        },
-      });
+      return res.json(emptyPayload(pageNum, resolvedSortField, resolvedSortOrder));
     }
-    const sellerInMatchList = sellerIdsInMatch(activeSellerIds).$in;
+
+    const sid = String(sellerId || '').trim();
+    if (sid && !mongoose.Types.ObjectId.isValid(sid)) {
+      return res.status(400).json({ error: 'Invalid sellerId' });
+    }
+    if (sid && !activeSellerIds.some((id) => String(id) === sid)) {
+      return res.json(emptyPayload(pageNum, resolvedSortField, resolvedSortOrder));
+    }
+
+    const match = buildStoreListingsMatch({
+      sellerIds: activeSellerIds,
+      sellerId: sid,
+      search,
+    });
+
     const sellerNameById = new Map(
       activeSellers.map((s) => [String(s._id), s?.user?.username || String(s._id)])
     );
 
-    let query = {
-      ...activeListingStatusFilter(),
-      seller: { $in: sellerInMatchList },
-    };
-
-    if (sellerId && String(sellerId).trim() !== '') {
-      const sid = String(sellerId).trim();
-      if (!mongoose.Types.ObjectId.isValid(sid)) {
-        return res.status(400).json({ error: 'Invalid sellerId' });
-      }
-      const sellerObjectId = new mongoose.Types.ObjectId(sid);
-      const allowed = activeSellerIds.some((id) => String(id) === String(sellerObjectId));
-      if (!allowed) {
-        return res.json({
-          listings: [],
-          sourceCollection: 'ActiveListing+Listing',
-          sorting: {
-            sortBy: resolvedSortField,
-            sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
-          },
-          summary: {
-            totalAmount: 0,
-            totalQuantity: 0,
-            totalSoldQuantity: 0,
-            totalViews30d: 0,
-            totalWatchers: 0,
-            promotedCount: 0,
-            inventoryValue: 0,
-            uniqueStoreCount: 0,
-          },
-          pagination: {
-            total: 0,
-            page: pageNum,
-            pages: 0,
-          },
-        });
-      }
-      query.seller = { $in: [sellerObjectId, String(sellerObjectId)] };
-    }
-
-    if (search && search.trim() !== '') {
-      const searchRegex = { $regex: search.trim(), $options: 'i' };
-      query.$or = [
-        { title: searchRegex },
-        { sku: searchRegex },
-        { itemId: searchRegex },
-      ];
-    }
-
-    const listingColl = Listing.collection.name;
-
-    const mergeStages = [
-      { $match: query },
-      {
-        $unionWith: {
-          coll: listingColl,
-          pipeline: [{ $match: query }],
-        },
-      },
-      {
-        $group: {
-          _id: '$itemId',
-          docs: { $push: '$$ROOT' },
-        },
-      },
-      {
-        $replaceRoot: {
-          newRoot: {
-            $reduce: {
-              input: { $reverseArray: '$docs' },
-              initialValue: {},
-              in: { $mergeObjects: ['$$value', '$$this'] },
+    const [listings, totalDocs, summaryRows] = await Promise.all([
+      ActiveListing.find(match).sort(sortSpec).skip(skip).limit(limitNum).lean(),
+      ActiveListing.countDocuments(match),
+      ActiveListing.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: null,
+            totalAmount: { $sum: { $ifNull: ['$currentPrice', 0] } },
+            totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } },
+            totalSoldQuantity: { $sum: { $ifNull: ['$soldQuantity', 0] } },
+            totalViews30d: { $sum: { $ifNull: ['$views30d', 0] } },
+            totalWatchers: { $sum: { $ifNull: ['$watchCount', 0] } },
+            promotedCount: { $sum: { $cond: [{ $eq: ['$promoted', true] }, 1, 0] } },
+            inventoryValue: {
+              $sum: {
+                $multiply: [
+                  { $ifNull: ['$currentPrice', 0] },
+                  { $ifNull: ['$quantity', 0] },
+                ],
+              },
+            },
+            sellerIds: {
+              $addToSet: { $toString: { $ifNull: ['$seller', ''] } },
             },
           },
         },
-      },
-    ];
-
-    const [facetRow] = await ActiveListing.aggregate(
-      [
-      ...mergeStages,
-      {
-        $facet: {
-          summary: [
-            {
-              $group: {
-                _id: null,
-                totalAmount: { $sum: { $ifNull: ['$currentPrice', 0] } },
-                totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } },
-                totalSoldQuantity: { $sum: { $ifNull: ['$soldQuantity', 0] } },
-                totalViews30d: { $sum: { $ifNull: ['$views30d', 0] } },
-                totalWatchers: { $sum: { $ifNull: ['$watchCount', 0] } },
-                promotedCount: { $sum: { $cond: [{ $eq: ['$promoted', true] }, 1, 0] } },
-                inventoryValue: {
-                  $sum: {
-                    $multiply: [
-                      { $ifNull: ['$currentPrice', 0] },
-                      { $ifNull: ['$quantity', 0] },
+        {
+          $project: {
+            totalAmount: 1,
+            totalQuantity: 1,
+            totalSoldQuantity: 1,
+            totalViews30d: 1,
+            totalWatchers: 1,
+            promotedCount: 1,
+            inventoryValue: 1,
+            uniqueStoreCount: {
+              $size: {
+                $filter: {
+                  input: { $ifNull: ['$sellerIds', []] },
+                  as: 'storeId',
+                  cond: {
+                    $and: [
+                      { $ne: ['$$storeId', null] },
+                      { $ne: ['$$storeId', ''] },
                     ],
                   },
                 },
-                sellerIds: {
-                  $addToSet: {
-                    $toString: { $ifNull: ['$seller', ''] },
-                  },
-                },
               },
             },
-            {
-              $project: {
-                totalAmount: 1,
-                totalQuantity: 1,
-                totalSoldQuantity: 1,
-                totalViews30d: 1,
-                totalWatchers: 1,
-                promotedCount: 1,
-                inventoryValue: 1,
-                uniqueStoreCount: {
-                  $size: {
-                    $filter: {
-                      input: { $ifNull: ['$sellerIds', []] },
-                      as: 'sid',
-                      cond: {
-                        $and: [
-                          { $ne: ['$$sid', null] },
-                          { $ne: ['$$sid', ''] },
-                        ],
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          ],
-          data: [{ $sort: sortSpec }, { $skip: skip }, { $limit: limitNum }],
-          meta: [{ $count: 'total' }],
+          },
         },
-      },
-      ],
-      { allowDiskUse: true },
-    );
+      ]).allowDiskUse(true),
+    ]);
 
-    const totalDocs = facetRow?.meta[0]?.total || 0;
-    const listings = facetRow?.data || [];
-    const summary = facetRow?.summary[0] || {};
+    const summary = summaryRows[0] || {};
     const toNum = (v) => Number(v || 0);
 
     const enriched = listings.map((listing) => ({
@@ -10543,7 +10434,7 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
 
     res.json({
       listings: enriched,
-      sourceCollection: 'ActiveListing+Listing',
+      sourceCollection: 'ActiveListing',
       sorting: {
         sortBy: resolvedSortField,
         sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
@@ -10565,7 +10456,110 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
       },
     });
   } catch (err) {
+    console.error('[Store Listings] Error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Per-store listing counts + last sync-all result (Store Listings diagnostics).
+router.get('/store-listings/store-status', requireAuth, async (req, res) => {
+  try {
+    const scopedSellers = await getSellersForStoreListings(req);
+    const sellerIds = scopedSellers.map((s) => s._id);
+    if (sellerIds.length === 0) {
+      return res.json({
+        sync: {
+          running: false,
+          currentSeller: '',
+          sellersTotal: 0,
+          sellersComplete: 0,
+          currentPage: 0,
+          currentTotalPages: 0,
+          completedAt: null,
+          startedAt: null,
+          errors: [],
+        },
+        stores: [],
+      });
+    }
+
+    let syncPayload = syncAllStatus;
+    try {
+      const row = await SyncAllSellersStatusCache.findById(SYNC_ALL_SELLERS_STATUS_ID).lean();
+      if (row?.payload && typeof row.payload === 'object') {
+        syncPayload = row.payload;
+      }
+    } catch {
+      // use in-memory fallback
+    }
+
+    const resultsById = new Map();
+    const resultsByName = new Map();
+    for (const r of syncPayload?.results || []) {
+      if (r?.sellerId) resultsById.set(String(r.sellerId), r);
+      if (r?.sellerName) resultsByName.set(String(r.sellerName).toLowerCase(), r);
+    }
+
+    const sellerInList = sellerIdsInMatch(sellerIds).$in;
+    const countRows = await ActiveListing.aggregate([
+      {
+        $match: {
+          ...activeListingStatusFilter(),
+          seller: { $in: sellerInList },
+        },
+      },
+      { $group: { _id: '$seller', count: { $sum: 1 } } },
+    ]);
+    const countBySeller = new Map(countRows.map((c) => [String(c._id), c.count]));
+
+    const sellerDocs = await Seller.find({ _id: { $in: sellerIds } })
+      .select('_id user ebayTokens.refresh_token lastAllListingsPolledAt isStoreActive')
+      .populate('user', 'username email active')
+      .lean();
+
+    const stores = sellerDocs
+      .map((s) => {
+        const sid = String(s._id);
+        const sellerName = s.user?.username || s.user?.email || sid;
+        const lastResult =
+          resultsById.get(sid) || resultsByName.get(sellerName.toLowerCase()) || null;
+        return {
+          sellerId: s._id,
+          sellerName,
+          listingCount: countBySeller.get(sid) || 0,
+          hasOAuth: Boolean(s.ebayTokens?.refresh_token),
+          userActive: s.user?.active !== false,
+          isStoreActive: s.isStoreActive !== false,
+          lastAllListingsPolledAt: s.lastAllListingsPolledAt || null,
+          lastSync: lastResult
+            ? {
+                processedCount: lastResult.processedCount ?? 0,
+                skippedCount: lastResult.skippedCount ?? 0,
+                error: lastResult.error || null,
+              }
+            : null,
+        };
+      })
+      .sort((a, b) => b.listingCount - a.listingCount || a.sellerName.localeCompare(b.sellerName));
+
+    res.json({
+      sync: {
+        running: Boolean(syncPayload?.running),
+        currentSeller: syncPayload?.currentSeller || '',
+        sellersTotal: syncPayload?.sellersTotal ?? 0,
+        sellersComplete: syncPayload?.sellersComplete ?? 0,
+        currentPage: syncPayload?.currentPage ?? 0,
+        currentTotalPages: syncPayload?.currentTotalPages ?? 0,
+        totalProcessed: syncPayload?.totalProcessed ?? 0,
+        completedAt: syncPayload?.completedAt || null,
+        startedAt: syncPayload?.startedAt || null,
+        errors: Array.isArray(syncPayload?.errors) ? syncPayload.errors : [],
+      },
+      stores,
+    });
+  } catch (err) {
+    console.error('[Store Listings Status] Error:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to load store status' });
   }
 });
 
@@ -15867,6 +15861,110 @@ router.get('/finances/transactions', requireAuth, requirePageAccess('FinancesTra
 });
 
 // ============================================
+// MARKETING CAMPAIGNS (Marketing API — getCampaigns)
+// ============================================
+const MARKETING_CAMPAIGNS_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/campaign/methods/getCampaigns';
+
+function normalizeMarketingCampaignRow(campaign = {}) {
+  const funding = campaign.fundingStrategy || {};
+  const daily = campaign.budget?.daily?.amount;
+  return {
+    campaignId: campaign.campaignId || '',
+    campaignName: campaign.campaignName || '',
+    campaignStatus: campaign.campaignStatus || '',
+    campaignTargetingType: campaign.campaignTargetingType || '',
+    marketplaceId: campaign.marketplaceId || '',
+    channels: Array.isArray(campaign.channels) ? campaign.channels : [],
+    startDate: campaign.startDate || null,
+    endDate: campaign.endDate || null,
+    fundingModel: funding.fundingModel || '',
+    bidPercentage: funding.bidPercentage || '',
+    biddingStrategy: funding.biddingStrategy || '',
+    adRateStrategy: funding.adRateStrategy || '',
+    dailyBudgetValue: daily?.value ?? null,
+    dailyBudgetCurrency: daily?.currency || '',
+    budgetStatus: campaign.budget?.daily?.budgetStatus || '',
+    raw: campaign,
+  };
+}
+
+function buildMarketingCampaignQueryParams(query) {
+  const params = {};
+  const limit = Math.min(500, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  params.limit = limit;
+  params.offset = offset;
+
+  const optionalKeys = [
+    'campaign_status',
+    'campaign_name',
+    'funding_strategy',
+    'campaign_targeting_type',
+    'start_date_range',
+    'end_date_range',
+  ];
+  for (const key of optionalKeys) {
+    const value = String(query[key] || '').trim();
+    if (value) params[key] = value;
+  }
+  return params;
+}
+
+router.get('/marketing/campaigns', requireAuth, requirePageAccess('MarketingCampaigns'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+    if (!seller.ebayTokens?.refresh_token) {
+      return res.status(400).json({ success: false, error: 'Seller not connected to eBay', needsReconnect: true });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
+    const params = buildMarketingCampaignQueryParams(req.query);
+
+    const response = await axios.get('https://api.ebay.com/sell/marketing/v1/ad_campaign', {
+      headers: buildEbayRawHeaders({
+        accessToken,
+        method: 'GET',
+        path: '/sell/marketing/v1/ad_campaign',
+        marketplace: marketplaceId,
+      }),
+      params,
+      timeout: 90000,
+    });
+
+    const campaigns = (response.data?.campaigns || []).map(normalizeMarketingCampaignRow);
+    return res.json({
+      success: true,
+      docsUrl: MARKETING_CAMPAIGNS_DOCS,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId,
+      limit: response.data?.limit ?? String(params.limit),
+      offset: response.data?.offset ?? String(params.offset),
+      total: response.data?.total ?? null,
+      href: response.data?.href || null,
+      next: response.data?.next || null,
+      prev: response.data?.prev || null,
+      campaigns,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = data?.errors || [];
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to load marketing campaigns';
+    console.error('[Marketing Campaigns] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
+// ============================================
 // SELLER FUNDS SUMMARY (All connected sellers)
 // ============================================
 router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
@@ -17048,10 +17146,193 @@ router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res)
 // Set RUNNER_ID=render in Render's env vars.
 // ============================================
 
+const RECENT_LISTINGS_LOOKBACK_DAYS = 14;
+const STORE_LISTINGS_MOTORS_CATEGORIES = [
+  'eBay Motors',
+  'Parts & Accessories',
+  'Automotive Tools',
+  'Tools & Supplies',
+];
+
+/**
+ * Paginate GetSellerList (StartTime window) into ActiveListing (+ Motors Listing).
+ * Uses a fresh StartTimeTo on every page so listings created mid-sync are not skipped.
+ */
+async function paginateGetSellerListForActiveListings({
+  seller,
+  token,
+  sellerName,
+  startTimeFrom,
+  onPageProgress = null,
+  bumpGlobalProcessed = null,
+}) {
+  let page = 1;
+  let totalPages = 1;
+  let processedCount = 0;
+  let skippedCount = 0;
+  const startFromIso = new Date(startTimeFrom).toISOString();
+
+  do {
+    const startTimeTo = new Date();
+    if (onPageProgress) onPageProgress({ page, totalPages });
+
+    const xmlRequest = `
+        <?xml version="1.0" encoding="utf-8"?>
+        <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+          <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+          <ErrorLanguage>en_US</ErrorLanguage>
+          <WarningLevel>High</WarningLevel>
+          <DetailLevel>ItemReturnDescription</DetailLevel>
+          <StartTimeFrom>${startFromIso}</StartTimeFrom>
+          <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
+          <IncludeWatchCount>true</IncludeWatchCount>
+          <Pagination>
+            <EntriesPerPage>100</EntriesPerPage>
+            <PageNumber>${page}</PageNumber>
+          </Pagination>
+          <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
+          <OutputSelector>ItemArray.Item.Title</OutputSelector>
+          <OutputSelector>ItemArray.Item.SKU</OutputSelector>
+          <OutputSelector>ItemArray.Item.Quantity</OutputSelector>
+          <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
+          <OutputSelector>ItemArray.Item.WatchCount</OutputSelector>
+          <OutputSelector>ItemArray.Item.TimeLeft</OutputSelector>
+          <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
+          <OutputSelector>ItemArray.Item.Description</OutputSelector>
+          <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
+          <OutputSelector>ItemArray.Item.ItemCompatibilityList</OutputSelector>
+          <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
+          <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
+          <OutputSelector>PaginationResult</OutputSelector>
+        </GetSellerListRequest>
+      `;
+
+    const response = await postEbayTradingApi(xmlRequest, {
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'GetSellerList',
+      'Content-Type': 'text/xml',
+    }, {
+      logLabel: `Sync All ${sellerName} p${page}`,
+    });
+
+    const result = await parseStringPromise(response.data);
+    if (result.GetSellerListResponse.Ack[0] === 'Failure') {
+      throw new Error(result.GetSellerListResponse.Errors[0].LongMessage[0]);
+    }
+
+    const pagination = result.GetSellerListResponse.PaginationResult[0];
+    totalPages = parseInt(pagination.TotalNumberOfPages[0], 10) || 1;
+    if (onPageProgress) onPageProgress({ page, totalPages });
+
+    const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
+    for (const item of items) {
+      const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
+      if (status !== 'Active') continue;
+
+      const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
+      const isMotorsItem = STORE_LISTINGS_MOTORS_CATEGORIES.some((keyword) => categoryName.includes(keyword));
+      const rawHtml = item.Description ? item.Description[0] : '';
+      const cleanHtml = extractCleanDescription(rawHtml);
+      const promotedStatusRaw =
+        item.PromotedListingStatus?.[0]
+        || item.ListingDetails?.[0]?.PromotedListingStatus?.[0]
+        || item.AdvertisingStatus?.[0]
+        || '';
+      const adRateRaw =
+        item.PromotedListingDetails?.[0]?.PromotedListingAdRate?.[0]
+        || item.PromotedListingAdRate?.[0]
+        || item.AdRate?.[0]
+        || item.ListingDetails?.[0]?.AdRate?.[0]
+        || null;
+      const parsedAdRate = Number.parseFloat(adRateRaw);
+      const adRate = Number.isFinite(parsedAdRate) ? parsedAdRate : null;
+      let promoted = null;
+      if (typeof promotedStatusRaw === 'string' && promotedStatusRaw.trim()) {
+        const normalizedStatus = promotedStatusRaw.trim().toLowerCase();
+        promoted = !(normalizedStatus.includes('not')
+          || normalizedStatus.includes('off')
+          || normalizedStatus.includes('disabled')
+          || normalizedStatus.includes('ineligible'));
+      } else if (adRate !== null) {
+        promoted = adRate > 0;
+      }
+
+      let parsedCompatibility = [];
+      if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
+        parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map((comp) => ({
+          notes: comp.CompatibilityNotes ? comp.CompatibilityNotes[0] : '',
+          nameValueList: comp.NameValueList.map((nv) => ({
+            name: nv.Name[0],
+            value: nv.Value[0],
+          })),
+        }));
+      }
+
+      await ActiveListing.findOneAndUpdate(
+        { itemId: item.ItemID[0] },
+        {
+          seller: seller._id,
+          title: item.Title[0],
+          sku: item.SKU ? item.SKU[0] : '',
+          currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
+          currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
+          quantity: item.Quantity ? parseInt(item.Quantity[0], 10) || 0 : 0,
+          soldQuantity: item.SellingStatus?.[0]?.QuantitySold
+            ? parseInt(item.SellingStatus[0].QuantitySold[0], 10) || 0
+            : 0,
+          watchCount: item.WatchCount ? parseInt(item.WatchCount[0], 10) || 0 : 0,
+          timeLeft: item.TimeLeft?.[0] || '',
+          listingStatus: status,
+          mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+          categoryName,
+          descriptionPreview: cleanHtml,
+          startTime: item.ListingDetails?.[0]?.StartTime?.[0],
+          ...(promoted !== null ? { promoted } : {}),
+          ...(adRate !== null ? { adRate } : {}),
+        },
+        { upsert: true }
+      );
+
+      if (isMotorsItem) {
+        await Listing.findOneAndUpdate(
+          { itemId: item.ItemID[0] },
+          {
+            seller: seller._id,
+            title: item.Title[0],
+            sku: item.SKU ? item.SKU[0] : '',
+            currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
+            currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
+            listingStatus: status,
+            mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+            categoryName,
+            descriptionPreview: cleanHtml,
+            compatibility: parsedCompatibility,
+            startTime: item.ListingDetails?.[0]?.StartTime?.[0],
+          },
+          { upsert: true }
+        );
+      } else {
+        skippedCount++;
+      }
+
+      processedCount++;
+      if (bumpGlobalProcessed) bumpGlobalProcessed();
+    }
+
+    page++;
+  } while (page <= totalPages);
+
+  return { processedCount, skippedCount };
+}
+
 // Core logic for "Poll All Sellers".
 // Called by: POST /sync-all-sellers-listings (background) and the 1:00 AM IST cron job.
 async function executeSyncAllSellersWork() {
-  const allSellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+  const allSellers = await Seller.find({
+    isStoreActive: { $ne: false },
+    'ebayTokens.refresh_token': { $exists: true, $nin: [null, ''] },
+  })
     .populate('user', 'username email');
   if (allSellers.length === 0) {
     console.log('[Sync All] No sellers with eBay tokens found.');
@@ -17088,7 +17369,6 @@ async function executeSyncAllSellersWork() {
   };
   console.log(`[Sync All] Started for ${allSellers.length} seller(s).`);
   await persistSyncAllStatusToDb();
-  const VALID_MOTORS_CATEGORIES = ["eBay Motors", "Parts & Accessories", "Automotive Tools", "Tools & Supplies"];
   try {
     for (const seller of allSellers) {
       await renewSyncAllSellersLock();
@@ -17099,172 +17379,75 @@ async function executeSyncAllSellersWork() {
       console.log(`[Sync All] Starting sync for seller: ${sellerName}`);
       try {
         const token = await ensureValidToken(seller);
-        const listingCount = await Listing.countDocuments({ seller: seller._id, listingStatus: 'Active' });
-        const orderCount = await Order.countDocuments({ seller: seller._id });
-        const defaultStartDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
-        const startTimeTo = new Date();
-        let startTimeFrom;
-        if (listingCount === 0 && orderCount === 0) {
-          startTimeFrom = defaultStartDate;
-        } else {
-          startTimeFrom = seller.lastListingPolledAt || defaultStartDate;
-        }
-        startTimeFrom = getClampedSellerListStart(startTimeFrom, startTimeTo);
-        let page = 1;
-        let totalPages = 1;
+        const pollFinishedAt = new Date();
+        const fullStartTimeFrom = getClampedSellerListStart(
+          getEffectiveInitialSyncDate(seller.initialSyncDate),
+          pollFinishedAt
+        );
+        const recentStartTimeFrom = new Date(pollFinishedAt);
+        recentStartTimeFrom.setUTCDate(recentStartTimeFrom.getUTCDate() - RECENT_LISTINGS_LOOKBACK_DAYS);
+        const recentFrom = recentStartTimeFrom > fullStartTimeFrom
+          ? recentStartTimeFrom
+          : fullStartTimeFrom;
+
+        const onPageProgress = ({ page, totalPages }) => {
+          syncAllStatus.currentPage = page;
+          syncAllStatus.currentTotalPages = totalPages;
+          if (page === 1 || page % 3 === 0 || page >= totalPages) {
+            void persistSyncAllStatusToDb();
+          }
+        };
+        const bumpGlobalProcessed = () => {
+          syncAllStatus.totalProcessed++;
+        };
+
+        console.log(`[Sync All] ${sellerName} — recent pass (${RECENT_LISTINGS_LOOKBACK_DAYS}d start window)...`);
         let processedCount = 0;
         let skippedCount = 0;
-        do {
-          syncAllStatus.currentPage = page;
-          console.log(`[Sync All] ${sellerName} — Fetching Page ${page}...`);
-          const xmlRequest = `
-              <?xml version="1.0" encoding="utf-8"?>
-              <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-                <ErrorLanguage>en_US</ErrorLanguage>
-                <WarningLevel>High</WarningLevel>
-                <DetailLevel>ItemReturnDescription</DetailLevel>
-                <StartTimeFrom>${new Date(startTimeFrom).toISOString()}</StartTimeFrom>
-                <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
-                <IncludeWatchCount>true</IncludeWatchCount>
-                <Pagination>
-                  <EntriesPerPage>100</EntriesPerPage>
-                  <PageNumber>${page}</PageNumber>
-                </Pagination>
-                <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
-                <OutputSelector>ItemArray.Item.Title</OutputSelector>
-                <OutputSelector>ItemArray.Item.SKU</OutputSelector>
-                <OutputSelector>ItemArray.Item.Quantity</OutputSelector>
-                <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
-                <OutputSelector>ItemArray.Item.WatchCount</OutputSelector>
-                <OutputSelector>ItemArray.Item.TimeLeft</OutputSelector>
-                <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
-                <OutputSelector>ItemArray.Item.Description</OutputSelector>
-                <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
-                <OutputSelector>ItemArray.Item.ItemCompatibilityList</OutputSelector>
-                <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
-                <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
-                <OutputSelector>PaginationResult</OutputSelector>
-              </GetSellerListRequest>
-            `;
-          const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-            headers: {
-              'X-EBAY-API-SITEID': '0',
-              'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-              'X-EBAY-API-CALL-NAME': 'GetSellerList',
-              'Content-Type': 'text/xml'
-            }
-          });
-          const result = await parseStringPromise(response.data);
-          if (result.GetSellerListResponse.Ack[0] === 'Failure') {
-            throw new Error(result.GetSellerListResponse.Errors[0].LongMessage[0]);
-          }
-          const pagination = result.GetSellerListResponse.PaginationResult[0];
-          totalPages = parseInt(pagination.TotalNumberOfPages[0]);
-          syncAllStatus.currentTotalPages = totalPages;
-          const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
-          for (const item of items) {
-            const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
-            if (status !== 'Active') continue;
-            const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
-            const isMotorsItem = VALID_MOTORS_CATEGORIES.some(keyword => categoryName.includes(keyword));
-            const rawHtml = item.Description ? item.Description[0] : '';
-            const cleanHtml = extractCleanDescription(rawHtml);
-            const promotedStatusRaw =
-              item.PromotedListingStatus?.[0]
-              || item.ListingDetails?.[0]?.PromotedListingStatus?.[0]
-              || item.AdvertisingStatus?.[0]
-              || '';
-            const adRateRaw =
-              item.PromotedListingDetails?.[0]?.PromotedListingAdRate?.[0]
-              || item.PromotedListingAdRate?.[0]
-              || item.AdRate?.[0]
-              || item.ListingDetails?.[0]?.AdRate?.[0]
-              || null;
-            const parsedAdRate = Number.parseFloat(adRateRaw);
-            const adRate = Number.isFinite(parsedAdRate) ? parsedAdRate : null;
-            let promoted = null;
-            if (typeof promotedStatusRaw === 'string' && promotedStatusRaw.trim()) {
-              const normalizedStatus = promotedStatusRaw.trim().toLowerCase();
-              promoted = !(normalizedStatus.includes('not')
-                || normalizedStatus.includes('off')
-                || normalizedStatus.includes('disabled')
-                || normalizedStatus.includes('ineligible'));
-            } else if (adRate !== null) {
-              promoted = adRate > 0;
-            }
-            let parsedCompatibility = [];
-            if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
-              parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map(comp => ({
-                notes: comp.CompatibilityNotes ? comp.CompatibilityNotes[0] : '',
-                nameValueList: comp.NameValueList.map(nv => ({
-                  name: nv.Name[0],
-                  value: nv.Value[0]
-                }))
-              }));
-            }
-            // Store Listings: all active items (any category).
-            await ActiveListing.findOneAndUpdate(
-              { itemId: item.ItemID[0] },
-              {
-                seller: seller._id,
-                title: item.Title[0],
-                sku: item.SKU ? item.SKU[0] : '',
-                currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
-                currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
-                quantity: item.Quantity ? parseInt(item.Quantity[0], 10) || 0 : 0,
-                soldQuantity: item.SellingStatus?.[0]?.QuantitySold
-                  ? parseInt(item.SellingStatus[0].QuantitySold[0], 10) || 0
-                  : 0,
-                watchCount: item.WatchCount ? parseInt(item.WatchCount[0], 10) || 0 : 0,
-                timeLeft: item.TimeLeft?.[0] || '',
-                listingStatus: status,
-                mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
-                categoryName: categoryName,
-                descriptionPreview: cleanHtml,
-                startTime: item.ListingDetails?.[0]?.StartTime?.[0],
-                ...(promoted !== null ? { promoted } : {}),
-                ...(adRate !== null ? { adRate } : {}),
-              },
-              { upsert: true }
-            );
+        const recentResult = await paginateGetSellerListForActiveListings({
+          seller,
+          token,
+          sellerName,
+          startTimeFrom: recentFrom,
+          onPageProgress,
+          bumpGlobalProcessed,
+        });
+        processedCount += recentResult.processedCount;
+        skippedCount += recentResult.skippedCount;
 
-            // Compatibility dashboard: Motors categories only.
-            if (isMotorsItem) {
-              await Listing.findOneAndUpdate(
-                { itemId: item.ItemID[0] },
-                {
-                  seller: seller._id,
-                  title: item.Title[0],
-                  sku: item.SKU ? item.SKU[0] : '',
-                  currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
-                  currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
-                  listingStatus: status,
-                  mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
-                  categoryName: categoryName,
-                  descriptionPreview: cleanHtml,
-                  compatibility: parsedCompatibility,
-                  startTime: item.ListingDetails?.[0]?.StartTime?.[0]
-                },
-                { upsert: true }
-              );
-            } else {
-              skippedCount++;
-            }
-            processedCount++;
-          }
-          page++;
-        } while (page <= totalPages);
-        seller.lastListingPolledAt = startTimeTo;
+        console.log(`[Sync All] ${sellerName} — full pass (120d start window)...`);
+        const fullResult = await paginateGetSellerListForActiveListings({
+          seller,
+          token,
+          sellerName,
+          startTimeFrom: fullStartTimeFrom,
+          onPageProgress,
+          bumpGlobalProcessed,
+        });
+        processedCount += fullResult.processedCount;
+        skippedCount += fullResult.skippedCount;
+
+        seller.lastListingPolledAt = pollFinishedAt;
+        seller.lastAllListingsPolledAt = new Date();
         await seller.save();
         console.log(`[Sync All] ${sellerName} — Done: ${processedCount} processed, ${skippedCount} skipped`);
-        syncAllStatus.results.push({ sellerName, processedCount, skippedCount });
-        syncAllStatus.totalProcessed += processedCount;
+        syncAllStatus.results.push({
+          sellerId: String(seller._id),
+          sellerName,
+          processedCount,
+          skippedCount,
+        });
         syncAllStatus.totalSkipped += skippedCount;
       } catch (sellerErr) {
         console.error(`[Sync All] Error for seller ${sellerName}:`, sellerErr.message);
         syncAllStatus.errors.push(`${sellerName}: ${sellerErr.message}`);
-        syncAllStatus.results.push({ sellerName, processedCount: 0, skippedCount: 0, error: sellerErr.message });
+        syncAllStatus.results.push({
+          sellerId: String(seller._id),
+          sellerName,
+          processedCount: 0,
+          skippedCount: 0,
+          error: sellerErr.message,
+        });
       }
       syncAllStatus.sellersComplete++;
       await persistSyncAllStatusToDb();
@@ -17276,6 +17459,8 @@ async function executeSyncAllSellersWork() {
   } finally {
     syncAllStatus.running = false;
     syncAllStatus.currentSeller = '';
+    syncAllStatus.currentPage = 0;
+    syncAllStatus.currentTotalPages = 0;
     syncAllStatus.completedAt = new Date().toISOString();
     await persistSyncAllStatusToDb();
   }

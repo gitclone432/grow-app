@@ -29,7 +29,7 @@ export default function usePageAccess(user) {
           return pagePermissions.some((p) => ['Analytics', 'AnalyticsSellerStandards'].includes(p));
         }
         if (pageId === 'EmployeeManagement') {
-          return pagePermissions.some((p) => ['EmployeeManagement', 'AddUser'].includes(p));
+          return pagePermissions.some((p) => ['EmployeeManagement', 'AddUser', 'EmployeeDetails'].includes(p));
         }
         return false;
       }

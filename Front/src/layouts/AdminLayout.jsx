@@ -40,7 +40,6 @@ import ManagePlatformsPage from '../pages/admin/ManagePlatformsPage.jsx';
 import ManageStoresPage from '../pages/admin/ManageStoresPage.jsx';
 import ManageRangesPage from '../pages/admin/ManageRangesPage.jsx';
 import ManageCategoriesPage from '../pages/admin/ManageCategoriesPage.jsx';
-import UserCredentialsPage from '../pages/admin/UserCredentialsPage.jsx';
 import SupervisorAccountIcon from '@mui/icons-material/SupervisorAccount';
 import TaskIcon from '@mui/icons-material/Task';
 import EditIcon from '@mui/icons-material/Edit';
@@ -72,7 +71,6 @@ import ExtraExpensePage from '../pages/admin/ExtraExpensePage.jsx';
 import RevenueGrossNetPage from '../pages/admin/RevenueGrossNetPage.jsx';
 //import MessageReceivedPage from '../pages/admin/MessageReceivedPage.jsx';
 import AboutMePage from '../pages/AboutMePage.jsx';
-import EmployeeDetailsPage from '../pages/admin/EmployeeDetailsPage.jsx';
 import EmployeeManagementPage from '../pages/admin/EmployeeManagementPage.jsx';
 import BuyerChatPage from '../pages/admin/BuyerChatPage.jsx';
 import FeedUploadPage from '../pages/ebay/FeedUploadPage.jsx';
@@ -89,6 +87,7 @@ import SalaryPage from '../pages/admin/SalaryPage.jsx';
 import SellerFundsPage from '../pages/admin/SellerFundsPage.jsx';
 import TransactionSummaryPage from '../pages/admin/TransactionSummaryPage.jsx';
 import FinancesTransactionsPage from '../pages/admin/FinancesTransactionsPage.jsx';
+import MarketingCampaignsPage from '../pages/admin/MarketingCampaignsPage.jsx';
 import FinanceCashflowPage from '../pages/admin/FinanceCashflowPage.jsx';
 import AffiliateBalancePage from '../pages/admin/AffiliateBalancePage.jsx';
 
@@ -320,6 +319,7 @@ const COMPONENT_MAP = {
   'EbayAnalyticsHub': EbayAnalyticsHubPage,
   'EbayFeedback': EbayFeedbackPage,
   'EbayApiTester': EbayApiTesterPage,
+  'MarketingCampaigns': MarketingCampaignsPage,
   'SellerFunds': SellerFundsPage,
   'FinancesTransactionSummary': TransactionSummaryPage,
   'FinancesTransactions': FinancesTransactionsPage,
@@ -340,9 +340,7 @@ const COMPONENT_MAP = {
   'ProductTable': ListingManagementPage,
   'ColumnCreator': ColumnCreatorPage,
   'ManageRanges': ManageRangesPage,
-  'UserCredentials': UserCredentialsPage,
   'UserPerformance': UserPerformancePage,
-  'EmployeeDetails': EmployeeDetailsPage,
   'StoresPage': StoresPage,
   'EtsyStoresPage': EtsyStoresPage,
   'DescriptionTemplates': DescriptionTemplatesPage,
@@ -716,7 +714,7 @@ export default function AdminLayout({ user, onLogout }) {
     // Check categories in priority order
     const priorityPages = [
       'ProductResearch', 'ProductTable', 'CompatibilityTasks', 'CompatibilityEditor',
-      'Fulfillment', 'EmployeeDetails', 'OrdersDashboard'
+      'Fulfillment', 'EmployeeManagement', 'OrdersDashboard'
     ];
     for (const pageId of priorityPages) {
       if (hasAccess(pageId)) {
@@ -919,6 +917,7 @@ export default function AdminLayout({ user, onLogout }) {
 
           <Route path="/credit-card-names" element={<Navigate to="/admin/credit-cards" replace />} />
           <Route path="/add-user" element={<Navigate to="/employee-management" replace />} />
+          <Route path="/employee-details" element={<Navigate to="/employee-management" replace />} />
 
           {hasAccess('EbayAnalyticsHub') && (
             <>

@@ -6,6 +6,8 @@ import {
   Button,
   Checkbox,
   CircularProgress,
+  Chip,
+  LinearProgress,
   FormControl,
   FormControlLabel,
   Grid,
@@ -33,6 +35,33 @@ import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import api from '../../lib/api';
 
+function getSyncProgressPercent(sync) {
+  const total = Number(sync?.sellersTotal) || 0;
+  if (total <= 0) return 0;
+  const complete = Number(sync?.sellersComplete) || 0;
+  const curPage = Number(sync?.currentPage) || 0;
+  const totalPages = Number(sync?.currentTotalPages) || 0;
+  const storeFraction = totalPages > 0 ? Math.min(curPage / totalPages, 1) : 0;
+  return Math.min(100, Math.round(((complete + storeFraction) / total) * 100));
+}
+
+function formatSyncStatusLine(sync) {
+  const complete = Number(sync?.sellersComplete) || 0;
+  const total = Number(sync?.sellersTotal) || 0;
+  const curPage = Number(sync?.currentPage) || 0;
+  const totalPages = Number(sync?.currentTotalPages) || 0;
+  const storeNum = complete + (sync?.currentSeller ? 1 : 0);
+  const seller = sync?.currentSeller ? String(sync.currentSeller) : 'stores';
+  const parts = [`Syncing: ${seller}`];
+  if (totalPages > 0) {
+    parts.push(`page ${curPage}/${totalPages}`);
+  }
+  if (total > 0) {
+    parts.push(`store ${storeNum} of ${total}`);
+  }
+  return parts.join(' · ');
+}
+
 export default function StoreListingsPage() {
   const navigate = useNavigate();
   const ALL_COLUMNS = [
@@ -58,9 +87,8 @@ export default function StoreListingsPage() {
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
-  const syncPollRef = useRef(null);
+  const prevSyncRunningRef = useRef(false);
   const [search, setSearch] = useState('');
-  const [stores, setStores] = useState([]);
   const [selectedSellerId, setSelectedSellerId] = useState('');
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(50);
@@ -78,6 +106,8 @@ export default function StoreListingsPage() {
   const [customizeAnchorEl, setCustomizeAnchorEl] = useState(null);
   const [sortBy, setSortBy] = useState('startDate');
   const [sortOrder, setSortOrder] = useState('desc');
+  const [storeStatus, setStoreStatus] = useState({ sync: null, stores: [] });
+  const [storeStatusLoading, setStoreStatusLoading] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_VISIBLE);
@@ -153,22 +183,56 @@ export default function StoreListingsPage() {
     }
   }, [page, rowsPerPage, search, selectedSellerId, sortBy, sortOrder]);
 
+  const loadStoreStatus = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setStoreStatusLoading(true);
+    try {
+      const { data } = await api.get('/ebay/store-listings/store-status');
+      setStoreStatus({
+        sync: data?.sync || null,
+        stores: Array.isArray(data?.stores) ? data.stores : [],
+      });
+    } catch (error) {
+      console.error('Failed to load store status:', error);
+    } finally {
+      if (!silent) setStoreStatusLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadListings();
   }, [loadListings]);
 
   useEffect(() => {
-    const loadStores = async () => {
-      try {
-        const { data } = await api.get('/sellers/all');
-        setStores(Array.isArray(data) ? data : []);
-      } catch (error) {
-        console.error('Failed to load stores:', error);
-        setStores([]);
-      }
-    };
-    loadStores();
-  }, []);
+    loadStoreStatus();
+  }, [loadStoreStatus]);
+
+  useEffect(() => {
+    if (!storeStatus.sync?.running) return undefined;
+
+    setSyncing(true);
+    const intervalId = setInterval(() => {
+      void loadStoreStatus({ silent: true });
+    }, 3000);
+
+    return () => clearInterval(intervalId);
+  }, [storeStatus.sync?.running, loadStoreStatus]);
+
+  useEffect(() => {
+    const running = Boolean(storeStatus.sync?.running);
+    if (prevSyncRunningRef.current && !running) {
+      setSyncing(false);
+      void loadListings();
+      const errCount = Array.isArray(storeStatus.sync?.errors) ? storeStatus.sync.errors.length : 0;
+      setSnackbar({
+        open: true,
+        message: errCount
+          ? `Sync finished with ${errCount} seller error(s). Table refreshed.`
+          : 'Sync finished. Table refreshed.',
+        severity: errCount ? 'warning' : 'success',
+      });
+    }
+    prevSyncRunningRef.current = running;
+  }, [storeStatus.sync?.running, storeStatus.sync?.errors, loadListings]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_ORDER, JSON.stringify(columnOrder));
@@ -177,13 +241,6 @@ export default function StoreListingsPage() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_VISIBLE, JSON.stringify(visibleColumns));
   }, [visibleColumns]);
-
-  useEffect(() => () => {
-    if (syncPollRef.current) {
-      clearInterval(syncPollRef.current);
-      syncPollRef.current = null;
-    }
-  }, []);
 
   const handleSyncAllStores = async () => {
     setSyncing(true);
@@ -203,32 +260,7 @@ export default function StoreListingsPage() {
         message: data?.message || `Sync started for ${data.sellersTotal} seller(s).`,
         severity: 'info',
       });
-
-      if (syncPollRef.current) {
-        clearInterval(syncPollRef.current);
-      }
-      syncPollRef.current = setInterval(async () => {
-        try {
-          const { data: status } = await api.get('/ebay/sync-all-sellers-status');
-          if (status?.running) return;
-          if (syncPollRef.current) {
-            clearInterval(syncPollRef.current);
-            syncPollRef.current = null;
-          }
-          setSyncing(false);
-          await loadListings();
-          const errCount = Array.isArray(status?.errors) ? status.errors.length : 0;
-          setSnackbar({
-            open: true,
-            message: errCount
-              ? `Sync finished with ${errCount} seller error(s). Table refreshed.`
-              : 'Sync finished. Table refreshed.',
-            severity: errCount ? 'warning' : 'success',
-          });
-        } catch (pollErr) {
-          console.error('Sync status poll failed:', pollErr);
-        }
-      }, 3000);
+      await loadStoreStatus({ silent: true });
     } catch (error) {
       console.error('Failed to start all-store sync:', error);
       const msg =
@@ -330,6 +362,15 @@ export default function StoreListingsPage() {
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 2 }}>
         Store Listings
       </Typography>
+
+      {!loading && total === 0 && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          No listings in the database for this view. Data comes from <strong>Sync All Stores</strong> (eBay{' '}
+          <code>GetSellerList</code> → MongoDB), not a live API call. Each store needs a working eBay OAuth
+          connection. If only one store (e.g. raveoli) ever had data, other stores likely failed during sync —
+          check backend logs or run sync again after fixing token errors.
+        </Alert>
+      )}
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
         <Grid item xs={12} sm={6} md={4} lg={2}>
@@ -448,16 +489,16 @@ export default function StoreListingsPage() {
           <InputLabel>Store</InputLabel>
           <Select
             label="Store"
-            value={selectedSellerId}
+            value={String(selectedSellerId)}
             onChange={(e) => {
               setSelectedSellerId(e.target.value);
               setPage(0);
             }}
           >
             <MenuItem value="">All Stores</MenuItem>
-            {stores.map((store) => (
-              <MenuItem key={store._id} value={store._id}>
-                {store?.user?.username || store?.username || store._id}
+            {storeStatus.stores.map((store) => (
+              <MenuItem key={String(store.sellerId)} value={String(store.sellerId)}>
+                {store.sellerName}
               </MenuItem>
             ))}
           </Select>
@@ -476,7 +517,7 @@ export default function StoreListingsPage() {
           }}
           sx={{ minWidth: 280 }}
         />
-        <Button variant="outlined" startIcon={<RefreshIcon />} onClick={loadListings} disabled={loading}>
+        <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => { loadListings(); loadStoreStatus(); }} disabled={loading}>
           Refresh
         </Button>
         <Button variant="contained" startIcon={<RefreshIcon />} onClick={handleSyncAllStores} disabled={syncing}>
@@ -531,6 +572,136 @@ export default function StoreListingsPage() {
           ))}
         </Box>
       </Menu>
+
+      <Paper sx={{ p: 2, borderRadius: 2, mb: 2 }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1, mb: 1.5 }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            Store sync status
+          </Typography>
+          <Button size="small" onClick={() => void loadStoreStatus()} disabled={storeStatusLoading}>
+            Refresh status
+          </Button>
+        </Box>
+
+        {storeStatus.sync?.running ? (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+              {formatSyncStatusLine(storeStatus.sync)}
+            </Typography>
+            {Number(storeStatus.sync.totalProcessed) > 0 ? (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                {Number(storeStatus.sync.totalProcessed).toLocaleString()} listings written this run
+              </Typography>
+            ) : null}
+            <LinearProgress
+              variant="determinate"
+              value={getSyncProgressPercent(storeStatus.sync)}
+            />
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+              {getSyncProgressPercent(storeStatus.sync)}% overall
+            </Typography>
+          </Box>
+        ) : null}
+
+        {!storeStatus.sync?.running && storeStatus.sync?.completedAt ? (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            Last sync finished: {formatDateTime(storeStatus.sync.completedAt)}
+          </Typography>
+        ) : null}
+
+        {storeStatusLoading ? (
+          <Box sx={{ py: 2, display: 'flex', justifyContent: 'center' }}>
+            <CircularProgress size={22} />
+          </Box>
+        ) : (
+          <TableContainer>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ fontWeight: 700 }}>Store</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>OAuth</TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 700 }}>Listings in DB</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>Last polled</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>Last sync</TableCell>
+                  <TableCell sx={{ fontWeight: 700 }}>Error</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {storeStatus.stores.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6}>
+                      <Typography variant="body2" color="text.secondary">
+                        No stores in scope for your account.
+                      </Typography>
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  storeStatus.stores.map((store) => {
+                    const syncErr = store.lastSync?.error;
+                    let statusChip = { label: 'OK', color: 'success' };
+                    if (!store.hasOAuth) statusChip = { label: 'No OAuth', color: 'error' };
+                    else if (syncErr) statusChip = { label: 'Sync failed', color: 'error' };
+                    else if (store.listingCount === 0) statusChip = { label: 'Empty', color: 'warning' };
+
+                    return (
+                      <TableRow
+                        key={store.sellerId}
+                        hover
+                        selected={String(selectedSellerId) === String(store.sellerId)}
+                        sx={{ cursor: 'pointer' }}
+                        onClick={() => {
+                          setSelectedSellerId(String(store.sellerId));
+                          setPage(0);
+                        }}
+                      >
+                        <TableCell>
+                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                            {store.sellerName}
+                          </Typography>
+                          {!store.isStoreActive || !store.userActive ? (
+                            <Typography variant="caption" color="warning.main">
+                              {!store.isStoreActive ? 'Store inactive' : 'User inactive'}
+                            </Typography>
+                          ) : null}
+                        </TableCell>
+                        <TableCell>
+                          <Chip
+                            size="small"
+                            label={store.hasOAuth ? 'Connected' : 'Missing'}
+                            color={store.hasOAuth ? 'success' : 'default'}
+                            variant="outlined"
+                          />
+                        </TableCell>
+                        <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+                          {store.listingCount.toLocaleString('en-US')}
+                        </TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                          <Typography variant="caption">
+                            {formatDateTime(store.lastAllListingsPolledAt)}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>
+                          <Chip size="small" label={statusChip.label} color={statusChip.color} variant="outlined" />
+                          {store.lastSync && !syncErr ? (
+                            <Typography variant="caption" display="block" color="text.secondary">
+                              +{store.lastSync.processedCount} processed
+                            </Typography>
+                          ) : null}
+                        </TableCell>
+                        <TableCell sx={{ maxWidth: 280 }}>
+                          <Typography variant="caption" color="error.main" sx={{ wordBreak: 'break-word' }}>
+                            {syncErr || '—'}
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        )}
+      </Paper>
 
       <Paper sx={{ borderRadius: 2, overflow: 'hidden' }}>
         <Box sx={{ px: 2, py: 1.25, borderBottom: '1px solid #eee' }}>

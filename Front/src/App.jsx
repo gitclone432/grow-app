@@ -99,9 +99,9 @@ function useAuth() {
     else if (u.role === 'compatibilityeditor') navigate('/admin/compatibility-editor');
     else if (u.role === 'seller') navigate('/seller-ebay');
     else if (u.role === 'fulfillmentadmin') navigate('/admin/fulfillment');
-    else if (u.role === 'hradmin') navigate('/admin/employee-details');
+    else if (u.role === 'hradmin') navigate('/admin/employee-management');
     else if (u.role === 'hr') navigate('/admin/about-me');
-    else if (u.role === 'operationhead') navigate('/admin/employee-details');
+    else if (u.role === 'operationhead') navigate('/admin/employee-management');
     // For HOC and Compliance Manager, we send them to the general admin area
     // AdminLayout will handle the specific redirect to /fulfillment
     else navigate('/admin');
