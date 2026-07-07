@@ -122,7 +122,7 @@ export const PAGE_REGISTRY = [
   { id: 'EbayAnalyticsHub', name: 'Analytics Hub', path: '/analytics-hub', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayFeedback', name: 'Feedback', path: '/feedback', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayApiTester', name: 'eBay API Tester', path: '/ebay-api-tester', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
-  { id: 'MarketingCampaigns', name: 'Marketing Campaigns', path: '/marketing-campaigns', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'AdsAndMarketing', name: 'Ads and Marketing', path: '/ads-and-marketing', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'SellerFunds', name: 'Seller Funds', path: '/seller-funds', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'FinancesTransactionSummary', name: 'Transaction Summary', path: '/finances/transaction-summary', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'FinancesTransactions', name: 'Finances Transactions', path: '/finances/transactions', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },

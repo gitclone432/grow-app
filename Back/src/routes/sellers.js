@@ -3,7 +3,7 @@ import { requireAuth, requirePageAccess, requireRole } from '../middleware/auth.
 import jwt from 'jsonwebtoken';
 import Seller from '../models/Seller.js';
 import User from '../models/User.js';
-import { getSellersMatchingAllRoute } from '../utils/sellersAllScope.js';
+import { getSellersMatchingAllRoute, getSellersForEbayApiPicker } from '../utils/sellersAllScope.js';
 import { getActiveUserIds } from '../utils/activeSellerScope.js';
 import {
   getSellerPermanentDeleteBlockers,
@@ -21,6 +21,17 @@ router.get('/all', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Error fetching sellers:', err);
     res.status(500).json({ error: 'Failed to fetch sellers' });
+  }
+});
+
+// OAuth-connected stores for eBay API admin pages (marketing, finances, etc.)
+router.get('/ebay-connected', requireAuth, async (req, res) => {
+  try {
+    const sellers = await getSellersForEbayApiPicker(req);
+    res.json(sellers);
+  } catch (err) {
+    console.error('Error fetching eBay-connected sellers:', err);
+    res.status(500).json({ error: 'Failed to fetch eBay-connected sellers' });
   }
 });
 

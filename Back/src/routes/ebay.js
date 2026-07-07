@@ -32,6 +32,7 @@ import SyncAllSellersStatusCache from '../models/SyncAllSellersStatusCache.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import ChatAgent from '../models/ChatAgent.js';
+import MarketingViewCache from '../models/MarketingViewCache.js';
 import { getOrderQtyExcludedLegacyIdSet } from '../utils/orderQtyExcludeLegacyCache.js';
 import { enrichOrdersWithSupplierLinks } from '../utils/supplierLinkFromListings.js';
 import { buildSellerAnalyticsFromOrders } from '../utils/sellerAnalyticsFinancials.js';
@@ -64,7 +65,7 @@ import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
 import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
-import { getSellersMatchingAllRoute, resolveStoreDisplayName } from '../utils/sellersAllScope.js';
+import { getSellersMatchingAllRoute, getSellersForEbayApiPicker, resolveStoreDisplayName } from '../utils/sellersAllScope.js';
 import { applySellerStandardsThresholdLabels } from '../utils/sellerStandardsThresholds.js';
 import {
   activeListingStatusFilter,
@@ -15866,6 +15867,20 @@ router.get('/finances/transactions', requireAuth, requirePageAccess('FinancesTra
 const MARKETING_CAMPAIGNS_DOCS =
   'https://developer.ebay.com/api-docs/sell/marketing/resources/campaign/methods/getCampaigns';
 
+const MARKETING_PICKER_MARKETPLACES = ['EBAY_US', 'EBAY_GB', 'EBAY_AU', 'EBAY_CA', 'EBAY_DE'];
+
+function isAllMarketplacesQuery(queryMarketplace) {
+  const raw = String(queryMarketplace ?? '').trim().toLowerCase();
+  return !raw || raw === '__all__' || raw === 'all';
+}
+
+function resolveMarketingMarketplaceIds(seller, queryMarketplace) {
+  if (isAllMarketplacesQuery(queryMarketplace)) {
+    return MARKETING_PICKER_MARKETPLACES;
+  }
+  return [resolvePrimaryFinancesMarketplaceId(seller, queryMarketplace)];
+}
+
 function normalizeMarketingCampaignRow(campaign = {}) {
   const funding = campaign.fundingStrategy || {};
   const daily = campaign.budget?.daily?.amount;
@@ -15911,43 +15926,274 @@ function buildMarketingCampaignQueryParams(query) {
   return params;
 }
 
-router.get('/marketing/campaigns', requireAuth, requirePageAccess('MarketingCampaigns'), async (req, res) => {
-  try {
-    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
-    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
-    if (!seller.ebayTokens?.refresh_token) {
-      return res.status(400).json({ success: false, error: 'Seller not connected to eBay', needsReconnect: true });
-    }
+async function resolveSellerWithEbayTokens(sellerOrId) {
+  const id = sellerOrId?._id || sellerOrId;
+  if (!id) throw new Error('Seller not found');
 
-    const accessToken = await ensureValidToken(seller);
-    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
-    const params = buildMarketingCampaignQueryParams(req.query);
+  if (
+    sellerOrId
+    && typeof sellerOrId === 'object'
+    && sellerOrId.ebayTokens?.refresh_token
+    && typeof sellerOrId.save === 'function'
+  ) {
+    return sellerOrId;
+  }
 
-    const response = await axios.get('https://api.ebay.com/sell/marketing/v1/ad_campaign', {
-      headers: buildEbayRawHeaders({
-        accessToken,
-        method: 'GET',
-        path: '/sell/marketing/v1/ad_campaign',
-        marketplace: marketplaceId,
-      }),
-      params,
-      timeout: 90000,
-    });
+  const seller = await Seller.findById(id).populate('user', 'username');
+  if (!seller) throw new Error('Seller not found');
+  if (!seller.ebayTokens?.refresh_token) throw new Error('Seller not connected to eBay');
+  return seller;
+}
 
-    const campaigns = (response.data?.campaigns || []).map(normalizeMarketingCampaignRow);
-    return res.json({
-      success: true,
-      docsUrl: MARKETING_CAMPAIGNS_DOCS,
-      seller: { id: seller._id, name: seller.user?.username },
-      marketplaceId,
+async function fetchMarketingCampaignsPageForMarketplace(accessToken, marketplaceId, query, { limitOverride, offsetOverride } = {}) {
+  const params = buildMarketingCampaignQueryParams(query);
+  if (limitOverride != null) params.limit = limitOverride;
+  if (offsetOverride != null) params.offset = offsetOverride;
+
+  const response = await axios.get('https://api.ebay.com/sell/marketing/v1/ad_campaign', {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'GET',
+      path: '/sell/marketing/v1/ad_campaign',
+      marketplace: marketplaceId,
+    }),
+    params,
+    timeout: 90000,
+  });
+
+  return {
+    marketplaceId,
+    campaigns: (response.data?.campaigns || []).map((row) => {
+      const normalized = normalizeMarketingCampaignRow(row);
+      return {
+        ...normalized,
+        marketplaceId: normalized.marketplaceId || marketplaceId,
+      };
+    }),
+    pagination: {
       limit: response.data?.limit ?? String(params.limit),
       offset: response.data?.offset ?? String(params.offset),
       total: response.data?.total ?? null,
       href: response.data?.href || null,
       next: response.data?.next || null,
       prev: response.data?.prev || null,
+    },
+  };
+}
+
+async function fetchMarketingCampaignsForSeller(seller, query, { limitOverride, offsetOverride } = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const marketplaceIds = resolveMarketingMarketplaceIds(sellerDoc, query.marketplace);
+
+  if (marketplaceIds.length === 1) {
+    const payload = await fetchMarketingCampaignsPageForMarketplace(
+      accessToken,
+      marketplaceIds[0],
+      query,
+      { limitOverride, offsetOverride },
+    );
+    return {
+      marketplaceId: payload.marketplaceId,
+      params: buildMarketingCampaignQueryParams(query),
+      campaigns: payload.campaigns,
+      pagination: payload.pagination,
+    };
+  }
+
+  const perMarketplaceLimit = limitOverride ?? Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const pageResults = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      return await fetchMarketingCampaignsPageForMarketplace(accessToken, marketplaceId, query, {
+        limitOverride: perMarketplaceLimit,
+        offsetOverride: 0,
+      });
+    } catch {
+      return { marketplaceId, campaigns: [] };
+    }
+  }));
+
+  const merged = sortMergedMarketingRows(
+    pageResults.flatMap((result) => result.campaigns),
+    query.sort,
+    'campaignName',
+  );
+
+  const limit = limitOverride ?? Math.min(500, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = offsetOverride ?? Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  const bulkFetch = limitOverride != null && offsetOverride === 0;
+
+  return {
+    marketplaceId: 'ALL',
+    params: buildMarketingCampaignQueryParams(query),
+    campaigns: bulkFetch ? merged : merged.slice(offset, offset + limit),
+    pagination: {
+      limit: String(limit),
+      offset: String(offset),
+      total: merged.length,
+      href: null,
+      next: null,
+      prev: null,
+    },
+  };
+}
+
+function sortMergedMarketingRows(rows, sort, nameKey = 'campaignName') {
+  const sortKey = String(sort || '').trim();
+  if (!sortKey) return rows;
+  const desc = sortKey.startsWith('-');
+  const field = desc ? sortKey.slice(1) : sortKey;
+  const dir = desc ? -1 : 1;
+  const getter = (row) => {
+    if (field === 'PROMOTION_NAME' || field === 'CAMPAIGN_NAME') {
+      return String(row[nameKey] || row.promotionName || row.campaignName || '').toLowerCase();
+    }
+    if (field === 'START_DATE') return new Date(row.startDate || 0).getTime();
+    if (field === 'END_DATE') return new Date(row.endDate || 0).getTime();
+    return '';
+  };
+  return [...rows].sort((a, b) => {
+    const av = getter(a);
+    const bv = getter(b);
+    if (av === bv) return String(a.sellerName || '').localeCompare(String(b.sellerName || ''));
+    return av < bv ? -dir : dir;
+  });
+}
+
+const MARKETING_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function stableQueryString(query = {}) {
+  const pairs = Object.entries(query)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}:${String(value)}`);
+  return pairs.join('|');
+}
+
+function buildMarketingCacheKey(req, scope) {
+  const userKey = String(req.user?.userId || 'anon');
+  return `mkt:${userKey}:${scope}:${stableQueryString(req.query || {})}`;
+}
+
+async function readMarketingCache(cacheKey) {
+  const row = await MarketingViewCache.findById(cacheKey).lean();
+  if (!row) return null;
+  if (!row.expiresAt || new Date(row.expiresAt).getTime() < Date.now()) return null;
+  return row.payload || null;
+}
+
+async function writeMarketingCache(cacheKey, payload) {
+  const expiresAt = new Date(Date.now() + MARKETING_CACHE_TTL_MS);
+  await MarketingViewCache.findByIdAndUpdate(
+    cacheKey,
+    { payload, expiresAt, updatedAt: new Date() },
+    { upsert: true, setDefaultsOnInsert: true }
+  );
+}
+
+async function invalidateMarketingCacheForUser(userId) {
+  const prefix = `mkt:${String(userId)}:`;
+  await MarketingViewCache.deleteMany({ _id: { $regex: `^${prefix}` } });
+}
+
+router.get('/marketing/campaigns/all', requireAuth, requirePageAccess('MarketingCampaigns'), async (req, res) => {
+  try {
+    const refresh = String(req.query.refresh || '').toLowerCase();
+    const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
+    const cacheKey = buildMarketingCacheKey(req, 'campaigns_all');
+    if (!bypassCache) {
+      const cached = await readMarketingCache(cacheKey);
+      if (cached) return res.json({ ...cached, fromCache: true });
+    }
+
+    const sellers = await getSellersForEbayApiPicker(req);
+    const perSellerLimit = Math.min(200, Math.max(1, parseInt(req.query.perSellerLimit || '50', 10) || 50));
+    const bulkQuery = { ...req.query, limit: perSellerLimit, offset: 0 };
+
+    const storeResults = await Promise.all(sellers.map(async (seller) => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        const payload = await fetchMarketingCampaignsForSeller(seller, bulkQuery, {
+          limitOverride: perSellerLimit,
+          offsetOverride: 0,
+        });
+        return {
+          sellerId: seller._id,
+          sellerName,
+          campaigns: payload.campaigns.map((row) => ({
+            ...row,
+            sellerId: String(seller._id),
+            sellerName,
+          })),
+        };
+      } catch (err) {
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message || 'Failed to load campaigns',
+          campaigns: [],
+        };
+      }
+    }));
+
+    const errors = storeResults.filter((r) => r.error).map((r) => ({
+      sellerId: r.sellerId,
+      sellerName: r.sellerName,
+      error: r.error,
+    }));
+    const campaigns = sortMergedMarketingRows(
+      storeResults.flatMap((r) => r.campaigns),
+      req.query.sort,
+      'campaignName'
+    );
+
+    const payload = {
+      success: true,
+      docsUrl: MARKETING_CAMPAIGNS_DOCS,
+      allStores: true,
+      sellersQueried: sellers.length,
+      perSellerLimit,
+      errors,
       campaigns,
-    });
+      total: campaigns.length,
+    };
+    await writeMarketingCache(cacheKey, payload);
+    return res.json({ ...payload, fromCache: false });
+  } catch (err) {
+    console.error('[Marketing Campaigns All] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load campaigns for all stores' });
+  }
+});
+
+router.get('/marketing/campaigns', requireAuth, requirePageAccess('MarketingCampaigns'), async (req, res) => {
+  try {
+    const refresh = String(req.query.refresh || '').toLowerCase();
+    const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
+    const cacheKey = buildMarketingCacheKey(req, 'campaigns_single');
+    if (!bypassCache) {
+      const cached = await readMarketingCache(cacheKey);
+      if (cached) return res.json({ ...cached, fromCache: true });
+    }
+
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const payload = await fetchMarketingCampaignsForSeller(seller, req.query);
+    const payloadJson = {
+      success: true,
+      docsUrl: MARKETING_CAMPAIGNS_DOCS,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId: payload.marketplaceId,
+      limit: payload.pagination.limit,
+      offset: payload.pagination.offset,
+      total: payload.pagination.total,
+      href: payload.pagination.href,
+      next: payload.pagination.next,
+      prev: payload.pagination.prev,
+      campaigns: payload.campaigns,
+    };
+    await writeMarketingCache(cacheKey, payloadJson);
+    return res.json({ ...payloadJson, fromCache: false });
   } catch (err) {
     if (sendTokenReconnectError(err, res)) return;
     const status = err.response?.status || 500;
@@ -15961,6 +16207,514 @@ router.get('/marketing/campaigns', requireAuth, requirePageAccess('MarketingCamp
       error: message,
       details: data,
     });
+  }
+});
+
+// ============================================
+// MARKETING PROMOTIONS (Marketing API — getPromotions)
+// ============================================
+const MARKETING_PROMOTIONS_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/promotion/methods/getPromotions';
+
+const CREATE_ITEM_PROMOTION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/createItemPromotion';
+
+const GET_ITEM_PROMOTION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/getItemPromotion';
+
+const UPDATE_ITEM_PROMOTION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/updateItemPromotion';
+
+const DELETE_ITEM_PROMOTION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/deleteItemPromotion';
+
+function buildEbayItemPromotionPathId(promotionId, marketplaceId) {
+  const id = String(promotionId || '').trim();
+  const mp = normalizeFinancesMarketplaceId(marketplaceId);
+  if (!id) throw new Error('promotionId is required');
+  if (!mp) throw new Error('marketplaceId is required');
+  return `${id}@${mp}`;
+}
+
+async function callEbayItemPromotionApi({ sellerDoc, promotionPathId, method, marketplaceId, body }) {
+  const accessToken = await ensureValidToken(sellerDoc);
+  const encodedPathId = encodeURIComponent(promotionPathId);
+  const apiPath = `/sell/marketing/v1/item_promotion/${encodedPathId}`;
+  const url = `https://api.ebay.com${apiPath}`;
+  const headers = buildEbayRawHeaders({
+    accessToken,
+    method,
+    path: apiPath,
+    marketplace: marketplaceId,
+  });
+  const config = { headers, timeout: 90000, validateStatus: () => true };
+
+  let response;
+  if (method === 'GET') response = await axios.get(url, config);
+  else if (method === 'PUT') response = await axios.put(url, body, config);
+  else if (method === 'DELETE') response = await axios.delete(url, config);
+  else throw new Error(`Unsupported method: ${method}`);
+
+  return {
+    response,
+    data: parseEbayRawResponseData(response),
+  };
+}
+
+function sendEbayItemPromotionError(res, response, data, fallbackMessage) {
+  const ebayErrors = extractEbayApiErrors(data);
+  const first = ebayErrors[0] || {};
+  const message = first.longMessage || first.message || data?.error || fallbackMessage;
+  return res.status(response?.status || 500).json({
+    success: false,
+    error: message,
+    details: data,
+  });
+}
+
+function normalizeMarketingPromotionRow(promotion = {}) {
+  return {
+    promotionId: promotion.promotionId || '',
+    promotionName: promotion.name || promotion.promotionName || '',
+    promotionStatus: promotion.promotionStatus || '',
+    promotionType: promotion.promotionType || '',
+    marketplaceId: promotion.marketplaceId || '',
+    startDate: promotion.startDate || null,
+    endDate: promotion.endDate || null,
+    couponCode: promotion.couponCode || promotion.couponConfiguration?.couponCode || '',
+    description: promotion.description || promotion.promotionDescription || '',
+    promotionHref: promotion.promotionHref || promotion.href || '',
+    raw: promotion,
+  };
+}
+
+function buildMarketingPromotionQueryParams(query, marketplaceId) {
+  const params = { marketplace_id: marketplaceId };
+  const limit = Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  params.limit = limit;
+  params.offset = offset;
+
+  const optionalKeys = ['promotion_status', 'promotion_type', 'q', 'sort'];
+  for (const key of optionalKeys) {
+    const value = String(query[key] || '').trim();
+    if (value) params[key] = value;
+  }
+  return params;
+}
+
+async function fetchMarketingPromotionsPageForMarketplace(accessToken, marketplaceId, query, { limitOverride, offsetOverride } = {}) {
+  const params = buildMarketingPromotionQueryParams(query, marketplaceId);
+  if (limitOverride != null) params.limit = limitOverride;
+  if (offsetOverride != null) params.offset = offsetOverride;
+
+  const response = await axios.get('https://api.ebay.com/sell/marketing/v1/promotion', {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'GET',
+      path: '/sell/marketing/v1/promotion',
+      marketplace: marketplaceId,
+    }),
+    params,
+    timeout: 90000,
+  });
+
+  return {
+    marketplaceId,
+    promotions: (response.data?.promotions || []).map((row) => {
+      const normalized = normalizeMarketingPromotionRow(row);
+      return {
+        ...normalized,
+        marketplaceId: normalized.marketplaceId || marketplaceId,
+      };
+    }),
+    pagination: {
+      limit: response.data?.limit ?? String(params.limit),
+      offset: response.data?.offset ?? String(params.offset),
+      total: response.data?.total ?? null,
+      href: response.data?.href || null,
+      next: response.data?.next || null,
+      prev: response.data?.prev || null,
+    },
+  };
+}
+
+async function fetchMarketingPromotionsForSeller(seller, query, { limitOverride, offsetOverride } = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const marketplaceIds = resolveMarketingMarketplaceIds(sellerDoc, query.marketplace);
+
+  if (marketplaceIds.length === 1) {
+    const payload = await fetchMarketingPromotionsPageForMarketplace(
+      accessToken,
+      marketplaceIds[0],
+      query,
+      { limitOverride, offsetOverride },
+    );
+    return {
+      marketplaceId: payload.marketplaceId,
+      params: buildMarketingPromotionQueryParams(query, payload.marketplaceId),
+      promotions: payload.promotions,
+      pagination: payload.pagination,
+    };
+  }
+
+  const perMarketplaceLimit = limitOverride ?? Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const pageResults = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      return await fetchMarketingPromotionsPageForMarketplace(accessToken, marketplaceId, query, {
+        limitOverride: perMarketplaceLimit,
+        offsetOverride: 0,
+      });
+    } catch {
+      return { marketplaceId, promotions: [] };
+    }
+  }));
+
+  const merged = sortMergedMarketingRows(
+    pageResults.flatMap((result) => result.promotions),
+    query.sort,
+    'promotionName',
+  );
+
+  const limit = limitOverride ?? Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = offsetOverride ?? Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  const bulkFetch = limitOverride != null && offsetOverride === 0;
+
+  return {
+    marketplaceId: 'ALL',
+    params: buildMarketingPromotionQueryParams(query, 'ALL'),
+    promotions: bulkFetch ? merged : merged.slice(offset, offset + limit),
+    pagination: {
+      limit: String(limit),
+      offset: String(offset),
+      total: merged.length,
+      href: null,
+      next: null,
+      prev: null,
+    },
+  };
+}
+
+router.get('/marketing/promotions/all', requireAuth, requirePageAccess('MarketingPromotions'), async (req, res) => {
+  try {
+    const refresh = String(req.query.refresh || '').toLowerCase();
+    const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
+    const cacheKey = buildMarketingCacheKey(req, 'promotions_all');
+    if (!bypassCache) {
+      const cached = await readMarketingCache(cacheKey);
+      if (cached) return res.json({ ...cached, fromCache: true });
+    }
+
+    const sellers = await getSellersForEbayApiPicker(req);
+    const perSellerLimit = Math.min(200, Math.max(1, parseInt(req.query.perSellerLimit || '50', 10) || 50));
+    const bulkQuery = { ...req.query, limit: perSellerLimit, offset: 0 };
+
+    const storeResults = await Promise.all(sellers.map(async (seller) => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        const payload = await fetchMarketingPromotionsForSeller(seller, bulkQuery, {
+          limitOverride: perSellerLimit,
+          offsetOverride: 0,
+        });
+        return {
+          sellerId: seller._id,
+          sellerName,
+          promotions: payload.promotions.map((row) => ({
+            ...row,
+            sellerId: String(seller._id),
+            sellerName,
+          })),
+        };
+      } catch (err) {
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message || 'Failed to load promotions',
+          promotions: [],
+        };
+      }
+    }));
+
+    const errors = storeResults.filter((r) => r.error).map((r) => ({
+      sellerId: r.sellerId,
+      sellerName: r.sellerName,
+      error: r.error,
+    }));
+    const promotions = sortMergedMarketingRows(
+      storeResults.flatMap((r) => r.promotions),
+      req.query.sort,
+      'promotionName'
+    );
+
+    const payload = {
+      success: true,
+      docsUrl: MARKETING_PROMOTIONS_DOCS,
+      allStores: true,
+      sellersQueried: sellers.length,
+      perSellerLimit,
+      errors,
+      promotions,
+      total: promotions.length,
+    };
+    await writeMarketingCache(cacheKey, payload);
+    return res.json({ ...payload, fromCache: false });
+  } catch (err) {
+    console.error('[Marketing Promotions All] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load promotions for all stores' });
+  }
+});
+
+router.get('/marketing/promotions', requireAuth, requirePageAccess('MarketingPromotions'), async (req, res) => {
+  try {
+    const refresh = String(req.query.refresh || '').toLowerCase();
+    const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
+    const cacheKey = buildMarketingCacheKey(req, 'promotions_single');
+    if (!bypassCache) {
+      const cached = await readMarketingCache(cacheKey);
+      if (cached) return res.json({ ...cached, fromCache: true });
+    }
+
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const payload = await fetchMarketingPromotionsForSeller(seller, req.query);
+    const payloadJson = {
+      success: true,
+      docsUrl: MARKETING_PROMOTIONS_DOCS,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId: payload.marketplaceId,
+      limit: payload.pagination.limit,
+      offset: payload.pagination.offset,
+      total: payload.pagination.total,
+      href: payload.pagination.href,
+      next: payload.pagination.next,
+      prev: payload.pagination.prev,
+      promotions: payload.promotions,
+    };
+    await writeMarketingCache(cacheKey, payloadJson);
+    return res.json({ ...payloadJson, fromCache: false });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = data?.errors || [];
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to load marketing promotions';
+    console.error('[Marketing Promotions] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
+router.post('/marketing/promotions/create', requireAuth, requirePageAccess('MarketingPromotions'), async (req, res) => {
+  try {
+    const { sellerId, promotion } = req.body || {};
+    if (!sellerId) {
+      return res.status(400).json({ success: false, error: 'sellerId is required' });
+    }
+    if (!promotion || typeof promotion !== 'object' || Array.isArray(promotion)) {
+      return res.status(400).json({ success: false, error: 'promotion payload object is required' });
+    }
+    if (!String(promotion.name || '').trim()) {
+      return res.status(400).json({ success: false, error: 'promotion.name is required' });
+    }
+    if (!String(promotion.marketplaceId || '').trim()) {
+      return res.status(400).json({ success: false, error: 'promotion.marketplaceId is required' });
+    }
+    if (!String(promotion.promotionType || '').trim()) {
+      return res.status(400).json({ success: false, error: 'promotion.promotionType is required' });
+    }
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const accessToken = await ensureValidToken(sellerDoc);
+    const marketplaceId = normalizeFinancesMarketplaceId(promotion.marketplaceId);
+
+    const response = await axios.post(
+      'https://api.ebay.com/sell/marketing/v1/item_promotion',
+      promotion,
+      {
+        headers: buildEbayRawHeaders({
+          accessToken,
+          method: 'POST',
+          path: '/sell/marketing/v1/item_promotion',
+          marketplace: marketplaceId,
+        }),
+        timeout: 90000,
+        validateStatus: () => true,
+      },
+    );
+
+    const location = response.headers?.location || response.headers?.Location || '';
+    const promotionId = location ? String(location).split('/').filter(Boolean).pop() : null;
+    const data = parseEbayRawResponseData(response);
+
+    if (response.status < 200 || response.status >= 300) {
+      const ebayErrors = extractEbayApiErrors(data);
+      const first = ebayErrors[0] || {};
+      const message = first.longMessage || first.message || data?.error || 'Failed to create promotion';
+      console.error('[Marketing Promotions Create] Error:', data || response.status);
+      return res.status(response.status || 500).json({
+        success: false,
+        error: message,
+        details: data,
+      });
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.status(201).json({
+      success: true,
+      docsUrl: CREATE_ITEM_PROMOTION_DOCS,
+      promotionId,
+      location,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId,
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = extractEbayApiErrors(data);
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to create promotion';
+    console.error('[Marketing Promotions Create] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
+router.get('/marketing/promotions/item', requireAuth, requirePageAccess('MarketingPromotions'), async (req, res) => {
+  try {
+    const { sellerId, promotionId, marketplaceId } = req.query || {};
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!promotionId) return res.status(400).json({ success: false, error: 'promotionId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const promotionPathId = buildEbayItemPromotionPathId(promotionId, mp);
+    const { response, data } = await callEbayItemPromotionApi({
+      sellerDoc,
+      promotionPathId,
+      method: 'GET',
+      marketplaceId: mp,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Promotions Get] Error:', data || response.status);
+      return sendEbayItemPromotionError(res, response, data, 'Failed to load promotion');
+    }
+
+    return res.json({
+      success: true,
+      docsUrl: GET_ITEM_PROMOTION_DOCS,
+      promotionPathId,
+      seller: { id: seller._id, name: seller.user?.username },
+      promotion: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Promotions Get] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load promotion' });
+  }
+});
+
+router.put('/marketing/promotions/update', requireAuth, requirePageAccess('MarketingPromotions'), async (req, res) => {
+  try {
+    const { sellerId, promotionId, marketplaceId, promotion } = req.body || {};
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!promotionId) return res.status(400).json({ success: false, error: 'promotionId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+    if (!promotion || typeof promotion !== 'object' || Array.isArray(promotion)) {
+      return res.status(400).json({ success: false, error: 'promotion payload object is required' });
+    }
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const promotionPathId = buildEbayItemPromotionPathId(promotionId, mp);
+    const { response, data } = await callEbayItemPromotionApi({
+      sellerDoc,
+      promotionPathId,
+      method: 'PUT',
+      marketplaceId: mp,
+      body: promotion,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Promotions Update] Error:', data || response.status);
+      return sendEbayItemPromotionError(res, response, data, 'Failed to update promotion');
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.json({
+      success: true,
+      docsUrl: UPDATE_ITEM_PROMOTION_DOCS,
+      promotionPathId,
+      seller: { id: seller._id, name: seller.user?.username },
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Promotions Update] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to update promotion' });
+  }
+});
+
+router.delete('/marketing/promotions/delete', requireAuth, requirePageAccess('MarketingPromotions'), async (req, res) => {
+  try {
+    const sellerId = req.body?.sellerId || req.query?.sellerId;
+    const promotionId = req.body?.promotionId || req.query?.promotionId;
+    const marketplaceId = req.body?.marketplaceId || req.query?.marketplaceId;
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!promotionId) return res.status(400).json({ success: false, error: 'promotionId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const promotionPathId = buildEbayItemPromotionPathId(promotionId, mp);
+    const { response, data } = await callEbayItemPromotionApi({
+      sellerDoc,
+      promotionPathId,
+      method: 'DELETE',
+      marketplaceId: mp,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Promotions Delete] Error:', data || response.status);
+      return sendEbayItemPromotionError(res, response, data, 'Failed to delete promotion');
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.json({
+      success: true,
+      docsUrl: DELETE_ITEM_PROMOTION_DOCS,
+      promotionPathId,
+      seller: { id: seller._id, name: seller.user?.username },
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Promotions Delete] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to delete promotion' });
   }
 });
 

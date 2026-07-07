@@ -87,7 +87,9 @@ import SalaryPage from '../pages/admin/SalaryPage.jsx';
 import SellerFundsPage from '../pages/admin/SellerFundsPage.jsx';
 import TransactionSummaryPage from '../pages/admin/TransactionSummaryPage.jsx';
 import FinancesTransactionsPage from '../pages/admin/FinancesTransactionsPage.jsx';
+import AdsAndMarketingPage from '../pages/admin/AdsAndMarketingPage.jsx';
 import MarketingCampaignsPage from '../pages/admin/MarketingCampaignsPage.jsx';
+import MarketingPromotionsPage from '../pages/admin/MarketingPromotionsPage.jsx';
 import FinanceCashflowPage from '../pages/admin/FinanceCashflowPage.jsx';
 import AffiliateBalancePage from '../pages/admin/AffiliateBalancePage.jsx';
 
@@ -319,7 +321,9 @@ const COMPONENT_MAP = {
   'EbayAnalyticsHub': EbayAnalyticsHubPage,
   'EbayFeedback': EbayFeedbackPage,
   'EbayApiTester': EbayApiTesterPage,
+  'AdsAndMarketing': AdsAndMarketingPage,
   'MarketingCampaigns': MarketingCampaignsPage,
+  'MarketingPromotions': MarketingPromotionsPage,
   'SellerFunds': SellerFundsPage,
   'FinancesTransactionSummary': TransactionSummaryPage,
   'FinancesTransactions': FinancesTransactionsPage,
