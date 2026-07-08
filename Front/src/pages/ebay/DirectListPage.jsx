@@ -35,8 +35,12 @@ import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
 import ScheduleIcon from '@mui/icons-material/Schedule';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import ErrorIcon from '@mui/icons-material/Error';
 import api from '../../lib/api';
 import { generateSKUFromASIN } from '../../utils/skuGenerator';
+import AsinReviewModal from '../../components/AsinReviewModal.jsx';
+import { fetchDescriptionTemplateGallery } from '../../lib/descriptionTemplateGalleryApi.js';
 
 function countItemPhotoUrls(value) {
   if (!value) return 0;
@@ -99,6 +103,11 @@ function chunkAsins(asins, size = BULK_BATCH_SIZE) {
 
 function mergeBulkPreviewResults(batchResults) {
   const results = batchResults.flatMap((batch) => batch.results || []);
+  const previewItems = batchResults.flatMap(
+    (batch) => batch.previewItems
+      || (batch.results || []).map((row) => row.reviewItem).filter(Boolean)
+  );
+  const customColumns = batchResults.find((batch) => Array.isArray(batch.customColumns) && batch.customColumns.length > 0)?.customColumns || [];
   const ready = results.filter((row) => row.status === 'ready').length;
   const failed = results.length - ready;
   return {
@@ -107,15 +116,18 @@ function mergeBulkPreviewResults(batchResults) {
     ready,
     failed,
     results,
+    previewItems,
+    customColumns,
     batchCount: batchResults.length,
     message: `Prepared ${ready}/${results.length} listing(s) for review${batchResults.length > 1 ? ` (${batchResults.length} batches)` : ''}.`,
   };
 }
 
-function mergeBulkListResults(batchResults) {
+function mergeBulkListResults(batchResults, { retriedCount = 0 } = {}) {
   const results = batchResults.flatMap((batch) => batch.results || []);
   const successful = results.filter((row) => row.status === 'success').length;
   const failed = results.length - successful;
+  const retryNote = retriedCount > 0 ? ` · retried ${retriedCount} failed` : '';
   return {
     success: failed === 0,
     total: results.length,
@@ -124,7 +136,61 @@ function mergeBulkListResults(batchResults) {
     verifyOnly: false,
     results,
     batchCount: batchResults.length,
-    message: `Published ${successful}/${results.length} listing(s) on eBay${batchResults.length > 1 ? ` (${batchResults.length} batches)` : ''}.`,
+    retriedCount,
+    message: `Published ${successful}/${results.length} listing(s) on eBay${batchResults.length > 1 ? ` (${batchResults.length} batches)` : ''}${retryNote}.`,
+  };
+}
+
+function buildListingsByAsin(listings = []) {
+  const listingsByAsin = {};
+  for (const listing of listings) {
+    const asin = String(listing?._asinReference || listing?.asin || '').trim().toUpperCase();
+    if (!asin) continue;
+    listingsByAsin[asin] = listingPayloadForApi(listing);
+  }
+  return listingsByAsin;
+}
+
+function createLoadingPreviewItems(asins = []) {
+  return asins.map((asin) => ({
+    id: `loading-${asin}`,
+    asin,
+    sku: generateSKUFromASIN(asin),
+    status: 'loading',
+    sourceData: null,
+    generatedListing: null,
+    pricingCalculation: null,
+    warnings: [],
+    errors: [],
+  }));
+}
+
+function pickListingOverridesForAsins(listingOverrides, asins = []) {
+  const picked = {};
+  for (const asin of asins) {
+    if (listingOverrides[asin]) {
+      picked[asin] = listingOverrides[asin];
+    }
+  }
+  return picked;
+}
+
+function mergeListResultsWithRetry(firstPass, retryPass) {
+  const retryMap = Object.fromEntries(
+    (retryPass.results || []).map((row) => [row.asin, row])
+  );
+  const results = (firstPass.results || []).map((row) => retryMap[row.asin] || row);
+  const successful = results.filter((row) => row.status === 'success').length;
+  const failed = results.length - successful;
+  const retriedCount = (retryPass.results || []).length;
+  return {
+    ...firstPass,
+    results,
+    successful,
+    failed,
+    success: failed === 0,
+    retriedCount,
+    message: `Published ${successful}/${results.length} listing(s) on eBay · retried ${retriedCount} failed once.`,
   };
 }
 
@@ -361,100 +427,72 @@ function SingleListingReviewPanel({
   );
 }
 
-function BulkListingReviewPanel({
-  preview,
-  bulkResult,
-  bulkProcessing,
-  canBulk,
-  onSubmit,
-}) {
-  const rows = bulkResult?.results?.length
-    ? bulkResult.results
-    : preview?.results || [];
+function BulkListingReviewPanel({ bulkResult, bulkProcessing }) {
+  const rows = bulkResult?.results || [];
   if (!rows.length) return null;
-
-  const isSubmitted = Boolean(bulkResult?.results?.length);
-  const total = bulkResult?.total ?? preview?.total ?? rows.length;
-  const readyCount = preview?.ready ?? rows.filter((row) => row.status === 'ready' || row.status === 'success').length;
-  const failedCount = bulkResult?.failed ?? preview?.failed ?? rows.filter((row) => row.status === 'error').length;
 
   return (
     <Paper sx={{ p: 3, mb: 3 }} variant="outlined">
       <Stack direction="row" justifyContent="space-between" alignItems="flex-start" flexWrap="wrap" gap={1} sx={{ mb: 2 }}>
         <Box>
           <Typography variant="h6" gutterBottom sx={{ mb: 0.5 }}>
-            {isSubmitted ? 'Bulk eBay result' : 'Prepared listings'}
+            Bulk eBay result
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            {isSubmitted
-              ? 'Submission complete — see status per ASIN below.'
-              : 'Review prepared listings, then list on eBay.'}
+            Submission complete — failed ASINs were retried once automatically.
           </Typography>
         </Box>
+        {bulkProcessing && <CircularProgress size={24} />}
       </Stack>
 
-      <Stack direction="row" spacing={1} sx={{ mb: 2 }}>
-        <Chip label={`Total ${total}`} />
-        <Chip color="success" label={isSubmitted ? `OK ${bulkResult.successful}` : `Ready ${readyCount}`} />
-        <Chip color={failedCount ? 'error' : 'default'} label={`Failed ${failedCount}`} />
+      <Stack direction="row" spacing={1} sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
+        <Chip label={`Total ${bulkResult.total}`} />
+        <Chip color="success" icon={<CheckCircleIcon />} label={`OK ${bulkResult.successful}`} />
+        <Chip
+          color={bulkResult.failed ? 'error' : 'default'}
+          icon={bulkResult.failed ? <ErrorIcon /> : undefined}
+          label={`Failed ${bulkResult.failed}`}
+        />
+        {bulkResult.retriedCount > 0 && (
+          <Chip size="small" variant="outlined" label={`Retried ${bulkResult.retriedCount}`} />
+        )}
       </Stack>
 
-      <TableContainer sx={{ mb: isSubmitted ? 0 : 2 }}>
+      <TableContainer>
         <Table size="small">
           <TableHead>
             <TableRow>
+              <TableCell width={50}>Status</TableCell>
               <TableCell>ASIN</TableCell>
               <TableCell>SKU</TableCell>
-              <TableCell>Status</TableCell>
               <TableCell>Title</TableCell>
-              <TableCell>Price</TableCell>
-              <TableCell>Photos</TableCell>
-              {!isSubmitted && <TableCell>Location</TableCell>}
-              {!isSubmitted && <TableCell>Brand</TableCell>}
-              {isSubmitted && <TableCell>eBay ID</TableCell>}
+              <TableCell>eBay ID</TableCell>
               <TableCell>Error</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {rows.map((row) => (
               <TableRow key={row.asin}>
-                <TableCell>{row.asin}</TableCell>
-                <TableCell>{row.sku || row.listing?.customLabel || '—'}</TableCell>
                 <TableCell>
-                  <Chip
-                    size="small"
-                    color={
-                      row.status === 'ready' || row.status === 'success'
-                        ? 'success'
-                        : 'error'
-                    }
-                    label={row.status}
-                  />
+                  {row.status === 'success' ? (
+                    <CheckCircleIcon color="success" fontSize="small" />
+                  ) : (
+                    <ErrorIcon color="error" fontSize="small" />
+                  )}
                 </TableCell>
-                <TableCell sx={{ maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                <TableCell>
+                  <Typography variant="body2" fontFamily="monospace">{row.asin}</Typography>
+                </TableCell>
+                <TableCell>{row.sku || row.listing?.customLabel || '—'}</TableCell>
+                <TableCell sx={{ maxWidth: 220, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {row.listing?.title || '—'}
                 </TableCell>
-                <TableCell>{row.listing?.startPrice ? `$${row.listing.startPrice}` : '—'}</TableCell>
-                <TableCell>{row.listing?.photoCount ?? '—'}</TableCell>
-                {!isSubmitted && (
-                  <TableCell sx={{ maxWidth: 140, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {row.storeListerApplied?.location || row.listing?.location || '—'}
-                  </TableCell>
-                )}
-                {!isSubmitted && (
-                  <TableCell sx={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {row.storeListerApplied?.brand
-                      || (row.storeListerApplied?.brandMode === 'does_not_apply' ? 'Does Not Apply' : '—')}
-                  </TableCell>
-                )}
-                {isSubmitted && (
-                  <TableCell>
-                    {row.listingUrl ? (
-                      <Link href={row.listingUrl} target="_blank" rel="noopener noreferrer">{row.itemId}</Link>
-                    ) : row.itemId || '—'}
-                  </TableCell>
-                )}
-                <TableCell sx={{ maxWidth: 220, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                <TableCell>
+                  {row.listingUrl ? (
+                    <Link href={row.listingUrl} target="_blank" rel="noopener noreferrer">{row.itemId}</Link>
+                  ) : row.itemId || '—'}
+                </TableCell>
+                <TableCell sx={{ maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {row.error || '—'}
                 </TableCell>
               </TableRow>
@@ -462,21 +500,6 @@ function BulkListingReviewPanel({
           </TableBody>
         </Table>
       </TableContainer>
-
-      {!isSubmitted && preview?.ready > 0 && (
-        <Button
-          variant="contained"
-          color="primary"
-          size="large"
-          startIcon={bulkProcessing ? <CircularProgress size={20} color="inherit" /> : <CloudUploadIcon />}
-          onClick={onSubmit}
-          disabled={!canBulk || bulkProcessing}
-        >
-          {bulkProcessing
-            ? 'Listing…'
-            : `List ${preview.ready} on eBay now`}
-        </Button>
-      )}
     </Paper>
   );
 }
@@ -498,8 +521,14 @@ export default function DirectListPage() {
 
   const [bulkAsinsText, setBulkAsinsText] = useState('');
   const [bulkResult, setBulkResult] = useState(null);
+  const [previewItems, setPreviewItems] = useState([]);
+  const [reviewModalOpen, setReviewModalOpen] = useState(false);
+  const [pricingConfig, setPricingConfig] = useState(null);
+  const [effectiveTemplate, setEffectiveTemplate] = useState(null);
+  const [bulkPreviewCustomColumns, setBulkPreviewCustomColumns] = useState([]);
+  const [galleryTemplates, setGalleryTemplates] = useState([]);
+  const [galleryStoreMap, setGalleryStoreMap] = useState({});
   const [singlePreview, setSinglePreview] = useState(null);
-  const [bulkPreview, setBulkPreview] = useState(null);
 
   const [loadingInit, setLoadingInit] = useState(true);
   const [autofilling, setAutofilling] = useState(false);
@@ -545,6 +574,103 @@ export default function DirectListPage() {
   useEffect(() => {
     void loadStoreListerDefaults();
   }, [loadStoreListerDefaults]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const gallery = await fetchDescriptionTemplateGallery();
+        if (cancelled) return;
+        setGalleryTemplates(Array.isArray(gallery.templates) ? gallery.templates : []);
+        setGalleryStoreMap(
+          gallery.storeTemplateMap && typeof gallery.storeTemplateMap === 'object'
+            ? gallery.storeTemplateMap
+            : {}
+        );
+      } catch {
+        if (!cancelled) {
+          setGalleryTemplates([]);
+          setGalleryStoreMap({});
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedSeller || !selectedTemplate) {
+      setPricingConfig(null);
+      return undefined;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { data } = await api.get('/seller-pricing-config', {
+          params: { sellerId: selectedSeller, templateId: selectedTemplate },
+        });
+        if (!cancelled) setPricingConfig(data.pricingConfig || null);
+      } catch {
+        if (!cancelled) setPricingConfig(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSeller, selectedTemplate]);
+
+  useEffect(() => {
+    if (!selectedSeller || !selectedTemplate) {
+      setEffectiveTemplate(null);
+      return undefined;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { data } = await api.get(`/template-overrides/${selectedTemplate}/effective`, {
+          params: { sellerId: selectedSeller },
+        });
+        if (!cancelled) setEffectiveTemplate(data);
+      } catch {
+        if (!cancelled) setEffectiveTemplate(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSeller, selectedTemplate]);
+
+  const selectedStoreTemplate = useMemo(() => {
+    if (!selectedSeller) return null;
+    const assignedId = galleryStoreMap[selectedSeller] ?? galleryStoreMap[String(selectedSeller)];
+    if (!assignedId) return null;
+    return galleryTemplates.find((template) => String(template?.id) === String(assignedId)) || null;
+  }, [selectedSeller, galleryTemplates, galleryStoreMap]);
+
+  const reviewModalListLabel = useMemo(() => {
+    const count = previewItems.filter((item) => !['error', 'loading', 'blocked'].includes(item.status)).length;
+    return `List on eBay (${count})`;
+  }, [previewItems]);
+
+  const reviewTemplateColumns = useMemo(() => {
+    const customColumns = bulkPreviewCustomColumns.length > 0
+      ? bulkPreviewCustomColumns
+      : (effectiveTemplate?.customColumns || []);
+    return [
+      ...customColumns.map((col) => ({
+        ...col,
+        label: col.displayName || col.name,
+        type: 'custom',
+      })),
+      { name: 'title', label: 'Title', type: 'core' },
+      { name: 'description', label: 'Description', type: 'core' },
+      { name: 'startPrice', label: 'Start Price', type: 'core' },
+      { name: 'quantity', label: 'Quantity', type: 'core' },
+      { name: 'categoryId', label: 'Category ID', type: 'core' },
+      { name: 'categoryName', label: 'Category Name', type: 'core' },
+    ];
+  }, [bulkPreviewCustomColumns, effectiveTemplate]);
 
   const parsedBulkAsins = useMemo(() => parseBulkAsins(bulkAsinsText), [bulkAsinsText]);
   const bulkBatchCount = useMemo(
@@ -659,9 +785,11 @@ export default function DirectListPage() {
     setBulkPreviewing(true);
     setError('');
     setSuccess('');
-    setBulkPreview(null);
     setBulkResult(null);
     setBulkBatchProgress(null);
+    setBulkPreviewCustomColumns([]);
+    setPreviewItems(createLoadingPreviewItems(parsedBulkAsins));
+    setReviewModalOpen(true);
 
     const batches = chunkAsins(parsedBulkAsins);
     const batchResponses = [];
@@ -676,15 +804,32 @@ export default function DirectListPage() {
           asins: batches[i],
         });
         batchResponses.push(data);
+
+        if (Array.isArray(data.customColumns) && data.customColumns.length > 0) {
+          setBulkPreviewCustomColumns(data.customColumns);
+        }
+
+        const batchItems = data.previewItems
+          || data.results?.map((row) => row.reviewItem).filter(Boolean)
+          || [];
+        if (batchItems.length > 0) {
+          setPreviewItems((prev) => {
+            const byAsin = Object.fromEntries(batchItems.map((item) => [item.asin, item]));
+            return prev.map((item) => byAsin[item.asin] || item);
+          });
+        }
       }
 
       const merged = mergeBulkPreviewResults(batchResponses);
-      setBulkPreview(merged);
+      setPreviewItems(merged.previewItems);
+      if (merged.customColumns?.length) {
+        setBulkPreviewCustomColumns(merged.customColumns);
+      }
       setSuccess(merged.message);
     } catch (err) {
       if (batchResponses.length > 0) {
         const partial = mergeBulkPreviewResults(batchResponses);
-        setBulkPreview(partial);
+        setPreviewItems(partial.previewItems);
       }
       setError(err.response?.data?.error || 'Failed to prepare bulk preview');
     } finally {
@@ -771,39 +916,81 @@ export default function DirectListPage() {
     }
   };
 
-  const handleBulkSubmit = async () => {
-    if (!canBulk) return;
+  const runBulkListBatches = async ({
+    asins,
+    listingsByAsin = {},
+    listingOverrides = {},
+    phase = 'list',
+  }) => {
+    const batches = chunkAsins(asins);
+    const batchResponses = [];
+
+    for (let i = 0; i < batches.length; i += 1) {
+      setBulkBatchProgress({ current: i + 1, total: batches.length, phase });
+      const batchAsins = batches[i];
+      const batchListingsByAsin = {};
+      for (const asin of batchAsins) {
+        if (listingsByAsin[asin]) batchListingsByAsin[asin] = listingsByAsin[asin];
+      }
+      const { data } = await api.post('/template-listings/direct-list-bulk', {
+        templateId: selectedTemplate,
+        sellerId: selectedSeller,
+        verifyOnly: false,
+        region,
+        asins: batchAsins,
+        listingsByAsin: batchListingsByAsin,
+        listingOverrides: pickListingOverridesForAsins(listingOverrides, batchAsins),
+      });
+      batchResponses.push(data);
+    }
+
+    return mergeBulkListResults(batchResponses);
+  };
+
+  const handleListFromReview = async (listings) => {
+    const validListings = (listings || []).filter((listing) => listing?.customLabel && listing?.title);
+    if (!validListings.length) return;
+
+    setReviewModalOpen(false);
     setBulkProcessing(true);
     setError('');
     setSuccess('');
     setBulkResult(null);
     setBulkBatchProgress(null);
 
-    const batches = chunkAsins(parsedBulkAsins);
-    const batchResponses = [];
+    const asinsToList = validListings
+      .map((listing) => String(listing._asinReference || listing.asin || '').trim().toUpperCase())
+      .filter(Boolean);
+    const listingsByAsin = buildListingsByAsin(validListings);
 
     try {
-      for (let i = 0; i < batches.length; i += 1) {
-        setBulkBatchProgress({ current: i + 1, total: batches.length, phase: 'list' });
-        const { data } = await api.post('/template-listings/direct-list-bulk', {
-          templateId: selectedTemplate,
-          sellerId: selectedSeller,
-          verifyOnly: false,
-          region,
-          asins: batches[i],
+      let merged = await runBulkListBatches({
+        asins: asinsToList,
+        listingsByAsin,
+        phase: 'list',
+      });
+
+      const failedAsins = merged.results
+        .filter((row) => row.status === 'error')
+        .map((row) => row.asin);
+
+      if (failedAsins.length > 0) {
+        const retryListingsByAsin = {};
+        for (const asin of failedAsins) {
+          if (listingsByAsin[asin]) retryListingsByAsin[asin] = listingsByAsin[asin];
+        }
+        const retryMerged = await runBulkListBatches({
+          asins: failedAsins,
+          listingsByAsin: retryListingsByAsin,
+          phase: 'retry',
         });
-        batchResponses.push(data);
+        merged = mergeListResultsWithRetry(merged, retryMerged);
       }
 
-      const merged = mergeBulkListResults(batchResponses);
       setBulkResult(merged);
-      setBulkPreview(null);
+      setPreviewItems([]);
       setSuccess(merged.message);
     } catch (err) {
-      if (batchResponses.length > 0) {
-        const partial = mergeBulkListResults(batchResponses);
-        setBulkResult(partial);
-      }
       setError(err.response?.data?.error || 'Bulk direct list failed');
     } finally {
       setBulkProcessing(false);
@@ -1064,7 +1251,7 @@ export default function DirectListPage() {
           <Paper sx={{ p: 3, mb: 3 }}>
             <Typography variant="h6" gutterBottom>Bulk ASINs</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Paste ASINs below. Use <strong>Prepare</strong> to review in the browser, <strong>List now</strong> for immediate listing, or <strong>Run in background / Schedule</strong> for large jobs (up to {BULK_JOB_MAX_ASINS}) — server processes {BULK_BATCH_SIZE} ASINs per batch with pauses to avoid rate limits.
+              Paste ASINs below. Use <strong>Prepare</strong> to open the review modal (Amazon source vs generated listing), then <strong>List on eBay</strong> from there. Use <strong>Run in background / Schedule</strong> for large jobs (up to {BULK_JOB_MAX_ASINS}) without review.
             </Typography>
 
             <TextField
@@ -1142,6 +1329,13 @@ export default function DirectListPage() {
                 {bulkPreviewing
                   ? 'Preparing…'
                   : `Prepare ${parsedBulkAsins.length || 0} listing${parsedBulkAsins.length === 1 ? '' : 's'}`}
+              </Button>
+              <Button
+                variant="outlined"
+                disabled={!previewItems.length || reviewModalOpen || bulkProcessing}
+                onClick={() => setReviewModalOpen(true)}
+              >
+                Review prepared ({previewItems.filter((item) => item.status === 'success').length})
               </Button>
               <Button
                 variant="outlined"
@@ -1249,20 +1443,23 @@ export default function DirectListPage() {
             </Paper>
           )}
 
-          <BulkListingReviewPanel
-            preview={bulkPreview}
-            bulkResult={bulkResult}
-            bulkProcessing={bulkProcessing}
-            canBulk={canBulk}
-            onSubmit={handleBulkSubmit}
-          />
+          {bulkResult && (
+            <BulkListingReviewPanel
+              bulkResult={bulkResult}
+              bulkProcessing={bulkProcessing}
+            />
+          )}
         </>
       )}
 
       {bulkBatchProgress && (
         <Paper sx={{ p: 2, mb: 2 }} variant="outlined">
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            {bulkBatchProgress.phase === 'list' ? 'Listing' : 'Preparing'} batch {bulkBatchProgress.current} of {bulkBatchProgress.total}…
+            {bulkBatchProgress.phase === 'retry'
+              ? 'Retrying failed ASINs'
+              : bulkBatchProgress.phase === 'list'
+                ? 'Listing'
+                : 'Preparing'} batch {bulkBatchProgress.current} of {bulkBatchProgress.total}…
           </Typography>
           <LinearProgress
             variant="determinate"
@@ -1273,6 +1470,24 @@ export default function DirectListPage() {
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
       {success && <Alert severity="success" sx={{ mb: 2 }}>{success}</Alert>}
+
+      <AsinReviewModal
+        open={reviewModalOpen}
+        marketplace={region}
+        sellerId={selectedSeller}
+        storeTemplateHtml={selectedStoreTemplate?.html || ''}
+        pricingConfig={pricingConfig}
+        previewItems={previewItems}
+        hideSaveButton
+        listDirectlyLabel={reviewModalListLabel}
+        onListDirectly={handleListFromReview}
+        onClose={() => {
+          if (bulkProcessing) return;
+          setReviewModalOpen(false);
+          setPreviewItems([]);
+        }}
+        templateColumns={reviewTemplateColumns}
+      />
     </Box>
   );
 }

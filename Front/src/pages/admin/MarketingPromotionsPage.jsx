@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from 'react';
 import {
   Alert,
   Box,
@@ -37,9 +37,31 @@ import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
 import api from '../../lib/api';
 import GrowMentalityLoader from '../../components/GrowMentalityLoader.jsx';
+import MarketingKpiStrip from '../../components/marketing/MarketingKpiStrip.jsx';
+import MarketingCollapsibleFilters from '../../components/marketing/MarketingCollapsibleFilters.jsx';
+import MarketingStoreFilters from '../../components/marketing/MarketingStoreFilters.jsx';
 import CreateItemPromotionDialog from '../../components/marketing/CreateItemPromotionDialog.jsx';
 import UpdateItemPromotionDialog from '../../components/marketing/UpdateItemPromotionDialog.jsx';
 import { canDeletePromotion, canEditPromotion } from '../../utils/itemPromotionUtils';
+import { useEbayConnectedSellers } from '../../hooks/useEbayConnectedSellers.js';
+import {
+  ALL_MARKETPLACES_VALUE,
+  ALL_STORES_PER_SELLER_LIMIT,
+  ALL_STORES_VALUE,
+  KPI_FETCH_LIMIT,
+  PROMOTION_STATUS_OPTIONS,
+  PROMOTION_TYPE_OPTIONS,
+  STATUS_CHIP_COLOR,
+} from '../../lib/marketingConstants.js';
+import {
+  buildMarketingKpiCacheKey,
+  formatDate,
+  getMarketingKpiCache,
+  invalidateMarketingKpiCache,
+  parseApiError,
+  resolveSellerName,
+  setMarketingKpiCache,
+} from '../../lib/marketingUtils.js';
 
 const EBAY_DOCS =
   'https://developer.ebay.com/api-docs/sell/marketing/resources/promotion/methods/getPromotions';
@@ -53,29 +75,7 @@ const UPDATE_PROMOTION_DOCS =
 const DELETE_PROMOTION_DOCS =
   'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/deleteItemPromotion';
 
-const ALL_STORES_VALUE = '__all__';
-const ALL_MARKETPLACES_VALUE = '__all__';
-const ALL_STORES_PER_SELLER_LIMIT = 50;
-
-const MARKETPLACES = ['EBAY_US', 'EBAY_GB', 'EBAY_AU', 'EBAY_CA', 'EBAY_DE'];
 const PAGE_SIZES = [25, 50, 100, 200];
-
-const PROMOTION_STATUS_OPTIONS = [
-  { value: '', label: 'All statuses' },
-  { value: 'RUNNING', label: 'Running' },
-  { value: 'PAUSED', label: 'Paused' },
-  { value: 'SCHEDULED', label: 'Scheduled' },
-  { value: 'ENDED', label: 'Ended' },
-  { value: 'DRAFT', label: 'Draft' },
-];
-
-const PROMOTION_TYPE_OPTIONS = [
-  { value: '', label: 'All types' },
-  { value: 'CODED_COUPON', label: 'Coded coupon' },
-  { value: 'MARKDOWN_SALE', label: 'Markdown sale' },
-  { value: 'ORDER_DISCOUNT', label: 'Order discount' },
-  { value: 'VOLUME_DISCOUNT', label: 'Volume discount' },
-];
 
 const SORT_OPTIONS = [
   { value: '', label: 'Default sort' },
@@ -87,35 +87,7 @@ const SORT_OPTIONS = [
   { value: '-PROMOTION_NAME', label: 'Name (Z–A)' },
 ];
 
-const STATUS_CHIP_COLOR = {
-  RUNNING: 'success',
-  PAUSED: 'warning',
-  ENDED: 'default',
-  SCHEDULED: 'info',
-  DRAFT: 'default',
-};
-
-function formatDate(value) {
-  if (!value) return '—';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-}
-
-function parseApiError(err, fallback) {
-  const apiError = err.response?.data?.error;
-  const details = err.response?.data?.details;
-  const detailMsg = details?.errors?.[0]?.longMessage || details?.errors?.[0]?.message;
-  return detailMsg || apiError || err.message || fallback;
-}
-
-function PromotionRow({
+const PromotionRow = memo(function PromotionRow({
   row,
   expanded,
   onToggle,
@@ -237,12 +209,35 @@ function PromotionRow({
       </TableRow>
     </>
   );
-}
+});
 
-export default function MarketingPromotionsPage() {
-  const [sellers, setSellers] = useState([]);
-  const [sellerId, setSellerId] = useState(ALL_STORES_VALUE);
-  const [marketplace, setMarketplace] = useState(ALL_MARKETPLACES_VALUE);
+export default forwardRef(function MarketingPromotionsPage({
+  embedded = false,
+  active = true,
+  sellers: sellersProp,
+  sellerId: sellerIdProp,
+  onSellerChange,
+  marketplace: marketplaceProp,
+  onMarketplaceChange,
+  onToolbarState,
+}, ref) {
+  const { sellers: hookSellers } = useEbayConnectedSellers({ enabled: !embedded });
+  const sellers = embedded ? (sellersProp ?? []) : hookSellers;
+
+  const [localSellerId, setLocalSellerId] = useState(ALL_STORES_VALUE);
+  const [localMarketplace, setLocalMarketplace] = useState(ALL_MARKETPLACES_VALUE);
+  const sellerId = embedded ? (sellerIdProp ?? '') : localSellerId;
+  const marketplace = embedded ? (marketplaceProp ?? ALL_MARKETPLACES_VALUE) : localMarketplace;
+
+  const setSellerId = useCallback((value) => {
+    if (embedded) onSellerChange?.(value);
+    else setLocalSellerId(value);
+  }, [embedded, onSellerChange]);
+
+  const setMarketplace = useCallback((value) => {
+    if (embedded) onMarketplaceChange?.(value);
+    else setLocalMarketplace(value);
+  }, [embedded, onMarketplaceChange]);
   const [promotionStatus, setPromotionStatus] = useState('RUNNING');
   const [promotionType, setPromotionType] = useState('CODED_COUPON');
   const [sort, setSort] = useState('END_DATE');
@@ -253,6 +248,8 @@ export default function MarketingPromotionsPage() {
 
   const [rows, setRows] = useState([]);
   const [allRows, setAllRows] = useState([]);
+  const [kpiRows, setKpiRows] = useState([]);
+  const [kpiLoading, setKpiLoading] = useState(false);
   const [storeErrors, setStoreErrors] = useState([]);
   const [total, setTotal] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -265,24 +262,17 @@ export default function MarketingPromotionsPage() {
   const [deleteError, setDeleteError] = useState('');
 
   useEffect(() => {
-    api.get('/sellers/ebay-connected')
-      .then(({ data }) => {
-        const list = Array.isArray(data) ? data : [];
-        setSellers(list);
-        if (list.length > 0) {
-          setSellerId((prev) => prev || ALL_STORES_VALUE);
-        }
-      })
-      .catch(() => setSellers([]));
-  }, []);
+    if (embedded || sellerId || sellers.length === 0) return;
+    setLocalSellerId(ALL_STORES_VALUE);
+  }, [embedded, sellers, sellerId]);
 
   const isAllStores = sellerId === ALL_STORES_VALUE;
   const isAllMarketplaces = marketplace === ALL_MARKETPLACES_VALUE;
 
-  const selectedSellerName = useMemo(() => {
-    if (isAllStores) return 'All Stores';
-    return sellers.find((s) => String(s._id) === String(sellerId))?.user?.username || '';
-  }, [sellers, sellerId, isAllStores]);
+  const selectedSellerName = useMemo(
+    () => resolveSellerName(sellers, sellerId, isAllStores),
+    [sellers, sellerId, isAllStores],
+  );
 
   const sharedParams = useMemo(
     () => ({
@@ -293,6 +283,14 @@ export default function MarketingPromotionsPage() {
       q: appliedKeyword.trim() || undefined,
     }),
     [marketplace, isAllMarketplaces, promotionStatus, promotionType, sort, appliedKeyword],
+  );
+
+  const kpiParams = useMemo(
+    () => ({
+      marketplace: isAllMarketplaces ? ALL_MARKETPLACES_VALUE : marketplace,
+      promotion_status: 'RUNNING',
+    }),
+    [marketplace, isAllMarketplaces],
   );
 
   const loadAllStoresPromotions = useCallback(async () => {
@@ -354,20 +352,93 @@ export default function MarketingPromotionsPage() {
     return isAllStores ? loadAllStoresPromotions() : loadSingleSellerPromotions();
   }, [sellerId, isAllStores, loadAllStoresPromotions, loadSingleSellerPromotions]);
 
-  useEffect(() => {
-    if (!sellerId || !isAllStores) return;
-    void loadAllStoresPromotions();
-  }, [sellerId, isAllStores, sharedParams, loadAllStoresPromotions]);
+  const loadKpiPromotions = useCallback(async ({ refresh = false } = {}) => {
+    if (!sellerId) return;
+    const cacheKey = buildMarketingKpiCacheKey('promotions', sellerId, marketplace);
+    if (!refresh) {
+      const cached = getMarketingKpiCache(cacheKey);
+      if (cached) {
+        setKpiRows(cached);
+        return;
+      }
+    }
+
+    setKpiLoading(true);
+    try {
+      let rows = [];
+      if (isAllStores) {
+        const { data } = await api.get('/ebay/marketing/promotions/all', {
+          params: {
+            ...kpiParams,
+            perSellerLimit: ALL_STORES_PER_SELLER_LIMIT,
+          },
+        });
+        rows = Array.isArray(data?.promotions) ? data.promotions : [];
+      } else {
+        const { data } = await api.get('/ebay/marketing/promotions', {
+          params: {
+            ...kpiParams,
+            sellerId,
+            limit: KPI_FETCH_LIMIT,
+            offset: 0,
+          },
+        });
+        rows = Array.isArray(data?.promotions) ? data.promotions : [];
+      }
+      setKpiRows(rows);
+      setMarketingKpiCache(cacheKey, rows);
+    } catch {
+      setKpiRows([]);
+    } finally {
+      setKpiLoading(false);
+    }
+  }, [sellerId, isAllStores, kpiParams, marketplace]);
+
+  const refreshPromotions = useCallback(({ refreshKpi = true } = {}) => {
+    void Promise.all([
+      loadPromotions(),
+      refreshKpi ? loadKpiPromotions({ refresh: true }) : Promise.resolve(),
+    ]);
+    if (refreshKpi) invalidateMarketingKpiCache('promotions:');
+  }, [loadPromotions, loadKpiPromotions]);
+
+  useImperativeHandle(ref, () => ({
+    refresh: () => refreshPromotions(),
+    openCreate: () => setCreateOpen(true),
+  }), [refreshPromotions]);
 
   useEffect(() => {
-    if (!sellerId || isAllStores) return;
+    if (!embedded || !onToolbarState) return;
+    onToolbarState({
+      loading,
+      refreshDisabled: !sellerId || loading,
+      createDisabled: sellers.length === 0,
+    });
+  }, [embedded, onToolbarState, loading, sellerId, sellers.length]);
+
+  useEffect(() => {
+    if (!active || !sellerId || !isAllStores) return;
+    void loadAllStoresPromotions();
+  }, [active, sellerId, isAllStores, sharedParams, loadAllStoresPromotions]);
+
+  useEffect(() => {
+    if (!active || !sellerId || isAllStores) return;
     void loadSingleSellerPromotions();
-  }, [sellerId, isAllStores, sharedParams, pageSize, offset, loadSingleSellerPromotions]);
+  }, [active, sellerId, isAllStores, sharedParams, pageSize, offset, loadSingleSellerPromotions]);
 
   useEffect(() => {
     if (!isAllStores) return;
     setRows(allRows.slice(offset, offset + pageSize));
   }, [isAllStores, allRows, offset, pageSize]);
+
+  useEffect(() => {
+    if (!active || !sellerId) return;
+    void loadKpiPromotions();
+  }, [active, sellerId, isAllStores, kpiParams, loadKpiPromotions]);
+
+  useEffect(() => {
+    setOffset(0);
+  }, [sellerId, marketplace]);
 
   const pageIndex = Math.floor(offset / pageSize);
   const pageCount = total != null ? Math.max(1, Math.ceil(total / pageSize)) : null;
@@ -392,7 +463,7 @@ export default function MarketingPromotionsPage() {
         },
       });
       setDeleteTarget(null);
-      void loadPromotions();
+      refreshPromotions();
     } catch (err) {
       setDeleteError(parseApiError(err, 'Failed to delete promotion'));
     } finally {
@@ -401,74 +472,70 @@ export default function MarketingPromotionsPage() {
   };
 
   return (
-    <Box sx={{ p: { xs: 2, sm: 3 }, maxWidth: 1500, mx: 'auto' }}>
-      <Stack
-        direction={{ xs: 'column', md: 'row' }}
-        justifyContent="space-between"
-        alignItems={{ xs: 'stretch', md: 'flex-start' }}
-        spacing={2}
-        sx={{ mb: 2 }}
-      >
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 800 }}>Marketing Promotions</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Item discounts &amp; coupons via eBay <code>getPromotions</code> / <code>createItemPromotion</code> —{' '}
-            <Link href={EBAY_DOCS} target="_blank" rel="noopener noreferrer">List</Link>
-            {' · '}
-            <Link href={CREATE_PROMOTION_DOCS} target="_blank" rel="noopener noreferrer">Create</Link>
-            {' · '}
-            <Link href={UPDATE_PROMOTION_DOCS} target="_blank" rel="noopener noreferrer">Update</Link>
-            {' · '}
-            <Link href={DELETE_PROMOTION_DOCS} target="_blank" rel="noopener noreferrer">Delete</Link>
-          </Typography>
-        </Box>
-        <Stack direction="row" spacing={1}>
-          <Button
-            variant="outlined"
-            startIcon={<AddIcon />}
-            onClick={() => setCreateOpen(true)}
-            disabled={sellers.length === 0}
-          >
-            Create promotion
-          </Button>
-          <Button
-            variant="contained"
-            startIcon={<RefreshIcon />}
-            onClick={() => void loadPromotions()}
-            disabled={!sellerId || loading}
-          >
-            Refresh
-          </Button>
+    <Box sx={{ px: { xs: 2, sm: 3 }, pt: embedded ? 1.5 : { xs: 2, sm: 3 }, pb: { xs: 2, sm: 3 }, maxWidth: 1500, mx: 'auto' }}>
+      {!embedded ? (
+        <Stack
+          direction={{ xs: 'column', md: 'row' }}
+          justifyContent="space-between"
+          alignItems={{ xs: 'stretch', md: 'flex-start' }}
+          spacing={2}
+          sx={{ mb: 2 }}
+        >
+          <Box>
+            <Typography variant="h4" sx={{ fontWeight: 800 }}>Marketing Promotions</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              Item discounts &amp; coupons via eBay <code>getPromotions</code> / <code>createItemPromotion</code> —{' '}
+              <Link href={EBAY_DOCS} target="_blank" rel="noopener noreferrer">List</Link>
+              {' · '}
+              <Link href={CREATE_PROMOTION_DOCS} target="_blank" rel="noopener noreferrer">Create</Link>
+              {' · '}
+              <Link href={UPDATE_PROMOTION_DOCS} target="_blank" rel="noopener noreferrer">Update</Link>
+              {' · '}
+              <Link href={DELETE_PROMOTION_DOCS} target="_blank" rel="noopener noreferrer">Delete</Link>
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={1}>
+            <Button
+              variant="outlined"
+              startIcon={<AddIcon />}
+              onClick={() => setCreateOpen(true)}
+              disabled={sellers.length === 0}
+            >
+              Create promotion
+            </Button>
+            <Button
+              variant="contained"
+              startIcon={<RefreshIcon />}
+              onClick={() => refreshPromotions()}
+              disabled={!sellerId || loading}
+            >
+              Refresh
+            </Button>
+          </Stack>
         </Stack>
-      </Stack>
+      ) : null}
 
-      <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+      <MarketingKpiStrip
+        rows={kpiRows}
+        loading={kpiLoading}
+        statusKey="promotionStatus"
+        typeKey="promotionType"
+        typeLabel="Promotion type"
+        entityLabel="promotions"
+        typeOptions={PROMOTION_TYPE_OPTIONS}
+      />
+
+      <MarketingCollapsibleFilters title="Promotion filters">
         <Grid container spacing={2}>
-          <Grid item xs={12} sm={6} md={3}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Seller</InputLabel>
-              <Select label="Seller" value={sellerId} onChange={(e) => { setSellerId(e.target.value); setOffset(0); }}>
-                <MenuItem value={ALL_STORES_VALUE}>All Stores</MenuItem>
-                {sellers.map((s) => (
-                  <MenuItem key={s._id} value={s._id}>
-                    {s.user?.username || s.user?.email || s._id}
-                    {s.user?.active === false ? ' (inactive user)' : ''}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Grid>
-          <Grid item xs={12} sm={6} md={2}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Marketplace</InputLabel>
-              <Select label="Marketplace" value={marketplace} onChange={(e) => { setMarketplace(e.target.value); setOffset(0); }}>
-                <MenuItem value={ALL_MARKETPLACES_VALUE}>All Marketplaces</MenuItem>
-                {MARKETPLACES.map((mp) => (
-                  <MenuItem key={mp} value={mp}>{mp}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Grid>
+          {!embedded ? (
+            <MarketingStoreFilters
+              sellers={sellers}
+              sellerId={sellerId}
+              onSellerChange={(value) => { setSellerId(value); setOffset(0); }}
+              marketplace={marketplace}
+              onMarketplaceChange={(value) => { setMarketplace(value); setOffset(0); }}
+            />
+          ) : null}
           <Grid item xs={12} sm={6} md={2}>
             <FormControl fullWidth size="small">
               <InputLabel>Status</InputLabel>
@@ -526,7 +593,7 @@ export default function MarketingPromotionsPage() {
             </Button>
           </Grid>
         </Grid>
-      </Paper>
+      </MarketingCollapsibleFilters>
 
       {selectedSellerName ? (
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
@@ -543,12 +610,6 @@ export default function MarketingPromotionsPage() {
           {storeErrors.length > 3 ? ` · +${storeErrors.length - 3} more` : ''}
         </Alert>
       ) : null}
-
-      <Alert severity="info" sx={{ mb: 2 }}>
-        Listing requires OAuth scope <code>sell.marketing.readonly</code> or <code>sell.marketing</code>.
-        Creating promotions requires <code>sell.marketing</code> (write).
-        Sellers need an active eBay Store for most discount types. Reconnect OAuth if you see scope errors.
-      </Alert>
 
       <Paper variant="outlined">
         {loading ? (
@@ -631,7 +692,7 @@ export default function MarketingPromotionsPage() {
         sellers={sellers}
         defaultSellerId={isAllStores ? '' : sellerId}
         onCreated={() => {
-          void loadPromotions();
+          refreshPromotions();
         }}
       />
 
@@ -640,7 +701,7 @@ export default function MarketingPromotionsPage() {
         onClose={() => setUpdateTarget(null)}
         target={updateTarget}
         onUpdated={() => {
-          void loadPromotions();
+          refreshPromotions();
         }}
       />
 
@@ -673,4 +734,4 @@ export default function MarketingPromotionsPage() {
       </Dialog>
     </Box>
   );
-}
+});

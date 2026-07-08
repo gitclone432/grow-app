@@ -344,6 +344,8 @@ export default function AsinReviewModal({
   previewItems = [], 
   onSave,
   onListDirectly = null,
+  hideSaveButton = false,
+  listDirectlyLabel = 'List Directly',
   templateColumns = [],
   marketplace = 'US',
   sellerId = '',
@@ -834,7 +836,18 @@ export default function AsinReviewModal({
   })();
   // Separate core fields and custom fields from template columns
   const coreFieldColumns = templateColumns.filter(col => col.type === 'core');
-  const customFieldColumns = templateColumns.filter(col => col.type === 'custom');
+  const templateCustomFieldColumns = templateColumns.filter(col => col.type === 'custom');
+  const customFieldColumns = (() => {
+    if (templateCustomFieldColumns.length > 0) return templateCustomFieldColumns;
+    const fields = itemData.customFields || {};
+    return Object.keys(fields)
+      .filter((key) => String(fields[key] ?? '').trim())
+      .map((name) => ({
+        name,
+        label: String(name).replace(/^C:/i, '').trim() || name,
+        type: 'custom',
+      }));
+  })();
 
   return (
     <Dialog 
@@ -951,7 +964,7 @@ export default function AsinReviewModal({
             {onListDirectly && (
               <Button
                 variant="contained"
-                color="secondary"
+                color={hideSaveButton ? 'primary' : 'secondary'}
                 size="small"
                 onClick={() => {
                   const listingsToSave = activeItems
@@ -975,9 +988,10 @@ export default function AsinReviewModal({
                 disabled={saving || activeItems.every(i => ['error', 'loading', 'blocked'].includes(i.status))}
                 sx={{ fontSize: showAmazonPreview ? '0.7rem' : undefined, whiteSpace: 'nowrap' }}
               >
-                List Directly
+                {listDirectlyLabel}
               </Button>
             )}
+            {!hideSaveButton && onSave && (
             <Button
               variant="contained"
               startIcon={showAmazonPreview ? null : <SaveIcon />}
@@ -988,6 +1002,7 @@ export default function AsinReviewModal({
             >
               {saving ? 'Saving...' : `Save All (${activeItems.filter(i => !['error', 'loading', 'blocked'].includes(i.status)).length})`}
             </Button>
+            )}
             <IconButton onClick={handleClose} size="small">
               <CloseIcon fontSize={showAmazonPreview ? 'small' : 'medium'} />
             </IconButton>
@@ -1181,6 +1196,27 @@ export default function AsinReviewModal({
                     <Typography variant="body2">
                       {currentItem.sourceData.compatibility}
                     </Typography>
+                  </Box>
+                )}
+
+                {currentItem.sourceData?.productInformation
+                  && Object.keys(currentItem.sourceData.productInformation).length > 0 && (
+                  <Box>
+                    <Typography variant="caption" color="text.secondary" gutterBottom>
+                      Specifications
+                    </Typography>
+                    <Stack spacing={0.75} sx={{ mt: 0.5 }}>
+                      {Object.entries(currentItem.sourceData.productInformation).map(([key, value]) => (
+                        <Box key={key}>
+                          <Typography variant="caption" color="text.secondary" display="block">
+                            {key}
+                          </Typography>
+                          <Typography variant="body2">
+                            {String(value ?? '').trim() || '—'}
+                          </Typography>
+                        </Box>
+                      ))}
+                    </Stack>
                   </Box>
                 )}
 
@@ -1508,7 +1544,7 @@ export default function AsinReviewModal({
                 {customFieldColumns.length > 0 && (
                   <>
                     <Divider sx={{ my: 2 }}>
-                      <Chip label="Custom Fields" size="small" />
+                      <Chip label="Item Specifications" size="small" />
                     </Divider>
 
                     {customFieldColumns.map(col => (

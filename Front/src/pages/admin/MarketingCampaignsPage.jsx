@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from 'react';
 import {
   Alert,
   Box,
@@ -30,81 +30,37 @@ import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 import api from '../../lib/api';
 import GrowMentalityLoader from '../../components/GrowMentalityLoader.jsx';
+import MarketingKpiStrip from '../../components/marketing/MarketingKpiStrip.jsx';
+import MarketingCollapsibleFilters from '../../components/marketing/MarketingCollapsibleFilters.jsx';
+import MarketingStoreFilters from '../../components/marketing/MarketingStoreFilters.jsx';
+import { useEbayConnectedSellers } from '../../hooks/useEbayConnectedSellers.js';
+import {
+  ALL_MARKETPLACES_VALUE,
+  ALL_STORES_PER_SELLER_LIMIT,
+  ALL_STORES_VALUE,
+  CAMPAIGN_STATUS_OPTIONS,
+  FUNDING_OPTIONS,
+  KPI_FETCH_LIMIT,
+  STATUS_CHIP_COLOR,
+  TARGETING_OPTIONS,
+} from '../../lib/marketingConstants.js';
+import {
+  buildMarketingKpiCacheKey,
+  formatBudget,
+  formatDate,
+  getMarketingKpiCache,
+  invalidateMarketingKpiCache,
+  parseApiError,
+  resolveSellerName,
+  setMarketingKpiCache,
+} from '../../lib/marketingUtils.js';
 
 const EBAY_DOCS =
   'https://developer.ebay.com/api-docs/sell/marketing/resources/campaign/methods/getCampaigns';
 
-const ALL_STORES_VALUE = '__all__';
-const ALL_MARKETPLACES_VALUE = '__all__';
-const ALL_STORES_PER_SELLER_LIMIT = 50;
-
-const MARKETPLACES = ['EBAY_US', 'EBAY_GB', 'EBAY_AU', 'EBAY_CA', 'EBAY_DE'];
 const PAGE_SIZES = [25, 50, 100, 200, 500];
 
-const CAMPAIGN_STATUS_OPTIONS = [
-  { value: '', label: 'All statuses' },
-  { value: 'RUNNING', label: 'Running' },
-  { value: 'PAUSED', label: 'Paused' },
-  { value: 'SCHEDULED', label: 'Scheduled' },
-  { value: 'ENDED', label: 'Ended' },
-  { value: 'DRAFT', label: 'Draft' },
-  { value: 'DELETED', label: 'Deleted' },
-];
-
-const FUNDING_OPTIONS = [
-  { value: '', label: 'All funding models' },
-  { value: 'COST_PER_SALE', label: 'Cost per sale (CPS)' },
-  { value: 'COST_PER_CLICK', label: 'Cost per click (CPC)' },
-];
-
-const TARGETING_OPTIONS = [
-  { value: '', label: 'All targeting types' },
-  { value: 'MANUAL', label: 'Manual' },
-  { value: 'SMART', label: 'Smart' },
-];
-
-const STATUS_CHIP_COLOR = {
-  RUNNING: 'success',
-  PAUSED: 'warning',
-  ENDED: 'default',
-  DELETED: 'error',
-  SCHEDULED: 'info',
-  DRAFT: 'default',
-};
-
-function formatDate(value) {
-  if (!value) return '—';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-}
-
-function formatBudget(value, currency) {
-  if (value == null || value === '') return '—';
-  const num = Number(value);
-  if (Number.isNaN(num)) return String(value);
-  const cur = currency || 'USD';
-  try {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: cur }).format(num);
-  } catch {
-    return `${num} ${cur}`;
-  }
-}
-
-function parseApiError(err, fallback) {
-  const apiError = err.response?.data?.error;
-  const details = err.response?.data?.details;
-  const detailMsg = details?.errors?.[0]?.longMessage || details?.errors?.[0]?.message;
-  return detailMsg || apiError || err.message || fallback;
-}
-
-function CampaignRow({ row, expanded, onToggle, showStore }) {
+const CampaignRow = memo(function CampaignRow({ row, expanded, onToggle, showStore }) {
   const channels = Array.isArray(row.channels) ? row.channels.join(', ') : '';
   const colSpan = showStore ? 11 : 10;
   return (
@@ -179,12 +135,35 @@ function CampaignRow({ row, expanded, onToggle, showStore }) {
       </TableRow>
     </>
   );
-}
+});
 
-export default function MarketingCampaignsPage() {
-  const [sellers, setSellers] = useState([]);
-  const [sellerId, setSellerId] = useState(ALL_STORES_VALUE);
-  const [marketplace, setMarketplace] = useState(ALL_MARKETPLACES_VALUE);
+export default forwardRef(function MarketingCampaignsPage({
+  embedded = false,
+  active = true,
+  sellers: sellersProp,
+  sellerId: sellerIdProp,
+  onSellerChange,
+  marketplace: marketplaceProp,
+  onMarketplaceChange,
+  onToolbarState,
+}, ref) {
+  const { sellers: hookSellers } = useEbayConnectedSellers({ enabled: !embedded });
+  const sellers = embedded ? (sellersProp ?? []) : hookSellers;
+
+  const [localSellerId, setLocalSellerId] = useState(ALL_STORES_VALUE);
+  const [localMarketplace, setLocalMarketplace] = useState(ALL_MARKETPLACES_VALUE);
+  const sellerId = embedded ? (sellerIdProp ?? '') : localSellerId;
+  const marketplace = embedded ? (marketplaceProp ?? ALL_MARKETPLACES_VALUE) : localMarketplace;
+
+  const setSellerId = useCallback((value) => {
+    if (embedded) onSellerChange?.(value);
+    else setLocalSellerId(value);
+  }, [embedded, onSellerChange]);
+
+  const setMarketplace = useCallback((value) => {
+    if (embedded) onMarketplaceChange?.(value);
+    else setLocalMarketplace(value);
+  }, [embedded, onMarketplaceChange]);
   const [campaignStatus, setCampaignStatus] = useState('');
   const [campaignName, setCampaignName] = useState('');
   const [fundingStrategy, setFundingStrategy] = useState('');
@@ -201,6 +180,8 @@ export default function MarketingCampaignsPage() {
 
   const [rows, setRows] = useState([]);
   const [allRows, setAllRows] = useState([]);
+  const [kpiRows, setKpiRows] = useState([]);
+  const [kpiLoading, setKpiLoading] = useState(false);
   const [storeErrors, setStoreErrors] = useState([]);
   const [total, setTotal] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -208,24 +189,17 @@ export default function MarketingCampaignsPage() {
   const [expandedId, setExpandedId] = useState(null);
 
   useEffect(() => {
-    api.get('/sellers/ebay-connected')
-      .then(({ data }) => {
-        const list = Array.isArray(data) ? data : [];
-        setSellers(list);
-        if (list.length > 0) {
-          setSellerId((prev) => prev || ALL_STORES_VALUE);
-        }
-      })
-      .catch(() => setSellers([]));
-  }, []);
+    if (embedded || sellerId || sellers.length === 0) return;
+    setLocalSellerId(ALL_STORES_VALUE);
+  }, [embedded, sellers, sellerId]);
 
   const isAllStores = sellerId === ALL_STORES_VALUE;
   const isAllMarketplaces = marketplace === ALL_MARKETPLACES_VALUE;
 
-  const selectedSellerName = useMemo(() => {
-    if (isAllStores) return 'All Stores';
-    return sellers.find((s) => String(s._id) === String(sellerId))?.user?.username || '';
-  }, [sellers, sellerId, isAllStores]);
+  const selectedSellerName = useMemo(
+    () => resolveSellerName(sellers, sellerId, isAllStores),
+    [sellers, sellerId, isAllStores],
+  );
 
   const sharedParams = useMemo(
     () => ({
@@ -238,6 +212,14 @@ export default function MarketingCampaignsPage() {
       end_date_range: appliedFilters.endDateRange.trim() || undefined,
     }),
     [marketplace, isAllMarketplaces, campaignStatus, fundingStrategy, campaignTargetingType, appliedFilters],
+  );
+
+  const kpiParams = useMemo(
+    () => ({
+      marketplace: isAllMarketplaces ? ALL_MARKETPLACES_VALUE : marketplace,
+      campaign_status: 'RUNNING',
+    }),
+    [marketplace, isAllMarketplaces],
   );
 
   const loadAllStoresCampaigns = useCallback(async () => {
@@ -299,20 +281,91 @@ export default function MarketingCampaignsPage() {
     return isAllStores ? loadAllStoresCampaigns() : loadSingleSellerCampaigns();
   }, [sellerId, isAllStores, loadAllStoresCampaigns, loadSingleSellerCampaigns]);
 
-  useEffect(() => {
-    if (!sellerId || !isAllStores) return;
-    void loadAllStoresCampaigns();
-  }, [sellerId, isAllStores, sharedParams, loadAllStoresCampaigns]);
+  const loadKpiCampaigns = useCallback(async ({ refresh = false } = {}) => {
+    if (!sellerId) return;
+    const cacheKey = buildMarketingKpiCacheKey('campaigns', sellerId, marketplace);
+    if (!refresh) {
+      const cached = getMarketingKpiCache(cacheKey);
+      if (cached) {
+        setKpiRows(cached);
+        return;
+      }
+    }
+
+    setKpiLoading(true);
+    try {
+      let rows = [];
+      if (isAllStores) {
+        const { data } = await api.get('/ebay/marketing/campaigns/all', {
+          params: {
+            ...kpiParams,
+            perSellerLimit: ALL_STORES_PER_SELLER_LIMIT,
+          },
+        });
+        rows = Array.isArray(data?.campaigns) ? data.campaigns : [];
+      } else {
+        const { data } = await api.get('/ebay/marketing/campaigns', {
+          params: {
+            ...kpiParams,
+            sellerId,
+            limit: KPI_FETCH_LIMIT,
+            offset: 0,
+          },
+        });
+        rows = Array.isArray(data?.campaigns) ? data.campaigns : [];
+      }
+      setKpiRows(rows);
+      setMarketingKpiCache(cacheKey, rows);
+    } catch {
+      setKpiRows([]);
+    } finally {
+      setKpiLoading(false);
+    }
+  }, [sellerId, isAllStores, kpiParams, marketplace]);
+
+  const refreshCampaigns = useCallback(({ refreshKpi = true } = {}) => {
+    void Promise.all([
+      loadCampaigns(),
+      refreshKpi ? loadKpiCampaigns({ refresh: true }) : Promise.resolve(),
+    ]);
+    if (refreshKpi) invalidateMarketingKpiCache('campaigns:');
+  }, [loadCampaigns, loadKpiCampaigns]);
+
+  useImperativeHandle(ref, () => ({
+    refresh: () => refreshCampaigns(),
+  }), [refreshCampaigns]);
 
   useEffect(() => {
-    if (!sellerId || isAllStores) return;
+    if (!embedded || !onToolbarState) return;
+    onToolbarState({
+      loading,
+      refreshDisabled: !sellerId || loading,
+    });
+  }, [embedded, onToolbarState, loading, sellerId]);
+
+  useEffect(() => {
+    if (!active || !sellerId || !isAllStores) return;
+    void loadAllStoresCampaigns();
+  }, [active, sellerId, isAllStores, sharedParams, loadAllStoresCampaigns]);
+
+  useEffect(() => {
+    if (!active || !sellerId || isAllStores) return;
     void loadSingleSellerCampaigns();
-  }, [sellerId, isAllStores, sharedParams, pageSize, offset, loadSingleSellerCampaigns]);
+  }, [active, sellerId, isAllStores, sharedParams, pageSize, offset, loadSingleSellerCampaigns]);
 
   useEffect(() => {
     if (!isAllStores) return;
     setRows(allRows.slice(offset, offset + pageSize));
   }, [isAllStores, allRows, offset, pageSize]);
+
+  useEffect(() => {
+    if (!active || !sellerId) return;
+    void loadKpiCampaigns();
+  }, [active, sellerId, isAllStores, kpiParams, loadKpiCampaigns]);
+
+  useEffect(() => {
+    setOffset(0);
+  }, [sellerId, marketplace]);
 
   const pageIndex = Math.floor(offset / pageSize);
   const pageCount = total != null ? Math.max(1, Math.ceil(total / pageSize)) : null;
@@ -329,59 +382,55 @@ export default function MarketingCampaignsPage() {
   };
 
   return (
-    <Box sx={{ p: { xs: 2, sm: 3 }, maxWidth: 1500, mx: 'auto' }}>
-      <Stack
-        direction={{ xs: 'column', md: 'row' }}
-        justifyContent="space-between"
-        alignItems={{ xs: 'stretch', md: 'flex-start' }}
-        spacing={2}
-        sx={{ mb: 2 }}
-      >
-        <Box>
-          <Typography variant="h4" sx={{ fontWeight: 800 }}>Marketing Campaigns</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Promoted Listings &amp; marketing campaigns via eBay{' '}
-            <code>getCampaigns</code> —{' '}
-            <Link href={EBAY_DOCS} target="_blank" rel="noopener noreferrer">API docs</Link>
-          </Typography>
-        </Box>
-        <Button
-          variant="contained"
-          startIcon={<RefreshIcon />}
-          onClick={() => void loadCampaigns()}
-          disabled={!sellerId || loading}
+    <Box sx={{ px: { xs: 2, sm: 3 }, pt: embedded ? 1.5 : { xs: 2, sm: 3 }, pb: { xs: 2, sm: 3 }, maxWidth: 1500, mx: 'auto' }}>
+      {!embedded ? (
+        <Stack
+          direction={{ xs: 'column', md: 'row' }}
+          justifyContent="space-between"
+          alignItems={{ xs: 'stretch', md: 'flex-start' }}
+          spacing={2}
+          sx={{ mb: 2 }}
         >
-          Refresh
-        </Button>
-      </Stack>
+          <Box>
+            <Typography variant="h4" sx={{ fontWeight: 800 }}>Marketing Campaigns</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              Promoted Listings &amp; marketing campaigns via eBay{' '}
+              <code>getCampaigns</code> —{' '}
+              <Link href={EBAY_DOCS} target="_blank" rel="noopener noreferrer">API docs</Link>
+            </Typography>
+          </Box>
+          <Button
+            variant="contained"
+            startIcon={<RefreshIcon />}
+            onClick={() => refreshCampaigns()}
+            disabled={!sellerId || loading}
+          >
+            Refresh
+          </Button>
+        </Stack>
+      ) : null}
 
-      <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+      <MarketingKpiStrip
+        rows={kpiRows}
+        loading={kpiLoading}
+        statusKey="campaignStatus"
+        typeKey="fundingModel"
+        typeLabel="Funding"
+        entityLabel="campaigns"
+        typeOptions={FUNDING_OPTIONS}
+      />
+
+      <MarketingCollapsibleFilters title="Campaign filters">
         <Grid container spacing={2}>
-          <Grid item xs={12} sm={6} md={3}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Seller</InputLabel>
-              <Select label="Seller" value={sellerId} onChange={(e) => { setSellerId(e.target.value); setOffset(0); }}>
-                <MenuItem value={ALL_STORES_VALUE}>All Stores</MenuItem>
-                {sellers.map((s) => (
-                  <MenuItem key={s._id} value={s._id}>
-                    {s.user?.username || s.user?.email || s._id}
-                    {s.user?.active === false ? ' (inactive user)' : ''}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Grid>
-          <Grid item xs={12} sm={6} md={2}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Marketplace</InputLabel>
-              <Select label="Marketplace" value={marketplace} onChange={(e) => { setMarketplace(e.target.value); setOffset(0); }}>
-                <MenuItem value={ALL_MARKETPLACES_VALUE}>All Marketplaces</MenuItem>
-                {MARKETPLACES.map((mp) => (
-                  <MenuItem key={mp} value={mp}>{mp}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Grid>
+          {!embedded ? (
+            <MarketingStoreFilters
+              sellers={sellers}
+              sellerId={sellerId}
+              onSellerChange={(value) => { setSellerId(value); setOffset(0); }}
+              marketplace={marketplace}
+              onMarketplaceChange={(value) => { setMarketplace(value); setOffset(0); }}
+            />
+          ) : null}
           <Grid item xs={12} sm={6} md={2}>
             <FormControl fullWidth size="small">
               <InputLabel>Status</InputLabel>
@@ -459,7 +508,7 @@ export default function MarketingCampaignsPage() {
             </Button>
           </Grid>
         </Grid>
-      </Paper>
+      </MarketingCollapsibleFilters>
 
       {selectedSellerName ? (
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
@@ -476,11 +525,6 @@ export default function MarketingCampaignsPage() {
           {storeErrors.length > 3 ? ` · +${storeErrors.length - 3} more` : ''}
         </Alert>
       ) : null}
-
-      <Alert severity="info" sx={{ mb: 2 }}>
-        Requires OAuth scope <code>sell.marketing.readonly</code> or <code>sell.marketing</code>.
-        Reconnect the seller if you see scope or permission errors.
-      </Alert>
 
       <Paper variant="outlined">
         {loading ? (
@@ -556,4 +600,4 @@ export default function MarketingCampaignsPage() {
       </Stack>
     </Box>
   );
-}
+});

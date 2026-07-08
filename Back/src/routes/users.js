@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import { requireAuth, requirePageAccess, PAGE_DEFAULT_ROLES } from '../middleware/auth.js';
+import { requireAuth, requirePageAccess, PAGE_DEFAULT_ROLES, invalidateAuthVersionCache } from '../middleware/auth.js';
 import { validate } from '../utils/validate.js';
 import { createUserSchema } from '../schemas/index.js';
 import User from '../models/User.js';
@@ -538,6 +538,8 @@ router.put('/:id/page-permissions', requireAuth, requirePageAccess('PageAccessMa
 
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    invalidateAuthVersionCache(user._id);
+
     try {
       await createPageAccessAuditLog({
         actor: actorUser || { id: req.user.userId, username: 'Unknown', role: req.user.role },
@@ -614,6 +616,8 @@ router.put('/:id/password', requireAuth, async (req, res) => {
       passwordHash,
       tokenVersion: newTokenVersion 
     });
+
+    invalidateAuthVersionCache(req.params.id);
 
     res.json({
       message: `Password updated successfully for ${user.username}`,

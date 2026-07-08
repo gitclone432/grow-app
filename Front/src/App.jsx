@@ -1,25 +1,18 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { ThemeProvider, CssBaseline } from '@mui/material';
+import { Box, CircularProgress, ThemeProvider, CssBaseline } from '@mui/material';
 import LoginPage from './pages/LoginPage.jsx';
 import LandingPage from './pages/LandingPage.jsx';
-import AdminLayout from './layouts/AdminLayout.jsx';
-import ProductResearchPage from './pages/admin/ProductResearchPage.jsx';
-import AddListerPage from './pages/admin/AddListerPage.jsx';
-import ListingAnalyticsPage from './pages/admin/ListingAnalyticsPage.jsx';
-import ListerDashboard from './pages/lister/ListerDashboard.jsx';
-import SellerEbayPage from './pages/SellerProfilePage.jsx';
-import AboutMePage from './pages/AboutMePage.jsx';
-import MessageReceivedPage from './pages/admin/MessageReceivedPage.jsx';
-import PayoneerSheetPage from './pages/admin/PayoneerSheetPage.jsx';
-import BankAccountsPage from './pages/admin/BankAccountsPage.jsx';
-import TransactionPage from './pages/admin/TransactionPage.jsx';
-import SalaryPage from './pages/admin/SalaryPage.jsx';
-import IdeasPage from './pages/IdeasPage.jsx';
 
-import { setAuthToken } from './lib/api'
+import { setAuthToken } from './lib/api';
 import { PAGE_REGISTRY } from './constants/pages';
 import { createAppTheme } from './theme/appTheme';
+
+const AdminLayout = lazy(() => import('./layouts/AdminLayout.jsx'));
+const IdeasPage = lazy(() => import('./pages/IdeasPage.jsx'));
+const AboutMePage = lazy(() => import('./pages/AboutMePage.jsx'));
+const ListerDashboard = lazy(() => import('./pages/lister/ListerDashboard.jsx'));
+const SellerEbayPage = lazy(() => import('./pages/SellerProfilePage.jsx'));
 
 const BASE_DOCUMENT_TITLE = 'Grow Mentality • EMS';
 
@@ -77,13 +70,50 @@ function resolveDocumentTitle(pathname) {
   return BASE_DOCUMENT_TITLE;
 }
 
+function RouteFallback() {
+  // Keep this lightweight — a hanging Suspense should still leave #root non-empty
+  // so the HTML boot splash (#root:empty) does not stay forever.
+  return (
+    <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+      <CircularProgress size={28} />
+    </Box>
+  );
+}
+
+function readStoredUser() {
+  try {
+    const raw = localStorage.getItem('user');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !parsed.role) {
+      localStorage.removeItem('user');
+      return null;
+    }
+    return parsed;
+  } catch {
+    localStorage.removeItem('user');
+    return null;
+  }
+}
+
 function useAuth() {
   const [token, setToken] = useState(() => localStorage.getItem('auth_token'));
-  const [user, setUser] = useState(() => {
-    const raw = localStorage.getItem('user');
-    return raw ? JSON.parse(raw) : null;
-  });
+  const [user, setUser] = useState(() => readStoredUser());
   const navigate = useNavigate();
+
+  // Token without a valid user (or vice versa) leaves the app stuck on the boot splash.
+  useEffect(() => {
+    if (token && !user) {
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('user');
+      setAuthToken(null);
+      setToken(null);
+    } else if (!token && user) {
+      localStorage.removeItem('user');
+      setUser(null);
+    }
+  }, [token, user]);
+
   const login = (t, u) => {
     setToken(t);
     setUser(u);
@@ -91,7 +121,6 @@ function useAuth() {
     setAuthToken(t);
     localStorage.setItem('user', JSON.stringify(u));
 
-    // Navigation Logic
     if (u.role === 'lister') navigate('/lister');
     else if (u.role === 'advancelister') navigate('/lister');
     else if (u.role === 'trainee') navigate('/lister');
@@ -102,8 +131,6 @@ function useAuth() {
     else if (u.role === 'hradmin') navigate('/admin/employee-management');
     else if (u.role === 'hr') navigate('/admin/about-me');
     else if (u.role === 'operationhead') navigate('/admin/employee-management');
-    // For HOC and Compliance Manager, we send them to the general admin area
-    // AdminLayout will handle the specific redirect to /fulfillment
     else navigate('/admin');
   };
   const logout = () => {
@@ -114,8 +141,6 @@ function useAuth() {
     localStorage.removeItem('user');
     navigate('/login');
   };
-  // Cross-tab sync: when another tab logs out (removes auth_token from localStorage),
-  // mirror the logout in this tab immediately.
   useEffect(() => {
     const handleStorage = (e) => {
       if (e.key === 'auth_token' && !e.newValue) {
@@ -143,19 +168,13 @@ export default function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      {token && user ? (
+      <Suspense fallback={<RouteFallback />}>
+        {token && user ? (
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage onLogin={login} />} />
-
-            {/* PUBLIC ROUTE - No authentication required */}
             <Route path="/ideas" element={<IdeasPage />} />
-
-            <Route
-              path="/about-me"
-              element={<AboutMePage />}
-            />
-
+            <Route path="/about-me" element={<AboutMePage />} />
             <Route
               path="/admin/*"
               element={
@@ -170,7 +189,6 @@ export default function App() {
                   user.role === 'operationhead' ||
                   user.role === 'hoc' ||
                   user.role === 'compliancemanager' ||
-                  // Lister roles - access to template listing workflow only
                   user.role === 'lister' ||
                   user.role === 'advancelister' ||
                   user.role === 'trainee' ? (
@@ -196,14 +214,15 @@ export default function App() {
             />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-      ) : (
-        <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/login" element={<LoginPage onLogin={login} />} />
-          <Route path="/ideas" element={<IdeasPage />} />
-          <Route path="*" element={<Navigate to="/login" replace />} />
-        </Routes>
-      )}
+        ) : (
+          <Routes>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/login" element={<LoginPage onLogin={login} />} />
+            <Route path="/ideas" element={<IdeasPage />} />
+            <Route path="*" element={<Navigate to="/login" replace />} />
+          </Routes>
+        )}
+      </Suspense>
     </ThemeProvider>
   );
 }

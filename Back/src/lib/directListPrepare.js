@@ -331,6 +331,87 @@ function formatAmazonSource(amazonData) {
   };
 }
 
+function buildSourceDataFromAmazon(amazonData = {}) {
+  return {
+    title: amazonData.title,
+    brand: amazonData.brand,
+    price: amazonData.price,
+    description: amazonData.description,
+    images: amazonData.images,
+    color: amazonData.color,
+    compatibility: amazonData.compatibility,
+    model: amazonData.model,
+    material: amazonData.material,
+    specialFeatures: amazonData.specialFeatures,
+    size: amazonData.size,
+    formFactor: amazonData.formFactor,
+    screenSize: amazonData.screenSize,
+    bandMaterial: amazonData.bandMaterial,
+    bandWidth: amazonData.bandWidth,
+    bandColor: amazonData.bandColor,
+    includedComponents: amazonData.includedComponents,
+    productCategory: amazonData.productCategory,
+    itemDimensions: amazonData.itemDimensions,
+    waterResistanceLevel: amazonData.waterResistanceLevel,
+    availabilityStatus: amazonData.availabilityStatus,
+    soldBy: amazonData.soldBy,
+    bestSellersRank: amazonData.bestSellersRank,
+    review: amazonData.review || '',
+    productInformation: amazonData.productInformation || {},
+  };
+}
+
+export function buildDirectListReviewItem({
+  asin,
+  listingPayload = null,
+  amazonData = null,
+  pricingCalculation = null,
+  storeListerApplied = null,
+  aiDescription = '',
+  error = null,
+  missing = undefined,
+}) {
+  const sku = listingPayload?.customLabel || generateSKUFromASIN(asin);
+  if (error || !listingPayload) {
+    return {
+      id: `preview-${asin}`,
+      asin,
+      sku,
+      sourceData: amazonData ? buildSourceDataFromAmazon(amazonData) : null,
+      generatedListing: null,
+      pricingCalculation: null,
+      storeListerApplied,
+      aiDescription: '',
+      warnings: [],
+      errors: [error || 'Failed to prepare listing'],
+      status: 'error',
+      missing,
+    };
+  }
+
+  const customFields = listingPayload.customFields;
+  const plainCustomFields = customFields instanceof Map
+    ? Object.fromEntries(customFields)
+    : { ...(customFields || {}) };
+
+  return {
+    id: `preview-${asin}`,
+    asin,
+    sku,
+    sourceData: amazonData ? buildSourceDataFromAmazon(amazonData) : null,
+    generatedListing: {
+      ...listingPayload,
+      customFields: plainCustomFields,
+    },
+    pricingCalculation: pricingCalculation || null,
+    storeListerApplied,
+    aiDescription: String(aiDescription || '').trim(),
+    warnings: [],
+    errors: [],
+    status: 'success',
+  };
+}
+
 export async function loadDirectListContext(templateId, sellerId) {
   const [template, sellerConfig] = await Promise.all([
     getEffectiveTemplate(templateId, sellerId),
@@ -393,6 +474,7 @@ export async function prepareDirectListPayload({
   let aiDescription = '';
   let reusedFromDatabase = false;
   let listingReuseOptions = {};
+  let pricingCalculation = null;
 
   if (normalizedAsin) {
     const { reuseOptions, isReuse } = await buildListingReuseContext(normalizedAsin);
@@ -401,13 +483,14 @@ export async function prepareDirectListPayload({
 
     amazonData = await fetchAmazonData(normalizedAsin, region);
 
-    const { coreFields, customFields, reusedFromDatabase: autofillReuse } = await applyFieldConfigs(
+    const { coreFields, customFields, reusedFromDatabase: autofillReuse, pricingCalculation: pricingCalc } = await applyFieldConfigs(
       amazonData,
       fieldConfigs,
       pricingConfig,
       customColumns,
       reuseOptions
     );
+    pricingCalculation = pricingCalc || null;
     reusedFromDatabase = autofillReuse || isReuse;
 
     if (templateDescriptionNeedsAiAutofill(coreFieldDefaults)) {
@@ -563,6 +646,8 @@ export async function prepareDirectListPayload({
     ebayMarketplace,
     storeListerApplied,
     reusedFromDatabase,
+    pricingCalculation,
+    aiDescriptionText: aiDescription,
   };
 }
 
@@ -691,23 +776,47 @@ export async function previewDirectListPayload({
   };
 }
 
+function resolveListingOverride(listingOverrides, asin) {
+  if (!listingOverrides || typeof listingOverrides !== 'object') return null;
+  const override = listingOverrides[asin];
+  if (!override || typeof override !== 'object') return null;
+  return { ...override, _asinReference: asin };
+}
+
+function resolveClientListing(listingOverrides, listingsByAsin, asin) {
+  const fullListing = listingsByAsin?.[asin];
+  if (fullListing && typeof fullListing === 'object') {
+    return { ...fullListing, _asinReference: asin };
+  }
+  return resolveListingOverride(listingOverrides, asin);
+}
+
 export async function previewDirectListBulk({
   templateId,
   sellerId,
   asins = [],
   region = 'US',
   defaults = {},
+  listingOverrides = {},
   concurrency = 2,
   createdBy = null,
 }) {
   const context = await loadDirectListContext(templateId, sellerId);
-  const { ebayMarketplace } = context;
+  const { ebayMarketplace, customColumns } = context;
   const results = await runWithConcurrency(asins, concurrency, async (asin) => {
     try {
-      const { listingPayload, storeListerApplied, amazonData } = await prepareDirectListPayload({
+      const listingOverride = resolveListingOverride(listingOverrides, asin);
+      const {
+        listingPayload,
+        storeListerApplied,
+        amazonData,
+        pricingCalculation,
+        aiDescriptionText,
+      } = await prepareDirectListPayload({
         templateId,
         sellerId,
         asin,
+        listing: listingOverride,
         region,
         defaults,
         context,
@@ -722,20 +831,35 @@ export async function previewDirectListBulk({
         amazonData,
         region,
       });
+      const reviewItem = buildDirectListReviewItem({
+        asin,
+        listingPayload,
+        amazonData,
+        pricingCalculation,
+        storeListerApplied,
+        aiDescription: aiDescriptionText,
+      });
       return {
         asin,
         status: 'ready',
         sku: listingPayload.customLabel,
         listing: formatListingSummary(listingPayload, asin),
         storeListerApplied,
+        reviewItem,
       };
     } catch (error) {
+      const reviewItem = buildDirectListReviewItem({
+        asin,
+        error: error.message || 'Failed to prepare listing',
+        missing: error.missing || undefined,
+      });
       return {
         asin,
         status: 'error',
         sku: generateSKUFromASIN(asin),
         error: error.message || 'Failed to prepare listing',
         missing: error.missing || undefined,
+        reviewItem,
       };
     }
   });
@@ -749,6 +873,8 @@ export async function previewDirectListBulk({
     ready,
     failed,
     results,
+    previewItems: results.map((row) => row.reviewItem).filter(Boolean),
+    customColumns,
     ebayMarketplace,
     message: `Prepared ${ready}/${results.length} listing(s) for review.`,
   };
@@ -761,6 +887,8 @@ export async function processDirectListBulk({
   region = 'US',
   verifyOnly = false,
   defaults = {},
+  listingOverrides = {},
+  listingsByAsin = {},
   token,
   concurrency = 2,
   createdBy = null,
@@ -769,10 +897,12 @@ export async function processDirectListBulk({
   const { ebayMarketplace } = context;
   const results = await runWithConcurrency(asins, concurrency, async (asin) => {
     try {
+      const clientListing = resolveClientListing(listingOverrides, listingsByAsin, asin);
       const { listingPayload, storeListerApplied, amazonData, ebayMarketplace } = await prepareDirectListPayload({
         templateId,
         sellerId,
         asin,
+        listing: clientListing,
         region,
         defaults,
         context,

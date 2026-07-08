@@ -6,6 +6,7 @@ import User from '../models/User.js';
 import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import { validate } from '../utils/validate.js';
 import { loginSchema } from '../schemas/index.js';
+import { invalidateAuthVersionCache } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -26,6 +27,15 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req, res) => {
   if (!user.active) return res.status(401).json({ error: 'Account is not active' });
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Incorrect password' });
+
+  // Drop any stale auth-version cache entry from a previous password/permission change.
+  invalidateAuthVersionCache(user._id);
+
+  if (!process.env.JWT_SECRET) {
+    console.error('[auth/login] JWT_SECRET is not set');
+    return res.status(500).json({ error: 'Server auth is misconfigured' });
+  }
+
   const token = jwt.sign({ 
     userId: user._id.toString(), 
     role: user.role, 

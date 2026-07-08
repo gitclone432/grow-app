@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, Suspense } from 'react';
 import { Link, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import {
   AppBar,
@@ -17,8 +17,11 @@ import {
   Button,
   Menu,
   MenuItem,
-  Tooltip
+  Tooltip,
+  useMediaQuery,
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
+import { fetchSellersAll } from '../lib/sellersAllCache.js';
 import MenuIcon from '@mui/icons-material/Menu';
 import Inventory2Icon from '@mui/icons-material/Inventory2';
 import AddCircleIcon from '@mui/icons-material/AddCircle';
@@ -32,67 +35,9 @@ import ExpandMore from '@mui/icons-material/ExpandMore';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import PersonOutlineIcon from '@mui/icons-material/PersonOutline';
-import ProductResearchPage from '../pages/admin/ProductResearchPage.jsx';
-import AddListerPage from '../pages/admin/AddListerPage.jsx';
-import AddSellerPage from '../pages/admin/AddSellerPage.jsx';
-import ListingManagementPage from '../pages/admin/ListingManagementPage.jsx';
-import ManagePlatformsPage from '../pages/admin/ManagePlatformsPage.jsx';
-import ManageStoresPage from '../pages/admin/ManageStoresPage.jsx';
-import ManageRangesPage from '../pages/admin/ManageRangesPage.jsx';
-import ManageCategoriesPage from '../pages/admin/ManageCategoriesPage.jsx';
 import SupervisorAccountIcon from '@mui/icons-material/SupervisorAccount';
 import TaskIcon from '@mui/icons-material/Task';
 import EditIcon from '@mui/icons-material/Edit';
-
-import StockLedgerPage from '../pages/admin/StockLedgerPage.jsx';
-import AdminTaskList from '../pages/compatibility/AdminTaskList.jsx';
-import EditorDashboard from '../pages/compatibility/EditorDashboard.jsx';
-import ProgressTrackingPage from '../pages/compatibility/ProgressTrackingPage.jsx';
-import CompatibilityBatchHistoryPage from '../pages/compatibility/CompatibilityBatchHistoryPage.jsx';
-import AutoCompatibilityPage from '../pages/compatibility/AutoCompatibilityPage.jsx';
-import AutoCompatReviewHistoryPage from '../pages/compatibility/AutoCompatReviewHistoryPage.jsx';
-import AutoCompatSellerHistoryPage from '../pages/compatibility/AutoCompatSellerHistoryPage.jsx';
-
-import FulfillmentDashboard from '../pages/admin/FulfillmentDashboard.jsx';
-import AllOrdersSheetPage from '../pages/admin/AllOrdersSheetPage.jsx';
-import PriceChangeHistoryPage from '../pages/admin/PriceChangeHistoryPage.jsx';
-import AwaitingShipmentPage from '../pages/admin/AwaitingShipmentPage.jsx';
-import AwaitingSheetPage from '../pages/admin/AwaitingSheetPage.jsx';
-import AmazonArrivalsPage from '../pages/admin/AmazonArrivalsPage.jsx';
-import FulfillmentNotesPage from '../pages/admin/FulfillmentNotesPage.jsx';
-import ConversationTrackingPage from '../pages/admin/ConversationTrackingPage.jsx';
-// CancelledStatusPage is now embedded in Issues and Resolutions (DisputesPage)
-import DisputesPage from '../pages/admin/DisputesPage.jsx';
-import AccountHealthReportPage from '../pages/admin/AccountHealthReportPage.jsx';
-import PayoneerSheetPage from '../pages/admin/PayoneerSheetPage.jsx';
-import BankAccountsPage from '../pages/admin/BankAccountsPage.jsx';
-import TransactionPage from '../pages/admin/TransactionPage.jsx';
-import ExtraExpensePage from '../pages/admin/ExtraExpensePage.jsx';
-import RevenueGrossNetPage from '../pages/admin/RevenueGrossNetPage.jsx';
-//import MessageReceivedPage from '../pages/admin/MessageReceivedPage.jsx';
-import AboutMePage from '../pages/AboutMePage.jsx';
-import EmployeeManagementPage from '../pages/admin/EmployeeManagementPage.jsx';
-import BuyerChatPage from '../pages/admin/BuyerChatPage.jsx';
-import FeedUploadPage from '../pages/ebay/FeedUploadPage.jsx';
-import DirectListPage from '../pages/ebay/DirectListPage.jsx';
-import SellingPrivilegesPage from '../pages/admin/SellingPrivilegesPage.jsx';
-import EbayApiUsagePage from '../pages/admin/EbayApiUsagePage.jsx';
-import EbayAnalyticsHubPage from '../pages/admin/EbayAnalyticsHubPage.jsx';
-import EbayFeedbackPage from '../pages/admin/EbayFeedbackPage.jsx';
-import EbayApiTesterPage from '../pages/admin/EbayApiTesterPage.jsx';
-import StoreListingsPage from '../pages/admin/StoreListingsPage.jsx';
-import SendOfferEligiblePage from '../pages/admin/SendOfferEligiblePage.jsx';
-import FeedUploadStatsPage from '../pages/admin/FeedUploadStatsPage.jsx';
-import SalaryPage from '../pages/admin/SalaryPage.jsx';
-import SellerFundsPage from '../pages/admin/SellerFundsPage.jsx';
-import TransactionSummaryPage from '../pages/admin/TransactionSummaryPage.jsx';
-import FinancesTransactionsPage from '../pages/admin/FinancesTransactionsPage.jsx';
-import AdsAndMarketingPage from '../pages/admin/AdsAndMarketingPage.jsx';
-import MarketingCampaignsPage from '../pages/admin/MarketingCampaignsPage.jsx';
-import MarketingPromotionsPage from '../pages/admin/MarketingPromotionsPage.jsx';
-import FinanceCashflowPage from '../pages/admin/FinanceCashflowPage.jsx';
-import AffiliateBalancePage from '../pages/admin/AffiliateBalancePage.jsx';
-
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import AttachMoneyIcon from '@mui/icons-material/AttachMoney';
@@ -100,76 +45,129 @@ import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
 import CreditCardIcon from '@mui/icons-material/CreditCard';
 import MoneyOffIcon from '@mui/icons-material/MoneyOff';
-import CompatibilityDashboard from '../pages/compatibility/CompatibilityDashboard.jsx';
-import EditListingsDashboard from '../pages/listings/EditListingsDashboard.jsx';
-
-import ConversationManagementPage from '../pages/admin/ConversationManagementPage.jsx';
-import ManageAmazonAccountsPage from '../pages/admin/ManageAmazonAccountsPage.jsx';
-import InternalMessagesPage from '../pages/admin/InternalMessagesPage.jsx';
-import InternalMessagesAdminPage from '../pages/admin/InternalMessagesAdminPage.jsx';
-import ManageCreditCardsPage from '../pages/admin/ManageCreditCardsPage.jsx';
-import ExcludeOrderQtySkipsPage from '../pages/admin/ExcludeOrderQtySkipsPage.jsx';
-import CronJobsPage from '../pages/admin/CronJobsPage.jsx';
-import ScraperTesterPage from '../pages/admin/ScraperTesterPage.jsx';
-import ImageOverlaySettingsPage from '../pages/admin/ImageOverlaySettingsPage.jsx';
-import GmailTesterPage from '../pages/admin/GmailTesterPage.jsx';
-import EtsyDashboardPage from '../pages/admin/etsy/EtsyDashboardPage.jsx';
-import EtsyProductsPage from '../pages/admin/etsy/EtsyProductsPage.jsx';
-import EtsyOrderFulfilmentPage from '../pages/admin/etsy/EtsyOrderFulfilmentPage.jsx';
-import EtsyOrderAnalyticsPage from '../pages/admin/etsy/EtsyOrderAnalyticsPage.jsx';
-import EtsyProfitSheetPage from '../pages/admin/etsy/EtsyProfitSheetPage.jsx';
-import AmazonPiSourceColumnsPage from '../pages/admin/AmazonPiSourceColumnsPage.jsx';
-import AffiliateOrdersPage from '../pages/admin/AffiliateOrdersPage.jsx';
 import LinkIcon from '@mui/icons-material/Link';
-import IdeasPage from '../pages/IdeasPage.jsx';
 import LightbulbIcon from '@mui/icons-material/Lightbulb';
-import OrderAnalyticsPage from '../pages/admin/OrderAnalyticsPage.jsx';
-import MicroOrdersPage from '../pages/admin/MicroOrdersPage.jsx';
-import CRPAnalyticsPage from '../pages/admin/CRPAnalyticsPage.jsx';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
-import SellerAnalyticsPage from '../pages/admin/SellerAnalyticsPage.jsx';
-import OrdersDepartmentDashboardPage from '../pages/admin/OrdersDepartmentDashboardPage.jsx';
-// WorksheetPage is now embedded in Issues and Resolutions (DisputesPage)
 import BarChartIcon from '@mui/icons-material/BarChart';
 import ChatIcon from '@mui/icons-material/Chat';
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings';
 import LayersIcon from '@mui/icons-material/Layers';
-import ColumnCreatorPage from '../pages/admin/ColumnCreatorPage.jsx';
 import ViewColumnIcon from '@mui/icons-material/ViewColumn';
-import ManageTemplatesPage from '../pages/admin/ManageTemplatesPage.jsx';
-import TemplateListingsPage from '../pages/admin/TemplateListingsPage.jsx';
-import TemplateListingAnalyticsPage from '../pages/admin/TemplateListingAnalyticsPage.jsx';
-import SelectSellerPage from '../pages/admin/SelectSellerPage.jsx';
-import SellerTemplatesPage from '../pages/admin/SellerTemplatesPage.jsx';
-import ListingDirectoryPage from '../pages/admin/ListingDirectoryPage.jsx';
-import TemplateDirectoryPage from '../pages/admin/TemplateDirectoryPage.jsx';
-import TemplateDatabasePage from '../pages/admin/TemplateDatabasePage.jsx';
-import CsvStoragePage from '../pages/admin/CsvStoragePage.jsx';
 import DescriptionIcon from '@mui/icons-material/Description';
 import HomeIcon from '@mui/icons-material/Home';
 import EventAvailableIcon from '@mui/icons-material/EventAvailable';
-import LeaveManagementPage from '../pages/LeaveManagementPage.jsx';
-import LeaveAdminPage from '../pages/admin/LeaveAdminPage.jsx';
-import AttendanceAdminPage from '../pages/admin/AttendanceAdminPage.jsx';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
-import AsinDirectoryPage from '../pages/admin/AsinDirectoryPage.jsx';
-import AsinListPage from '../pages/admin/AsinListPage.jsx';
-import CRPComparisonPage from '../pages/admin/CRPComparisonPage.jsx';
-import UserSellerAssignmentPage from '../pages/admin/UserSellerAssignmentPage.jsx';
-import UserPerformancePage from '../pages/admin/UserPerformancePage.jsx';
-import AiFitmentUsagePage from '../pages/admin/AiFitmentUsagePage.jsx';
-import ListingStatsPage from '../pages/admin/ListingStatsPage.jsx';
 import AssignmentIcon from '@mui/icons-material/Assignment';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import QueryStatsIcon from '@mui/icons-material/QueryStats';
 import SecurityIcon from '@mui/icons-material/Security';
-
-import PageAccessManagementPage from '../pages/admin/PageAccessManagementPage.jsx';
-import PageAccessAuditLogPage from '../pages/admin/PageAccessAuditLogPage.jsx';
-import UserPasswordManagementPage from '../pages/admin/UserPasswordManagementPage.jsx';
-import StoresPage from '../pages/admin/StoresPage.jsx';
-import EtsyStoresPage from '../pages/admin/EtsyStoresPage.jsx';
-import DescriptionTemplatesPage from '../pages/admin/DescriptionTemplatesPage.jsx';
+import CircularProgress from '@mui/material/CircularProgress';
+import {
+  ProductResearchPage,
+  AddListerPage,
+  AddSellerPage,
+  ListingManagementPage,
+  ManagePlatformsPage,
+  ManageStoresPage,
+  ManageRangesPage,
+  ManageCategoriesPage,
+  StockLedgerPage,
+  AdminTaskList,
+  EditorDashboard,
+  ProgressTrackingPage,
+  CompatibilityBatchHistoryPage,
+  AutoCompatibilityPage,
+  AutoCompatReviewHistoryPage,
+  AutoCompatSellerHistoryPage,
+  FulfillmentDashboard,
+  AllOrdersSheetPage,
+  PriceChangeHistoryPage,
+  AwaitingShipmentPage,
+  AwaitingSheetPage,
+  AmazonArrivalsPage,
+  FulfillmentNotesPage,
+  ConversationTrackingPage,
+  DisputesPage,
+  AccountHealthReportPage,
+  PayoneerSheetPage,
+  BankAccountsPage,
+  TransactionPage,
+  ExtraExpensePage,
+  RevenueGrossNetPage,
+  AboutMePage,
+  EmployeeManagementPage,
+  BuyerChatPage,
+  FeedUploadPage,
+  DirectListPage,
+  SellingPrivilegesPage,
+  EbayApiUsagePage,
+  EbayAnalyticsHubPage,
+  EbayFeedbackPage,
+  EbayApiTesterPage,
+  StoreListingsPage,
+  SendOfferEligiblePage,
+  FeedUploadStatsPage,
+  SalaryPage,
+  SellerFundsPage,
+  TransactionSummaryPage,
+  FinancesTransactionsPage,
+  AdsAndMarketingPage,
+  MarketingCampaignsPage,
+  MarketingPromotionsPage,
+  FinanceCashflowPage,
+  AffiliateBalancePage,
+  CompatibilityDashboard,
+  EditListingsDashboard,
+  ConversationManagementPage,
+  ManageAmazonAccountsPage,
+  InternalMessagesPage,
+  InternalMessagesAdminPage,
+  ManageCreditCardsPage,
+  ExcludeOrderQtySkipsPage,
+  CronJobsPage,
+  ScraperTesterPage,
+  ImageOverlaySettingsPage,
+  GmailTesterPage,
+  EtsyDashboardPage,
+  EtsyProductsPage,
+  EtsyOrderFulfilmentPage,
+  EtsyOrderAnalyticsPage,
+  EtsyProfitSheetPage,
+  AmazonPiSourceColumnsPage,
+  AffiliateOrdersPage,
+  IdeasPage,
+  OrderAnalyticsPage,
+  MicroOrdersPage,
+  CRPAnalyticsPage,
+  SellerAnalyticsPage,
+  OrdersDepartmentDashboardPage,
+  ColumnCreatorPage,
+  ManageTemplatesPage,
+  TemplateListingsPage,
+  TemplateListingAnalyticsPage,
+  SelectSellerPage,
+  SellerTemplatesPage,
+  ListingDirectoryPage,
+  TemplateDirectoryPage,
+  TemplateDatabasePage,
+  CsvStoragePage,
+  LeaveManagementPage,
+  LeaveAdminPage,
+  AttendanceAdminPage,
+  AsinDirectoryPage,
+  AsinListPage,
+  CRPComparisonPage,
+  UserSellerAssignmentPage,
+  UserPerformancePage,
+  AiFitmentUsagePage,
+  ListingStatsPage,
+  PageAccessManagementPage,
+  PageAccessAuditLogPage,
+  UserPasswordManagementPage,
+  StoresPage,
+  EtsyStoresPage,
+  DescriptionTemplatesPage,
+} from './adminLazyPages.jsx';
 import SettingsIcon from '@mui/icons-material/Settings';
 
 import usePageAccess from '../hooks/usePageAccess';
@@ -356,6 +354,8 @@ const COMPONENT_MAP = {
 };
 
 export default function AdminLayout({ user, onLogout }) {
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -367,6 +367,11 @@ export default function AdminLayout({ user, onLogout }) {
 
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Warm seller list early so page mounts don't wait on the first /sellers/all.
+  useEffect(() => {
+    void fetchSellersAll(null).catch(() => {});
+  }, []);
 
   // Use the page access hook
   const { hasAccess, hasCategoryAccess, accessibleCategories, getAccessiblePages, getSubmenuPages, hasSubmenuAccess, isSuper } = usePageAccess(user);
@@ -852,57 +857,53 @@ export default function AdminLayout({ user, onLogout }) {
         </Toolbar>
       </AppBar>
       <Box component="nav" sx={{ width: { sm: sidebarOpen ? drawerWidth : 56 }, flexShrink: { sm: 0 } }}>
-        <Drawer
-          variant="temporary"
-          open={mobileOpen}
-          onClose={() => setMobileOpen(false)}
-          ModalProps={{ keepMounted: true }}
-          sx={{
-            display: { xs: 'block', sm: 'none' },
-            '& .MuiDrawer-paper': {
-              boxSizing: 'border-box',
-              width: drawerWidth,
-              background: 'linear-gradient(180deg, #f8f9fa 0%, #ffffff 100%)',
-              borderRight: '1px solid rgba(0,0,0,0.08)',
-              '&::-webkit-scrollbar': { width: '8px' },
-              '&::-webkit-scrollbar-track': { background: 'transparent' },
-              '&::-webkit-scrollbar-thumb': {
-                background: 'rgba(0, 0, 0, 0.15)',
-                borderRadius: '10px',
-                '&:hover': { background: 'rgba(0, 0, 0, 0.25)' },
+        {isMobile ? (
+          <Drawer
+            variant="temporary"
+            open={mobileOpen}
+            onClose={() => setMobileOpen(false)}
+            ModalProps={{ keepMounted: false }}
+            sx={{
+              display: { xs: 'block', sm: 'none' },
+              '& .MuiDrawer-paper': {
+                boxSizing: 'border-box',
+                width: drawerWidth,
+                background: 'linear-gradient(180deg, #f8f9fa 0%, #ffffff 100%)',
+                borderRight: '1px solid rgba(0,0,0,0.08)',
               },
-            }
-          }}
-        >
-          {drawer}
-        </Drawer>
-        <Drawer
-          variant="permanent"
-          sx={{
-            display: { xs: 'none', sm: 'block' },
-            '& .MuiDrawer-paper': {
-              boxSizing: 'border-box',
-              width: sidebarOpen ? drawerWidth : 56,
-              transition: 'width 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-              background: 'linear-gradient(180deg, #f8f9fa 0%, #ffffff 100%)',
-              borderRight: '1px solid rgba(0,0,0,0.08)',
-              boxShadow: '2px 0 8px rgba(0,0,0,0.04)',
-              '&::-webkit-scrollbar': { width: '8px' },
-              '&::-webkit-scrollbar-track': { background: 'transparent' },
-              '&::-webkit-scrollbar-thumb': {
-                background: 'rgba(0, 0, 0, 0.15)',
-                borderRadius: '10px',
-                '&:hover': { background: 'rgba(0, 0, 0, 0.25)' },
+            }}
+          >
+            {drawer}
+          </Drawer>
+        ) : (
+          <Drawer
+            variant="permanent"
+            sx={{
+              display: { xs: 'none', sm: 'block' },
+              '& .MuiDrawer-paper': {
+                boxSizing: 'border-box',
+                width: sidebarOpen ? drawerWidth : 56,
+                transition: 'width 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                background: 'linear-gradient(180deg, #f8f9fa 0%, #ffffff 100%)',
+                borderRight: '1px solid rgba(0,0,0,0.08)',
+                boxShadow: '2px 0 8px rgba(0,0,0,0.04)',
               },
-            }
-          }}
-          open
-        >
-          {drawer}
-        </Drawer>
+            }}
+            open
+          >
+            {drawer}
+          </Drawer>
+        )}
       </Box>
       <Box component="main" sx={{ flexGrow: 1, p: 3, width: { sm: `calc(100% - ${sidebarOpen ? drawerWidth : 56}px)` }, transition: 'width 0.2s' }}>
         <Toolbar />
+        <Suspense
+          fallback={(
+            <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 120, py: 4 }}>
+              <CircularProgress size={24} />
+            </Box>
+          )}
+        >
         <Routes>
           {/* Ideas & Issues - accessible to ALL roles */}
           <Route path="/ideas" element={<IdeasPage />} />
@@ -967,6 +968,7 @@ export default function AdminLayout({ user, onLogout }) {
           {/* Default redirect */}
           <Route path="*" element={<Navigate to={getDefaultRedirect()} replace />} />
         </Routes>
+        </Suspense>
       </Box>
     </Box>
   );

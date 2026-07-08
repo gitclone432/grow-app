@@ -4886,6 +4886,7 @@ router.post('/direct-list-bulk/preview', requireAuth, async (req, res) => {
       asins,
       region = 'US',
       defaults = {},
+      listingOverrides = {},
       concurrency = 2,
     } = req.body;
 
@@ -4916,6 +4917,7 @@ router.post('/direct-list-bulk/preview', requireAuth, async (req, res) => {
       asins: cleanedAsins,
       region,
       defaults,
+      listingOverrides,
       concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 2, 1), 3),
       createdBy: req.user?.userId,
     });
@@ -4989,6 +4991,8 @@ router.post('/direct-list-bulk', requireAuth, async (req, res) => {
       region = 'US',
       verifyOnly = false,
       defaults = {},
+      listingOverrides = {},
+      listingsByAsin = {},
       concurrency = 2,
     } = req.body;
 
@@ -5021,6 +5025,8 @@ router.post('/direct-list-bulk', requireAuth, async (req, res) => {
       region,
       verifyOnly: Boolean(verifyOnly),
       defaults,
+      listingOverrides,
+      listingsByAsin,
       token,
       concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 2, 1), 3),
       createdBy: req.user?.userId,
