@@ -20,19 +20,19 @@ export function formatStoreSubscriptionPrice(level, termValue, termUnit) {
 
   if (key.includes('featured')) {
     if (months === 1) return '$74.95';
-    if (months === 12) return '$59.95 per month';
+    if (months === 12) return '$59.95 / mo';
   }
   if (key.includes('anchor')) {
     if (months === 1) return '$349.95';
-    if (months === 12) return '$299.95 per month';
+    if (months === 12) return '$299.95 / mo';
   }
   return '—';
 }
 
 export function formatFreeListings(level) {
   const key = String(level || '').trim().toLowerCase();
-  if (key.includes('featured')) return '10,000/month';
-  if (key.includes('anchor')) return '25,000/month';
+  if (key.includes('featured')) return '10,000 / mo';
+  if (key.includes('anchor')) return '25,000 / mo';
   return '—';
 }
 

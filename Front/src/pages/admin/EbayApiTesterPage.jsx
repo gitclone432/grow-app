@@ -24,6 +24,8 @@ function sleep(ms) {
 
 const PRESETS = [
   // Sell Account / eBay Parameters
+  { group: 'Sell Account', label: 'Account Privileges (All Stores)', method: 'GET', path: '/ebay/account/privileges/all', params: {} },
+  { group: 'Sell Account', label: 'Account Privileges (Single Seller)', method: 'GET', path: '/ebay/account/privileges', params: { sellerId: '<sellerId>' } },
   { group: 'Sell Account', label: 'Selling Privileges (All Stores)', method: 'GET', path: '/ebay/selling/summary/all', params: {} },
   { group: 'Sell Account', label: 'Selling Summary (Single Seller)', method: 'GET', path: '/ebay/selling/summary', params: { sellerId: '<sellerId>' } },
   { group: 'Sell Account', label: 'Store Subscriptions (All Stores)', method: 'GET', path: '/ebay/account/subscriptions/all', params: {} },

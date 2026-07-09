@@ -39,6 +39,7 @@ const SORT_COLUMNS = {
   sellerName: { label: 'Store', align: 'left' },
   quantityLimitRemaining: { label: 'Qty limit', align: 'right' },
   amountLimitRemaining: { label: 'Amt limit', align: 'right' },
+  totalLimit: { label: 'Total Limit', align: 'right' },
   subscriptionLevel: { label: 'Store level', align: 'left' },
   term: { label: 'Term', align: 'left' },
   price: { label: 'Price', align: 'right' },
@@ -56,6 +57,18 @@ function formatCurrency(amount, currency) {
   }).format(num);
 }
 
+function formatCurrencyCompact(amount, currency) {
+  if (amount === undefined || amount === null || amount === '') return '—';
+  const num = parseFloat(amount);
+  if (Number.isNaN(num)) return '—';
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: currency || 'USD',
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(num);
+}
+
 function formatNumber(num) {
   if (num === undefined || num === null || num === '') return '—';
   const n = parseInt(num, 10);
@@ -63,14 +76,51 @@ function formatNumber(num) {
   return n.toLocaleString();
 }
 
+function formatNumberCompact(num) {
+  if (num === undefined || num === null || num === '') return '—';
+  const n = parseInt(num, 10);
+  if (Number.isNaN(n)) return '—';
+  return new Intl.NumberFormat('en-US', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(n);
+}
+
+function sortableLimitValue(row, field, errorField = 'privilegeError') {
+  if (row.notConnected || row[errorField]) return null;
+  const val = Number(row[field]);
+  return Number.isFinite(val) ? val : null;
+}
+
+function compareNullableNumeric(a, b, dir) {
+  const aMissing = a === null;
+  const bMissing = b === null;
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  return dir * (a - b);
+}
+
+function formatTotalLimit(row) {
+  const qty = formatNumberCompact(row.accountLimitQuantity);
+  const amt = formatCurrencyCompact(row.accountLimitAmount, row.accountLimitCurrency);
+  if (qty === '—' && amt === '—') return '—';
+  if (qty === '—') return `— / ${amt}`;
+  if (amt === '—') return `${qty} / —`;
+  return `${qty} / ${amt}`;
+}
+
 function pickSubscriptionRow(rows = []) {
   if (!rows.length) return null;
   return rows.find((row) => row.subscriptionLevel) || rows[0];
 }
 
-function mergeStoreOverviewRows(privileges = [], subscriptionRows = []) {
+function mergeStoreOverviewRows(privileges = [], accountPrivileges = [], subscriptionRows = []) {
   const privilegesBySeller = new Map(
     privileges.map((row) => [String(row.sellerId), row])
+  );
+  const accountPrivilegesBySeller = new Map(
+    accountPrivileges.map((row) => [String(row.sellerId), row])
   );
   const subscriptionsBySeller = new Map();
 
@@ -83,12 +133,14 @@ function mergeStoreOverviewRows(privileges = [], subscriptionRows = []) {
 
   const sellerIds = new Set([
     ...privilegesBySeller.keys(),
+    ...accountPrivilegesBySeller.keys(),
     ...subscriptionsBySeller.keys(),
   ]);
 
   return [...sellerIds]
     .map((sellerId) => {
       const priv = privilegesBySeller.get(sellerId) || {};
+      const accountPriv = accountPrivilegesBySeller.get(sellerId) || {};
       const sub = pickSubscriptionRow(subscriptionsBySeller.get(sellerId)) || {};
 
       return {
@@ -97,6 +149,10 @@ function mergeStoreOverviewRows(privileges = [], subscriptionRows = []) {
         quantityLimitRemaining: priv.quantityLimitRemaining,
         amountLimitRemaining: priv.amountLimitRemaining,
         amountLimitCurrency: priv.amountLimitCurrency,
+        accountLimitQuantity: accountPriv.limitQuantity,
+        accountLimitAmount: accountPriv.limitAmount,
+        accountLimitCurrency: accountPriv.limitCurrency,
+        accountPrivilegeError: accountPriv.error || null,
         subscriptionLevel: sub.subscriptionLevel || null,
         termValue: sub.termValue,
         termUnit: sub.termUnit,
@@ -139,6 +195,17 @@ function compareRows(a, b, sortBy, sortOrder) {
       cmp = valA - valB;
       break;
     }
+    case 'totalLimit': {
+      const qtyA = sortableLimitValue(a, 'accountLimitQuantity', 'accountPrivilegeError');
+      const qtyB = sortableLimitValue(b, 'accountLimitQuantity', 'accountPrivilegeError');
+      const amtA = sortableLimitValue(a, 'accountLimitAmount', 'accountPrivilegeError');
+      const amtB = sortableLimitValue(b, 'accountLimitAmount', 'accountPrivilegeError');
+      cmp = compareNullableNumeric(qtyA, qtyB, dir);
+      if (cmp === 0 && qtyA !== null) {
+        cmp = compareNullableNumeric(amtA, amtB, dir);
+      }
+      break;
+    }
     case 'subscriptionLevel':
       cmp = levelSortValue(a.subscriptionLevel) - levelSortValue(b.subscriptionLevel);
       if (cmp === 0) {
@@ -173,6 +240,7 @@ function compareRows(a, b, sortBy, sortOrder) {
   }
 
   if (cmp === 0 && sortBy !== 'sellerName') return tieBreak();
+  if (sortBy === 'totalLimit') return cmp;
   return dir * cmp;
 }
 
@@ -203,25 +271,29 @@ export default function StoreOverviewPage() {
     setLoading(true);
     setError('');
     try {
-      const [privilegesRes, subscriptionsRes] = await Promise.all([
+      const [privilegesRes, accountPrivilegesRes, subscriptionsRes] = await Promise.all([
         api.get('/ebay/selling/summary/all'),
+        api.get('/ebay/account/privileges/all'),
         api.get('/ebay/account/subscriptions/all'),
       ]);
 
       const privileges = privilegesRes.data?.success
         ? (privilegesRes.data.data || [])
         : [];
+      const accountPrivileges = accountPrivilegesRes.data?.success
+        ? (accountPrivilegesRes.data.rows || [])
+        : [];
       const subscriptionRows = subscriptionsRes.data?.success
         ? (subscriptionsRes.data.rows || [])
         : [];
 
-      if (!privilegesRes.data?.success && !subscriptionsRes.data?.success) {
+      if (!privilegesRes.data?.success && !accountPrivilegesRes.data?.success && !subscriptionsRes.data?.success) {
         setError('Failed to load store overview data');
         setRows([]);
         return;
       }
 
-      setRows(mergeStoreOverviewRows(privileges, subscriptionRows));
+      setRows(mergeStoreOverviewRows(privileges, accountPrivileges, subscriptionRows));
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load store overview');
       setRows([]);
@@ -297,11 +369,11 @@ export default function StoreOverviewPage() {
   }).format(amount);
 
   return (
-    <Box sx={{ p: { xs: 2, sm: 3 }, maxWidth: 1600, mx: 'auto' }}>
-      <Paper variant="outlined" sx={{ p: { xs: 1.5, sm: 2 }, mb: 2 }}>
+    <Box sx={{ p: { xs: 1.5, sm: 2 }, maxWidth: 1600, mx: 'auto' }}>
+      <Paper variant="outlined" sx={{ p: { xs: 1.25, sm: 1.75 }, mb: 1.5 }}>
         <Stack
           direction={{ xs: 'column', lg: 'row' }}
-          spacing={2}
+          spacing={1.5}
           alignItems={{ lg: 'center' }}
           justifyContent="space-between"
         >
@@ -310,7 +382,7 @@ export default function StoreOverviewPage() {
               Store Overview
             </Typography>
             {!loading && rows.length > 0 && (
-              <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap sx={{ mt: 1 }}>
+              <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap sx={{ mt: 0.75 }}>
                 <Chip label={`${rows.length} stores`} size="small" variant="outlined" />
                 <Chip label={`${summary.withPlan} with plan`} size="small" color="success" variant="outlined" />
                 {summary.noPlan > 0 && <Chip label={`${summary.noPlan} no plan`} size="small" variant="outlined" />}
@@ -324,7 +396,7 @@ export default function StoreOverviewPage() {
 
           <Stack
             direction={{ xs: 'column', sm: 'row' }}
-            spacing={1.25}
+            spacing={1}
             alignItems={{ sm: 'center' }}
             sx={{ flexShrink: 0, width: { xs: '100%', lg: 'auto' } }}
           >
@@ -337,7 +409,7 @@ export default function StoreOverviewPage() {
                   border: '1px solid',
                   borderColor: 'divider',
                   bgcolor: 'action.hover',
-                  minWidth: 148,
+                  minWidth: 138,
                 }}
               >
                 <Typography variant="caption" color="text.secondary" fontWeight={700} display="block" lineHeight={1.2}>
@@ -383,7 +455,18 @@ export default function StoreOverviewPage() {
 
       <Paper sx={{ overflow: 'hidden' }}>
         <TableContainer>
-          <Table size="small" stickyHeader>
+          <Table
+            size="small"
+            stickyHeader
+            sx={{
+              '& .MuiTableCell-root': {
+                py: 0.9,
+              },
+              '& .MuiTableCell-head': {
+                py: 1,
+              },
+            }}
+          >
             <TableHead>
               <TableRow>
                 {Object.keys(SORT_COLUMNS).map((column) => (
@@ -400,7 +483,7 @@ export default function StoreOverviewPage() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={8} align="center" sx={{ py: 4 }}>
+                  <TableCell colSpan={9} align="center" sx={{ py: 4 }}>
                     <CircularProgress size={32} />
                     <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                       Loading selling limits and store subscriptions…
@@ -409,7 +492,7 @@ export default function StoreOverviewPage() {
                 </TableRow>
               ) : sortedRows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} align="center" sx={{ py: 4 }}>
+                  <TableCell colSpan={9} align="center" sx={{ py: 4 }}>
                     <Typography color="text.secondary">No stores found</Typography>
                   </TableCell>
                 </TableRow>
@@ -422,6 +505,9 @@ export default function StoreOverviewPage() {
                     <TableCell align="right">{formatNumber(row.quantityLimitRemaining)}</TableCell>
                     <TableCell align="right">
                       {formatCurrency(row.amountLimitRemaining, row.amountLimitCurrency)}
+                    </TableCell>
+                    <TableCell align="right">
+                      {formatTotalLimit(row)}
                     </TableCell>
                     <TableCell>
                       {row.subscriptionLevel ? (

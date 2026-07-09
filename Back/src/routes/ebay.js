@@ -14811,6 +14811,168 @@ router.get('/account/subscriptions/all', requireAuth, requirePageAccess('StoreOv
   }
 });
 
+async function fetchSellerAccountPrivileges(seller) {
+  const accessToken = await ensureValidToken(seller);
+
+  const response = await axios.get('https://api.ebay.com/sell/account/v1/privilege', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    const message = ebayError?.longMessage || ebayError?.message || response.statusText || 'eBay privileges request failed';
+    const needsReconnect = /scope|access|unauthorized|invalid token/i.test(String(message));
+    return {
+      success: false,
+      status: response.status || 400,
+      error: message,
+      details: response.data || null,
+      needsReconnect,
+    };
+  }
+
+  const payload = response.data || {};
+  const sellingLimit = payload.sellingLimit || null;
+
+  return {
+    success: true,
+    sellerRegistrationCompleted: payload.sellerRegistrationCompleted ?? null,
+    limitAmount: sellingLimit?.amount?.value ?? null,
+    limitCurrency: sellingLimit?.amount?.currency ?? 'USD',
+    limitQuantity: sellingLimit?.quantity ?? null,
+    report: payload,
+  };
+}
+
+// eBay Sell Account API — getPrivileges
+// @see https://developer.ebay.com/api-docs/sell/account/resources/privilege/methods/getPrivileges
+router.get('/account/privileges', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+  try {
+    const { sellerId } = req.query;
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay', notConnected: true });
+    }
+
+    const result = await fetchSellerAccountPrivileges(seller);
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error,
+        details: result.details || null,
+        needsReconnect: result.needsReconnect || false,
+      });
+    }
+
+    return res.json({
+      success: true,
+      seller: {
+        id: seller._id,
+        name: resolveStoreDisplayName(seller),
+      },
+      sellerRegistrationCompleted: result.sellerRegistrationCompleted,
+      limitAmount: result.limitAmount,
+      limitCurrency: result.limitCurrency,
+      limitQuantity: result.limitQuantity,
+    });
+  } catch (err) {
+    console.error('[Account Privileges] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch account privileges',
+    });
+  }
+});
+
+router.get('/account/privileges/all', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+  try {
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email active')
+      : [];
+
+    console.log(`[Account Privileges] Fetching for ${sellers.length} stores...`);
+
+    const rows = await Promise.all(sellers.map(async (seller) => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        if (!seller.ebayTokens?.access_token || !seller.ebayTokens?.refresh_token) {
+          return {
+            sellerId: seller._id,
+            sellerName,
+            notConnected: true,
+            sellerRegistrationCompleted: null,
+            limitAmount: null,
+            limitCurrency: null,
+            limitQuantity: null,
+          };
+        }
+
+        const result = await fetchSellerAccountPrivileges(seller);
+        if (!result.success) {
+          return {
+            sellerId: seller._id,
+            sellerName,
+            error: result.error,
+            needsReconnect: result.needsReconnect || false,
+            sellerRegistrationCompleted: null,
+            limitAmount: null,
+            limitCurrency: null,
+            limitQuantity: null,
+          };
+        }
+
+        return {
+          sellerId: seller._id,
+          sellerName,
+          sellerRegistrationCompleted: result.sellerRegistrationCompleted,
+          limitAmount: result.limitAmount,
+          limitCurrency: result.limitCurrency,
+          limitQuantity: result.limitQuantity,
+        };
+      } catch (err) {
+        console.error(`[Account Privileges] Failed for seller ${seller._id}:`, err.message);
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message,
+          sellerRegistrationCompleted: null,
+          limitAmount: null,
+          limitCurrency: null,
+          limitQuantity: null,
+        };
+      }
+    }));
+
+    rows.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
+
+    return res.json({
+      success: true,
+      fetchedAt: new Date().toISOString(),
+      storeCount: rows.length,
+      rows,
+    });
+  } catch (error) {
+    console.error('[Account Privileges All] Error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 async function getEbayClientCredentialsToken(scope = 'https://api.ebay.com/oauth/api_scope') {
   const response = await axios.post(
     'https://api.ebay.com/identity/v1/oauth2/token',
