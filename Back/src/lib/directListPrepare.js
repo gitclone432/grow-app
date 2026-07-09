@@ -243,6 +243,7 @@ export async function persistTemplateListingRecord({
   createdBy = null,
   amazonData = null,
   region = 'US',
+  listingOrigin = 'template_listings',
 }) {
   if (!templateId || !sellerId || !listingPayload?.customLabel) return null;
 
@@ -268,6 +269,7 @@ export async function persistTemplateListingRecord({
     ...persistFields,
     customFields: toCustomFieldsMap(listingPayload.customFields || {}),
     status: nextStatus,
+    listingOrigin,
     updatedAt: new Date(),
   };
 
@@ -692,6 +694,7 @@ export async function submitDirectListPayload({
     createdBy,
     amazonData,
     region,
+    listingOrigin: 'direct_list',
   });
 
   return {
@@ -761,6 +764,7 @@ export async function previewDirectListPayload({
     createdBy,
     amazonData,
     region,
+    listingOrigin: 'direct_list',
   });
 
   return {
@@ -830,6 +834,7 @@ export async function previewDirectListBulk({
         createdBy,
         amazonData,
         region,
+        listingOrigin: 'direct_list',
       });
       const reviewItem = buildDirectListReviewItem({
         asin,

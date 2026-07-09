@@ -352,10 +352,29 @@ function sanitizeCustomCsvValueByHeader(header, value) {
   return raw;
 }
 
+function applyExcludeDirectListFilter(filter) {
+  filter.$and = filter.$and || [];
+  filter.$and.push({
+    $or: [
+      { listingOrigin: { $exists: false } },
+      { listingOrigin: null },
+      { listingOrigin: 'template_listings' },
+    ],
+  });
+  // Legacy Direct List rows (before listingOrigin) that were published on eBay
+  filter.$and.push({
+    $or: [
+      { ebayPublishedAt: { $exists: false } },
+      { ebayPublishedAt: null },
+    ],
+  });
+  return filter;
+}
+
 // Get all listings for a template
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, page = 1, limit = 50, batchFilter = 'active', batchId, status = 'active', minPrice, maxPrice, search } = req.query;
+    const { templateId, sellerId, page = 1, limit = 50, batchFilter = 'active', batchId, status = 'active', minPrice, maxPrice, search, excludeDirectList } = req.query;
     
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -396,6 +415,12 @@ router.get('/', requireAuth, async (req, res) => {
       filter.$or = [{ downloadBatchId: null }, { pendingRedownload: true }];
     } else if (batchFilter === 'all') {
       // All batches (no filter on downloadBatchId)
+    }
+
+    if (String(excludeDirectList || '').toLowerCase() === '1'
+      || String(excludeDirectList || '').toLowerCase() === 'true'
+      || String(excludeDirectList || '').toLowerCase() === 'yes') {
+      applyExcludeDirectListFilter(filter);
     }
     
     const [listings, total] = await Promise.all([

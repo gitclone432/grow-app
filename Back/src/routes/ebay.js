@@ -14511,7 +14511,7 @@ router.get('/awaiting-sheet-summary', requireAuth, requirePageAccess('AwaitingSh
 // ============================================
 // GET ALL SELLING PRIVILEGES (BULK)
 // ============================================
-router.get('/selling/summary/all', requireAuth, requirePageAccess('SellingPrivileges'), async (req, res) => {
+router.get('/selling/summary/all', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
   try {
     const scoped = await getSellersMatchingAllRoute(req);
     const sellerIds = scoped.map((s) => s._id);
@@ -14603,6 +14603,211 @@ router.get('/selling/summary/all', requireAuth, requirePageAccess('SellingPrivil
   } catch (error) {
     console.error('[Selling Summary All] Error:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+async function fetchSellerAccountSubscriptions(seller, { limit, continuationToken } = {}) {
+  const accessToken = await ensureValidToken(seller);
+  const params = {};
+  if (limit != null && String(limit).trim() !== '') params.limit = String(limit);
+  if (continuationToken) params.continuation_token = String(continuationToken);
+
+  const response = await axios.get('https://api.ebay.com/sell/account/v1/subscription', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    params,
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    const message = ebayError?.longMessage || ebayError?.message || response.statusText || 'eBay subscription request failed';
+    const needsReconnect = /scope|access|unauthorized|invalid token/i.test(String(message));
+    return {
+      success: false,
+      status: response.status || 400,
+      error: message,
+      details: response.data || null,
+      needsReconnect,
+    };
+  }
+
+  const payload = response.data || {};
+  const subscriptions = Array.isArray(payload.subscriptions) ? payload.subscriptions : [];
+
+  return {
+    success: true,
+    total: payload.total ?? subscriptions.length,
+    subscriptions,
+    href: payload.href || null,
+    limit: payload.limit ?? null,
+    continuationToken: payload.continuation_token || null,
+    report: payload,
+  };
+}
+
+// eBay Sell Account API — getSubscription (eBay Store plans per seller)
+// @see https://developer.ebay.com/api-docs/sell/account/resources/subscription/methods/getSubscription
+router.get('/account/subscriptions', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+  try {
+    const { sellerId, limit, continuation_token: continuationToken } = req.query;
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay', notConnected: true });
+    }
+
+    const result = await fetchSellerAccountSubscriptions(seller, { limit, continuationToken });
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error,
+        details: result.details || null,
+        needsReconnect: result.needsReconnect || false,
+      });
+    }
+
+    return res.json({
+      success: true,
+      seller: {
+        id: seller._id,
+        name: resolveStoreDisplayName(seller),
+      },
+      total: result.total,
+      subscriptions: result.subscriptions,
+      href: result.href,
+      limit: result.limit,
+      continuationToken: result.continuationToken,
+    });
+  } catch (err) {
+    console.error('[Account Subscriptions] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch store subscriptions',
+    });
+  }
+});
+
+router.get('/account/subscriptions/all', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+  try {
+    const { limit } = req.query;
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email active')
+      : [];
+
+    console.log(`[Store Subscriptions] Fetching for ${sellers.length} stores...`);
+
+    const results = await Promise.all(sellers.map(async (seller) => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        if (!seller.ebayTokens?.access_token || !seller.ebayTokens?.refresh_token) {
+          return {
+            sellerId: seller._id,
+            sellerName,
+            notConnected: true,
+            total: 0,
+            subscriptions: [],
+          };
+        }
+
+        const result = await fetchSellerAccountSubscriptions(seller, { limit });
+        if (!result.success) {
+          return {
+            sellerId: seller._id,
+            sellerName,
+            error: result.error,
+            needsReconnect: result.needsReconnect || false,
+            total: 0,
+            subscriptions: [],
+          };
+        }
+
+        return {
+          sellerId: seller._id,
+          sellerName,
+          total: result.total,
+          subscriptions: result.subscriptions,
+          continuationToken: result.continuationToken || null,
+        };
+      } catch (err) {
+        console.error(`[Store Subscriptions] Failed for seller ${seller._id}:`, err.message);
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message,
+          total: 0,
+          subscriptions: [],
+        };
+      }
+    }));
+
+    results.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
+
+    const flatRows = results.flatMap((row) => {
+      if (row.notConnected || row.error) {
+        return [{
+          sellerId: row.sellerId,
+          sellerName: row.sellerName,
+          notConnected: row.notConnected || false,
+          error: row.error || null,
+          needsReconnect: row.needsReconnect || false,
+          marketplaceId: null,
+          subscriptionId: null,
+          subscriptionLevel: null,
+          subscriptionType: null,
+          termValue: null,
+          termUnit: null,
+        }];
+      }
+      if (!row.subscriptions?.length) {
+        return [{
+          sellerId: row.sellerId,
+          sellerName: row.sellerName,
+          noPlan: true,
+          marketplaceId: null,
+          subscriptionId: null,
+          subscriptionLevel: null,
+          subscriptionType: null,
+          termValue: null,
+          termUnit: null,
+        }];
+      }
+      return row.subscriptions.map((sub) => ({
+        sellerId: row.sellerId,
+        sellerName: row.sellerName,
+        marketplaceId: sub.marketplaceId || null,
+        subscriptionId: sub.subscriptionId || null,
+        subscriptionLevel: sub.subscriptionLevel || null,
+        subscriptionType: sub.subscriptionType || null,
+        termValue: sub.term?.value ?? null,
+        termUnit: sub.term?.unit || null,
+      }));
+    });
+
+    return res.json({
+      success: true,
+      fetchedAt: new Date().toISOString(),
+      storeCount: results.length,
+      rowCount: flatRows.length,
+      data: results,
+      rows: flatRows,
+    });
+  } catch (error) {
+    console.error('[Store Subscriptions All] Error:', error);
+    return res.status(500).json({ error: error.message });
   }
 });
 

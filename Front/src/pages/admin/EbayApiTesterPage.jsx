@@ -26,6 +26,8 @@ const PRESETS = [
   // Sell Account / eBay Parameters
   { group: 'Sell Account', label: 'Selling Privileges (All Stores)', method: 'GET', path: '/ebay/selling/summary/all', params: {} },
   { group: 'Sell Account', label: 'Selling Summary (Single Seller)', method: 'GET', path: '/ebay/selling/summary', params: { sellerId: '<sellerId>' } },
+  { group: 'Sell Account', label: 'Store Subscriptions (All Stores)', method: 'GET', path: '/ebay/account/subscriptions/all', params: {} },
+  { group: 'Sell Account', label: 'Store Subscriptions (Single Seller)', method: 'GET', path: '/ebay/account/subscriptions', params: { sellerId: '<sellerId>' } },
   { group: 'Sell Account', label: 'eBay API Usage Stats (All Stores)', method: 'GET', path: '/ebay/api-usage-stats/all', params: {} },
   { group: 'Sell Account', label: 'eBay API Usage Stats (Single Seller)', method: 'GET', path: '/ebay/api-usage-stats', params: { sellerId: '<sellerId>' } },
   { group: 'Sell Account', label: 'Seller Funds Summary', method: 'GET', path: '/ebay/seller-funds-summary', params: {} },

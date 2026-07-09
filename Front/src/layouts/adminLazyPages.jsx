@@ -37,7 +37,7 @@ export const EmployeeManagementPage = lazy(() => import('../pages/admin/Employee
 export const BuyerChatPage = lazy(() => import('../pages/admin/BuyerChatPage.jsx'));
 export const FeedUploadPage = lazy(() => import('../pages/ebay/FeedUploadPage.jsx'));
 export const DirectListPage = lazy(() => import('../pages/ebay/DirectListPage.jsx'));
-export const SellingPrivilegesPage = lazy(() => import('../pages/admin/SellingPrivilegesPage.jsx'));
+export const StoreOverviewPage = lazy(() => import('../pages/admin/StoreOverviewPage.jsx'));
 export const EbayApiUsagePage = lazy(() => import('../pages/admin/EbayApiUsagePage.jsx'));
 export const EbayAnalyticsHubPage = lazy(() => import('../pages/admin/EbayAnalyticsHubPage.jsx'));
 export const EbayFeedbackPage = lazy(() => import('../pages/admin/EbayFeedbackPage.jsx'));

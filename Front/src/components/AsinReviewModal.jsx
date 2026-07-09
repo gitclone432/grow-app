@@ -369,6 +369,10 @@ export default function AsinReviewModal({
 
   // Filter out dismissed items
   const activeItems = previewItems.filter(item => !dismissedItems.has(item.id));
+  const listableCount = activeItems.filter(
+    (item) => !['error', 'loading', 'blocked'].includes(item.status)
+  ).length;
+  const listDirectlyButtonLabel = `${String(listDirectlyLabel || 'List Directly').replace(/\s*\(\d+\)\s*$/, '')} (${listableCount})`;
   const currentItem = activeItems[currentIndex];
   const itemData = editedItems[currentItem?.id] || currentItem?.generatedListing || {};
   const isStartPriceEditing = !!(currentItem?.id && startPriceEditMode[currentItem.id]);
@@ -985,10 +989,10 @@ export default function AsinReviewModal({
                     });
                   onListDirectly(listingsToSave);
                 }}
-                disabled={saving || activeItems.every(i => ['error', 'loading', 'blocked'].includes(i.status))}
+                disabled={saving || listableCount === 0}
                 sx={{ fontSize: showAmazonPreview ? '0.7rem' : undefined, whiteSpace: 'nowrap' }}
               >
-                {listDirectlyLabel}
+                {listDirectlyButtonLabel}
               </Button>
             )}
             {!hideSaveButton && onSave && (

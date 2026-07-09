@@ -114,7 +114,7 @@ export const PAGE_DEFAULT_ROLES = {
   'AffiliateOrders': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // eBay Parameters
-  'SellingPrivileges': ['superadmin', 'listingadmin'],
+  'StoreOverview': ['superadmin', 'listingadmin'],
   'EbayApiUsage': ['superadmin', 'listingadmin'],
   'Analytics': ['superadmin', 'listingadmin'],
   'AnalyticsSellerStandards': ['superadmin', 'listingadmin'],

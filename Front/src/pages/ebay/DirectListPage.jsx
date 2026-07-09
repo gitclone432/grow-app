@@ -8,6 +8,7 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Collapse,
   FormControl,
   FormControlLabel,
   InputLabel,
@@ -18,6 +19,7 @@ import {
   Radio,
   RadioGroup,
   Select,
+  Skeleton,
   Stack,
   Switch,
   Tab,
@@ -41,6 +43,14 @@ import api from '../../lib/api';
 import { generateSKUFromASIN } from '../../utils/skuGenerator';
 import AsinReviewModal from '../../components/AsinReviewModal.jsx';
 import { fetchDescriptionTemplateGallery } from '../../lib/descriptionTemplateGalleryApi.js';
+import { fetchSellersAll } from '../../lib/sellersAllCache.js';
+import { fetchListingTemplatesSummary } from '../../lib/listingTemplatesCache.js';
+import {
+  pickInitialSelection,
+  readDirectListPrefs,
+  writeDirectListPrefs,
+} from '../../lib/directListPrefs.js';
+import { useDirectListContext } from '../../hooks/useDirectListContext.js';
 
 function countItemPhotoUrls(value) {
   if (!value) return 0;
@@ -523,14 +533,13 @@ export default function DirectListPage() {
   const [bulkResult, setBulkResult] = useState(null);
   const [previewItems, setPreviewItems] = useState([]);
   const [reviewModalOpen, setReviewModalOpen] = useState(false);
-  const [pricingConfig, setPricingConfig] = useState(null);
-  const [effectiveTemplate, setEffectiveTemplate] = useState(null);
   const [bulkPreviewCustomColumns, setBulkPreviewCustomColumns] = useState([]);
   const [galleryTemplates, setGalleryTemplates] = useState([]);
   const [galleryStoreMap, setGalleryStoreMap] = useState({});
   const [singlePreview, setSinglePreview] = useState(null);
 
   const [loadingInit, setLoadingInit] = useState(true);
+  const [loadingTemplates, setLoadingTemplates] = useState(true);
   const [autofilling, setAutofilling] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [listingNow, setListingNow] = useState(false);
@@ -547,35 +556,17 @@ export default function DirectListPage() {
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [storeListerDefaults, setStoreListerDefaults] = useState(null);
-  const [ebayMarketplace, setEbayMarketplace] = useState(null);
+  const [showListingPace, setShowListingPace] = useState(false);
 
-  const loadStoreListerDefaults = useCallback(async () => {
-    if (!selectedSeller) {
-      setStoreListerDefaults(null);
-      setEbayMarketplace(null);
-      return;
-    }
-    try {
-      const { data } = await api.get('/template-listings/direct-list/store-lister-defaults', {
-        params: {
-          sellerId: selectedSeller,
-          ...(selectedTemplate ? { templateId: selectedTemplate } : {}),
-        },
-      });
-      setStoreListerDefaults(data.storeListerApplied || null);
-      setEbayMarketplace(data.ebayMarketplace || null);
-    } catch {
-      setStoreListerDefaults(null);
-      setEbayMarketplace(null);
-    }
-  }, [selectedSeller, selectedTemplate]);
+  const {
+    storeListerDefaults,
+    ebayMarketplace,
+    pricingConfig,
+    effectiveTemplate,
+  } = useDirectListContext(selectedSeller, selectedTemplate);
 
   useEffect(() => {
-    void loadStoreListerDefaults();
-  }, [loadStoreListerDefaults]);
-
-  useEffect(() => {
+    if (!reviewModalOpen) return undefined;
     let cancelled = false;
     void (async () => {
       try {
@@ -597,49 +588,7 @@ export default function DirectListPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  useEffect(() => {
-    if (!selectedSeller || !selectedTemplate) {
-      setPricingConfig(null);
-      return undefined;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { data } = await api.get('/seller-pricing-config', {
-          params: { sellerId: selectedSeller, templateId: selectedTemplate },
-        });
-        if (!cancelled) setPricingConfig(data.pricingConfig || null);
-      } catch {
-        if (!cancelled) setPricingConfig(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedSeller, selectedTemplate]);
-
-  useEffect(() => {
-    if (!selectedSeller || !selectedTemplate) {
-      setEffectiveTemplate(null);
-      return undefined;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { data } = await api.get(`/template-overrides/${selectedTemplate}/effective`, {
-          params: { sellerId: selectedSeller },
-        });
-        if (!cancelled) setEffectiveTemplate(data);
-      } catch {
-        if (!cancelled) setEffectiveTemplate(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedSeller, selectedTemplate]);
+  }, [reviewModalOpen]);
 
   const selectedStoreTemplate = useMemo(() => {
     if (!selectedSeller) return null;
@@ -647,11 +596,6 @@ export default function DirectListPage() {
     if (!assignedId) return null;
     return galleryTemplates.find((template) => String(template?.id) === String(assignedId)) || null;
   }, [selectedSeller, galleryTemplates, galleryStoreMap]);
-
-  const reviewModalListLabel = useMemo(() => {
-    const count = previewItems.filter((item) => !['error', 'loading', 'blocked'].includes(item.status)).length;
-    return `List on eBay (${count})`;
-  }, [previewItems]);
 
   const reviewTemplateColumns = useMemo(() => {
     const customColumns = bulkPreviewCustomColumns.length > 0
@@ -702,27 +646,52 @@ export default function DirectListPage() {
   }, [tab, loadBulkJobs]);
 
   useEffect(() => {
-    const load = async () => {
+    const prefs = readDirectListPrefs();
+    if (prefs.region) setRegion(prefs.region);
+
+    let cancelled = false;
+    void (async () => {
       setLoadingInit(true);
+      setLoadingTemplates(true);
       try {
-        const [sellersRes, templatesRes] = await Promise.all([
-          api.get('/sellers/all'),
-          api.get('/listing-templates'),
-        ]);
-        const nextSellers = sellersRes.data || [];
-        const nextTemplates = templatesRes.data || [];
+        const sellersPromise = fetchSellersAll(api);
+        const templatesPromise = fetchListingTemplatesSummary(api);
+
+        const nextSellers = await sellersPromise;
+        if (cancelled) return;
         setSellers(nextSellers);
-        setTemplates(nextTemplates);
-        if (nextSellers.length > 0) setSelectedSeller(nextSellers[0]._id);
-        if (nextTemplates.length > 0) setSelectedTemplate(nextTemplates[0]._id);
-      } catch (err) {
-        setError(err.response?.data?.error || 'Failed to load sellers or templates');
-      } finally {
+        setSelectedSeller(pickInitialSelection(nextSellers, prefs.sellerId));
         setLoadingInit(false);
+
+        const nextTemplates = await templatesPromise;
+        if (cancelled) return;
+        setTemplates(nextTemplates);
+        setSelectedTemplate(pickInitialSelection(nextTemplates, prefs.templateId));
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.response?.data?.error || 'Failed to load sellers or templates');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingInit(false);
+          setLoadingTemplates(false);
+        }
       }
+    })();
+
+    return () => {
+      cancelled = true;
     };
-    load();
   }, []);
+
+  useEffect(() => {
+    if (!selectedSeller && !selectedTemplate) return;
+    writeDirectListPrefs({
+      sellerId: selectedSeller,
+      templateId: selectedTemplate,
+      region,
+    });
+  }, [selectedSeller, selectedTemplate, region]);
 
   const canAutofill = Boolean(asin.trim() && selectedTemplate);
   const canList = Boolean(
@@ -1047,14 +1016,6 @@ export default function DirectListPage() {
     [templates, selectedTemplate]
   );
 
-  if (loadingInit) {
-    return (
-      <Box sx={{ p: 3, display: 'flex', justifyContent: 'center' }}>
-        <CircularProgress />
-      </Box>
-    );
-  }
-
   return (
     <Box sx={{ p: 3, maxWidth: 1100 }}>
       <Typography variant="h4" gutterBottom>
@@ -1067,34 +1028,48 @@ export default function DirectListPage() {
       <Paper sx={{ p: 3, mb: 3 }}>
         <Stack spacing={2.5}>
           <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Seller</InputLabel>
-              <Select value={selectedSeller} label="Seller" onChange={(e) => setSelectedSeller(e.target.value)}>
-                {sellers.map((seller) => (
-                  <MenuItem key={seller._id} value={seller._id}>
-                    {seller.storeName || seller.user?.username || seller._id}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <FormControl fullWidth size="small">
-              <InputLabel>Template</InputLabel>
-              <Select value={selectedTemplate} label="Template" onChange={(e) => setSelectedTemplate(e.target.value)}>
-                {templates.map((template) => (
-                  <MenuItem key={template._id} value={template._id}>
-                    {template.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <FormControl size="small" sx={{ minWidth: 120 }}>
-              <InputLabel>Amazon region</InputLabel>
-              <Select value={region} label="Amazon region" onChange={(e) => setRegion(e.target.value)}>
-                <MenuItem value="US">US</MenuItem>
-                <MenuItem value="UK">UK</MenuItem>
-                <MenuItem value="AU">AU</MenuItem>
-              </Select>
-            </FormControl>
+            {loadingInit ? (
+              <>
+                <Skeleton variant="rounded" height={40} sx={{ flex: 1 }} />
+                <Skeleton variant="rounded" height={40} sx={{ flex: 1 }} />
+                <Skeleton variant="rounded" height={40} width={120} />
+              </>
+            ) : (
+              <>
+                <FormControl fullWidth size="small" disabled={!sellers.length}>
+                  <InputLabel>Seller</InputLabel>
+                  <Select value={selectedSeller} label="Seller" onChange={(e) => setSelectedSeller(e.target.value)}>
+                    {sellers.map((seller) => (
+                      <MenuItem key={seller._id} value={seller._id}>
+                        {seller.storeName || seller.user?.username || seller._id}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <FormControl fullWidth size="small" disabled={loadingTemplates || !templates.length}>
+                  <InputLabel>Template{loadingTemplates ? ' (loading…)' : ''}</InputLabel>
+                  <Select
+                    value={selectedTemplate}
+                    label={`Template${loadingTemplates ? ' (loading…)' : ''}`}
+                    onChange={(e) => setSelectedTemplate(e.target.value)}
+                  >
+                    {templates.map((template) => (
+                      <MenuItem key={template._id} value={template._id}>
+                        {template.name}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <FormControl size="small" sx={{ minWidth: 120 }}>
+                  <InputLabel>Amazon region</InputLabel>
+                  <Select value={region} label="Amazon region" onChange={(e) => setRegion(e.target.value)}>
+                    <MenuItem value="US">US</MenuItem>
+                    <MenuItem value="UK">UK</MenuItem>
+                    <MenuItem value="AU">AU</MenuItem>
+                  </Select>
+                </FormControl>
+              </>
+            )}
           </Stack>
           {ebayMarketplace?.marketplaceLabel && (
             <Stack direction="row" spacing={1} alignItems="center">
@@ -1116,7 +1091,7 @@ export default function DirectListPage() {
         <Tab label={`Bulk ASINs${parsedBulkAsins.length ? ` (${parsedBulkAsins.length})` : ''}`} />
       </Tabs>
 
-      {tab === 0 && (
+      <Box hidden={tab !== 0}>
         <>
           <Paper sx={{ p: 3, mb: 3 }}>
             <Stack spacing={2.5}>
@@ -1244,9 +1219,9 @@ export default function DirectListPage() {
             storeListerDefaults={storeListerDefaults}
           />
         </>
-      )}
+      </Box>
 
-      {tab === 1 && (
+      <Box hidden={tab !== 1}>
         <>
           <Paper sx={{ p: 3, mb: 3 }}>
             <Typography variant="h6" gutterBottom>Bulk ASINs</Typography>
@@ -1270,53 +1245,62 @@ export default function DirectListPage() {
               sx={{ mb: 2 }}
             />
 
-            <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-              <Typography variant="subtitle2" gutterBottom>
-                Listing pace (background / schedule)
-              </Typography>
-              <FormControl component="fieldset" sx={{ mb: 1.5 }}>
-                <RadioGroup
-                  value={bulkGapMode}
-                  onChange={(e) => setBulkGapMode(e.target.value)}
-                >
-                  <FormControlLabel
-                    value="listing"
-                    control={<Radio size="small" />}
-                    label="Gap after each listing (1 ASIN, then wait — safest for large runs)"
-                  />
-                  <FormControlLabel
-                    value="batch"
-                    control={<Radio size="small" />}
-                    label={`Gap after each batch (${BULK_BATCH_SIZE} ASINs, then wait — faster)`}
-                  />
-                </RadioGroup>
-              </FormControl>
-              <TextField
-                label={bulkGapMode === 'listing' ? 'Seconds between listings' : 'Minutes between batches'}
-                type="number"
+            <Box sx={{ mb: 2 }}>
+              <Button
                 size="small"
-                value={bulkGapMode === 'listing' ? bulkDelaySeconds : bulkDelayMinutes}
-                onChange={(e) => {
-                  if (bulkGapMode === 'listing') {
-                    setBulkDelaySeconds(Math.min(
-                      BULK_JOB_MAX_DELAY_SECONDS,
-                      Math.max(BULK_JOB_MIN_DELAY_SECONDS, Number(e.target.value) || BULK_JOB_DEFAULT_DELAY_SECONDS)
-                    ));
-                  } else {
-                    setBulkDelayMinutes(Math.max(1, Number(e.target.value) || BULK_JOB_DEFAULT_DELAY_MINUTES));
-                  }
-                }}
-                inputProps={bulkGapMode === 'listing'
-                  ? { min: BULK_JOB_MIN_DELAY_SECONDS, max: BULK_JOB_MAX_DELAY_SECONDS }
-                  : { min: 1, max: 60 }}
-                helperText={formatJobScheduleEstimate(
-                  parsedBulkAsins.length,
-                  bulkGapMode,
-                  bulkGapMode === 'listing' ? bulkDelaySeconds : bulkDelayMinutes
-                )}
-                sx={{ maxWidth: 320 }}
-              />
-            </Paper>
+                variant="text"
+                onClick={() => setShowListingPace((v) => !v)}
+                sx={{ mb: showListingPace ? 1 : 0 }}
+              >
+                {showListingPace ? 'Hide listing pace options' : 'Listing pace (background / schedule)…'}
+              </Button>
+              <Collapse in={showListingPace}>
+                <Paper variant="outlined" sx={{ p: 2 }}>
+                  <FormControl component="fieldset" sx={{ mb: 1.5 }}>
+                    <RadioGroup
+                      value={bulkGapMode}
+                      onChange={(e) => setBulkGapMode(e.target.value)}
+                    >
+                      <FormControlLabel
+                        value="listing"
+                        control={<Radio size="small" />}
+                        label="Gap after each listing (1 ASIN, then wait — safest for large runs)"
+                      />
+                      <FormControlLabel
+                        value="batch"
+                        control={<Radio size="small" />}
+                        label={`Gap after each batch (${BULK_BATCH_SIZE} ASINs, then wait — faster)`}
+                      />
+                    </RadioGroup>
+                  </FormControl>
+                  <TextField
+                    label={bulkGapMode === 'listing' ? 'Seconds between listings' : 'Minutes between batches'}
+                    type="number"
+                    size="small"
+                    value={bulkGapMode === 'listing' ? bulkDelaySeconds : bulkDelayMinutes}
+                    onChange={(e) => {
+                      if (bulkGapMode === 'listing') {
+                        setBulkDelaySeconds(Math.min(
+                          BULK_JOB_MAX_DELAY_SECONDS,
+                          Math.max(BULK_JOB_MIN_DELAY_SECONDS, Number(e.target.value) || BULK_JOB_DEFAULT_DELAY_SECONDS)
+                        ));
+                      } else {
+                        setBulkDelayMinutes(Math.max(1, Number(e.target.value) || BULK_JOB_DEFAULT_DELAY_MINUTES));
+                      }
+                    }}
+                    inputProps={bulkGapMode === 'listing'
+                      ? { min: BULK_JOB_MIN_DELAY_SECONDS, max: BULK_JOB_MAX_DELAY_SECONDS }
+                      : { min: 1, max: 60 }}
+                    helperText={formatJobScheduleEstimate(
+                      parsedBulkAsins.length,
+                      bulkGapMode,
+                      bulkGapMode === 'listing' ? bulkDelaySeconds : bulkDelayMinutes
+                    )}
+                    sx={{ maxWidth: 320 }}
+                  />
+                </Paper>
+              </Collapse>
+            </Box>
 
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} flexWrap="wrap" sx={{ mb: 2 }}>
               <Button
@@ -1450,7 +1434,7 @@ export default function DirectListPage() {
             />
           )}
         </>
-      )}
+      </Box>
 
       {bulkBatchProgress && (
         <Paper sx={{ p: 2, mb: 2 }} variant="outlined">
@@ -1479,7 +1463,7 @@ export default function DirectListPage() {
         pricingConfig={pricingConfig}
         previewItems={previewItems}
         hideSaveButton
-        listDirectlyLabel={reviewModalListLabel}
+        listDirectlyLabel="List on eBay"
         onListDirectly={handleListFromReview}
         onClose={() => {
           if (bulkProcessing) return;
