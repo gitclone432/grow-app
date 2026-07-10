@@ -110,62 +110,6 @@ function formatTotalLimit(row) {
   return `${qty} / ${amt}`;
 }
 
-function pickSubscriptionRow(rows = []) {
-  if (!rows.length) return null;
-  return rows.find((row) => row.subscriptionLevel) || rows[0];
-}
-
-function mergeStoreOverviewRows(privileges = [], accountPrivileges = [], subscriptionRows = []) {
-  const privilegesBySeller = new Map(
-    privileges.map((row) => [String(row.sellerId), row])
-  );
-  const accountPrivilegesBySeller = new Map(
-    accountPrivileges.map((row) => [String(row.sellerId), row])
-  );
-  const subscriptionsBySeller = new Map();
-
-  for (const row of subscriptionRows) {
-    const sellerId = String(row.sellerId);
-    const existing = subscriptionsBySeller.get(sellerId) || [];
-    existing.push(row);
-    subscriptionsBySeller.set(sellerId, existing);
-  }
-
-  const sellerIds = new Set([
-    ...privilegesBySeller.keys(),
-    ...accountPrivilegesBySeller.keys(),
-    ...subscriptionsBySeller.keys(),
-  ]);
-
-  return [...sellerIds]
-    .map((sellerId) => {
-      const priv = privilegesBySeller.get(sellerId) || {};
-      const accountPriv = accountPrivilegesBySeller.get(sellerId) || {};
-      const sub = pickSubscriptionRow(subscriptionsBySeller.get(sellerId)) || {};
-
-      return {
-        sellerId,
-        sellerName: priv.sellerName || sub.sellerName || 'Unknown store',
-        quantityLimitRemaining: priv.quantityLimitRemaining,
-        amountLimitRemaining: priv.amountLimitRemaining,
-        amountLimitCurrency: priv.amountLimitCurrency,
-        accountLimitQuantity: accountPriv.limitQuantity,
-        accountLimitAmount: accountPriv.limitAmount,
-        accountLimitCurrency: accountPriv.limitCurrency,
-        accountPrivilegeError: accountPriv.error || null,
-        subscriptionLevel: sub.subscriptionLevel || null,
-        termValue: sub.termValue,
-        termUnit: sub.termUnit,
-        notConnected: Boolean(priv.notConnected || sub.notConnected),
-        privilegeError: priv.error || null,
-        subscriptionError: sub.error || null,
-        needsReconnect: sub.needsReconnect || false,
-        noPlan: Boolean(sub.noPlan),
-      };
-    })
-    .sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
-}
-
 function compareRows(a, b, sortBy, sortOrder) {
   const dir = sortOrder === 'asc' ? 1 : -1;
   const tieBreak = () => String(a.sellerName || '').localeCompare(
@@ -267,33 +211,21 @@ export default function StoreOverviewPage() {
   const [sortBy, setSortBy] = useState('sellerName');
   const [sortOrder, setSortOrder] = useState('asc');
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     setError('');
     try {
-      const [privilegesRes, accountPrivilegesRes, subscriptionsRes] = await Promise.all([
-        api.get('/ebay/selling/summary/all'),
-        api.get('/ebay/account/privileges/all'),
-        api.get('/ebay/account/subscriptions/all'),
-      ]);
+      const { data } = await api.get('/ebay/store-overview/all', {
+        params: forceRefresh ? { refresh: '1' } : {},
+      });
 
-      const privileges = privilegesRes.data?.success
-        ? (privilegesRes.data.data || [])
-        : [];
-      const accountPrivileges = accountPrivilegesRes.data?.success
-        ? (accountPrivilegesRes.data.rows || [])
-        : [];
-      const subscriptionRows = subscriptionsRes.data?.success
-        ? (subscriptionsRes.data.rows || [])
-        : [];
-
-      if (!privilegesRes.data?.success && !accountPrivilegesRes.data?.success && !subscriptionsRes.data?.success) {
-        setError('Failed to load store overview data');
+      if (!data.success) {
+        setError(data.error || 'Failed to load store overview data');
         setRows([]);
         return;
       }
 
-      setRows(mergeStoreOverviewRows(privileges, accountPrivileges, subscriptionRows));
+      setRows(Array.isArray(data.rows) ? data.rows : []);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load store overview');
       setRows([]);
@@ -441,7 +373,7 @@ export default function StoreOverviewPage() {
               variant="contained"
               size="small"
               startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
-              onClick={fetchData}
+              onClick={() => fetchData(true)}
               disabled={loading}
               sx={{ whiteSpace: 'nowrap', px: 2 }}
             >

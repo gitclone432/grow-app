@@ -5,6 +5,10 @@ import {
   Button,
   Chip,
   Collapse,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   Grid,
   IconButton,
@@ -17,10 +21,11 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableContainer,
   TableHead,
   TableRow,
+  TableSortLabel,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -28,11 +33,17 @@ import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
+import PauseIcon from '@mui/icons-material/Pause';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import StopCircleIcon from '@mui/icons-material/StopCircle';
 import api from '../../lib/api';
 import GrowMentalityLoader from '../../components/GrowMentalityLoader.jsx';
 import MarketingKpiStrip from '../../components/marketing/MarketingKpiStrip.jsx';
 import MarketingCollapsibleFilters from '../../components/marketing/MarketingCollapsibleFilters.jsx';
+import MarketingScrollableTableContainer from '../../components/marketing/MarketingScrollableTableContainer.jsx';
 import MarketingStoreFilters from '../../components/marketing/MarketingStoreFilters.jsx';
+import ColumnSelector from '../../components/ColumnSelector.jsx';
+import CreateCampaignDialog from '../../components/marketing/CreateCampaignDialog.jsx';
 import { useEbayConnectedSellers } from '../../hooks/useEbayConnectedSellers.js';
 import {
   ALL_MARKETPLACES_VALUE,
@@ -46,23 +57,105 @@ import {
 } from '../../lib/marketingConstants.js';
 import {
   buildMarketingKpiCacheKey,
+  compareCampaignRows,
   formatBudget,
-  formatDate,
+  formatDateOnly,
   getMarketingKpiCache,
   invalidateMarketingKpiCache,
   parseApiError,
   resolveSellerName,
   setMarketingKpiCache,
 } from '../../lib/marketingUtils.js';
+import {
+  CAMPAIGN_TABLE_COLUMNS,
+  countMarketingTableColumns,
+  defaultVisibleColumnIds,
+  filterVisibleColumnsForSelector,
+  getMarketingColumnOptions,
+  isMarketingColumnVisible,
+  loadMarketingVisibleColumns,
+  MARKETING_TABLE_COLUMN_STORAGE_KEYS,
+} from '../../lib/marketingTableColumns.js';
+import {
+  canEndCampaign,
+  canPauseCampaign,
+  canResumeCampaign,
+  parseCampaignApiError,
+} from '../../utils/campaignUtils.js';
+
+const CAMPAIGN_SORT_COLUMNS = {
+  sellerName: { label: 'Store', align: 'left' },
+  campaignName: { label: 'Campaign', align: 'left' },
+  campaignStatus: { label: 'Status', align: 'left' },
+  startDate: { label: 'Start', align: 'left' },
+  endDate: { label: 'End', align: 'left' },
+  fundingModel: { label: 'Funding', align: 'left' },
+  bidPercentage: { label: 'Bid %', align: 'right' },
+  dailyBudgetValue: { label: 'Daily budget', align: 'right' },
+  campaignTargetingType: { label: 'Targeting', align: 'left' },
+  channels: { label: 'Channels', align: 'left' },
+  marketplaceId: { label: 'Marketplace', align: 'left' },
+};
+
+function SortableHeader({ column, sortBy, sortOrder, onSort }) {
+  const meta = CAMPAIGN_SORT_COLUMNS[column];
+  return (
+    <TableCell align={meta.align} sx={{ fontWeight: 700 }}>
+      <TableSortLabel
+        active={sortBy === column}
+        direction={sortBy === column ? sortOrder : 'asc'}
+        onClick={() => onSort(column)}
+      >
+        {meta.label}
+      </TableSortLabel>
+    </TableCell>
+  );
+}
 
 const EBAY_DOCS =
   'https://developer.ebay.com/api-docs/sell/marketing/resources/campaign/methods/getCampaigns';
 
+const CREATE_CAMPAIGN_DOCS =
+  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-campaign-createcampaign';
+
 const PAGE_SIZES = [25, 50, 100, 200, 500];
 
-const CampaignRow = memo(function CampaignRow({ row, expanded, onToggle, showStore }) {
+const DEFAULT_CAMPAIGN_VISIBLE_COLUMNS = defaultVisibleColumnIds(CAMPAIGN_TABLE_COLUMNS);
+
+const CampaignRow = memo(function CampaignRow({
+  row,
+  expanded,
+  onToggle,
+  showStore,
+  visibleColumns,
+  pageSellerId,
+  actingKey,
+  onPause,
+  onResume,
+  onEnd,
+}) {
   const channels = Array.isArray(row.channels) ? row.channels.join(', ') : '';
-  const colSpan = showStore ? 11 : 10;
+  const colSpan = countMarketingTableColumns(visibleColumns, showStore, { leadingCols: 1 });
+  const show = (columnId) => isMarketingColumnVisible(visibleColumns, columnId, showStore);
+  const effectiveSellerId = row.sellerId || pageSellerId;
+  const rowActionKey = `${effectiveSellerId}-${row.campaignId}`;
+  const isActing = actingKey === rowActionKey;
+  const pausable = canPauseCampaign(row.campaignStatus);
+  const resumable = canResumeCampaign(row.campaignStatus);
+  const endable = canEndCampaign(row.campaignStatus);
+  const hasActions = pausable || resumable || endable;
+
+  const buildActionTarget = () => {
+    if (!effectiveSellerId || !row.campaignId || !row.marketplaceId) return null;
+    return {
+      sellerId: effectiveSellerId,
+      campaignId: row.campaignId,
+      marketplaceId: row.marketplaceId,
+      campaignName: row.campaignName,
+      campaignStatus: row.campaignStatus,
+    };
+  };
+
   return (
     <>
       <TableRow hover>
@@ -71,11 +164,12 @@ const CampaignRow = memo(function CampaignRow({ row, expanded, onToggle, showSto
             {expanded ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
           </IconButton>
         </TableCell>
-        {showStore ? (
+        {show('sellerName') ? (
           <TableCell sx={{ whiteSpace: 'nowrap', fontWeight: 600 }}>
             {row.sellerName || '—'}
           </TableCell>
         ) : null}
+        {show('campaignName') ? (
         <TableCell sx={{ fontWeight: 600, maxWidth: 220 }}>
           <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap title={row.campaignName}>
             {row.campaignName || '—'}
@@ -84,6 +178,8 @@ const CampaignRow = memo(function CampaignRow({ row, expanded, onToggle, showSto
             {row.campaignId || '—'}
           </Typography>
         </TableCell>
+        ) : null}
+        {show('campaignStatus') ? (
         <TableCell>
           <Chip
             size="small"
@@ -92,17 +188,98 @@ const CampaignRow = memo(function CampaignRow({ row, expanded, onToggle, showSto
             variant="outlined"
           />
         </TableCell>
-        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(row.startDate)}</TableCell>
-        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(row.endDate)}</TableCell>
+        ) : null}
+        {show('startDate') ? (
+        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDateOnly(row.startDate)}</TableCell>
+        ) : null}
+        {show('endDate') ? (
+        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDateOnly(row.endDate)}</TableCell>
+        ) : null}
+        {show('fundingModel') ? (
         <TableCell>{row.fundingModel || '—'}</TableCell>
+        ) : null}
+        {show('bidPercentage') ? (
         <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
           {row.bidPercentage ? `${row.bidPercentage}%` : '—'}
         </TableCell>
+        ) : null}
+        {show('dailyBudgetValue') ? (
         <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
           {formatBudget(row.dailyBudgetValue, row.dailyBudgetCurrency)}
         </TableCell>
+        ) : null}
+        {show('campaignTargetingType') ? (
         <TableCell>{row.campaignTargetingType || '—'}</TableCell>
+        ) : null}
+        {show('channels') ? (
         <TableCell sx={{ whiteSpace: 'nowrap' }}>{channels || '—'}</TableCell>
+        ) : null}
+        {show('marketplaceId') ? (
+        <TableCell sx={{ whiteSpace: 'nowrap', fontSize: '0.8rem', fontFamily: 'monospace' }}>
+          {row.marketplaceId || '—'}
+        </TableCell>
+        ) : null}
+        {show('actions') ? (
+        <TableCell sx={{ whiteSpace: 'nowrap' }}>
+          <Stack direction="row" spacing={0.5}>
+            {pausable ? (
+              <Tooltip title="Pause campaign">
+                <span>
+                  <IconButton
+                    size="small"
+                    aria-label="pause campaign"
+                    disabled={!effectiveSellerId || isActing}
+                    onClick={() => {
+                      const target = buildActionTarget();
+                      if (target) onPause?.(target);
+                    }}
+                  >
+                    <PauseIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            ) : null}
+            {resumable ? (
+              <Tooltip title="Resume campaign">
+                <span>
+                  <IconButton
+                    size="small"
+                    aria-label="resume campaign"
+                    disabled={!effectiveSellerId || isActing}
+                    onClick={() => {
+                      const target = buildActionTarget();
+                      if (target) onResume?.(target);
+                    }}
+                  >
+                    <PlayArrowIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            ) : null}
+            {endable ? (
+              <Tooltip title="End campaign">
+                <span>
+                  <IconButton
+                    size="small"
+                    aria-label="end campaign"
+                    disabled={!effectiveSellerId || isActing}
+                    color="error"
+                    onClick={() => {
+                      const target = buildActionTarget();
+                      if (target) onEnd?.(target);
+                    }}
+                  >
+                    <StopCircleIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            ) : null}
+            {!hasActions ? (
+              <Typography variant="caption" color="text.secondary">—</Typography>
+            ) : null}
+          </Stack>
+        </TableCell>
+        ) : null}
       </TableRow>
       <TableRow>
         <TableCell colSpan={colSpan} sx={{ py: 0, borderBottom: expanded ? 1 : 0, borderColor: 'divider' }}>
@@ -177,6 +354,8 @@ export default forwardRef(function MarketingCampaignsPage({
   });
   const [pageSize, setPageSize] = useState(50);
   const [offset, setOffset] = useState(0);
+  const [sortBy, setSortBy] = useState('endDate');
+  const [sortOrder, setSortOrder] = useState('asc');
 
   const [rows, setRows] = useState([]);
   const [allRows, setAllRows] = useState([]);
@@ -187,6 +366,20 @@ export default forwardRef(function MarketingCampaignsPage({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [expandedId, setExpandedId] = useState(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [actingKey, setActingKey] = useState('');
+  const [endTarget, setEndTarget] = useState(null);
+  const [lifecycleError, setLifecycleError] = useState('');
+  const [visibleColumns, setVisibleColumns] = useState(() => (
+    loadMarketingVisibleColumns(MARKETING_TABLE_COLUMN_STORAGE_KEYS.campaigns, CAMPAIGN_TABLE_COLUMNS)
+  ));
+
+  useEffect(() => {
+    localStorage.setItem(
+      MARKETING_TABLE_COLUMN_STORAGE_KEYS.campaigns,
+      JSON.stringify(visibleColumns),
+    );
+  }, [visibleColumns]);
 
   useEffect(() => {
     if (embedded || sellerId || sellers.length === 0) return;
@@ -195,6 +388,21 @@ export default forwardRef(function MarketingCampaignsPage({
 
   const isAllStores = sellerId === ALL_STORES_VALUE;
   const isAllMarketplaces = marketplace === ALL_MARKETPLACES_VALUE;
+
+  const campaignColumnOptions = useMemo(
+    () => getMarketingColumnOptions(CAMPAIGN_TABLE_COLUMNS, isAllStores),
+    [isAllStores],
+  );
+
+  const tableColSpan = useMemo(
+    () => countMarketingTableColumns(visibleColumns, isAllStores, { leadingCols: 1 }),
+    [visibleColumns, isAllStores],
+  );
+
+  const showColumn = useCallback(
+    (columnId) => isMarketingColumnVisible(visibleColumns, columnId, isAllStores),
+    [visibleColumns, isAllStores],
+  );
 
   const selectedSellerName = useMemo(
     () => resolveSellerName(sellers, sellerId, isAllStores),
@@ -299,7 +507,7 @@ export default forwardRef(function MarketingCampaignsPage({
         const { data } = await api.get('/ebay/marketing/campaigns/all', {
           params: {
             ...kpiParams,
-            perSellerLimit: ALL_STORES_PER_SELLER_LIMIT,
+            perSellerLimit: KPI_FETCH_LIMIT,
           },
         });
         rows = Array.isArray(data?.campaigns) ? data.campaigns : [];
@@ -324,15 +532,17 @@ export default forwardRef(function MarketingCampaignsPage({
   }, [sellerId, isAllStores, kpiParams, marketplace]);
 
   const refreshCampaigns = useCallback(({ refreshKpi = true } = {}) => {
-    void Promise.all([
-      loadCampaigns(),
-      refreshKpi ? loadKpiCampaigns({ refresh: true }) : Promise.resolve(),
-    ]);
-    if (refreshKpi) invalidateMarketingKpiCache('campaigns:');
+    const jobs = [loadCampaigns()];
+    if (refreshKpi) {
+      jobs.push(loadKpiCampaigns({ refresh: true }));
+      invalidateMarketingKpiCache('campaigns:');
+    }
+    void Promise.all(jobs);
   }, [loadCampaigns, loadKpiCampaigns]);
 
   useImperativeHandle(ref, () => ({
     refresh: () => refreshCampaigns(),
+    openCreate: () => setCreateOpen(true),
   }), [refreshCampaigns]);
 
   useEffect(() => {
@@ -340,8 +550,9 @@ export default forwardRef(function MarketingCampaignsPage({
     onToolbarState({
       loading,
       refreshDisabled: !sellerId || loading,
+      createDisabled: sellers.length === 0,
     });
-  }, [embedded, onToolbarState, loading, sellerId]);
+  }, [embedded, onToolbarState, loading, sellerId, sellers.length]);
 
   useEffect(() => {
     if (!active || !sellerId || !isAllStores) return;
@@ -353,10 +564,21 @@ export default forwardRef(function MarketingCampaignsPage({
     void loadSingleSellerCampaigns();
   }, [active, sellerId, isAllStores, sharedParams, pageSize, offset, loadSingleSellerCampaigns]);
 
-  useEffect(() => {
-    if (!isAllStores) return;
-    setRows(allRows.slice(offset, offset + pageSize));
-  }, [isAllStores, allRows, offset, pageSize]);
+  const displayRows = useMemo(() => {
+    const source = isAllStores ? allRows : rows;
+    const sorted = [...source].sort((a, b) => compareCampaignRows(a, b, sortBy, sortOrder));
+    return isAllStores ? sorted.slice(offset, offset + pageSize) : sorted;
+  }, [isAllStores, allRows, rows, sortBy, sortOrder, offset, pageSize]);
+
+  const handleSort = (column) => {
+    setOffset(0);
+    if (sortBy === column) {
+      setSortOrder((order) => (order === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(column);
+      setSortOrder('asc');
+    }
+  };
 
   useEffect(() => {
     if (!active || !sellerId) return;
@@ -370,7 +592,7 @@ export default forwardRef(function MarketingCampaignsPage({
   const pageIndex = Math.floor(offset / pageSize);
   const pageCount = total != null ? Math.max(1, Math.ceil(total / pageSize)) : null;
   const canPrev = offset > 0;
-  const canNext = total != null ? offset + pageSize < total : rows.length >= pageSize;
+  const canNext = total != null ? offset + pageSize < total : displayRows.length >= pageSize;
 
   const applyFilters = () => {
     setOffset(0);
@@ -380,6 +602,39 @@ export default forwardRef(function MarketingCampaignsPage({
       endDateRange,
     });
   };
+
+  const runCampaignLifecycle = useCallback(async (target, action) => {
+    if (!target?.sellerId || !target?.campaignId || !target?.marketplaceId) return;
+    const key = `${target.sellerId}-${target.campaignId}`;
+    setActingKey(key);
+    setLifecycleError('');
+    try {
+      await api.post(`/ebay/marketing/campaigns/${action}`, {
+        sellerId: target.sellerId,
+        campaignId: target.campaignId,
+        marketplaceId: target.marketplaceId,
+      });
+      if (action === 'end') setEndTarget(null);
+      refreshCampaigns();
+    } catch (err) {
+      setLifecycleError(parseCampaignApiError(err, `Failed to ${action} campaign`));
+    } finally {
+      setActingKey('');
+    }
+  }, [refreshCampaigns]);
+
+  const handlePauseCampaign = useCallback((target) => {
+    void runCampaignLifecycle(target, 'pause');
+  }, [runCampaignLifecycle]);
+
+  const handleResumeCampaign = useCallback((target) => {
+    void runCampaignLifecycle(target, 'resume');
+  }, [runCampaignLifecycle]);
+
+  const handleEndCampaign = useCallback(() => {
+    if (!endTarget) return;
+    void runCampaignLifecycle(endTarget, 'end');
+  }, [endTarget, runCampaignLifecycle]);
 
   return (
     <Box sx={{ px: { xs: 2, sm: 3 }, pt: embedded ? 1.5 : { xs: 2, sm: 3 }, pb: { xs: 2, sm: 3 }, maxWidth: 1500, mx: 'auto' }}>
@@ -395,8 +650,10 @@ export default forwardRef(function MarketingCampaignsPage({
             <Typography variant="h4" sx={{ fontWeight: 800 }}>Marketing Campaigns</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
               Promoted Listings &amp; marketing campaigns via eBay{' '}
-              <code>getCampaigns</code> —{' '}
-              <Link href={EBAY_DOCS} target="_blank" rel="noopener noreferrer">API docs</Link>
+              <code>getCampaigns</code> / <code>createCampaign</code> —{' '}
+              <Link href={EBAY_DOCS} target="_blank" rel="noopener noreferrer">List</Link>
+              {' · '}
+              <Link href={CREATE_CAMPAIGN_DOCS} target="_blank" rel="noopener noreferrer">Create</Link>
             </Typography>
           </Box>
           <Button
@@ -511,13 +768,23 @@ export default forwardRef(function MarketingCampaignsPage({
       </MarketingCollapsibleFilters>
 
       {selectedSellerName ? (
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Store: <strong>{selectedSellerName}</strong>
-          {total != null ? ` · ${total.toLocaleString()} campaign(s)` : ` · ${rows.length} on this page`}
-        </Typography>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1, gap: 1 }}>
+          <Typography variant="body2" color="text.secondary">
+            Store: <strong>{selectedSellerName}</strong>
+            {total != null ? ` · ${total.toLocaleString()} campaign(s)` : ` · ${displayRows.length} on this page`}
+          </Typography>
+          <ColumnSelector
+            allColumns={campaignColumnOptions}
+            visibleColumns={filterVisibleColumnsForSelector(visibleColumns, isAllStores)}
+            onColumnChange={setVisibleColumns}
+            onReset={() => setVisibleColumns(DEFAULT_CAMPAIGN_VISIBLE_COLUMNS)}
+            page="marketing-campaigns"
+          />
+        </Stack>
       ) : null}
 
       {error ? <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert> : null}
+      {lifecycleError ? <Alert severity="error" sx={{ mb: 2 }} onClose={() => setLifecycleError('')}>{lifecycleError}</Alert> : null}
 
       {storeErrors.length > 0 ? (
         <Alert severity="warning" sx={{ mb: 2 }}>
@@ -532,38 +799,70 @@ export default forwardRef(function MarketingCampaignsPage({
             <GrowMentalityLoader />
           </Box>
         ) : (
-          <TableContainer>
-            <Table size="small">
+          <MarketingScrollableTableContainer>
+            <Table size="small" stickyHeader>
               <TableHead>
                 <TableRow>
                   <TableCell sx={{ width: 48 }} />
-                  {isAllStores ? <TableCell sx={{ fontWeight: 700 }}>Store</TableCell> : null}
-                  <TableCell sx={{ fontWeight: 700 }}>Campaign</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Start</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>End</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Funding</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700 }}>Bid %</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700 }}>Daily budget</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Targeting</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Channels</TableCell>
+                  {showColumn('sellerName') ? (
+                    <SortableHeader column="sellerName" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('campaignName') ? (
+                    <SortableHeader column="campaignName" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('campaignStatus') ? (
+                    <SortableHeader column="campaignStatus" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('startDate') ? (
+                    <SortableHeader column="startDate" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('endDate') ? (
+                    <SortableHeader column="endDate" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('fundingModel') ? (
+                    <SortableHeader column="fundingModel" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('bidPercentage') ? (
+                    <SortableHeader column="bidPercentage" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('dailyBudgetValue') ? (
+                    <SortableHeader column="dailyBudgetValue" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('campaignTargetingType') ? (
+                    <SortableHeader column="campaignTargetingType" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('channels') ? (
+                    <SortableHeader column="channels" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('marketplaceId') ? (
+                    <SortableHeader column="marketplaceId" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('actions') ? (
+                    <TableCell sx={{ fontWeight: 700 }}>Actions</TableCell>
+                  ) : null}
                 </TableRow>
               </TableHead>
               <TableBody>
-                {rows.length === 0 ? (
+                {displayRows.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isAllStores ? 11 : 10}>
+                    <TableCell colSpan={tableColSpan}>
                       <Typography variant="body2" color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>
                         No campaigns returned for these filters.
                       </Typography>
                     </TableCell>
                   </TableRow>
                 ) : (
-                  rows.map((row) => (
+                  displayRows.map((row) => (
                     <CampaignRow
                       key={`${row.sellerId || 'one'}-${row.campaignId || row.campaignName}`}
                       row={row}
                       showStore={isAllStores}
+                      visibleColumns={visibleColumns}
+                      pageSellerId={isAllStores ? '' : sellerId}
+                      actingKey={actingKey}
+                      onPause={handlePauseCampaign}
+                      onResume={handleResumeCampaign}
+                      onEnd={setEndTarget}
                       expanded={expandedId === `${row.sellerId}-${row.campaignId}`}
                       onToggle={() => setExpandedId((prev) => (
                         prev === `${row.sellerId}-${row.campaignId}` ? null : `${row.sellerId}-${row.campaignId}`
@@ -573,7 +872,7 @@ export default forwardRef(function MarketingCampaignsPage({
                 )}
               </TableBody>
             </Table>
-          </TableContainer>
+          </MarketingScrollableTableContainer>
         )}
       </Paper>
 
@@ -598,6 +897,44 @@ export default forwardRef(function MarketingCampaignsPage({
           <ChevronRightIcon />
         </IconButton>
       </Stack>
+
+      <CreateCampaignDialog
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        sellers={sellers}
+        defaultSellerId={isAllStores ? '' : sellerId}
+        defaultMarketplace={isAllMarketplaces ? 'EBAY_US' : marketplace}
+        onCreated={() => {
+          setCreateOpen(false);
+          refreshCampaigns();
+        }}
+      />
+
+      <Dialog
+        open={Boolean(endTarget)}
+        onClose={actingKey ? undefined : () => setEndTarget(null)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>End campaign?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            End <strong>{endTarget?.campaignName || endTarget?.campaignId}</strong>
+            {' '}on {endTarget?.marketplaceId}? This cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEndTarget(null)} disabled={Boolean(actingKey)}>Cancel</Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={handleEndCampaign}
+            disabled={Boolean(actingKey)}
+          >
+            {actingKey ? 'Ending…' : 'End campaign'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 });

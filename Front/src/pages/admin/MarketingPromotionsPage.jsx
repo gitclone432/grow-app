@@ -21,9 +21,9 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableContainer,
   TableHead,
   TableRow,
+  TableSortLabel,
   TextField,
   Typography,
 } from '@mui/material';
@@ -39,11 +39,23 @@ import api from '../../lib/api';
 import GrowMentalityLoader from '../../components/GrowMentalityLoader.jsx';
 import MarketingKpiStrip from '../../components/marketing/MarketingKpiStrip.jsx';
 import MarketingCollapsibleFilters from '../../components/marketing/MarketingCollapsibleFilters.jsx';
+import MarketingScrollableTableContainer from '../../components/marketing/MarketingScrollableTableContainer.jsx';
 import MarketingStoreFilters from '../../components/marketing/MarketingStoreFilters.jsx';
 import CreateItemPromotionDialog from '../../components/marketing/CreateItemPromotionDialog.jsx';
 import UpdateItemPromotionDialog from '../../components/marketing/UpdateItemPromotionDialog.jsx';
+import ColumnSelector from '../../components/ColumnSelector.jsx';
 import { canDeletePromotion, canEditPromotion } from '../../utils/itemPromotionUtils';
 import { useEbayConnectedSellers } from '../../hooks/useEbayConnectedSellers.js';
+import {
+  countMarketingTableColumns,
+  defaultVisibleColumnIds,
+  filterVisibleColumnsForSelector,
+  getMarketingColumnOptions,
+  isMarketingColumnVisible,
+  loadMarketingVisibleColumns,
+  MARKETING_TABLE_COLUMN_STORAGE_KEYS,
+  PROMOTION_TABLE_COLUMNS,
+} from '../../lib/marketingTableColumns.js';
 import {
   ALL_MARKETPLACES_VALUE,
   ALL_STORES_PER_SELLER_LIMIT,
@@ -55,19 +67,52 @@ import {
 } from '../../lib/marketingConstants.js';
 import {
   buildMarketingKpiCacheKey,
-  formatDate,
+  comparePromotionRows,
+  formatDateOnly,
+  formatPromotionTypeLabel,
   getMarketingKpiCache,
   invalidateMarketingKpiCache,
+  isPromotionApiSortable,
   parseApiError,
+  promotionSortToApiParam,
   resolveSellerName,
   setMarketingKpiCache,
 } from '../../lib/marketingUtils.js';
+
+const PROMOTION_SORT_COLUMNS = {
+  sellerName: { label: 'Store', align: 'left' },
+  promotionName: { label: 'Promotion', align: 'left' },
+  promotionStatus: { label: 'Status', align: 'left' },
+  promotionType: { label: 'Type', align: 'left' },
+  startDate: { label: 'Start', align: 'left' },
+  endDate: { label: 'End', align: 'left' },
+  couponCode: { label: 'Coupon', align: 'left' },
+  marketplaceId: { label: 'Marketplace', align: 'left' },
+};
+
+function SortableHeader({ column, sortBy, sortOrder, onSort }) {
+  const meta = PROMOTION_SORT_COLUMNS[column];
+  return (
+    <TableCell align={meta.align} sx={{ fontWeight: 700 }}>
+      <TableSortLabel
+        active={sortBy === column}
+        direction={sortBy === column ? sortOrder : 'asc'}
+        onClick={() => onSort(column)}
+      >
+        {meta.label}
+      </TableSortLabel>
+    </TableCell>
+  );
+}
 
 const EBAY_DOCS =
   'https://developer.ebay.com/api-docs/sell/marketing/resources/promotion/methods/getPromotions';
 
 const CREATE_PROMOTION_DOCS =
   'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/createItemPromotion';
+
+const CREATE_MARKDOWN_DOCS =
+  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-item_price_markdown-createitempricemarkdownpromotion';
 
 const UPDATE_PROMOTION_DOCS =
   'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/updateItemPromotion';
@@ -77,26 +122,20 @@ const DELETE_PROMOTION_DOCS =
 
 const PAGE_SIZES = [25, 50, 100, 200];
 
-const SORT_OPTIONS = [
-  { value: '', label: 'Default sort' },
-  { value: 'START_DATE', label: 'Start date (asc)' },
-  { value: '-START_DATE', label: 'Start date (desc)' },
-  { value: 'END_DATE', label: 'End date (asc)' },
-  { value: '-END_DATE', label: 'End date (desc)' },
-  { value: 'PROMOTION_NAME', label: 'Name (A–Z)' },
-  { value: '-PROMOTION_NAME', label: 'Name (Z–A)' },
-];
+const DEFAULT_PROMOTION_VISIBLE_COLUMNS = defaultVisibleColumnIds(PROMOTION_TABLE_COLUMNS);
 
 const PromotionRow = memo(function PromotionRow({
   row,
   expanded,
   onToggle,
   showStore,
+  visibleColumns,
   pageSellerId,
   onEdit,
   onDelete,
 }) {
-  const colSpan = showStore ? 10 : 9;
+  const colSpan = countMarketingTableColumns(visibleColumns, showStore, { leadingCols: 1 });
+  const show = (columnId) => isMarketingColumnVisible(visibleColumns, columnId, showStore);
   const effectiveSellerId = row.sellerId || pageSellerId;
   const deletable = canDeletePromotion(row.promotionStatus);
   const editable = canEditPromotion(row.promotionStatus);
@@ -109,6 +148,7 @@ const PromotionRow = memo(function PromotionRow({
       marketplaceId: row.marketplaceId,
       promotionName: row.promotionName,
       promotionStatus: row.promotionStatus,
+      promotionType: row.promotionType,
     });
   };
 
@@ -120,6 +160,7 @@ const PromotionRow = memo(function PromotionRow({
       marketplaceId: row.marketplaceId,
       promotionName: row.promotionName,
       promotionStatus: row.promotionStatus,
+      promotionType: row.promotionType,
     });
   };
 
@@ -131,11 +172,12 @@ const PromotionRow = memo(function PromotionRow({
             {expanded ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
           </IconButton>
         </TableCell>
-        {showStore ? (
+        {show('sellerName') ? (
           <TableCell sx={{ whiteSpace: 'nowrap', fontWeight: 600 }}>
             {row.sellerName || '—'}
           </TableCell>
         ) : null}
+        {show('promotionName') ? (
         <TableCell sx={{ maxWidth: 240 }}>
           <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap title={row.promotionName}>
             {row.promotionName || '—'}
@@ -144,6 +186,8 @@ const PromotionRow = memo(function PromotionRow({
             {row.promotionId || '—'}
           </Typography>
         </TableCell>
+        ) : null}
+        {show('promotionStatus') ? (
         <TableCell>
           <Chip
             size="small"
@@ -152,11 +196,23 @@ const PromotionRow = memo(function PromotionRow({
             variant="outlined"
           />
         </TableCell>
-        <TableCell sx={{ whiteSpace: 'nowrap' }}>{row.promotionType || '—'}</TableCell>
-        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(row.startDate)}</TableCell>
-        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(row.endDate)}</TableCell>
+        ) : null}
+        {show('promotionType') ? (
+        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatPromotionTypeLabel(row.promotionType)}</TableCell>
+        ) : null}
+        {show('startDate') ? (
+        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDateOnly(row.startDate)}</TableCell>
+        ) : null}
+        {show('endDate') ? (
+        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDateOnly(row.endDate)}</TableCell>
+        ) : null}
+        {show('couponCode') ? (
         <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{row.couponCode || '—'}</TableCell>
+        ) : null}
+        {show('marketplaceId') ? (
         <TableCell sx={{ whiteSpace: 'nowrap', fontSize: '0.8rem' }}>{row.marketplaceId || '—'}</TableCell>
+        ) : null}
+        {show('actions') ? (
         <TableCell sx={{ whiteSpace: 'nowrap' }}>
           <Stack direction="row" spacing={0.5}>
             <IconButton
@@ -178,6 +234,7 @@ const PromotionRow = memo(function PromotionRow({
             </IconButton>
           </Stack>
         </TableCell>
+        ) : null}
       </TableRow>
       <TableRow>
         <TableCell colSpan={colSpan} sx={{ py: 0, borderBottom: expanded ? 1 : 0, borderColor: 'divider' }}>
@@ -240,7 +297,8 @@ export default forwardRef(function MarketingPromotionsPage({
   }, [embedded, onMarketplaceChange]);
   const [promotionStatus, setPromotionStatus] = useState('RUNNING');
   const [promotionType, setPromotionType] = useState('CODED_COUPON');
-  const [sort, setSort] = useState('END_DATE');
+  const [sortBy, setSortBy] = useState('endDate');
+  const [sortOrder, setSortOrder] = useState('asc');
   const [keyword, setKeyword] = useState('');
   const [appliedKeyword, setAppliedKeyword] = useState('');
   const [pageSize, setPageSize] = useState(50);
@@ -260,6 +318,16 @@ export default forwardRef(function MarketingPromotionsPage({
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const [visibleColumns, setVisibleColumns] = useState(() => (
+    loadMarketingVisibleColumns(MARKETING_TABLE_COLUMN_STORAGE_KEYS.promotions, PROMOTION_TABLE_COLUMNS)
+  ));
+
+  useEffect(() => {
+    localStorage.setItem(
+      MARKETING_TABLE_COLUMN_STORAGE_KEYS.promotions,
+      JSON.stringify(visibleColumns),
+    );
+  }, [visibleColumns]);
 
   useEffect(() => {
     if (embedded || sellerId || sellers.length === 0) return;
@@ -269,20 +337,40 @@ export default forwardRef(function MarketingPromotionsPage({
   const isAllStores = sellerId === ALL_STORES_VALUE;
   const isAllMarketplaces = marketplace === ALL_MARKETPLACES_VALUE;
 
+  const promotionColumnOptions = useMemo(
+    () => getMarketingColumnOptions(PROMOTION_TABLE_COLUMNS, isAllStores),
+    [isAllStores],
+  );
+
+  const tableColSpan = useMemo(
+    () => countMarketingTableColumns(visibleColumns, isAllStores, { leadingCols: 1 }),
+    [visibleColumns, isAllStores],
+  );
+
+  const showColumn = useCallback(
+    (columnId) => isMarketingColumnVisible(visibleColumns, columnId, isAllStores),
+    [visibleColumns, isAllStores],
+  );
+
   const selectedSellerName = useMemo(
     () => resolveSellerName(sellers, sellerId, isAllStores),
     [sellers, sellerId, isAllStores],
   );
+
+  const apiSort = useMemo(() => {
+    if (isAllStores) return undefined;
+    return promotionSortToApiParam(sortBy, sortOrder);
+  }, [isAllStores, sortBy, sortOrder]);
 
   const sharedParams = useMemo(
     () => ({
       marketplace: isAllMarketplaces ? ALL_MARKETPLACES_VALUE : marketplace,
       promotion_status: promotionStatus || undefined,
       promotion_type: promotionType || undefined,
-      sort: sort || undefined,
+      sort: apiSort || undefined,
       q: appliedKeyword.trim() || undefined,
     }),
-    [marketplace, isAllMarketplaces, promotionStatus, promotionType, sort, appliedKeyword],
+    [marketplace, isAllMarketplaces, promotionStatus, promotionType, apiSort, appliedKeyword],
   );
 
   const kpiParams = useMemo(
@@ -370,7 +458,7 @@ export default forwardRef(function MarketingPromotionsPage({
         const { data } = await api.get('/ebay/marketing/promotions/all', {
           params: {
             ...kpiParams,
-            perSellerLimit: ALL_STORES_PER_SELLER_LIMIT,
+            perSellerLimit: KPI_FETCH_LIMIT,
           },
         });
         rows = Array.isArray(data?.promotions) ? data.promotions : [];
@@ -395,11 +483,12 @@ export default forwardRef(function MarketingPromotionsPage({
   }, [sellerId, isAllStores, kpiParams, marketplace]);
 
   const refreshPromotions = useCallback(({ refreshKpi = true } = {}) => {
-    void Promise.all([
-      loadPromotions(),
-      refreshKpi ? loadKpiPromotions({ refresh: true }) : Promise.resolve(),
-    ]);
-    if (refreshKpi) invalidateMarketingKpiCache('promotions:');
+    const jobs = [loadPromotions()];
+    if (refreshKpi) {
+      jobs.push(loadKpiPromotions({ refresh: true }));
+      invalidateMarketingKpiCache('promotions:');
+    }
+    void Promise.all(jobs);
   }, [loadPromotions, loadKpiPromotions]);
 
   useImperativeHandle(ref, () => ({
@@ -426,10 +515,24 @@ export default forwardRef(function MarketingPromotionsPage({
     void loadSingleSellerPromotions();
   }, [active, sellerId, isAllStores, sharedParams, pageSize, offset, loadSingleSellerPromotions]);
 
-  useEffect(() => {
-    if (!isAllStores) return;
-    setRows(allRows.slice(offset, offset + pageSize));
-  }, [isAllStores, allRows, offset, pageSize]);
+  const displayRows = useMemo(() => {
+    const source = isAllStores ? allRows : rows;
+    const needsClientSort = isAllStores || !isPromotionApiSortable(sortBy);
+    const sorted = needsClientSort
+      ? [...source].sort((a, b) => comparePromotionRows(a, b, sortBy, sortOrder))
+      : source;
+    return isAllStores ? sorted.slice(offset, offset + pageSize) : sorted;
+  }, [isAllStores, allRows, rows, sortBy, sortOrder, offset, pageSize]);
+
+  const handleSort = (column) => {
+    setOffset(0);
+    if (sortBy === column) {
+      setSortOrder((order) => (order === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(column);
+      setSortOrder('asc');
+    }
+  };
 
   useEffect(() => {
     if (!active || !sellerId) return;
@@ -443,7 +546,7 @@ export default forwardRef(function MarketingPromotionsPage({
   const pageIndex = Math.floor(offset / pageSize);
   const pageCount = total != null ? Math.max(1, Math.ceil(total / pageSize)) : null;
   const canPrev = offset > 0;
-  const canNext = total != null ? offset + pageSize < total : rows.length >= pageSize;
+  const canNext = total != null ? offset + pageSize < total : displayRows.length >= pageSize;
 
   const applyKeyword = () => {
     setOffset(0);
@@ -460,6 +563,7 @@ export default forwardRef(function MarketingPromotionsPage({
           sellerId: deleteTarget.sellerId,
           promotionId: deleteTarget.promotionId,
           marketplaceId: deleteTarget.marketplaceId,
+          promotionType: deleteTarget.promotionType,
         },
       });
       setDeleteTarget(null);
@@ -484,10 +588,14 @@ export default forwardRef(function MarketingPromotionsPage({
           <Box>
             <Typography variant="h4" sx={{ fontWeight: 800 }}>Marketing Promotions</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-              Item discounts &amp; coupons via eBay <code>getPromotions</code> / <code>createItemPromotion</code> —{' '}
+              Item discounts, markdown sales &amp; coupons via eBay{' '}
+              <code>getPromotions</code> / <code>createItemPromotion</code> /{' '}
+              <code>createItemPriceMarkdownPromotion</code> —{' '}
               <Link href={EBAY_DOCS} target="_blank" rel="noopener noreferrer">List</Link>
               {' · '}
               <Link href={CREATE_PROMOTION_DOCS} target="_blank" rel="noopener noreferrer">Create</Link>
+              {' · '}
+              <Link href={CREATE_MARKDOWN_DOCS} target="_blank" rel="noopener noreferrer">Markdown</Link>
               {' · '}
               <Link href={UPDATE_PROMOTION_DOCS} target="_blank" rel="noopener noreferrer">Update</Link>
               {' · '}
@@ -556,16 +664,6 @@ export default forwardRef(function MarketingPromotionsPage({
               </Select>
             </FormControl>
           </Grid>
-          <Grid item xs={12} sm={6} md={3}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Sort</InputLabel>
-              <Select label="Sort" value={sort} onChange={(e) => { setSort(e.target.value); setOffset(0); }}>
-                {SORT_OPTIONS.map((opt) => (
-                  <MenuItem key={opt.value || 'default'} value={opt.value}>{opt.label}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Grid>
           <Grid item xs={12} sm={6} md={4}>
             <TextField
               fullWidth
@@ -596,10 +694,19 @@ export default forwardRef(function MarketingPromotionsPage({
       </MarketingCollapsibleFilters>
 
       {selectedSellerName ? (
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Store: <strong>{selectedSellerName}</strong>
-          {total != null ? ` · ${total.toLocaleString()} promotion(s)` : ` · ${rows.length} on this page`}
-        </Typography>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1, gap: 1 }}>
+          <Typography variant="body2" color="text.secondary">
+            Store: <strong>{selectedSellerName}</strong>
+            {total != null ? ` · ${total.toLocaleString()} promotion(s)` : ` · ${displayRows.length} on this page`}
+          </Typography>
+          <ColumnSelector
+            allColumns={promotionColumnOptions}
+            visibleColumns={filterVisibleColumnsForSelector(visibleColumns, isAllStores)}
+            onColumnChange={setVisibleColumns}
+            onReset={() => setVisibleColumns(DEFAULT_PROMOTION_VISIBLE_COLUMNS)}
+            page="marketing-promotions"
+          />
+        </Stack>
       ) : null}
 
       {error ? <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert> : null}
@@ -617,37 +724,56 @@ export default forwardRef(function MarketingPromotionsPage({
             <GrowMentalityLoader />
           </Box>
         ) : (
-          <TableContainer>
-            <Table size="small">
+          <MarketingScrollableTableContainer>
+            <Table size="small" stickyHeader>
               <TableHead>
                 <TableRow>
                   <TableCell sx={{ width: 48 }} />
-                  {isAllStores ? <TableCell sx={{ fontWeight: 700 }}>Store</TableCell> : null}
-                  <TableCell sx={{ fontWeight: 700 }}>Promotion</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Type</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Start</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>End</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Coupon</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Marketplace</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Actions</TableCell>
+                  {showColumn('sellerName') ? (
+                    <SortableHeader column="sellerName" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('promotionName') ? (
+                    <SortableHeader column="promotionName" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('promotionStatus') ? (
+                    <SortableHeader column="promotionStatus" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('promotionType') ? (
+                    <SortableHeader column="promotionType" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('startDate') ? (
+                    <SortableHeader column="startDate" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('endDate') ? (
+                    <SortableHeader column="endDate" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('couponCode') ? (
+                    <SortableHeader column="couponCode" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('marketplaceId') ? (
+                    <SortableHeader column="marketplaceId" sortBy={sortBy} sortOrder={sortOrder} onSort={handleSort} />
+                  ) : null}
+                  {showColumn('actions') ? (
+                    <TableCell sx={{ fontWeight: 700 }}>Actions</TableCell>
+                  ) : null}
                 </TableRow>
               </TableHead>
               <TableBody>
-                {rows.length === 0 ? (
+                {displayRows.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isAllStores ? 10 : 9}>
+                    <TableCell colSpan={tableColSpan}>
                       <Typography variant="body2" color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>
                         No promotions returned for these filters.
                       </Typography>
                     </TableCell>
                   </TableRow>
                 ) : (
-                  rows.map((row) => (
+                  displayRows.map((row) => (
                     <PromotionRow
                       key={`${row.sellerId || 'one'}-${row.promotionId || row.promotionName}`}
                       row={row}
                       showStore={isAllStores}
+                      visibleColumns={visibleColumns}
                       pageSellerId={isAllStores ? '' : sellerId}
                       onEdit={setUpdateTarget}
                       onDelete={setDeleteTarget}
@@ -660,7 +786,7 @@ export default forwardRef(function MarketingPromotionsPage({
                 )}
               </TableBody>
             </Table>
-          </TableContainer>
+          </MarketingScrollableTableContainer>
         )}
       </Paper>
 

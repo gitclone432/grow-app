@@ -8,11 +8,15 @@ import {
   DialogContent,
   DialogTitle,
   FormControl,
+  FormControlLabel,
   Grid,
+  InputAdornment,
   InputLabel,
   Link,
   MenuItem,
   Select,
+  Stack,
+  Switch,
   TextField,
   Typography,
 } from '@mui/material';
@@ -21,23 +25,27 @@ import GrowMentalityLoader from '../GrowMentalityLoader.jsx';
 import {
   MARKETPLACES,
   canEditPromotion,
+  getPromotionLifecycleActions,
+  getPromotionStatusOptionsForUpdate,
   isLimitedPromotionEdit,
+  isMarkdownPromotionType,
   mergePromotionForUpdate,
   parseApiError,
   promotionApiToForm,
   toEbayUtcIso,
 } from '../../utils/itemPromotionUtils';
 
-const UPDATE_DOCS =
+const UPDATE_ITEM_PROMOTION_DOCS =
   'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/updateItemPromotion';
 
-const STATUS_OPTIONS = [
-  { value: 'SCHEDULED', label: 'Scheduled' },
-  { value: 'DRAFT', label: 'Draft' },
-  { value: 'RUNNING', label: 'Running' },
-  { value: 'PAUSED', label: 'Paused' },
-  { value: 'ENDED', label: 'Ended' },
-];
+const UPDATE_MARKDOWN_DOCS =
+  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-item_price_markdown-updateitempricemarkdownpromotion';
+
+function getPromotionInventoryCriterion(promotion) {
+  return promotion?.inventoryCriterion
+    || promotion?.selectedInventoryDiscounts?.[0]?.inventoryCriterion
+    || {};
+}
 
 export default function UpdateItemPromotionDialog({
   open,
@@ -67,6 +75,7 @@ export default function UpdateItemPromotionDialog({
         sellerId: target.sellerId,
         promotionId: target.promotionId,
         marketplaceId: target.marketplaceId,
+        promotionType: target.promotionType,
       },
     })
       .then(({ data }) => {
@@ -86,8 +95,14 @@ export default function UpdateItemPromotionDialog({
     return () => { cancelled = true; };
   }, [open, target]);
 
-  const limitedEdit = isLimitedPromotionEdit(form?.promotionStatus || target?.promotionStatus);
-  const editable = canEditPromotion(form?.promotionStatus || target?.promotionStatus);
+  const originalStatus = rawPromotion?.promotionStatus || target?.promotionStatus;
+  const limitedEdit = isLimitedPromotionEdit(originalStatus);
+  const editable = canEditPromotion(originalStatus);
+  const statusOptions = getPromotionStatusOptionsForUpdate(originalStatus);
+  const isMarkdown = isMarkdownPromotionType(form?.promotionType || target?.promotionType || rawPromotion?.promotionType);
+  const updateDocsUrl = isMarkdown ? UPDATE_MARKDOWN_DOCS : UPDATE_ITEM_PROMOTION_DOCS;
+  const updateApiName = isMarkdown ? 'updateItemPriceMarkdownPromotion' : 'updateItemPromotion';
+  const dialogTitle = isMarkdown ? 'Update markdown sale' : 'Update item promotion';
 
   const payloadPreview = useMemo(() => {
     if (!rawPromotion || !form) return null;
@@ -110,15 +125,54 @@ export default function UpdateItemPromotionDialog({
       return;
     }
 
-    const promotion = mergePromotionForUpdate(rawPromotion, form);
+    const originalStatus = rawPromotion.promotionStatus;
+    const lifecycle = getPromotionLifecycleActions(originalStatus, form.promotionStatus);
+    const limited = isLimitedPromotionEdit(originalStatus);
+    const merged = mergePromotionForUpdate(rawPromotion, form);
+    const endDateChanged = merged.endDate !== String(rawPromotion.endDate || '');
+    const rawInv = getPromotionInventoryCriterion(rawPromotion);
+    const mergedInv = getPromotionInventoryCriterion(merged);
+    const inventoryChanged = JSON.stringify(mergedInv) !== JSON.stringify(rawInv);
+
     setSubmitting(true);
     try {
-      await api.put('/ebay/marketing/promotions/update', {
-        sellerId: target.sellerId,
-        promotionId: target.promotionId,
-        marketplaceId: target.marketplaceId,
-        promotion,
-      });
+      const promotionType = form.promotionType || target.promotionType;
+      if (limited) {
+        const needsUpdate = lifecycle.end || endDateChanged || inventoryChanged;
+        if (needsUpdate) {
+          await api.put('/ebay/marketing/promotions/update', {
+            sellerId: target.sellerId,
+            promotionId: target.promotionId,
+            marketplaceId: target.marketplaceId,
+            promotionType,
+            promotion: merged,
+          });
+        }
+        if (lifecycle.pause) {
+          await api.post('/ebay/marketing/promotions/pause', {
+            sellerId: target.sellerId,
+            promotionId: target.promotionId,
+            marketplaceId: target.marketplaceId,
+          });
+        }
+        if (lifecycle.resume) {
+          await api.post('/ebay/marketing/promotions/resume', {
+            sellerId: target.sellerId,
+            promotionId: target.promotionId,
+            marketplaceId: target.marketplaceId,
+          });
+        }
+      } else {
+        const promotion = mergePromotionForUpdate(rawPromotion, form);
+        await api.put('/ebay/marketing/promotions/update', {
+          sellerId: target.sellerId,
+          promotionId: target.promotionId,
+          marketplaceId: target.marketplaceId,
+          promotionType: form.promotionType || target.promotionType,
+          promotion,
+        });
+      }
+
       setSuccess('Promotion updated successfully.');
       onUpdated?.();
     } catch (err) {
@@ -130,11 +184,11 @@ export default function UpdateItemPromotionDialog({
 
   return (
     <Dialog open={open} onClose={submitting ? undefined : onClose} fullWidth maxWidth="md">
-      <DialogTitle>Update item promotion</DialogTitle>
+      <DialogTitle>{dialogTitle}</DialogTitle>
       <DialogContent dividers>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Uses eBay <code>updateItemPromotion</code> —{' '}
-          <Link href={UPDATE_DOCS} target="_blank" rel="noopener noreferrer">API docs</Link>.
+          Uses eBay <code>{updateApiName}</code> —{' '}
+          <Link href={updateDocsUrl} target="_blank" rel="noopener noreferrer">API docs</Link>.
           eBay requires the full promotion body on update.
         </Typography>
 
@@ -163,7 +217,7 @@ export default function UpdateItemPromotionDialog({
 
         {!loading && editable && limitedEdit ? (
           <Alert severity="info" sx={{ mb: 2 }}>
-            Running or paused promotions can only change end date and inventory listings.
+            Pause and resume use eBay lifecycle APIs. Ending sets the end date to now. End date and inventory still update via save.
           </Alert>
         ) : null}
 
@@ -180,14 +234,14 @@ export default function UpdateItemPromotionDialog({
               />
             </Grid>
             <Grid item xs={12} sm={6}>
-              <FormControl fullWidth size="small" disabled={limitedEdit}>
+              <FormControl fullWidth size="small">
                 <InputLabel>Status</InputLabel>
                 <Select
                   label="Status"
                   value={form.promotionStatus}
                   onChange={(e) => update('promotionStatus', e.target.value)}
                 >
-                  {STATUS_OPTIONS.map((opt) => (
+                  {statusOptions.map((opt) => (
                     <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
                   ))}
                 </Select>
@@ -266,25 +320,108 @@ export default function UpdateItemPromotionDialog({
             ) : null}
             {!limitedEdit ? (
               <>
-                <Grid item xs={12} sm={6}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    label="Coupon code"
-                    value={form.couponCode}
-                    onChange={(e) => update('couponCode', e.target.value)}
-                    disabled={form.promotionType !== 'CODED_COUPON'}
-                  />
-                </Grid>
-                <Grid item xs={12} sm={6}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    label="Promotion image URL"
-                    value={form.promotionImageUrl}
-                    onChange={(e) => update('promotionImageUrl', e.target.value)}
-                  />
-                </Grid>
+                {isMarkdown ? (
+                  <>
+                    <Grid item xs={12} sm={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Discount type</InputLabel>
+                        <Select
+                          label="Discount type"
+                          value={form.benefitType}
+                          onChange={(e) => update('benefitType', e.target.value)}
+                        >
+                          <MenuItem value="percentageOffItem">Percentage off item</MenuItem>
+                          <MenuItem value="amountOffItem">Amount off item</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      {form.benefitType === 'amountOffItem' ? (
+                        <TextField
+                          fullWidth
+                          size="small"
+                          label="Amount off item"
+                          value={form.amountOffItem}
+                          onChange={(e) => update('amountOffItem', e.target.value)}
+                        />
+                      ) : (
+                        <TextField
+                          fullWidth
+                          size="small"
+                          label="Percentage off item"
+                          value={form.percentageOffItem}
+                          onChange={(e) => update('percentageOffItem', e.target.value)}
+                          InputProps={{
+                            endAdornment: <InputAdornment position="end">%</InputAdornment>,
+                          }}
+                        />
+                      )}
+                    </Grid>
+                    <Grid item xs={12}>
+                      <TextField
+                        fullWidth
+                        size="small"
+                        required
+                        label="Promotion image URL"
+                        value={form.promotionImageUrl}
+                        onChange={(e) => update('promotionImageUrl', e.target.value)}
+                      />
+                    </Grid>
+                    <Grid item xs={12}>
+                      <Stack spacing={0.5}>
+                        <FormControlLabel
+                          control={(
+                            <Switch
+                              checked={form.applyFreeShipping}
+                              onChange={(e) => update('applyFreeShipping', e.target.checked)}
+                            />
+                          )}
+                          label="Apply free shipping"
+                        />
+                        <FormControlLabel
+                          control={(
+                            <Switch
+                              checked={form.autoSelectFutureInventory}
+                              onChange={(e) => update('autoSelectFutureInventory', e.target.checked)}
+                            />
+                          )}
+                          label="Auto-select future inventory"
+                        />
+                        <FormControlLabel
+                          control={(
+                            <Switch
+                              checked={form.blockPriceIncreaseInItemRevision}
+                              onChange={(e) => update('blockPriceIncreaseInItemRevision', e.target.checked)}
+                            />
+                          )}
+                          label="Block price increase in item revision"
+                        />
+                      </Stack>
+                    </Grid>
+                  </>
+                ) : (
+                  <>
+                    <Grid item xs={12} sm={6}>
+                      <TextField
+                        fullWidth
+                        size="small"
+                        label="Coupon code"
+                        value={form.couponCode}
+                        onChange={(e) => update('couponCode', e.target.value)}
+                        disabled={form.promotionType !== 'CODED_COUPON'}
+                      />
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <TextField
+                        fullWidth
+                        size="small"
+                        label="Promotion image URL"
+                        value={form.promotionImageUrl}
+                        onChange={(e) => update('promotionImageUrl', e.target.value)}
+                      />
+                    </Grid>
+                  </>
+                )}
               </>
             ) : null}
           </Grid>

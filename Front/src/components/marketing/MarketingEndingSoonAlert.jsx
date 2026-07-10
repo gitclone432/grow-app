@@ -15,7 +15,7 @@ import {
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import EventBusyIcon from '@mui/icons-material/EventBusy';
-import { formatDate } from '../../lib/marketingUtils.js';
+import { formatDateOnly, formatEndingSoonBanner } from '../../lib/marketingUtils.js';
 import { useMarketingEndingSoon } from '../../hooks/useMarketingEndingSoon.js';
 
 function daysLeftLabel(daysLeft) {
@@ -50,7 +50,7 @@ export default function MarketingEndingSoonAlert({ sellerId, marketplace }) {
       >
         <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
           <Typography variant="body2" sx={{ fontWeight: 700 }}>
-            {loading ? 'Checking endings…' : `${count} ending within 5 days`}
+            {loading ? 'Checking endings…' : formatEndingSoonBanner(items)}
           </Typography>
           {!loading && count > 0 ? (
             <Chip size="small" color="warning" label="View" sx={{ fontWeight: 700 }} />
@@ -108,7 +108,7 @@ export default function MarketingEndingSoonAlert({ sellerId, marketplace }) {
                     secondary={(
                       <Box component="span" sx={{ display: 'block', mt: 0.5 }}>
                         <Typography component="span" variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                          {daysLeftLabel(item.daysLeft)} · Ends {formatDate(item.endDate)}
+                          {daysLeftLabel(item.daysLeft)} · Ends {formatDateOnly(item.endDate)}
                         </Typography>
                         {item.sellerName ? (
                           <Typography component="span" variant="caption" color="text.secondary" sx={{ display: 'block' }}>

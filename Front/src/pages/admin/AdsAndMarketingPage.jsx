@@ -19,11 +19,15 @@ import { useEbayConnectedSellers } from '../../hooks/useEbayConnectedSellers.js'
 
 const MarketingCampaignsPage = lazy(() => import('./MarketingCampaignsPage.jsx'));
 const MarketingPromotionsPage = lazy(() => import('./MarketingPromotionsPage.jsx'));
+const MarketingAdvertisingEligibilityPage = lazy(() => import('./MarketingAdvertisingEligibilityPage.jsx'));
 
 export default function AdsAndMarketingPage() {
   const [tab, setTab] = useState('promotions');
+  const [campaignsMounted, setCampaignsMounted] = useState(false);
+  const [eligibilityMounted, setEligibilityMounted] = useState(false);
   const promotionsRef = useRef(null);
   const campaignsRef = useRef(null);
+  const eligibilityRef = useRef(null);
   const [promoToolbar, setPromoToolbar] = useState({
     loading: false,
     refreshDisabled: true,
@@ -32,14 +36,25 @@ export default function AdsAndMarketingPage() {
   const [campaignToolbar, setCampaignToolbar] = useState({
     loading: false,
     refreshDisabled: true,
+    createDisabled: true,
+  });
+  const [eligibilityToolbar, setEligibilityToolbar] = useState({
+    loading: false,
+    refreshDisabled: true,
   });
   const { sellers, loading: sellersLoading } = useEbayConnectedSellers();
   const [sellerId, setSellerId] = useState(ALL_STORES_VALUE);
   const [marketplace, setMarketplace] = useState(ALL_MARKETPLACES_VALUE);
 
   useEffect(() => {
+    if (tab === 'campaigns') setCampaignsMounted(true);
+    if (tab === 'eligibility') setEligibilityMounted(true);
+  }, [tab]);
+
+  useEffect(() => {
     void import('./MarketingCampaignsPage.jsx');
     void import('./MarketingPromotionsPage.jsx');
+    void import('./MarketingAdvertisingEligibilityPage.jsx');
   }, []);
 
   const handleSellerChange = (value) => {
@@ -59,6 +74,11 @@ export default function AdsAndMarketingPage() {
   const campaignsTabProps = {
     ...sharedTabProps,
     active: tab === 'campaigns',
+  };
+
+  const eligibilityTabProps = {
+    ...sharedTabProps,
+    active: tab === 'eligibility',
   };
 
   return (
@@ -88,7 +108,7 @@ export default function AdsAndMarketingPage() {
               Ads and Marketing
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              Running KPIs, promotions, and campaigns in one place.
+              Running KPIs, promotions, campaigns, and advertising eligibility in one place.
             </Typography>
           </Box>
         </Stack>
@@ -124,6 +144,7 @@ export default function AdsAndMarketingPage() {
           >
             <Tab value="promotions" label="Marketing Promotions" />
             <Tab value="campaigns" label="Marketing Campaigns" />
+            <Tab value="eligibility" label="Advertising Eligibility" />
           </Tabs>
 
           <Stack direction="row" spacing={1} sx={{ pb: { xs: 1, sm: 0.5 }, flexShrink: 0 }}>
@@ -148,13 +169,34 @@ export default function AdsAndMarketingPage() {
                   Refresh
                 </Button>
               </>
+            ) : tab === 'campaigns' ? (
+              <>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<AddIcon />}
+                  onClick={() => campaignsRef.current?.openCreate()}
+                  disabled={campaignToolbar.createDisabled}
+                >
+                  Create campaign
+                </Button>
+                <Button
+                  variant="contained"
+                  size="small"
+                  startIcon={<RefreshIcon />}
+                  onClick={() => campaignsRef.current?.refresh()}
+                  disabled={campaignToolbar.refreshDisabled}
+                >
+                  Refresh
+                </Button>
+              </>
             ) : (
               <Button
                 variant="contained"
                 size="small"
                 startIcon={<RefreshIcon />}
-                onClick={() => campaignsRef.current?.refresh()}
-                disabled={campaignToolbar.refreshDisabled}
+                onClick={() => eligibilityRef.current?.refresh()}
+                disabled={eligibilityToolbar.refreshDisabled}
               >
                 Refresh
               </Button>
@@ -178,11 +220,22 @@ export default function AdsAndMarketingPage() {
           />
         </Box>
         <Box sx={{ display: tab === 'campaigns' ? 'block' : 'none' }}>
-          <MarketingCampaignsPage
-            ref={campaignsRef}
-            {...campaignsTabProps}
-            onToolbarState={setCampaignToolbar}
-          />
+          {campaignsMounted ? (
+            <MarketingCampaignsPage
+              ref={campaignsRef}
+              {...campaignsTabProps}
+              onToolbarState={setCampaignToolbar}
+            />
+          ) : null}
+        </Box>
+        <Box sx={{ display: tab === 'eligibility' ? 'block' : 'none' }}>
+          {eligibilityMounted ? (
+            <MarketingAdvertisingEligibilityPage
+              ref={eligibilityRef}
+              {...eligibilityTabProps}
+              onToolbarState={setEligibilityToolbar}
+            />
+          ) : null}
         </Box>
       </Suspense>
     </Box>

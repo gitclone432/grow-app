@@ -13,13 +13,25 @@ import {
   setEndingSoonCache,
 } from '../lib/marketingUtils.js';
 
+const ENDING_SOON_DEFER_MS = 2500;
+
 export function useMarketingEndingSoon({ sellerId, marketplace, enabled = true }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [deferReady, setDeferReady] = useState(false);
+
+  useEffect(() => {
+    if (!enabled) {
+      setDeferReady(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setDeferReady(true), ENDING_SOON_DEFER_MS);
+    return () => clearTimeout(timer);
+  }, [enabled, sellerId, marketplace]);
 
   const loadEndingSoon = useCallback(async ({ refresh = false } = {}) => {
-    if (!enabled || !sellerId) {
-      setItems([]);
+    if (!enabled || !deferReady || !sellerId) {
+      if (!sellerId) setItems([]);
       return;
     }
 
@@ -95,7 +107,7 @@ export function useMarketingEndingSoon({ sellerId, marketplace, enabled = true }
     } finally {
       setLoading(false);
     }
-  }, [enabled, sellerId, marketplace]);
+  }, [enabled, deferReady, sellerId, marketplace]);
 
   useEffect(() => {
     void loadEndingSoon();

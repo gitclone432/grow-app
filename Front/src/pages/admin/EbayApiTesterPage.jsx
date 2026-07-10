@@ -26,6 +26,7 @@ const PRESETS = [
   // Sell Account / eBay Parameters
   { group: 'Sell Account', label: 'Account Privileges (All Stores)', method: 'GET', path: '/ebay/account/privileges/all', params: {} },
   { group: 'Sell Account', label: 'Account Privileges (Single Seller)', method: 'GET', path: '/ebay/account/privileges', params: { sellerId: '<sellerId>' } },
+  { group: 'Sell Account', label: 'Store Overview (All Stores)', method: 'GET', path: '/ebay/store-overview/all', params: {} },
   { group: 'Sell Account', label: 'Selling Privileges (All Stores)', method: 'GET', path: '/ebay/selling/summary/all', params: {} },
   { group: 'Sell Account', label: 'Selling Summary (Single Seller)', method: 'GET', path: '/ebay/selling/summary', params: { sellerId: '<sellerId>' } },
   { group: 'Sell Account', label: 'Store Subscriptions (All Stores)', method: 'GET', path: '/ebay/account/subscriptions/all', params: {} },
@@ -33,6 +34,7 @@ const PRESETS = [
   { group: 'Sell Account', label: 'eBay API Usage Stats (All Stores)', method: 'GET', path: '/ebay/api-usage-stats/all', params: {} },
   { group: 'Sell Account', label: 'eBay API Usage Stats (Single Seller)', method: 'GET', path: '/ebay/api-usage-stats', params: { sellerId: '<sellerId>' } },
   { group: 'Sell Account', label: 'Seller Funds Summary', method: 'GET', path: '/ebay/seller-funds-summary', params: {} },
+  { group: 'Sell Account', label: 'Advertising Eligibility', method: 'GET', path: '/sell/account/v1/advertising_eligibility', params: {} },
 
   // Payouts / Finances
   { group: 'Payouts & Finances', label: 'Processing Transactions', method: 'GET', path: '/ebay/processing-transactions/<sellerId>', params: {} },
@@ -606,7 +608,7 @@ export default function EbayApiTesterPage() {
   const [sellerId, setSellerId] = useState('');
   const [sellers, setSellers] = useState([]);
   const [orderId, setOrderId] = useState('');
-  const [marketplaceId, setMarketplaceId] = useState('');
+  const [marketplaceId, setMarketplaceId] = useState('EBAY_US');
   const [tradingCallName, setTradingCallName] = useState('GetBestOffers');
   const [tradingSiteId, setTradingSiteId] = useState('0');
   const [tradingCompatibilityLevel, setTradingCompatibilityLevel] = useState('1423');
@@ -1705,6 +1707,9 @@ export default function EbayApiTesterPage() {
           <br />
           <strong>Traffic report (single listing):</strong> use <code>dimension: &quot;DAY&quot;</code> or <code>&quot;LISTING&quot;</code> — put the item ID in{' '}
           <code>filter</code> as <code>listing_ids:{'{127866369320}'}</code>, not in dimension.
+          <br />
+          <strong>Sell Account / Marketing APIs</strong> (e.g. <code>/sell/account/v1/advertising_eligibility</code>) require{' '}
+          <code>X-EBAY-C-MARKETPLACE-ID</code> — set Marketplace ID (defaults to <code>EBAY_US</code>).
         </Alert>
       ) : (
         <Alert severity="info" sx={{ mb: 2 }}>
@@ -1768,11 +1773,12 @@ export default function EbayApiTesterPage() {
                   ))}
                 </TextField>
                 <TextField
-                  label="Marketplace ID (optional)"
+                  label="Marketplace ID"
                   value={marketplaceId}
                   onChange={(e) => setMarketplaceId(e.target.value)}
                   size="small"
                   placeholder="EBAY_US"
+                  helperText="Required for Sell Account, Marketing, Inventory APIs"
                   sx={{ minWidth: 200 }}
                 />
                 <TextField
@@ -1896,11 +1902,12 @@ export default function EbayApiTesterPage() {
                       sx={{ minWidth: 260 }}
                     />
                     <TextField
-                      label="Marketplace ID (optional)"
+                      label="Marketplace ID"
                       value={marketplaceId}
                       onChange={(e) => setMarketplaceId(e.target.value)}
                       size="small"
                       placeholder="EBAY_US"
+                      helperText="Required for Sell Account, Marketing, Inventory APIs"
                       sx={{ minWidth: 200 }}
                     />
                   </>
