@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
   Box,
@@ -12,7 +12,6 @@ import {
   Grid,
   InputAdornment,
   InputLabel,
-  Link,
   MenuItem,
   Select,
   Stack,
@@ -32,14 +31,7 @@ import {
   mergePromotionForUpdate,
   parseApiError,
   promotionApiToForm,
-  toEbayUtcIso,
 } from '../../utils/itemPromotionUtils';
-
-const UPDATE_ITEM_PROMOTION_DOCS =
-  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/updateItemPromotion';
-
-const UPDATE_MARKDOWN_DOCS =
-  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-item_price_markdown-updateitempricemarkdownpromotion';
 
 function getPromotionInventoryCriterion(promotion) {
   return promotion?.inventoryCriterion
@@ -100,18 +92,7 @@ export default function UpdateItemPromotionDialog({
   const editable = canEditPromotion(originalStatus);
   const statusOptions = getPromotionStatusOptionsForUpdate(originalStatus);
   const isMarkdown = isMarkdownPromotionType(form?.promotionType || target?.promotionType || rawPromotion?.promotionType);
-  const updateDocsUrl = isMarkdown ? UPDATE_MARKDOWN_DOCS : UPDATE_ITEM_PROMOTION_DOCS;
-  const updateApiName = isMarkdown ? 'updateItemPriceMarkdownPromotion' : 'updateItemPromotion';
   const dialogTitle = isMarkdown ? 'Update markdown sale' : 'Update item promotion';
-
-  const payloadPreview = useMemo(() => {
-    if (!rawPromotion || !form) return null;
-    try {
-      return mergePromotionForUpdate(rawPromotion, form);
-    } catch {
-      return null;
-    }
-  }, [rawPromotion, form]);
 
   const update = (key, value) => setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
 
@@ -186,12 +167,6 @@ export default function UpdateItemPromotionDialog({
     <Dialog open={open} onClose={submitting ? undefined : onClose} fullWidth maxWidth="md">
       <DialogTitle>{dialogTitle}</DialogTitle>
       <DialogContent dividers>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Uses eBay <code>{updateApiName}</code> —{' '}
-          <Link href={updateDocsUrl} target="_blank" rel="noopener noreferrer">API docs</Link>.
-          eBay requires the full promotion body on update.
-        </Typography>
-
         {target ? (
           <Typography variant="body2" sx={{ mb: 2 }}>
             <strong>{target.promotionName || target.promotionId}</strong>
@@ -425,29 +400,6 @@ export default function UpdateItemPromotionDialog({
               </>
             ) : null}
           </Grid>
-        ) : null}
-
-        {payloadPreview ? (
-          <Box sx={{ mt: 2 }}>
-            <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Update payload preview</Typography>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-              End date UTC: {toEbayUtcIso(form?.endDate) || '—'}
-            </Typography>
-            <Box
-              component="pre"
-              sx={{
-                m: 0,
-                p: 1.5,
-                bgcolor: 'grey.50',
-                borderRadius: 1,
-                fontSize: '0.72rem',
-                overflow: 'auto',
-                maxHeight: 220,
-              }}
-            >
-              {JSON.stringify(payloadPreview, null, 2)}
-            </Box>
-          </Box>
         ) : null}
       </DialogContent>
       <DialogActions sx={{ px: 3, py: 2 }}>

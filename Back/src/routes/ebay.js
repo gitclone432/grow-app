@@ -17458,6 +17458,158 @@ router.post('/marketing/campaigns/end', requireAuth, requirePageAccess(['Marketi
   handleCampaignLifecycleRoute(req, res, 'end', END_CAMPAIGN_DOCS)
 ));
 
+const GET_CAMPAIGN_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/campaign/methods/getCampaign';
+
+const UPDATE_CAMPAIGN_IDENTIFICATION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/campaign/methods/updateCampaignIdentification';
+
+async function callEbayGetCampaignApi({ sellerDoc, campaignId, marketplaceId }) {
+  const accessToken = await ensureValidToken(sellerDoc);
+  const encodedCampaignId = encodeURIComponent(campaignId);
+  const apiPath = `/sell/marketing/v1/ad_campaign/${encodedCampaignId}`;
+  const url = `https://api.ebay.com${apiPath}`;
+  const response = await axios.get(url, {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'GET',
+      path: apiPath,
+      marketplace: marketplaceId,
+    }),
+    timeout: 90000,
+    validateStatus: () => true,
+  });
+
+  return {
+    response,
+    data: parseEbayRawResponseData(response),
+  };
+}
+
+async function callEbayUpdateCampaignIdentificationApi({
+  sellerDoc,
+  campaignId,
+  marketplaceId,
+  body,
+}) {
+  const accessToken = await ensureValidToken(sellerDoc);
+  const encodedCampaignId = encodeURIComponent(campaignId);
+  const apiPath = `/sell/marketing/v1/ad_campaign/${encodedCampaignId}/update_campaign_identification`;
+  const url = `https://api.ebay.com${apiPath}`;
+  const response = await axios.post(url, body, {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'POST',
+      path: apiPath,
+      marketplace: marketplaceId,
+    }),
+    timeout: 90000,
+    validateStatus: () => true,
+  });
+
+  return {
+    response,
+    data: parseEbayRawResponseData(response),
+  };
+}
+
+router.get('/marketing/campaigns/item', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const { sellerId, campaignId, marketplaceId } = req.query || {};
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!campaignId) return res.status(400).json({ success: false, error: 'campaignId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const { response, data } = await callEbayGetCampaignApi({
+      sellerDoc,
+      campaignId,
+      marketplaceId: mp,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Campaign Get] Error:', data || response.status);
+      return sendEbayMarketingCampaignError(res, response, data, 'Failed to load campaign');
+    }
+
+    return res.json({
+      success: true,
+      docsUrl: GET_CAMPAIGN_DOCS,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId: mp,
+      campaign: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Campaign Get] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load campaign' });
+  }
+});
+
+router.post('/marketing/campaigns/update-identification', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      campaignId,
+      marketplaceId,
+      campaignName,
+      startDate,
+      endDate,
+    } = req.body || {};
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!campaignId) return res.status(400).json({ success: false, error: 'campaignId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+    if (!String(campaignName || '').trim()) {
+      return res.status(400).json({ success: false, error: 'campaignName is required' });
+    }
+    if (!String(startDate || '').trim()) {
+      return res.status(400).json({ success: false, error: 'startDate is required' });
+    }
+    if (!String(endDate || '').trim()) {
+      return res.status(400).json({ success: false, error: 'endDate is required' });
+    }
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const { response, data } = await callEbayUpdateCampaignIdentificationApi({
+      sellerDoc,
+      campaignId,
+      marketplaceId: mp,
+      body: {
+        campaignName: String(campaignName).trim(),
+        startDate,
+        endDate,
+      },
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Campaign Update Identification] Error:', data || response.status);
+      return sendEbayMarketingCampaignError(res, response, data, 'Failed to update campaign');
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.json({
+      success: true,
+      docsUrl: UPDATE_CAMPAIGN_IDENTIFICATION_DOCS,
+      campaignId,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId: mp,
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Campaign Update Identification] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to update campaign' });
+  }
+});
+
 // ============================================
 // MARKETING PROMOTIONS (Marketing API — getPromotions)
 // ============================================

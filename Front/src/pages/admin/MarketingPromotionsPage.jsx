@@ -41,8 +41,10 @@ import MarketingKpiStrip from '../../components/marketing/MarketingKpiStrip.jsx'
 import MarketingCollapsibleFilters from '../../components/marketing/MarketingCollapsibleFilters.jsx';
 import MarketingScrollableTableContainer from '../../components/marketing/MarketingScrollableTableContainer.jsx';
 import MarketingStoreFilters from '../../components/marketing/MarketingStoreFilters.jsx';
+import MarketingAutoExtendToggle from '../../components/marketing/MarketingAutoExtendToggle.jsx';
 import CreateItemPromotionDialog from '../../components/marketing/CreateItemPromotionDialog.jsx';
 import UpdateItemPromotionDialog from '../../components/marketing/UpdateItemPromotionDialog.jsx';
+import { useMarketingAutoExtend } from '../../hooks/useMarketingAutoExtend.js';
 import ColumnSelector from '../../components/ColumnSelector.jsx';
 import { canDeletePromotion, canEditPromotion } from '../../utils/itemPromotionUtils';
 import { useEbayConnectedSellers } from '../../hooks/useEbayConnectedSellers.js';
@@ -133,6 +135,10 @@ const PromotionRow = memo(function PromotionRow({
   pageSellerId,
   onEdit,
   onDelete,
+  autoExtendKey,
+  autoExtendEnabled,
+  autoExtendLoading,
+  onAutoExtendChange,
 }) {
   const colSpan = countMarketingTableColumns(visibleColumns, showStore, { leadingCols: 1 });
   const show = (columnId) => isMarketingColumnVisible(visibleColumns, columnId, showStore);
@@ -214,7 +220,13 @@ const PromotionRow = memo(function PromotionRow({
         ) : null}
         {show('actions') ? (
         <TableCell sx={{ whiteSpace: 'nowrap' }}>
-          <Stack direction="row" spacing={0.5}>
+          <Stack direction="row" spacing={0.5} alignItems="center">
+            <MarketingAutoExtendToggle
+              checked={autoExtendEnabled}
+              loading={autoExtendLoading}
+              disabled={!editable || !effectiveSellerId}
+              onChange={(enabled) => onAutoExtendChange?.(autoExtendKey, enabled)}
+            />
             <IconButton
               size="small"
               aria-label="edit promotion"
@@ -524,6 +536,21 @@ export default forwardRef(function MarketingPromotionsPage({
     return isAllStores ? sorted.slice(offset, offset + pageSize) : sorted;
   }, [isAllStores, allRows, rows, sortBy, sortOrder, offset, pageSize]);
 
+  const pageSellerId = isAllStores ? '' : sellerId;
+
+  const autoExtendSourceRows = useMemo(
+    () => (isAllStores ? allRows : rows),
+    [isAllStores, allRows, rows],
+  );
+
+  const autoExtend = useMarketingAutoExtend({
+    kind: 'promotion',
+    rows: autoExtendSourceRows,
+    active,
+    pageSellerId,
+    onExtended: () => refreshPromotions({ refreshKpi: true }),
+  });
+
   const handleSort = (column) => {
     setOffset(0);
     if (sortBy === column) {
@@ -768,21 +795,28 @@ export default forwardRef(function MarketingPromotionsPage({
                     </TableCell>
                   </TableRow>
                 ) : (
-                  displayRows.map((row) => (
+                  displayRows.map((row) => {
+                    const autoExtendKey = autoExtend.buildKey(row, pageSellerId);
+                    return (
                     <PromotionRow
                       key={`${row.sellerId || 'one'}-${row.promotionId || row.promotionName}`}
                       row={row}
                       showStore={isAllStores}
                       visibleColumns={visibleColumns}
-                      pageSellerId={isAllStores ? '' : sellerId}
+                      pageSellerId={pageSellerId}
                       onEdit={setUpdateTarget}
                       onDelete={setDeleteTarget}
+                      autoExtendKey={autoExtendKey}
+                      autoExtendEnabled={autoExtend.isEnabled(autoExtendKey)}
+                      autoExtendLoading={autoExtend.isExtending(autoExtendKey)}
+                      onAutoExtendChange={autoExtend.setEnabled}
                       expanded={expandedId === `${row.sellerId}-${row.promotionId}`}
                       onToggle={() => setExpandedId((prev) => (
                         prev === `${row.sellerId}-${row.promotionId}` ? null : `${row.sellerId}-${row.promotionId}`
                       ))}
                     />
-                  ))
+                    );
+                  })
                 )}
               </TableBody>
             </Table>

@@ -1,6 +1,7 @@
 import {
   ADVERTISING_INELIGIBLE_REASON_LABELS,
   ADVERTISING_PROGRAM_LABELS,
+  FUNDING_MODEL_LABELS,
   LISTING_RECOMMENDATION_PROMOTE_LABELS,
   PROMOTION_TYPE_LABELS,
 } from './marketingConstants.js';
@@ -33,6 +34,12 @@ export function formatPromotionTypeLabel(value) {
   const key = String(value || '').trim();
   if (!key) return '—';
   return PROMOTION_TYPE_LABELS[key] || key;
+}
+
+export function formatFundingModelLabel(value) {
+  const key = String(value || '').trim().toUpperCase();
+  if (!key) return '—';
+  return FUNDING_MODEL_LABELS[key] || key;
 }
 
 export function formatAdvertisingProgramLabel(value) {

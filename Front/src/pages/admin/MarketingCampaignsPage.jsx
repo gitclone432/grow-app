@@ -44,6 +44,8 @@ import MarketingScrollableTableContainer from '../../components/marketing/Market
 import MarketingStoreFilters from '../../components/marketing/MarketingStoreFilters.jsx';
 import ColumnSelector from '../../components/ColumnSelector.jsx';
 import CreateCampaignDialog from '../../components/marketing/CreateCampaignDialog.jsx';
+import MarketingAutoExtendToggle from '../../components/marketing/MarketingAutoExtendToggle.jsx';
+import { useMarketingAutoExtend } from '../../hooks/useMarketingAutoExtend.js';
 import { useEbayConnectedSellers } from '../../hooks/useEbayConnectedSellers.js';
 import {
   ALL_MARKETPLACES_VALUE,
@@ -60,6 +62,7 @@ import {
   compareCampaignRows,
   formatBudget,
   formatDateOnly,
+  formatFundingModelLabel,
   getMarketingKpiCache,
   invalidateMarketingKpiCache,
   parseApiError,
@@ -82,6 +85,7 @@ import {
   canResumeCampaign,
   parseCampaignApiError,
 } from '../../utils/campaignUtils.js';
+import { canAutoExtendCampaign } from '../../lib/marketingAutoExtend.js';
 
 const CAMPAIGN_SORT_COLUMNS = {
   sellerName: { label: 'Store', align: 'left' },
@@ -133,6 +137,10 @@ const CampaignRow = memo(function CampaignRow({
   onPause,
   onResume,
   onEnd,
+  autoExtendKey,
+  autoExtendEnabled,
+  autoExtendLoading,
+  onAutoExtendChange,
 }) {
   const channels = Array.isArray(row.channels) ? row.channels.join(', ') : '';
   const colSpan = countMarketingTableColumns(visibleColumns, showStore, { leadingCols: 1 });
@@ -144,6 +152,7 @@ const CampaignRow = memo(function CampaignRow({
   const resumable = canResumeCampaign(row.campaignStatus);
   const endable = canEndCampaign(row.campaignStatus);
   const hasActions = pausable || resumable || endable;
+  const autoExtendable = canAutoExtendCampaign(row);
 
   const buildActionTarget = () => {
     if (!effectiveSellerId || !row.campaignId || !row.marketplaceId) return null;
@@ -196,7 +205,7 @@ const CampaignRow = memo(function CampaignRow({
         <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDateOnly(row.endDate)}</TableCell>
         ) : null}
         {show('fundingModel') ? (
-        <TableCell>{row.fundingModel || '—'}</TableCell>
+        <TableCell>{formatFundingModelLabel(row.fundingModel)}</TableCell>
         ) : null}
         {show('bidPercentage') ? (
         <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
@@ -221,7 +230,13 @@ const CampaignRow = memo(function CampaignRow({
         ) : null}
         {show('actions') ? (
         <TableCell sx={{ whiteSpace: 'nowrap' }}>
-          <Stack direction="row" spacing={0.5}>
+          <Stack direction="row" spacing={0.5} alignItems="center">
+            <MarketingAutoExtendToggle
+              checked={autoExtendEnabled}
+              loading={autoExtendLoading}
+              disabled={!autoExtendable || !effectiveSellerId}
+              onChange={(enabled) => onAutoExtendChange?.(autoExtendKey, enabled)}
+            />
             {pausable ? (
               <Tooltip title="Pause campaign">
                 <span>
@@ -570,6 +585,21 @@ export default forwardRef(function MarketingCampaignsPage({
     return isAllStores ? sorted.slice(offset, offset + pageSize) : sorted;
   }, [isAllStores, allRows, rows, sortBy, sortOrder, offset, pageSize]);
 
+  const pageSellerId = isAllStores ? '' : sellerId;
+
+  const autoExtendSourceRows = useMemo(
+    () => (isAllStores ? allRows : rows),
+    [isAllStores, allRows, rows],
+  );
+
+  const autoExtend = useMarketingAutoExtend({
+    kind: 'campaign',
+    rows: autoExtendSourceRows,
+    active,
+    pageSellerId,
+    onExtended: () => refreshCampaigns({ refreshKpi: true }),
+  });
+
   const handleSort = (column) => {
     setOffset(0);
     if (sortBy === column) {
@@ -852,23 +882,30 @@ export default forwardRef(function MarketingCampaignsPage({
                     </TableCell>
                   </TableRow>
                 ) : (
-                  displayRows.map((row) => (
+                  displayRows.map((row) => {
+                    const autoExtendKey = autoExtend.buildKey(row, pageSellerId);
+                    return (
                     <CampaignRow
                       key={`${row.sellerId || 'one'}-${row.campaignId || row.campaignName}`}
                       row={row}
                       showStore={isAllStores}
                       visibleColumns={visibleColumns}
-                      pageSellerId={isAllStores ? '' : sellerId}
+                      pageSellerId={pageSellerId}
                       actingKey={actingKey}
                       onPause={handlePauseCampaign}
                       onResume={handleResumeCampaign}
                       onEnd={setEndTarget}
+                      autoExtendKey={autoExtendKey}
+                      autoExtendEnabled={autoExtend.isEnabled(autoExtendKey)}
+                      autoExtendLoading={autoExtend.isExtending(autoExtendKey)}
+                      onAutoExtendChange={autoExtend.setEnabled}
                       expanded={expandedId === `${row.sellerId}-${row.campaignId}`}
                       onToggle={() => setExpandedId((prev) => (
                         prev === `${row.sellerId}-${row.campaignId}` ? null : `${row.sellerId}-${row.campaignId}`
                       ))}
                     />
-                  ))
+                    );
+                  })
                 )}
               </TableBody>
             </Table>

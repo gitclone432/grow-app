@@ -39,10 +39,15 @@ export const CAMPAIGN_STATUS_OPTIONS = [
   { value: 'DELETED', label: 'Deleted' },
 ];
 
+export const FUNDING_MODEL_LABELS = {
+  COST_PER_SALE: 'CPS',
+  COST_PER_CLICK: 'CPC',
+};
+
 export const FUNDING_OPTIONS = [
   { value: '', label: 'All funding models' },
-  { value: 'COST_PER_SALE', label: 'Cost per sale (CPS)' },
-  { value: 'COST_PER_CLICK', label: 'Cost per click (CPC)' },
+  { value: 'COST_PER_SALE', label: FUNDING_MODEL_LABELS.COST_PER_SALE },
+  { value: 'COST_PER_CLICK', label: FUNDING_MODEL_LABELS.COST_PER_CLICK },
 ];
 
 export const TARGETING_OPTIONS = [
