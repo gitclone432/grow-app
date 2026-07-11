@@ -1,5 +1,9 @@
 /** Helpers for eBay Finances API transaction payloads (getTransactions). */
 
+import { resolveFeeTypeFilterValues } from './ebayTransactionTypes.js';
+
+export { resolveFeeTypeFilterValues, isStoreSubscriptionFeeFilter } from './ebayTransactionTypes.js';
+
 export function getFinancesReference(txn, referenceType) {
   return (txn?.references || []).find((r) => r.referenceType === referenceType) || null;
 }
@@ -89,6 +93,22 @@ export function resolveFinancesOrderId(txn, indexes) {
   return bestOrderId;
 }
 
+export function isPromotedListingsFinancesTransaction(txn) {
+  const memo = String(txn?.transactionMemo || '').toLowerCase();
+  const feeType = String(txn?.feeType || '').toUpperCase();
+  return feeType === 'AD_FEE' || memo.includes('promoted listing');
+}
+
+/** Promoted listing charges store the fee in amount, not totalFeeAmount. */
+export function resolveFinancesDisplayFeeAmount(txn) {
+  const fee = txn?.totalFeeAmount;
+  if (fee?.value != null && fee?.value !== '') return fee;
+  if (isPromotedListingsFinancesTransaction(txn) && txn?.amount?.value != null && txn?.amount?.value !== '') {
+    return txn.amount;
+  }
+  return null;
+}
+
 /** @param {object[]} transactions */
 export function enrichFinancesTransactions(transactions) {
   const list = Array.isArray(transactions) ? transactions : [];
@@ -149,4 +169,96 @@ export async function fetchFinancesTransactionsByTypes(api, baseParams, transact
 
   merged.sort((a, b) => new Date(b.transactionDate) - new Date(a.transactionDate));
   return merged;
+}
+
+export function collectTransactionFeeTypes(txn) {
+  const types = new Set();
+  if (txn?.feeType) types.add(String(txn.feeType).trim().toUpperCase());
+  for (const line of txn?.orderLineItems || []) {
+    for (const fee of line?.marketplaceFees || []) {
+      if (fee?.feeType) types.add(String(fee.feeType).trim().toUpperCase());
+    }
+  }
+  return types;
+}
+
+/** Primary fee type enum for sorting (first alphabetically). */
+export function financesFeeTypeSortKey(txn) {
+  return [...collectTransactionFeeTypes(txn)].sort()[0] || '';
+}
+
+export function transactionHasFeeType(txn, feeType) {
+  const targets = resolveFeeTypeFilterValues(feeType);
+  if (!targets.length) return true;
+  const types = collectTransactionFeeTypes(txn);
+  return targets.some((target) => types.has(target));
+}
+
+export function filterFinancesTransactionsByFeeType(transactions, feeType) {
+  const targets = resolveFeeTypeFilterValues(feeType);
+  if (!targets.length) return transactions || [];
+  return (transactions || []).filter((txn) => transactionHasFeeType(txn, feeType));
+}
+
+function financesMoneySortValue(amount) {
+  const value = Number(amount?.value);
+  return Number.isFinite(value) ? value : 0;
+}
+
+export function compareFinancesTransactionRows(a, b, sortBy, sortOrder, resolveOrderId) {
+  const dir = sortOrder === 'asc' ? 1 : -1;
+  let av;
+  let bv;
+
+  switch (sortBy) {
+    case 'sellerName':
+      av = String(a?.sellerName || '').toLowerCase();
+      bv = String(b?.sellerName || '').toLowerCase();
+      break;
+    case 'transactionType':
+      av = String(a?.transactionType || '').toLowerCase();
+      bv = String(b?.transactionType || '').toLowerCase();
+      break;
+    case 'transactionStatus':
+      av = String(a?.transactionStatus || '').toLowerCase();
+      bv = String(b?.transactionStatus || '').toLowerCase();
+      break;
+    case 'bookingEntry':
+      av = String(a?.bookingEntry || '').toLowerCase();
+      bv = String(b?.bookingEntry || '').toLowerCase();
+      break;
+    case 'amount':
+      av = financesMoneySortValue(a?.amount);
+      bv = financesMoneySortValue(b?.amount);
+      break;
+    case 'totalFeeAmount':
+      av = financesMoneySortValue(a?.totalFeeAmount);
+      bv = financesMoneySortValue(b?.totalFeeAmount);
+      break;
+    case 'feeType':
+      av = financesFeeTypeSortKey(a).toLowerCase();
+      bv = financesFeeTypeSortKey(b).toLowerCase();
+      break;
+    case 'orderId':
+      av = String(resolveOrderId?.(a) || a?.orderId || '').toLowerCase();
+      bv = String(resolveOrderId?.(b) || b?.orderId || '').toLowerCase();
+      break;
+    case 'buyerUsername':
+      av = String(a?.buyer?.username || '').toLowerCase();
+      bv = String(b?.buyer?.username || '').toLowerCase();
+      break;
+    case 'payoutId':
+      av = String(a?.payoutId || '').toLowerCase();
+      bv = String(b?.payoutId || '').toLowerCase();
+      break;
+    case 'transactionDate':
+    default:
+      av = new Date(a?.transactionDate || 0).getTime();
+      bv = new Date(b?.transactionDate || 0).getTime();
+      break;
+  }
+
+  if (av < bv) return -1 * dir;
+  if (av > bv) return 1 * dir;
+  return String(a?.transactionId || '').localeCompare(String(b?.transactionId || ''));
 }

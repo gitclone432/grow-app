@@ -3,6 +3,11 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App.jsx';
 import { setAuthToken } from './lib/api';
+import {
+  clearStaleChunkReloadFlag,
+  isStaleChunkLoadError,
+  tryReloadForStaleChunk,
+} from './lib/lazyImport.js';
 
 function clearBrokenAuthState() {
   try {
@@ -28,6 +33,13 @@ function clearBrokenAuthState() {
 }
 
 clearBrokenAuthState();
+clearStaleChunkReloadFlag();
+
+window.addEventListener('unhandledrejection', (event) => {
+  if (tryReloadForStaleChunk(event.reason)) {
+    event.preventDefault();
+  }
+});
 
 // Read persisted token on boot (localStorage so it survives tab close + syncs across tabs)
 const bootToken = localStorage.getItem('auth_token');
@@ -45,10 +57,12 @@ class BootErrorBoundary extends React.Component {
 
   componentDidCatch(error) {
     console.error('[App boot failed]', error);
+    tryReloadForStaleChunk(error);
   }
 
   render() {
     if (this.state.error) {
+      const staleChunk = isStaleChunkLoadError(this.state.error);
       return (
         <div style={{
           minHeight: '100vh',
@@ -64,13 +78,22 @@ class BootErrorBoundary extends React.Component {
           textAlign: 'center',
         }}
         >
-          <strong style={{ fontSize: '1.1rem' }}>Grow Mentality failed to start</strong>
+          <strong style={{ fontSize: '1.1rem' }}>
+            {staleChunk ? 'A new version is available' : 'Grow Mentality failed to start'}
+          </strong>
           <div style={{ maxWidth: 480, color: '#555', fontSize: 14 }}>
-            {String(this.state.error?.message || this.state.error)}
+            {staleChunk
+              ? 'The app was updated while this tab was open. Reload to continue.'
+              : String(this.state.error?.message || this.state.error)}
           </div>
           <button
             type="button"
             onClick={() => {
+              if (staleChunk) {
+                clearStaleChunkReloadFlag();
+                window.location.reload();
+                return;
+              }
               localStorage.removeItem('auth_token');
               localStorage.removeItem('user');
               window.location.href = '/login';
@@ -86,7 +109,7 @@ class BootErrorBoundary extends React.Component {
               cursor: 'pointer',
             }}
           >
-            Clear session & go to login
+            {staleChunk ? 'Reload page' : 'Clear session & go to login'}
           </button>
         </div>
       );

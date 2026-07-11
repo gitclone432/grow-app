@@ -1,4 +1,4 @@
-import { lazy } from 'react';
+import { lazyWithRetry as lazy } from '../lib/lazyImport.js';
 
 /** Lazy page loaders — keeps AdminLayout bundle small so navigation stays fast. */
 export const ProductResearchPage = lazy(() => import('../pages/admin/ProductResearchPage.jsx'));
@@ -49,6 +49,7 @@ export const SalaryPage = lazy(() => import('../pages/admin/SalaryPage.jsx'));
 export const SellerFundsPage = lazy(() => import('../pages/admin/SellerFundsPage.jsx'));
 export const TransactionSummaryPage = lazy(() => import('../pages/admin/TransactionSummaryPage.jsx'));
 export const FinancesTransactionsPage = lazy(() => import('../pages/admin/FinancesTransactionsPage.jsx'));
+export const FinancesPayoutGroupsPage = lazy(() => import('../pages/admin/FinancesPayoutGroupsPage.jsx'));
 export const AdsAndMarketingPage = lazy(() => import('../pages/admin/AdsAndMarketingPage.jsx'));
 export const MarketingCampaignsPage = lazy(() => import('../pages/admin/MarketingCampaignsPage.jsx'));
 export const MarketingPromotionsPage = lazy(() => import('../pages/admin/MarketingPromotionsPage.jsx'));

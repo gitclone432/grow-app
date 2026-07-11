@@ -127,6 +127,7 @@ export const PAGE_DEFAULT_ROLES = {
   'SellerFunds': ['superadmin', 'listingadmin'],
   'FinancesTransactionSummary': ['superadmin', 'listingadmin'],
   'FinancesTransactions': ['superadmin', 'listingadmin'],
+  'FinancesPayoutGroups': ['superadmin', 'listingadmin'],
 
   // HR & Management
   'IdeasAndIssues': ['superadmin', 'hradmin', 'operationhead', 'listingadmin'],

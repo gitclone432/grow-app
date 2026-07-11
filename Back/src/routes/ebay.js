@@ -13,6 +13,7 @@ import { requireAuth, requirePageAccess, requireRole } from '../middleware/auth.
 import Seller from '../models/Seller.js';
 import BankAccount from '../models/BankAccount.js';
 import PayoneerFeedCache from '../models/PayoneerFeedCache.js';
+import FinancesPayoutGroupsCache from '../models/FinancesPayoutGroupsCache.js';
 import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.js';
 import { applyActiveSellerScope } from '../utils/activeSellerScope.js';
 import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
@@ -93,6 +94,13 @@ import {
   getOrderTotalAmount
 } from '../utils/exchangeRateUtils.js';
 import { enrichNewOrderData } from '../utils/ebayStoreOrderSettings.js';
+import {
+  processPendingPolicyMessagesIfEnabled,
+} from '../utils/policyMessageSettings.js';
+import {
+  isOrderListingQtyUpdateEnabled,
+  processPendingListingQtyUpdatesIfEnabled,
+} from '../utils/orderListingQtySettings.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
@@ -1519,7 +1527,13 @@ function normalizeFinancesMarketplaceId(raw) {
   return 'EBAY_US';
 }
 
+const FINANCES_PICKER_MARKETPLACES = ['EBAY_US', 'EBAY_GB', 'EBAY_AU', 'EBAY_CA', 'EBAY_DE'];
+
 function resolveFinancesMarketplaceIds(seller, queryMarketplace) {
+  const rawQuery = String(queryMarketplace ?? '').trim().toLowerCase();
+  if (rawQuery === '__all__' || rawQuery === 'all') {
+    return FINANCES_PICKER_MARKETPLACES;
+  }
   const fromQuery = normalizeFinancesMarketplaceId(queryMarketplace);
   if (queryMarketplace != null && String(queryMarketplace).trim() !== '') {
     return [fromQuery];
@@ -1574,7 +1588,7 @@ function moneyFromNumber(value, currency = 'USD') {
 }
 
 /** Paginate GET /sell/finances/v1/transaction with one or more filters. */
-async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filterOrFilters) {
+async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filterOrFilters, { maxTransactions = 2000 } = {}) {
   const all = [];
   let offset = 0;
   const limit = 200;
@@ -1583,7 +1597,7 @@ async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, fil
   const filters = (Array.isArray(filterOrFilters) ? filterOrFilters : [filterOrFilters])
     .filter((f) => f != null && String(f).trim() !== '');
 
-  while (hasMore) {
+  while (hasMore && all.length < maxTransactions) {
     try {
       const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
         headers: financesApiHeaders(accessToken, mp),
@@ -1602,7 +1616,7 @@ async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, fil
       throw err;
     }
   }
-  return all;
+  return all.slice(0, maxTransactions);
 }
 
 async function fetchFinancesTransactionsAllPagesSafe(accessToken, marketplaceId, filterOrFilters, label) {
@@ -4662,6 +4676,8 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
       });
     }
 
+    const queueListingQtyUpdate = await isOrderListingQtyUpdateEnabled();
+
     // Calculate 30 days ago in UTC
     const nowUTC = Date.now();
     const thirtyDaysAgoMs = 30 * 24 * 60 * 60 * 1000;
@@ -4772,14 +4788,13 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
                     orderData.policyMessageEligibleAt = policyEligibleAt;
                   }
                 }
+                if (queueListingQtyUpdate) {
+                  orderData.listingQtyUpdatePending = true;
+                }
                 const newOrder = await Order.create(orderData);
                 newOrders.push(newOrder);
                 console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
                 await sendAutoWelcomeMessage(seller, newOrder);
-
-                // Fire-and-forget: Update listing quantity to 1
-                updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName)
-                  .catch(err => console.error(`[Quantity Update] Background error for ${ebayOrder.orderId}:`, err.message));
               } else {
                 // Order exists, check if needs update
                 const ebayModTime = new Date(ebayOrder.lastModifiedDate).getTime();
@@ -5008,14 +5023,24 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
       totalUpdatedOrders
     });
 
-    // Trigger delayed policy messaging in background after polling
-    processPendingPolicyMessages(50)
+    // Trigger delayed policy messaging in background after polling (respects Cron Jobs toggle)
+    processPendingPolicyMessagesIfEnabled(processPendingPolicyMessages, 50)
       .then((r) => {
+        if (r.skipped) return;
         if (r.processed > 0) {
           console.log(`[PolicyMessage] Background run: processed=${r.processed}, sent=${r.sent}, failed=${r.failed}`);
         }
       })
       .catch((e) => console.error('[PolicyMessage] Background run failed:', e.message));
+
+    processPendingListingQtyUpdatesIfEnabled(processPendingListingQtyUpdates, 50)
+      .then((r) => {
+        if (r.skipped) return;
+        if (r.processed > 0) {
+          console.log(`[Quantity Update] Background run: processed=${r.processed}, updated=${r.updated}, failed=${r.failed}`);
+        }
+      })
+      .catch((e) => console.error('[Quantity Update] Background run failed:', e.message));
 
     console.log('\n========== POLLING SUMMARY ==========');
     console.log(`Total sellers polled: ${sellers.length}`);
@@ -5042,6 +5067,8 @@ export async function scheduledPollNewOrders() {
         totalNewOrders: 0
       };
     }
+
+    const queueListingQtyUpdate = await isOrderListingQtyUpdateEnabled();
 
     const nowUTC = Date.now();
     console.log(`\n========== POLLING NEW ORDERS FOR ${sellers.length} SELLERS ==========`);
@@ -5127,14 +5154,13 @@ export async function scheduledPollNewOrders() {
                   orderData.policyMessageEligibleAt = policyEligibleAt;
                 }
               }
+              if (queueListingQtyUpdate) {
+                orderData.listingQtyUpdatePending = true;
+              }
               const newOrder = await Order.create(orderData);
               newOrders.push(newOrder);
               console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
               await sendAutoWelcomeMessage(seller, newOrder);
-
-              // Fire-and-forget: Update listing quantity to 1
-              updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName)
-                .catch(err => console.error(`[Quantity Update] Background error for ${ebayOrder.orderId}:`, err.message));
 
               // Fetch ad fee from eBay Finances API
               try {
@@ -5219,14 +5245,24 @@ export async function scheduledPollNewOrders() {
       totalEbayFetched,
     };
 
-    // Trigger delayed policy messaging in background after polling
-    processPendingPolicyMessages(50)
+    // Trigger delayed policy messaging in background after polling (respects Cron Jobs toggle)
+    processPendingPolicyMessagesIfEnabled(processPendingPolicyMessages, 50)
       .then((r) => {
+        if (r.skipped) return;
         if (r.processed > 0) {
           console.log(`[PolicyMessage] Background run: processed=${r.processed}, sent=${r.sent}, failed=${r.failed}`);
         }
       })
       .catch((e) => console.error('[PolicyMessage] Background run failed:', e.message));
+
+    processPendingListingQtyUpdatesIfEnabled(processPendingListingQtyUpdates, 50)
+      .then((r) => {
+        if (r.skipped) return;
+        if (r.processed > 0) {
+          console.log(`[Quantity Update] Background run: processed=${r.processed}, updated=${r.updated}, failed=${r.failed}`);
+        }
+      })
+      .catch((e) => console.error('[Quantity Update] Background run failed:', e.message));
 
     console.log(`\n========== NEW ORDERS SUMMARY ==========`);
     console.log(`Total new orders: ${totalNewOrders}`);
@@ -6268,6 +6304,59 @@ async function updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName) 
       console.error(`[Quantity Update] ❌ Error updating quantity for ItemID ${legacyItemId}:`, err.response?.data || err.message);
     }
   }
+}
+
+function buildEbayOrderShapeForListingQtyUpdate(order) {
+  const lineItems = Array.isArray(order.lineItems) && order.lineItems.length > 0
+    ? order.lineItems
+    : (order.itemNumber
+      ? [{ legacyItemId: order.itemNumber, title: order.productName || 'Unknown' }]
+      : []);
+  return { orderId: order.orderId, lineItems };
+}
+
+async function processPendingListingQtyUpdates(limit = 50) {
+  const orders = await Order.find({ listingQtyUpdatePending: true })
+    .sort({ creationDate: 1 })
+    .limit(Math.max(1, Math.min(200, Number(limit) || 50)))
+    .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } });
+
+  let processed = 0;
+  let updated = 0;
+  let failed = 0;
+
+  for (const order of orders) {
+    processed += 1;
+    const seller = order.seller;
+    if (!seller?.ebayTokens?.access_token) {
+      failed += 1;
+      console.error(`[Quantity Update] No token for order ${order.orderId}, skipping`);
+      continue;
+    }
+
+    try {
+      const accessToken = await ensureValidToken(seller);
+      const sellerName = seller.user?.username || seller.user?.email || String(seller._id);
+      const ebayOrder = buildEbayOrderShapeForListingQtyUpdate(order);
+      if (!ebayOrder.lineItems.length) {
+        order.listingQtyUpdatePending = false;
+        await order.save();
+        console.log(`[Quantity Update] No line items for order ${order.orderId}, cleared pending`);
+        continue;
+      }
+
+      await updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName);
+      order.listingQtyUpdatePending = false;
+      order.listingQtyUpdatedAt = new Date();
+      await order.save();
+      updated += 1;
+    } catch (err) {
+      failed += 1;
+      console.error(`[Quantity Update] Pending order ${order.orderId} failed:`, err.message);
+    }
+  }
+
+  return { processed, updated, failed };
 }
 
 // Helper function to build order data object for insert/update
@@ -16102,7 +16191,7 @@ router.post('/end-item', requireAuth, async (req, res) => {
 });
 
 // Export for optional external schedulers
-export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDate };
+export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDate, processPendingListingQtyUpdates };
 
 // ============================================
 // FEED UPLOAD SUCCESS STATS (aggregated day-wise by seller)
@@ -16390,55 +16479,1312 @@ router.get('/finances/transaction-summary', requireAuth, requirePageAccess('Fina
 // ============================================
 // TRANSACTIONS LIST (Finances API — getTransactions)
 // ============================================
-router.get('/finances/transactions', requireAuth, requirePageAccess('FinancesTransactions'), async (req, res) => {
+function resolveFeeTypeFilterValuesBackend(feeType) {
+  const key = String(feeType || '').trim().toUpperCase();
+  if (!key) return [];
+  if (key === 'STORE_SUBSCRIPTION' || key === 'OTHER_FEES' || key === 'STORE_SUBSCRIPTION_FEE') {
+    return ['OTHER_FEES', 'STORE_SUBSCRIPTION_FEE'];
+  }
+  return [key];
+}
+
+function isStoreSubscriptionFeeFilterBackend(feeType) {
+  const key = String(feeType || '').trim().toUpperCase();
+  return key === 'STORE_SUBSCRIPTION' || key === 'OTHER_FEES' || key === 'STORE_SUBSCRIPTION_FEE';
+}
+
+function applyFeeTypeFetchHints(query = {}) {
+  const feeType = String(query.feeType || '').trim();
+  if (!feeType) return query;
+  if (isStoreSubscriptionFeeFilterBackend(feeType)) {
+    return { ...query, transactionType: 'NON_SALE_CHARGE' };
+  }
+  return query;
+}
+
+function buildFinancesAppliedFilterList(query = {}) {
+  const effectiveQuery = applyFeeTypeFetchHints(query);
+  const feeType = String(effectiveQuery.feeType || '').trim();
+  const filters = buildFinancesTransactionFilters({
+    transactionStatus: effectiveQuery.transactionStatus,
+    transactionType: effectiveQuery.transactionType,
+    fromDate: effectiveQuery.fromDate,
+    toDate: effectiveQuery.toDate,
+    orderId: effectiveQuery.orderId,
+    payoutId: effectiveQuery.payoutId,
+    buyerUsername: effectiveQuery.buyerUsername,
+    transactionId: effectiveQuery.transactionId,
+    requireStatus: false,
+  });
+  if (feeType) filters.push(`feeType:{${feeType}}`);
+  return filters;
+}
+
+function tagFinancesTransactionsWithMarketplace(transactions, marketplaceId) {
+  return (transactions || []).map((txn) => ({ ...txn, marketplaceId: txn.marketplaceId || marketplaceId }));
+}
+
+function shouldIncludeFinancesPayoutRows(query = {}) {
+  const feeType = String(query.feeType || '').trim();
+  if (feeType) return false;
+  const txnType = String(query.transactionType || '').trim().toUpperCase();
+  if (txnType && txnType !== 'WITHDRAWAL') return false;
+  if (query.orderId?.trim()) return false;
+  if (query.buyerUsername?.trim()) return false;
+  if (query.transactionId?.trim()) return false;
+  const status = String(query.transactionStatus || '').trim().toUpperCase();
+  if (status && status !== 'PAYOUT') return false;
+  return true;
+}
+
+function formatFinancesPayoutInstrument(payout) {
+  const inst = payout?.payoutInstrument || {};
+  const type = String(inst.instrumentType || inst.type || '').toUpperCase();
+  if (type.includes('PAYONEER')) return 'Payoneer';
+  if (inst.nickname) return inst.nickname;
+  if (inst.instrumentType) return inst.instrumentType;
+  return 'Payoneer';
+}
+
+function formatFinancesPayoutAmountLabel(amount) {
+  const value = Math.abs(parseFloat(amount?.value || 0));
+  const currency = amount?.currency || 'USD';
   try {
-    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
-    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
-    if (!seller.ebayTokens?.access_token) {
-      return res.status(400).json({ success: false, error: 'Seller not connected to eBay' });
-    }
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(value);
+  } catch {
+    return `${value.toFixed(2)} ${currency}`;
+  }
+}
 
-    const accessToken = await ensureValidToken(seller);
-    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
-    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit || '50', 10) || 50));
-    const offset = Math.max(0, parseInt(req.query.offset || '0', 10) || 0);
+function normalizeFinancesPayoutRow(payout, marketplaceId) {
+  const payoutId = String(payout.payoutId || '').trim();
+  const amount = payout.amount || { value: '0.00', currency: 'USD' };
+  const payoutStatus = String(payout.payoutStatus || '').toUpperCase();
+  const statusNote = payoutStatus === 'INITIATED'
+    ? 'Scheduled payout'
+    : payoutStatus === 'SUCCEEDED'
+      ? 'Paid out'
+      : payoutStatus || 'Payout';
+  const instrument = formatFinancesPayoutInstrument(payout);
+  const amountLabel = formatFinancesPayoutAmountLabel(amount);
 
-    const filters = buildFinancesTransactionFilters({
-      transactionStatus: req.query.transactionStatus,
-      transactionType: req.query.transactionType,
-      fromDate: req.query.fromDate,
-      toDate: req.query.toDate,
-      orderId: req.query.orderId,
-      payoutId: req.query.payoutId,
-      buyerUsername: req.query.buyerUsername,
-      transactionId: req.query.transactionId,
-      requireStatus: false,
+  return {
+    transactionId: payoutId ? `PAYOUT-${payoutId}` : `PAYOUT-${payout.payoutDate || Date.now()}`,
+    transactionDate: payout.payoutDate || payout.lastAttemptedPayoutDate || null,
+    transactionType: 'WITHDRAWAL',
+    transactionStatus: 'PAYOUT',
+    bookingEntry: 'DEBIT',
+    amount,
+    totalFeeAmount: null,
+    payoutId,
+    payoutStatus,
+    transactionMemo: payoutId
+      ? `Payout ${payoutId} — ${amountLabel} to ${instrument} (${statusNote})`
+      : `Payout — ${amountLabel} to ${instrument} (${statusNote})`,
+    references: payoutId ? [{ referenceType: 'PAYOUT_ID', referenceId: payoutId }] : [],
+    orderLineItems: [],
+    _isPayoutRow: true,
+    marketplaceId,
+  };
+}
+
+async function fetchFinancesPayoutById(accessToken, marketplaceId, payoutId) {
+  const pid = String(payoutId || '').trim();
+  if (!pid) return null;
+  try {
+    const response = await axios.get(`https://apiz.ebay.com/sell/finances/v1/payout/${pid}`, {
+      headers: financesApiHeaders(accessToken, normalizeFinancesMarketplaceId(marketplaceId)),
+      timeout: 30000,
     });
+    return response.data || null;
+  } catch (err) {
+    if (err.response?.status === 404) return null;
+    console.warn(`[Finances Payouts] getPayout ${pid} failed:`, err.response?.data || err.message);
+    return null;
+  }
+}
 
-    const params = { limit, offset };
+function buildFinancesPayoutMetaMap(payouts) {
+  const map = new Map();
+  for (const payout of payouts || []) {
+    const payoutId = String(payout?.payoutId || '').trim();
+    if (!payoutId) continue;
+    map.set(payoutId, payout);
+  }
+  return map;
+}
+
+function collectFinancesTransactionPayoutIds(transactions) {
+  return [...new Set(
+    (transactions || [])
+      .map((txn) => String(txn.payoutId || '').trim())
+      .filter(Boolean),
+  )];
+}
+
+async function fetchFinancesPayoutsForTransactionSet(accessToken, marketplaceId, transactions, effectiveQuery) {
+  let payouts = await fetchFinancesPayoutsInRange(accessToken, marketplaceId, {
+    fromDate: effectiveQuery.fromDate,
+    toDate: effectiveQuery.toDate,
+    payoutId: effectiveQuery.payoutId,
+  });
+  const knownIds = new Set(payouts.map((p) => String(p.payoutId || '').trim()).filter(Boolean));
+  const missingIds = collectFinancesTransactionPayoutIds(transactions).filter((id) => !knownIds.has(id));
+
+  if (missingIds.length) {
+    const extras = await Promise.all(
+      missingIds.map((pid) => fetchFinancesPayoutById(accessToken, marketplaceId, pid)),
+    );
+    for (const payout of extras) {
+      if (!payout?.payoutId) continue;
+      const pid = String(payout.payoutId).trim();
+      if (!knownIds.has(pid)) {
+        knownIds.add(pid);
+        payouts.push(payout);
+      }
+    }
+  }
+
+  return payouts.filter((p) => ['INITIATED', 'SUCCEEDED'].includes(
+    String(p.payoutStatus || '').toUpperCase(),
+  ));
+}
+
+function inferFinancesGroupPayoutStatus(transactions, payoutMeta) {
+  for (const txn of transactions || []) {
+    if (txn.payoutStatus) return txn.payoutStatus;
+    if (txn._isPayoutRow) return txn.payoutStatus || 'INITIATED';
+  }
+  if (payoutMeta?.payoutStatus) return payoutMeta.payoutStatus;
+  const statuses = new Set(
+    (transactions || []).map((txn) => String(txn.transactionStatus || '').toUpperCase()).filter(Boolean),
+  );
+  if (statuses.has('PAYOUT')) return 'SUCCEEDED';
+  if (statuses.has('FUNDS_PROCESSING')) return 'INITIATED';
+  if (statuses.has('FUNDS_AVAILABLE_FOR_PAYOUT')) return 'INITIATED';
+  return null;
+}
+
+function applyFinancesPayoutMetaToGroup(group, payoutMeta) {
+  if (!group.payoutId || !payoutMeta) return;
+  if (!group.payoutStatus) {
+    group.payoutStatus = inferFinancesGroupPayoutStatus(group.transactions, payoutMeta);
+  }
+  if (!group.payoutAmount && payoutMeta.amount) {
+    group.payoutAmount = payoutMeta.amount;
+  }
+  if (!group.payoutDate && payoutMeta.payoutDate) {
+    group.payoutDate = payoutMeta.payoutDate;
+  }
+}
+
+async function fetchFinancesPayoutsInRange(accessToken, marketplaceId, {
+  fromDate,
+  toDate,
+  payoutId,
+  maxPayouts = 500,
+} = {}) {
+  const filters = [];
+  if (fromDate || toDate) {
+    const from = fromDate ? new Date(fromDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const to = toDate ? new Date(toDate) : new Date();
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      throw new Error('Invalid fromDate or toDate');
+    }
+    filters.push(`payoutDate:[${from.toISOString()}..${to.toISOString()}]`);
+  }
+  if (payoutId?.trim()) filters.push(`payoutId:{${String(payoutId).trim()}}`);
+
+  const all = [];
+  let offset = 0;
+  const limit = 200;
+  let hasMore = true;
+  const mp = normalizeFinancesMarketplaceId(marketplaceId);
+
+  while (hasMore && all.length < maxPayouts) {
+    const params = { sort: '-payoutDate', limit, offset };
     if (filters.length) params.filter = filters;
-    if (req.query.sort) params.sort = String(req.query.sort);
-
-    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
-      headers: financesApiHeaders(accessToken, marketplaceId),
+    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
+      headers: financesApiHeaders(accessToken, mp),
       params,
       paramsSerializer: (p) => qs.stringify(p, { arrayFormat: 'repeat' }),
       timeout: 90000,
     });
+    const batch = response.data?.payouts || [];
+    all.push(...batch);
+    if (batch.length < limit) hasMore = false;
+    else offset += limit;
+  }
 
-    const transactions = enrichFinancesTransactions(response.data?.transactions);
+  return all
+    .filter((p) => ['INITIATED', 'SUCCEEDED'].includes(String(p.payoutStatus || '').toUpperCase()))
+    .slice(0, maxPayouts);
+}
+
+function mergeFinancesTransactionsWithPayouts(transactions, payouts, marketplaceId) {
+  const payoutRows = (payouts || []).map((p) => normalizeFinancesPayoutRow(p, marketplaceId));
+  const payoutIdSet = new Set(payoutRows.map((r) => r.payoutId).filter(Boolean));
+  const txnRows = (transactions || []).filter((txn) => {
+    const pid = String(txn.payoutId || '').trim();
+    if (!pid || !payoutIdSet.has(pid)) return true;
+    return String(txn.transactionType || '').toUpperCase() !== 'WITHDRAWAL';
+  });
+  return dedupeFinancesTransactions([...txnRows, ...payoutRows]);
+}
+
+async function mergeFinancesPayoutRowsIfNeeded(accessToken, marketplaceId, effectiveQuery, transactions) {
+  if (!shouldIncludeFinancesPayoutRows(effectiveQuery)) return { transactions, payoutMetaById: new Map() };
+  try {
+    const payouts = await fetchFinancesPayoutsForTransactionSet(
+      accessToken,
+      marketplaceId,
+      transactions,
+      effectiveQuery,
+    );
+    const payoutMetaById = buildFinancesPayoutMetaMap(payouts);
+    return {
+      transactions: mergeFinancesTransactionsWithPayouts(transactions, payouts, marketplaceId),
+      payoutMetaById,
+    };
+  } catch (err) {
+    console.warn('[Finances Payouts] fetch failed:', err.response?.data || err.message);
+    return { transactions, payoutMetaById: new Map() };
+  }
+}
+
+function buildFinancesTransactionFiltersForQuery(effectiveQuery) {
+  return buildFinancesTransactionFilters({
+    transactionStatus: effectiveQuery.transactionStatus,
+    transactionType: effectiveQuery.transactionType,
+    fromDate: effectiveQuery.fromDate,
+    toDate: effectiveQuery.toDate,
+    orderId: effectiveQuery.orderId,
+    payoutId: effectiveQuery.payoutId,
+    buyerUsername: effectiveQuery.buyerUsername,
+    transactionId: effectiveQuery.transactionId,
+    requireStatus: false,
+  });
+}
+
+function dedupeFinancesTransactions(transactions) {
+  const seen = new Set();
+  const deduped = [];
+  for (const txn of transactions || []) {
+    const key = String(txn?.transactionId || '').trim();
+    if (!key) {
+      deduped.push(txn);
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(txn);
+  }
+  return deduped;
+}
+
+async function fetchFinancesTransactionsForSellerMarketplace(accessToken, marketplaceId, effectiveQuery, responseFilters, {
+  limitOverride,
+  offsetOverride,
+} = {}) {
+  const limit = limitOverride ?? Math.min(200, Math.max(1, parseInt(effectiveQuery.limit || '50', 10) || 50));
+  const offset = offsetOverride ?? Math.max(0, parseInt(effectiveQuery.offset || '0', 10) || 0);
+  const feeType = String(effectiveQuery.feeType || '').trim();
+
+  const filters = buildFinancesTransactionFiltersForQuery(effectiveQuery);
+
+  if (feeType) {
+    const raw = await fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filters, {
+      maxTransactions: 2000,
+    });
+    const filtered = filterFinancesTransactionsByFeeType(enrichFinancesTransactions(raw), feeType);
+    const sorted = sortFinancesTransactionsByDate(
+      tagFinancesTransactionsWithMarketplace(filtered, marketplaceId),
+      'desc',
+    );
+    return {
+      marketplaceId,
+      filters: responseFilters,
+      total: sorted.length,
+      limit,
+      offset,
+      href: null,
+      next: null,
+      prev: null,
+      transactions: sorted,
+      feeType,
+    };
+  }
+
+  const params = { limit, offset };
+  if (filters.length) params.filter = filters;
+  if (effectiveQuery.sort) params.sort = String(effectiveQuery.sort);
+
+  const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+    headers: financesApiHeaders(accessToken, marketplaceId),
+    params,
+    paramsSerializer: (p) => qs.stringify(p, { arrayFormat: 'repeat' }),
+    timeout: 90000,
+  });
+
+  return {
+    marketplaceId,
+    filters: responseFilters,
+    total: response.data?.total ?? null,
+    limit: response.data?.limit ?? limit,
+    offset: response.data?.offset ?? offset,
+    href: response.data?.href,
+    next: response.data?.next,
+    prev: response.data?.prev,
+    transactions: tagFinancesTransactionsWithMarketplace(
+      enrichFinancesTransactions(response.data?.transactions),
+      marketplaceId,
+    ),
+  };
+}
+
+async function fetchFinancesTransactionsBulkForSeller(seller, query = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const effectiveQuery = applyFeeTypeFetchHints(query);
+  const marketplaceIds = resolveFinancesMarketplaceIds(sellerDoc, effectiveQuery.marketplace);
+  const feeType = String(effectiveQuery.feeType || '').trim();
+  const responseFilters = buildFinancesAppliedFilterList(query);
+  const payoutMarketplaceId = marketplaceIds[0];
+  const filters = buildFinancesTransactionFiltersForQuery(effectiveQuery);
+
+  if (feeType) {
+    const txnPages = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+      try {
+        const raw = await fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filters, {
+          maxTransactions: 2000,
+        });
+        const filtered = filterFinancesTransactionsByFeeType(enrichFinancesTransactions(raw), feeType);
+        return tagFinancesTransactionsWithMarketplace(filtered, marketplaceId);
+      } catch {
+        return [];
+      }
+    }));
+    const merged = sortFinancesTransactionsByDate(txnPages.flat(), 'desc');
+    return {
+      marketplaceId: marketplaceIds.length === 1 ? marketplaceIds[0] : 'ALL',
+      filters: responseFilters,
+      transactions: merged,
+      feeType,
+      payoutMetaById: new Map(),
+    };
+  }
+
+  const txnPages = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      const raw = await fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filters, {
+        maxTransactions: 2000,
+      });
+      return tagFinancesTransactionsWithMarketplace(enrichFinancesTransactions(raw), marketplaceId);
+    } catch {
+      return [];
+    }
+  }));
+  let merged = txnPages.flat();
+  let payoutMetaById = new Map();
+  if (shouldIncludeFinancesPayoutRows(effectiveQuery)) {
+    const payoutMerge = await mergeFinancesPayoutRowsIfNeeded(
+      accessToken,
+      payoutMarketplaceId,
+      effectiveQuery,
+      merged,
+    );
+    merged = payoutMerge.transactions;
+    payoutMetaById = payoutMerge.payoutMetaById;
+  }
+  merged = sortFinancesTransactionsByDate(merged, 'desc');
+
+  return {
+    marketplaceId: marketplaceIds.length === 1 ? marketplaceIds[0] : 'ALL',
+    filters: responseFilters,
+    transactions: merged,
+    payoutMetaById,
+  };
+}
+
+function parseFinancesMoneyValue(amount) {
+  const value = parseFloat(amount?.value);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function signedFinancesMoneyValue(amount, bookingEntry) {
+  const abs = Math.abs(parseFinancesMoneyValue(amount));
+  const entry = String(bookingEntry || '').toUpperCase();
+  if (entry === 'DEBIT') return -abs;
+  if (entry === 'CREDIT') return abs;
+  return parseFinancesMoneyValue(amount);
+}
+
+function isFinancesWithdrawalTransaction(txn) {
+  return Boolean(txn?._isPayoutRow)
+    || String(txn?.transactionType || '').toUpperCase() === 'WITHDRAWAL';
+}
+
+function isPromotedListingsFinancesTransaction(txn) {
+  const memo = String(txn?.transactionMemo || '').toLowerCase();
+  const feeType = String(txn?.feeType || '').toUpperCase();
+  return feeType === 'AD_FEE' || memo.includes('promoted listing');
+}
+
+function financesTransactionFeeTotal(txn) {
+  const fromFeeField = Math.abs(parseFinancesMoneyValue(txn?.totalFeeAmount));
+  if (fromFeeField) return fromFeeField;
+  if (isPromotedListingsFinancesTransaction(txn)) {
+    return Math.abs(parseFinancesMoneyValue(txn?.amount));
+  }
+  return 0;
+}
+
+function groupFinancesTransactionsByPayoutId(transactions, meta = {}, payoutMetaById = null) {
+  const NO_PAYOUT_PREFIX = '__no_payout__';
+  const metaMap = payoutMetaById instanceof Map ? payoutMetaById : new Map();
+  const map = new Map();
+
+  for (const txn of transactions || []) {
+    const payoutId = String(txn.payoutId || '').trim();
+    const groupKey = payoutId || `${NO_PAYOUT_PREFIX}:${txn.sellerId || meta.sellerId || 'one'}`;
+    if (!map.has(groupKey)) {
+      map.set(groupKey, {
+        groupKey,
+        payoutId: payoutId || null,
+        payoutDate: null,
+        payoutStatus: null,
+        payoutAmount: null,
+        pendingPayout: !payoutId,
+        sellerId: txn.sellerId || meta.sellerId || null,
+        sellerName: txn.sellerName || meta.sellerName || null,
+        marketplaceId: txn.marketplaceId || meta.marketplaceId || null,
+        transactionCount: 0,
+        totalAmount: 0,
+        totalFees: 0,
+        currency: txn.amount?.currency || 'USD',
+        transactions: [],
+      });
+    }
+
+    const group = map.get(groupKey);
+    group.transactions.push(txn);
+    group.totalAmount += signedFinancesMoneyValue(txn.amount, txn.bookingEntry);
+    group.totalFees += financesTransactionFeeTotal(txn);
+    if (!isFinancesWithdrawalTransaction(txn)) {
+      group.transactionCount += 1;
+    }
+    if (txn.amount?.currency) group.currency = txn.amount.currency;
+
+    const isPayoutRow = isFinancesWithdrawalTransaction(txn);
+    if (isPayoutRow) {
+      group.payoutDate = txn.transactionDate || group.payoutDate;
+      group.payoutStatus = txn.payoutStatus || group.payoutStatus;
+      group.payoutAmount = txn.amount || group.payoutAmount;
+    }
+  }
+
+  for (const [payoutId, payoutMeta] of metaMap) {
+    if (map.has(payoutId)) {
+      applyFinancesPayoutMetaToGroup(map.get(payoutId), payoutMeta);
+      continue;
+    }
+    const synthetic = normalizeFinancesPayoutRow(payoutMeta, meta.marketplaceId || 'EBAY_US');
+    map.set(payoutId, {
+      groupKey: payoutId,
+      payoutId,
+      payoutDate: synthetic.transactionDate,
+      payoutStatus: synthetic.payoutStatus,
+      payoutAmount: synthetic.amount,
+      pendingPayout: false,
+      sellerId: meta.sellerId || null,
+      sellerName: meta.sellerName || null,
+      marketplaceId: meta.marketplaceId || synthetic.marketplaceId || null,
+      transactionCount: 0,
+      totalAmount: 0,
+      totalFees: 0,
+      currency: synthetic.amount?.currency || 'USD',
+      transactions: [synthetic],
+    });
+  }
+
+  for (const group of map.values()) {
+    if (group.payoutId && metaMap.has(group.payoutId)) {
+      applyFinancesPayoutMetaToGroup(group, metaMap.get(group.payoutId));
+    }
+    if (group.payoutId && !group.payoutStatus) {
+      group.payoutStatus = inferFinancesGroupPayoutStatus(group.transactions, metaMap.get(group.payoutId));
+    }
+    if (group.payoutId && !group.payoutAmount) {
+      const withdrawal = group.transactions.find((txn) => isFinancesWithdrawalTransaction(txn));
+      if (withdrawal?.amount) group.payoutAmount = withdrawal.amount;
+    }
+    if (!group.payoutDate && group.transactions.length) {
+      const times = group.transactions
+        .map((txn) => new Date(txn.transactionDate).getTime())
+        .filter((time) => !Number.isNaN(time));
+      if (times.length) group.payoutDate = new Date(Math.max(...times)).toISOString();
+    }
+    group.transactions.sort(
+      (a, b) => new Date(b.transactionDate || 0) - new Date(a.transactionDate || 0),
+    );
+    group.totalAmount = parseFloat(group.totalAmount.toFixed(2));
+    group.totalFees = parseFloat(group.totalFees.toFixed(2));
+  }
+
+  return [...map.values()].sort((a, b) => {
+    const av = new Date(a.payoutDate || 0).getTime();
+    const bv = new Date(b.payoutDate || 0).getTime();
+    if (av !== bv) return bv - av;
+    return String(a.payoutId || '').localeCompare(String(b.payoutId || ''));
+  }).map((group) => ({ ...group, transactionsLoaded: group.transactionsLoaded !== false }));
+}
+
+const FINANCES_PAYOUT_TXN_CONCURRENCY = 4;
+const FINANCES_PAYOUT_GROUP_MAX = 120;
+const FINANCES_PAYOUT_PENDING_TXN_MAX = 400;
+
+function buildFinancesPayoutSummaryGroups(payouts, meta, marketplaceId) {
+  return (payouts || []).map((payout) => {
+    const mp = payout._marketplaceId || marketplaceId;
+    const synthetic = normalizeFinancesPayoutRow(payout, mp);
+    return {
+      groupKey: synthetic.payoutId,
+      payoutId: synthetic.payoutId,
+      payoutDate: synthetic.transactionDate,
+      payoutStatus: synthetic.payoutStatus,
+      payoutAmount: synthetic.amount,
+      pendingPayout: false,
+      sellerId: meta.sellerId || null,
+      sellerName: meta.sellerName || null,
+      marketplaceId: mp,
+      transactionCount: null,
+      totalAmount: null,
+      totalFees: null,
+      currency: synthetic.amount?.currency || 'USD',
+      transactions: [],
+      transactionsLoaded: false,
+    };
+  }).sort((a, b) => {
+    const av = new Date(a.payoutDate || 0).getTime();
+    const bv = new Date(b.payoutDate || 0).getTime();
+    if (av !== bv) return bv - av;
+    return String(a.payoutId || '').localeCompare(String(b.payoutId || ''));
+  });
+}
+
+/** List-row cache shape: keep payout metadata + aggregates, omit transaction blobs. */
+function toFinancesPayoutGroupSummary(group) {
+  if (!group) return null;
+  const hasTxns = Array.isArray(group.transactions) && group.transactions.length > 0;
+  let transactionCount = group.transactionCount;
+  let totalAmount = group.totalAmount;
+  let totalFees = group.totalFees;
+  let currency = group.currency || group.payoutAmount?.currency || 'USD';
+
+  if (hasTxns && (transactionCount == null || totalAmount == null || totalFees == null)) {
+    const grouped = groupFinancesTransactionsByPayoutId(group.transactions, {
+      sellerId: group.sellerId,
+      sellerName: group.sellerName,
+      marketplaceId: group.marketplaceId,
+    }, new Map());
+    const match = grouped.find((g) => String(g.payoutId || '') === String(group.payoutId || '')) || grouped[0];
+    if (match) {
+      transactionCount = match.transactionCount;
+      totalAmount = match.totalAmount;
+      totalFees = match.totalFees;
+      currency = match.currency || currency;
+    }
+  }
+
+  return {
+    groupKey: group.groupKey || group.payoutId,
+    payoutId: group.payoutId,
+    payoutDate: group.payoutDate,
+    payoutStatus: group.payoutStatus,
+    payoutAmount: group.payoutAmount,
+    pendingPayout: Boolean(group.pendingPayout),
+    sellerId: group.sellerId || null,
+    sellerName: group.sellerName || null,
+    marketplaceId: group.marketplaceId || null,
+    transactionCount: transactionCount ?? null,
+    totalAmount: totalAmount ?? null,
+    totalFees: totalFees ?? null,
+    currency,
+    transactions: [],
+    transactionsLoaded: false,
+  };
+}
+
+async function enrichFinancesPayoutSummaryGroupsWithAggregates(accessToken, payouts, summaryGroups, meta, marketplaceIds) {
+  const summaryByPayoutId = new Map(
+    (summaryGroups || []).filter((g) => g.payoutId).map((g) => [String(g.payoutId), g]),
+  );
+  const details = {};
+  const runLimited = pLimit(FINANCES_PAYOUT_TXN_CONCURRENCY);
+  await Promise.all((payouts || []).map((payout) => runLimited(async () => {
+    const pid = String(payout.payoutId || '').trim();
+    const summary = summaryByPayoutId.get(pid);
+    if (!summary || !pid) return;
+    const mp = payout._marketplaceId || marketplaceIds[0];
+    try {
+      const raw = await fetchFinancesTransactionsForPayoutId(accessToken, mp, pid);
+      const merged = mergeFinancesTransactionsWithPayouts(raw, [payout], mp);
+      const tagged = merged.map((row) => tagFinancesTransactionsWithMarketplace(
+        { ...row, sellerId: meta.sellerId, sellerName: meta.sellerName },
+        mp,
+      ));
+      const grouped = groupFinancesTransactionsByPayoutId(
+        tagged,
+        meta,
+        buildFinancesPayoutMetaMap([payout]),
+      );
+      const agg = grouped.find((g) => String(g.payoutId || '') === pid) || grouped[0];
+      if (!agg) return;
+      summary.transactionCount = agg.transactionCount;
+      summary.totalAmount = agg.totalAmount;
+      summary.totalFees = agg.totalFees;
+      summary.currency = agg.currency || summary.currency;
+      details[pid] = { ...agg, transactionsLoaded: true };
+    } catch {
+      /* keep payout-only row */
+    }
+  })));
+  return details;
+}
+
+function hydrateFinancesPayoutGroupSummariesFromDetails(groups, details = {}) {
+  return (groups || []).map((group) => {
+    const hasTotals = group.transactionCount != null
+      && group.totalAmount != null
+      && group.totalFees != null;
+    if (hasTotals) return group;
+    const pid = String(group.payoutId || '').trim();
+    const detail = pid ? details[pid] : null;
+    if (!detail) return group;
+    return {
+      ...group,
+      transactionCount: group.transactionCount ?? detail.transactionCount ?? null,
+      totalAmount: group.totalAmount ?? detail.totalAmount ?? null,
+      totalFees: group.totalFees ?? detail.totalFees ?? null,
+      currency: group.currency || detail.currency || 'USD',
+      transactionsLoaded: Boolean(group.transactionsLoaded || detail.transactionsLoaded),
+    };
+  });
+}
+
+async function collectFinancesPayoutsForSeller(accessToken, marketplaceIds, effectiveQuery) {
+  const payoutById = new Map();
+  for (const mp of marketplaceIds) {
+    try {
+      const page = await fetchFinancesPayoutsInRange(accessToken, mp, {
+        fromDate: effectiveQuery.fromDate,
+        toDate: effectiveQuery.toDate,
+        payoutId: effectiveQuery.payoutId,
+        maxPayouts: FINANCES_PAYOUT_GROUP_MAX,
+      });
+      for (const payout of page) {
+        const id = String(payout.payoutId || '').trim();
+        if (!id || payoutById.has(id)) continue;
+        payoutById.set(id, { ...payout, _marketplaceId: mp });
+      }
+    } catch (err) {
+      console.warn('[Finances Payouts] list failed for', mp, err.response?.data || err.message);
+    }
+  }
+  return [...payoutById.values()];
+}
+
+async function fetchFinancesTransactionsForPayoutId(accessToken, marketplaceId, payoutId) {
+  const pid = String(payoutId || '').trim();
+  if (!pid) return [];
+  const mp = normalizeFinancesMarketplaceId(marketplaceId);
+  const raw = await fetchFinancesTransactionsAllPages(
+    accessToken,
+    mp,
+    [`payoutId:{${pid}}`],
+    { maxTransactions: 400 },
+  );
+  return tagFinancesTransactionsWithMarketplace(enrichFinancesTransactions(raw), mp);
+}
+
+async function fetchFinancesPayoutGroupsForSeller(seller, query = {}, {
+  loadTransactions = true,
+  loadPendingGroup = true,
+} = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const effectiveQuery = applyFeeTypeFetchHints(query);
+  const marketplaceIds = resolveFinancesMarketplaceIds(sellerDoc, effectiveQuery.marketplace);
+  const responseFilters = buildFinancesAppliedFilterList(query);
+  const sellerName = seller.user?.username || resolveStoreDisplayName(sellerDoc);
+  const meta = {
+    sellerId: String(sellerDoc._id),
+    sellerName,
+    marketplaceId: marketplaceIds.length === 1 ? marketplaceIds[0] : 'ALL',
+  };
+
+  const payouts = await collectFinancesPayoutsForSeller(accessToken, marketplaceIds, effectiveQuery);
+  const payoutMetaById = buildFinancesPayoutMetaMap(payouts);
+
+  if (!loadTransactions) {
+    const summaryGroups = buildFinancesPayoutSummaryGroups(payouts, meta, marketplaceIds[0]);
+    const payoutDetails = await enrichFinancesPayoutSummaryGroupsWithAggregates(
+      accessToken,
+      payouts,
+      summaryGroups,
+      meta,
+      marketplaceIds,
+    );
+    return {
+      marketplaceId: meta.marketplaceId,
+      filters: responseFilters,
+      groups: summaryGroups,
+      payoutDetails,
+      payoutMetaById,
+    };
+  }
+
+  const runLimited = pLimit(FINANCES_PAYOUT_TXN_CONCURRENCY);
+  const txnBatches = await Promise.all(payouts.map((payout) => runLimited(async () => {
+    try {
+      return await fetchFinancesTransactionsForPayoutId(
+        accessToken,
+        payout._marketplaceId || marketplaceIds[0],
+        payout.payoutId,
+      );
+    } catch {
+      return [];
+    }
+  })));
+  let allTransactions = txnBatches.flat();
+
+  if (loadPendingGroup && !effectiveQuery.payoutId?.trim()) {
+    const filters = buildFinancesTransactionFiltersForQuery(effectiveQuery);
+    for (const mp of marketplaceIds) {
+      try {
+        const raw = await fetchFinancesTransactionsAllPages(
+          accessToken,
+          mp,
+          filters,
+          { maxTransactions: FINANCES_PAYOUT_PENDING_TXN_MAX },
+        );
+        const pending = enrichFinancesTransactions(raw).filter(
+          (txn) => !String(txn.payoutId || '').trim(),
+        );
+        allTransactions.push(...tagFinancesTransactionsWithMarketplace(pending, mp));
+      } catch {
+        /* skip marketplace */
+      }
+    }
+  }
+
+  allTransactions = mergeFinancesTransactionsWithPayouts(
+    allTransactions,
+    payouts,
+    marketplaceIds[0],
+  );
+
+  const groups = groupFinancesTransactionsByPayoutId(
+    allTransactions,
+    meta,
+    payoutMetaById,
+  ).map((group) => ({ ...group, transactionsLoaded: true }));
+
+  return {
+    marketplaceId: meta.marketplaceId,
+    filters: responseFilters,
+    groups,
+    payoutMetaById,
+  };
+}
+
+const FINANCES_PAYOUT_CACHE_MIN_DAYS = 90;
+let financesPayoutGroupsRefreshInFlight = null;
+
+function buildFinancesPayoutCacheRefreshQuery(query = {}) {
+  const to = query.toDate ? new Date(query.toDate) : new Date();
+  const toDate = Number.isNaN(to.getTime()) ? new Date() : to;
+  let from = query.fromDate ? new Date(query.fromDate) : new Date(toDate);
+  if (Number.isNaN(from.getTime())) {
+    from = new Date(toDate);
+    from.setUTCDate(from.getUTCDate() - FINANCES_PAYOUT_CACHE_MIN_DAYS);
+  }
+  const minFrom = new Date(toDate);
+  minFrom.setUTCDate(minFrom.getUTCDate() - FINANCES_PAYOUT_CACHE_MIN_DAYS);
+  if (from > minFrom) from = minFrom;
+  return {
+    ...query,
+    fromDate: from.toISOString(),
+    toDate: toDate.toISOString(),
+  };
+}
+
+function financesPayoutGroupsCacheMeta(cachedAt, { hit = true, source = 'mongodb', savedToDatabase = false } = {}) {
+  const cachedAtMs = cachedAt ? new Date(cachedAt).getTime() : null;
+  return {
+    hit,
+    source,
+    savedToDatabase,
+    cachedAt: cachedAtMs ? new Date(cachedAtMs).toISOString() : null,
+    ageMs: cachedAtMs ? Date.now() - cachedAtMs : null,
+  };
+}
+
+function mergeFinancesPayoutGroupsQuery(req) {
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  return { ...req.query, ...body };
+}
+
+function isFinancesPayoutForceRefresh(query = {}) {
+  return String(query.forceRefresh || '').toLowerCase() === 'true';
+}
+
+function stripFinancesPayoutRefreshFlag(query = {}) {
+  const next = { ...query };
+  delete next.forceRefresh;
+  return next;
+}
+
+async function refreshFinancesPayoutGroupsFromEbay(req, query = {}) {
+  const isAllStores = !query.sellerId || String(query.sellerId).trim() === '__all__';
+
+  if (financesPayoutGroupsRefreshInFlight) {
+    const err = new Error('A payout refresh is already in progress. Please wait.');
+    err.status = 409;
+    throw err;
+  }
+
+  financesPayoutGroupsRefreshInFlight = (async () => {
+    try {
+      if (isAllStores) {
+        const sellers = await getSellersForEbayApiPicker(req);
+        return refreshAllFinancesPayoutGroupsCaches(sellers, query);
+      }
+      const seller = await Seller.findById(query.sellerId).populate('user', 'username');
+      if (!seller) throw new Error('Seller not found');
+      const payload = await refreshFinancesPayoutGroupsCacheForSeller(seller, query, {
+        loadTransactions: true,
+        loadPendingGroup: true,
+      });
+      return {
+        refreshQuery: payload.refreshQuery,
+        results: [{
+          sellerId: seller._id,
+          sellerName: seller.user?.username || String(seller._id),
+          groups: payload.groups,
+          cachedAt: payload.cachedAt,
+        }],
+      };
+    } finally {
+      financesPayoutGroupsRefreshInFlight = null;
+    }
+  })();
+
+  const { refreshQuery, results } = await financesPayoutGroupsRefreshInFlight;
+  const errors = results.filter((r) => r.error).map((r) => ({
+    sellerId: r.sellerId,
+    sellerName: r.sellerName,
+    error: r.error,
+  }));
+
+  let groups;
+  if (isAllStores) {
+    groups = results.flatMap((r) => (r.groups || []).map((row) => ({
+      ...row,
+      sellerId: String(r.sellerId),
+      sellerName: r.sellerName,
+    })));
+    groups = filterFinancesPayoutGroups(groups, query);
+    groups.sort((a, b) => new Date(b.payoutDate || 0) - new Date(a.payoutDate || 0));
+  } else {
+    groups = filterFinancesPayoutGroups(results[0]?.groups || [], query);
+  }
+
+  const latestCachedAt = results.reduce((latest, r) => {
+    if (!r.cachedAt) return latest;
+    if (!latest || new Date(r.cachedAt) > new Date(latest)) return r.cachedAt;
+    return latest;
+  }, null);
+
+  return {
+    success: true,
+    allStores: isAllStores,
+    sellersQueried: results.length,
+    errors,
+    filters: buildFinancesAppliedFilterList(query),
+    marketplaceId: isAllMarketplacesQuery(query.marketplace) ? 'ALL' : (query.marketplace || 'ALL'),
+    totalGroups: groups.length,
+    groups,
+    cache: financesPayoutGroupsCacheMeta(latestCachedAt, {
+      hit: false,
+      source: 'ebay',
+      savedToDatabase: true,
+    }),
+    cacheRange: {
+      fromDate: refreshQuery.fromDate,
+      toDate: refreshQuery.toDate,
+    },
+  };
+}
+
+function filterFinancesPayoutGroups(groups, query = {}) {
+  const fromMs = query.fromDate ? new Date(query.fromDate).getTime() : null;
+  const toMs = query.toDate ? new Date(query.toDate).getTime() : null;
+  const payoutFilter = String(query.payoutId || '').trim();
+  const marketplace = String(query.marketplace || '').trim();
+  const isAllMp = !marketplace || marketplace.toLowerCase() === '__all__' || marketplace.toLowerCase() === 'all';
+
+  return (groups || []).filter((group) => {
+    if (payoutFilter && String(group.payoutId || '') !== payoutFilter) return false;
+    if (!isAllMp && group.marketplaceId && group.marketplaceId !== 'ALL' && group.marketplaceId !== marketplace) {
+      return false;
+    }
+    if (fromMs != null || toMs != null) {
+      const pd = new Date(group.payoutDate || 0).getTime();
+      if (Number.isNaN(pd)) return false;
+      if (fromMs != null && pd < fromMs) return false;
+      if (toMs != null && pd > toMs) return false;
+    }
+    return true;
+  });
+}
+
+function buildFinancesPayoutDetailsFromGroups(groups) {
+  const details = {};
+  for (const group of groups || []) {
+    const pid = String(group.payoutId || '').trim();
+    if (!pid || !Array.isArray(group.transactions) || group.transactions.length === 0) continue;
+    details[pid] = { ...group, transactionsLoaded: true };
+  }
+  return details;
+}
+
+async function readFinancesPayoutGroupsCacheDoc(sellerId) {
+  const row = await FinancesPayoutGroupsCache.findById(String(sellerId)).lean();
+  if (!row?.cachedAt) return null;
+  return row;
+}
+
+async function writeFinancesPayoutGroupsCacheDoc(sellerId, {
+  groups,
+  details,
+  cacheFromDate,
+  cacheToDate,
+  marketplace,
+  mergeDetails = false,
+}) {
+  const id = String(sellerId);
+  const cachedAt = new Date();
+  const nextDetails = details || {};
+  if (mergeDetails) {
+    const existing = await FinancesPayoutGroupsCache.findById(id).lean();
+    if (existing?.details && typeof existing.details === 'object') {
+      Object.assign(nextDetails, existing.details);
+    }
+  }
+  await FinancesPayoutGroupsCache.findByIdAndUpdate(
+    id,
+    {
+      $set: {
+        groups: groups || [],
+        details: nextDetails,
+        cachedAt,
+        cacheFromDate: cacheFromDate || '',
+        cacheToDate: cacheToDate || '',
+        marketplace: marketplace || 'ALL',
+      },
+    },
+    { upsert: true },
+  );
+  return cachedAt;
+}
+
+async function refreshFinancesPayoutGroupsCacheForSeller(seller, query = {}, {
+  loadTransactions = false,
+  loadPendingGroup = false,
+} = {}) {
+  const refreshQuery = buildFinancesPayoutCacheRefreshQuery(query);
+  const payload = await fetchFinancesPayoutGroupsForSeller(seller, refreshQuery, {
+    loadTransactions,
+    loadPendingGroup,
+  });
+  const details = loadTransactions
+    ? buildFinancesPayoutDetailsFromGroups(payload.groups)
+    : (payload.payoutDetails || {});
+  const groupSummaries = (payload.groups || []).map(toFinancesPayoutGroupSummary).filter(Boolean);
+  const cachedAt = await writeFinancesPayoutGroupsCacheDoc(String(seller._id), {
+    groups: groupSummaries,
+    details,
+    cacheFromDate: refreshQuery.fromDate,
+    cacheToDate: refreshQuery.toDate,
+    marketplace: refreshQuery.marketplace || 'ALL',
+    mergeDetails: loadTransactions ? false : Object.keys(details).length === 0,
+  });
+  return { ...payload, cachedAt, refreshQuery };
+}
+
+async function refreshAllFinancesPayoutGroupsCaches(sellers, query = {}) {
+  const refreshQuery = buildFinancesPayoutCacheRefreshQuery(query);
+  const runLimited = pLimit(MARKETING_SELLER_CONCURRENCY);
+  const results = await Promise.all(sellers.map((seller) => runLimited(async () => {
+    const sellerName = resolveStoreDisplayName(seller);
+    try {
+      const payload = await refreshFinancesPayoutGroupsCacheForSeller(seller, refreshQuery, {
+        loadTransactions: false,
+        loadPendingGroup: false,
+      });
+      return {
+        sellerId: seller._id,
+        sellerName,
+        groups: payload.groups,
+        cachedAt: payload.cachedAt,
+      };
+    } catch (err) {
+      return {
+        sellerId: seller._id,
+        sellerName,
+        error: err.message || 'Failed to refresh payout groups',
+        groups: [],
+      };
+    }
+  })));
+  return { refreshQuery, results };
+}
+
+async function loadFinancesPayoutGroupsFromCacheForSeller(sellerId, query = {}) {
+  const doc = await readFinancesPayoutGroupsCacheDoc(sellerId);
+  if (!doc) {
+    return {
+      groups: [],
+      cachedAt: null,
+      cacheFromDate: null,
+      cacheToDate: null,
+      marketplaceId: query.marketplace || 'ALL',
+    };
+  }
+  return {
+    groups: hydrateFinancesPayoutGroupSummariesFromDetails(
+      filterFinancesPayoutGroups(doc.groups, query),
+      doc.details,
+    ),
+    cachedAt: doc.cachedAt,
+    cacheFromDate: doc.cacheFromDate,
+    cacheToDate: doc.cacheToDate,
+    marketplaceId: isAllMarketplacesQuery(query.marketplace) ? 'ALL' : (query.marketplace || doc.marketplace || 'ALL'),
+    details: doc.details || {},
+  };
+}
+
+async function loadFinancesPayoutGroupDetailFromCache(sellerId, payoutId, query = {}) {
+  const doc = await readFinancesPayoutGroupsCacheDoc(sellerId);
+  if (!doc) return null;
+  const pid = String(payoutId || '').trim();
+  const fromDetails = doc.details?.[pid];
+  if (fromDetails) return fromDetails;
+  const fromGroups = (doc.groups || []).find(
+    (g) => String(g.payoutId || '') === pid && Array.isArray(g.transactions) && g.transactions.length > 0,
+  );
+  return fromGroups || null;
+}
+
+async function saveFinancesPayoutGroupDetailToCache(sellerId, payoutId, group) {
+  const pid = String(payoutId || '').trim();
+  if (!pid || !group) return;
+  const summary = toFinancesPayoutGroupSummary(group);
+  const doc = await readFinancesPayoutGroupsCacheDoc(sellerId);
+  const groups = Array.isArray(doc?.groups) ? [...doc.groups] : [];
+  const idx = groups.findIndex((g) => String(g.payoutId || '') === pid);
+  if (idx >= 0) {
+    groups[idx] = { ...groups[idx], ...summary, transactions: [], transactionsLoaded: true };
+  } else if (summary) {
+    groups.push(summary);
+  }
+  await FinancesPayoutGroupsCache.findByIdAndUpdate(
+    String(sellerId),
+    {
+      $set: {
+        [`details.${pid}`]: { ...group, transactionsLoaded: true },
+        groups,
+      },
+    },
+    { upsert: true },
+  );
+}
+
+async function fetchFinancesTransactionsForSeller(seller, query = {}) {
+  const limit = Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  const feeType = String(query.feeType || '').trim();
+  const includePayouts = shouldIncludeFinancesPayoutRows(applyFeeTypeFetchHints(query)) && !feeType;
+
+  if (includePayouts || feeType) {
+    const bulk = await fetchFinancesTransactionsBulkForSeller(seller, query);
+    return {
+      marketplaceId: bulk.marketplaceId,
+      filters: bulk.filters,
+      total: bulk.transactions.length,
+      limit,
+      offset,
+      href: null,
+      next: null,
+      prev: null,
+      transactions: bulk.transactions.slice(offset, offset + limit),
+      feeType: bulk.feeType || undefined,
+    };
+  }
+
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const effectiveQuery = applyFeeTypeFetchHints(query);
+  const marketplaceIds = resolveFinancesMarketplaceIds(sellerDoc, effectiveQuery.marketplace);
+  const responseFilters = buildFinancesAppliedFilterList(query);
+
+  if (marketplaceIds.length === 1) {
+    return fetchFinancesTransactionsForSellerMarketplace(
+      accessToken,
+      marketplaceIds[0],
+      effectiveQuery,
+      responseFilters,
+    );
+  }
+
+  const pageResults = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      return await fetchFinancesTransactionsForSellerMarketplace(
+        accessToken,
+        marketplaceId,
+        effectiveQuery,
+        responseFilters,
+        { limitOverride: limit, offsetOverride: 0 },
+      );
+    } catch {
+      return { marketplaceId, transactions: [] };
+    }
+  }));
+
+  const merged = sortFinancesTransactionsByDate(
+    dedupeFinancesTransactions(pageResults.flatMap((result) => result.transactions)),
+    'desc',
+  );
+
+  return {
+    marketplaceId: 'ALL',
+    filters: responseFilters,
+    total: merged.length,
+    limit,
+    offset,
+    href: null,
+    next: null,
+    prev: null,
+    transactions: merged.slice(offset, offset + limit),
+  };
+}
+
+function sortFinancesTransactionsByDate(transactions, direction = 'desc') {
+  const dir = direction === 'asc' ? 1 : -1;
+  return [...(transactions || [])].sort((a, b) => {
+    const av = new Date(a?.transactionDate || 0).getTime();
+    const bv = new Date(b?.transactionDate || 0).getTime();
+    if (av === bv) return String(a?.transactionId || '').localeCompare(String(b?.transactionId || ''));
+    return (av - bv) * dir;
+  });
+}
+
+function collectTransactionFeeTypes(txn) {
+  const types = new Set();
+  if (txn?.feeType) types.add(String(txn.feeType).trim().toUpperCase());
+  for (const line of txn?.orderLineItems || []) {
+    for (const fee of line?.marketplaceFees || []) {
+      if (fee?.feeType) types.add(String(fee.feeType).trim().toUpperCase());
+    }
+  }
+  return types;
+}
+
+function filterFinancesTransactionsByFeeType(transactions, feeType) {
+  const targets = resolveFeeTypeFilterValuesBackend(feeType);
+  if (!targets.length) return transactions || [];
+  return (transactions || []).filter((txn) => {
+    const types = collectTransactionFeeTypes(txn);
+    return targets.some((target) => types.has(target));
+  });
+}
+
+router.get('/finances/transactions/all', requireAuth, requirePageAccess('FinancesTransactions'), async (req, res) => {
+  try {
+    const sellers = await getSellersForEbayApiPicker(req);
+    const feeType = String(req.query.feeType || '').trim();
+    const perSellerLimit = feeType
+      ? 200
+      : Math.min(200, Math.max(1, parseInt(req.query.perSellerLimit || '50', 10) || 50));
+    const bulkQuery = { ...req.query, limit: perSellerLimit, offset: 0 };
+    const runLimited = pLimit(MARKETING_SELLER_CONCURRENCY);
+
+    const storeResults = await Promise.all(sellers.map((seller) => runLimited(async () => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        const payload = await fetchFinancesTransactionsForSeller(seller, bulkQuery);
+        return {
+          sellerId: seller._id,
+          sellerName,
+          marketplaceId: payload.marketplaceId,
+          filters: payload.filters,
+          transactions: (payload.transactions || []).map((row) => ({
+            ...row,
+            sellerId: String(seller._id),
+            sellerName,
+            marketplaceId: row.marketplaceId || payload.marketplaceId,
+          })),
+        };
+      } catch (err) {
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message || 'Failed to load transactions',
+          transactions: [],
+        };
+      }
+    })));
+
+    const errors = storeResults.filter((r) => r.error).map((r) => ({
+      sellerId: r.sellerId,
+      sellerName: r.sellerName,
+      error: r.error,
+    }));
+    let transactions = sortFinancesTransactionsByDate(
+      storeResults.flatMap((r) => r.transactions),
+      'desc',
+    );
+    const filters = buildFinancesAppliedFilterList(req.query);
+
+    return res.json({
+      success: true,
+      allStores: true,
+      sellersQueried: sellers.length,
+      perSellerLimit,
+      errors,
+      filters,
+      feeType: feeType || undefined,
+      marketplaceId: isAllMarketplacesQuery(req.query.marketplace) ? 'ALL' : (req.query.marketplace || 'ALL'),
+      total: transactions.length,
+      transactions,
+    });
+  } catch (err) {
+    console.error('[Finances Transactions All] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load transactions for all stores' });
+  }
+});
+
+router.get('/finances/transactions', requireAuth, requirePageAccess('FinancesTransactions'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const payload = await fetchFinancesTransactionsForSeller(seller, req.query);
     return res.json({
       success: true,
       seller: { id: seller._id, name: seller.user?.username },
-      marketplaceId,
-      filters,
-      total: response.data?.total ?? null,
-      limit: response.data?.limit ?? limit,
-      offset: response.data?.offset ?? offset,
-      href: response.data?.href,
-      next: response.data?.next,
-      prev: response.data?.prev,
-      transactions,
+      ...payload,
     });
   } catch (err) {
     const status = err.response?.status || 500;
@@ -16452,6 +17798,185 @@ router.get('/finances/transactions', requireAuth, requirePageAccess('FinancesTra
       error: message,
       details: data,
     });
+  }
+});
+
+router.get('/finances/transactions/by-payout/all', requireAuth, requirePageAccess('FinancesPayoutGroups'), async (req, res) => {
+  try {
+    if (isFinancesPayoutForceRefresh(req.query)) {
+      const payload = await refreshFinancesPayoutGroupsFromEbay(req, stripFinancesPayoutRefreshFlag(req.query));
+      return res.json(payload);
+    }
+
+    const sellers = await getSellersForEbayApiPicker(req);
+    const cacheRows = await FinancesPayoutGroupsCache.find({
+      _id: { $in: sellers.map((s) => String(s._id)) },
+    }).lean();
+    const cacheBySeller = new Map(cacheRows.map((row) => [row._id, row]));
+
+    const errors = [];
+    let latestCachedAt = null;
+    const groups = [];
+
+    for (const seller of sellers) {
+      const sellerName = resolveStoreDisplayName(seller);
+      const doc = cacheBySeller.get(String(seller._id));
+      if (!doc?.cachedAt) continue;
+      if (!latestCachedAt || new Date(doc.cachedAt) > new Date(latestCachedAt)) {
+        latestCachedAt = doc.cachedAt;
+      }
+      const filtered = filterFinancesPayoutGroups(
+        hydrateFinancesPayoutGroupSummariesFromDetails(
+          (doc.groups || []).map((row) => ({
+            ...row,
+            sellerId: String(seller._id),
+            sellerName,
+          })),
+          doc.details,
+        ),
+        req.query,
+      );
+      groups.push(...filtered);
+    }
+
+    groups.sort((a, b) => {
+      const av = new Date(a.payoutDate || 0).getTime();
+      const bv = new Date(b.payoutDate || 0).getTime();
+      if (av !== bv) return bv - av;
+      return String(a.payoutId || '').localeCompare(String(b.payoutId || ''));
+    });
+
+    return res.json({
+      success: true,
+      allStores: true,
+      sellersQueried: sellers.length,
+      errors,
+      filters: buildFinancesAppliedFilterList(req.query),
+      marketplaceId: isAllMarketplacesQuery(req.query.marketplace) ? 'ALL' : (req.query.marketplace || 'ALL'),
+      totalGroups: groups.length,
+      groups,
+      cache: financesPayoutGroupsCacheMeta(latestCachedAt, {
+        hit: Boolean(latestCachedAt),
+        source: latestCachedAt ? 'mongodb' : 'none',
+      }),
+    });
+  } catch (err) {
+    console.error('[Finances Payout Groups All] Error:', err.message);
+    const status = err.status || 500;
+    return res.status(status).json({ success: false, error: err.message || 'Failed to load payout groups for all stores' });
+  }
+});
+
+router.get('/finances/transactions/by-payout', requireAuth, requirePageAccess('FinancesPayoutGroups'), async (req, res) => {
+  try {
+    if (isFinancesPayoutForceRefresh(req.query)) {
+      const payload = await refreshFinancesPayoutGroupsFromEbay(req, stripFinancesPayoutRefreshFlag(req.query));
+      return res.json(payload);
+    }
+
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerName = seller.user?.username || String(seller._id);
+    const cached = await loadFinancesPayoutGroupsFromCacheForSeller(String(seller._id), req.query);
+    const groups = (cached.groups || []).map((row) => ({
+      ...row,
+      sellerId: String(seller._id),
+      sellerName,
+    }));
+
+    return res.json({
+      success: true,
+      seller: { id: seller._id, name: sellerName },
+      marketplaceId: cached.marketplaceId,
+      filters: buildFinancesAppliedFilterList(req.query),
+      totalGroups: groups.length,
+      groups,
+      cache: financesPayoutGroupsCacheMeta(cached.cachedAt, {
+        hit: Boolean(cached.cachedAt),
+        source: cached.cachedAt ? 'mongodb' : 'none',
+      }),
+      cacheRange: cached.cachedAt ? {
+        fromDate: cached.cacheFromDate,
+        toDate: cached.cacheToDate,
+      } : null,
+    });
+  } catch (err) {
+    const message = err.message || 'Failed to load payout groups';
+    console.error('[Finances Payout Groups] Error:', message);
+    return res.status(500).json({ success: false, error: message });
+  }
+});
+
+async function handleFinancesPayoutGroupsRefreshRequest(req, res) {
+  try {
+    const query = stripFinancesPayoutRefreshFlag(mergeFinancesPayoutGroupsQuery(req));
+    const payload = await refreshFinancesPayoutGroupsFromEbay(req, query);
+    return res.json(payload);
+  } catch (err) {
+    financesPayoutGroupsRefreshInFlight = null;
+    const message = err.message || 'Failed to refresh payout groups from eBay';
+    const status = err.status || 500;
+    console.error('[Finances Payout Groups Refresh] Error:', message);
+    return res.status(status).json({ success: false, error: message });
+  }
+}
+
+router.get('/finances/transactions/by-payout/refresh', requireAuth, requirePageAccess('FinancesPayoutGroups'), handleFinancesPayoutGroupsRefreshRequest);
+
+router.post('/finances/transactions/by-payout/refresh', requireAuth, requirePageAccess('FinancesPayoutGroups'), handleFinancesPayoutGroupsRefreshRequest);
+
+router.get('/finances/transactions/by-payout/detail', requireAuth, requirePageAccess('FinancesPayoutGroups'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+    const payoutId = String(req.query.payoutId || '').trim();
+    if (!payoutId) return res.status(400).json({ success: false, error: 'payoutId is required' });
+
+    const sellerName = seller.user?.username || String(seller._id);
+    let group = await loadFinancesPayoutGroupDetailFromCache(String(seller._id), payoutId, req.query);
+    let cacheSource = group ? 'mongodb' : 'none';
+
+    if (!group) {
+      const sellerDoc = await resolveSellerWithEbayTokens(seller);
+      const accessToken = await ensureValidToken(sellerDoc);
+      const marketplaceIds = resolveFinancesMarketplaceIds(sellerDoc, req.query.marketplace);
+      const mp = marketplaceIds[0];
+
+      let payoutMeta = await fetchFinancesPayoutById(accessToken, mp, payoutId);
+      if (!payoutMeta) {
+        const listed = await fetchFinancesPayoutsInRange(accessToken, mp, { payoutId, maxPayouts: 1 });
+        payoutMeta = listed[0] || null;
+      }
+
+      const transactions = await fetchFinancesTransactionsForPayoutId(accessToken, mp, payoutId);
+      const merged = payoutMeta
+        ? mergeFinancesTransactionsWithPayouts(transactions, [payoutMeta], mp)
+        : transactions;
+      const groups = groupFinancesTransactionsByPayoutId(
+        merged.map((row) => ({ ...row, sellerId: String(seller._id), sellerName })),
+        { sellerId: String(seller._id), sellerName, marketplaceId: mp },
+        payoutMeta ? buildFinancesPayoutMetaMap([payoutMeta]) : new Map(),
+      );
+      group = groups.find((g) => g.payoutId === payoutId) || groups[0] || null;
+      if (group) {
+        group = { ...group, transactionsLoaded: true };
+        await saveFinancesPayoutGroupDetailToCache(String(seller._id), payoutId, group);
+        cacheSource = 'ebay';
+      }
+    }
+
+    return res.json({
+      success: true,
+      seller: { id: seller._id, name: sellerName },
+      payoutId,
+      group,
+      cache: { source: cacheSource },
+    });
+  } catch (err) {
+    const message = err.message || 'Failed to load payout transactions';
+    console.error('[Finances Payout Detail] Error:', err.response?.data || message);
+    return res.status(500).json({ success: false, error: message });
   }
 });
 

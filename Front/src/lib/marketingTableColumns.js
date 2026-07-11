@@ -42,11 +42,26 @@ export const RECOMMENDATIONS_TABLE_COLUMNS = [
   { id: 'message', label: 'Message' },
 ];
 
+export const FINANCES_TRANSACTION_TABLE_COLUMNS = [
+  { id: 'sellerName', label: 'Store' },
+  { id: 'transactionDate', label: 'Date (PT)' },
+  { id: 'transactionType', label: 'Type' },
+  { id: 'transactionStatus', label: 'Status' },
+  { id: 'bookingEntry', label: 'Entry' },
+  { id: 'amount', label: 'Amount' },
+  { id: 'totalFeeAmount', label: 'Fees' },
+  { id: 'feeType', label: 'Fee type' },
+  { id: 'orderId', label: 'Order' },
+  { id: 'buyerUsername', label: 'Buyer' },
+  { id: 'payoutId', label: 'Payout' },
+];
+
 export const MARKETING_TABLE_COLUMN_STORAGE_KEYS = {
   promotions: 'marketingPromotions.visibleColumns',
   campaigns: 'marketingCampaigns.visibleColumns',
   eligibility: 'marketingAdvertisingEligibility.visibleColumns',
   recommendations: 'marketingListingRecommendations.visibleColumns',
+  financesTransactions: 'financesTransactions.visibleColumns',
 };
 
 export function defaultVisibleColumnIds(columns) {

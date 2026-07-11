@@ -126,6 +126,7 @@ export const PAGE_REGISTRY = [
   { id: 'SellerFunds', name: 'Seller Funds', path: '/seller-funds', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'FinancesTransactionSummary', name: 'Transaction Summary', path: '/finances/transaction-summary', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'FinancesTransactions', name: 'Finances Transactions', path: '/finances/transactions', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'FinancesPayoutGroups', name: 'Finances by Payout', path: '/finances/transactions-by-payout', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
 
   // ====== HR & MANAGEMENT ======
   { id: 'IdeasAndIssues', name: 'Ideas and Issues', path: '/ideas', category: 'hrManagement', defaultRoles: ['superadmin', 'hradmin', 'operationhead', 'listingadmin'] },

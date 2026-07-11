@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Box, CircularProgress, ThemeProvider, CssBaseline } from '@mui/material';
 import LoginPage from './pages/LoginPage.jsx';
@@ -7,12 +7,13 @@ import LandingPage from './pages/LandingPage.jsx';
 import { setAuthToken } from './lib/api';
 import { PAGE_REGISTRY } from './constants/pages';
 import { createAppTheme } from './theme/appTheme';
+import { lazyWithRetry } from './lib/lazyImport.js';
 
-const AdminLayout = lazy(() => import('./layouts/AdminLayout.jsx'));
-const IdeasPage = lazy(() => import('./pages/IdeasPage.jsx'));
-const AboutMePage = lazy(() => import('./pages/AboutMePage.jsx'));
-const ListerDashboard = lazy(() => import('./pages/lister/ListerDashboard.jsx'));
-const SellerEbayPage = lazy(() => import('./pages/SellerProfilePage.jsx'));
+const AdminLayout = lazyWithRetry(() => import('./layouts/AdminLayout.jsx'));
+const IdeasPage = lazyWithRetry(() => import('./pages/IdeasPage.jsx'));
+const AboutMePage = lazyWithRetry(() => import('./pages/AboutMePage.jsx'));
+const ListerDashboard = lazyWithRetry(() => import('./pages/lister/ListerDashboard.jsx'));
+const SellerEbayPage = lazyWithRetry(() => import('./pages/SellerProfilePage.jsx'));
 
 const BASE_DOCUMENT_TITLE = 'Grow Mentality • EMS';
 

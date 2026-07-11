@@ -144,6 +144,10 @@ const OrderSchema = new mongoose.Schema(
       }
     },
 
+    /** Queued when Cron Jobs → Set listing qty to 1 is enabled and a new order is imported. */
+    listingQtyUpdatePending: { type: Boolean, default: false },
+    listingQtyUpdatedAt: { type: Date, default: null },
+
     // Already in use flag for Awaiting Shipment
     alreadyInUse: {
       type: String,

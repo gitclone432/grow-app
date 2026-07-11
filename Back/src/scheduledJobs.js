@@ -8,6 +8,7 @@ import {
   scheduledPollNewOrders,
   refreshPayoneerFeedCache,
   processPendingPolicyMessages,
+  processPendingListingQtyUpdates,
 } from './routes/ebay.js';
 import { importTransactionsFromGmail } from './utils/gmailTransactionImporter.js';
 import { runScheduledDirectListJobs } from './lib/directListJobRunner.js';
@@ -58,9 +59,17 @@ export const CRON_JOB_DEFINITIONS = [
     enabled: false,
   },
   {
+    jobKey: 'orderListingQtyUpdate',
+    label: 'Set listing qty to 1 on new order',
+    description: 'After a new order is imported, set each line item listing quantity to 1 via eBay Trading API (ReviseInventoryStatus). Respects Exclude Order Qty Skips. When disabled, no qty updates run (including after order polls).',
+    cronExpr: '*/5 * * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: false,
+  },
+  {
     jobKey: 'policyMessages',
     label: 'Order policy messages',
-    description: 'Send buyer policy messages for eligible eBay orders (~20 min after order).',
+    description: 'Send buyer policy messages for eligible eBay orders (~20 min after order). When disabled, automatic sends after order polls are also skipped.',
     cronExpr: '*/5 * * * *',
     timezone: 'Asia/Kolkata',
     enabled: true,
@@ -148,6 +157,12 @@ async function runPollNewOrders() {
   await scheduledPollNewOrders();
 }
 
+async function runOrderListingQtyUpdate() {
+  console.log('[CRON] Listing qty update starting…');
+  const result = await processPendingListingQtyUpdates(50);
+  console.log(`[CRON] Listing qty update: processed=${result.processed}, updated=${result.updated}, failed=${result.failed}`);
+}
+
 async function runPolicyMessages() {
   console.log('[CRON] Policy messages starting...');
   const result = await processPendingPolicyMessages(50);
@@ -182,6 +197,7 @@ const CRON_JOB_HANDLERS = {
   directListBulkJobs: runDirectListBulkJobs,
   pollAllSellers: runPollAllSellers,
   pollNewOrders: runPollNewOrders,
+  orderListingQtyUpdate: runOrderListingQtyUpdate,
   policyMessages: runPolicyMessages,
   autoCompatRunForDate: runAutoCompatForDate,
   gmailImport: runGmailImport,

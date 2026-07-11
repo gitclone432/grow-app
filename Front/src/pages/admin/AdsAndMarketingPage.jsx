@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, lazy, Suspense } from 'react';
+import { useEffect, useRef, useState, Suspense } from 'react';
 import {
   Box,
   Button,
@@ -16,6 +16,7 @@ import MarketingStoreFilters from '../../components/marketing/MarketingStoreFilt
 import MarketingEndingSoonAlert from '../../components/marketing/MarketingEndingSoonAlert.jsx';
 import { ALL_MARKETPLACES_VALUE, ALL_STORES_VALUE } from '../../lib/marketingConstants.js';
 import { useEbayConnectedSellers } from '../../hooks/useEbayConnectedSellers.js';
+import { lazyWithRetry as lazy } from '../../lib/lazyImport.js';
 
 const MarketingCampaignsPage = lazy(() => import('./MarketingCampaignsPage.jsx'));
 const MarketingPromotionsPage = lazy(() => import('./MarketingPromotionsPage.jsx'));
