@@ -1,6 +1,46 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 
+/** Short-lived in-memory cache for auth version checks (cuts DB round-trips on page APIs). */
+const AUTH_VERSION_CACHE_TTL_MS = 60_000;
+const authVersionCache = new Map();
+
+function getCachedAuthVersions(userId) {
+  const entry = authVersionCache.get(String(userId));
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    authVersionCache.delete(String(userId));
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedAuthVersions(userId, value) {
+  authVersionCache.set(String(userId), {
+    value,
+    expiresAt: Date.now() + AUTH_VERSION_CACHE_TTL_MS,
+  });
+}
+
+async function loadAuthVersions(userId) {
+  const cached = getCachedAuthVersions(userId);
+  if (cached) return cached;
+  const user = await User.findById(userId).select('tokenVersion permissionsVersion').lean();
+  if (!user) return null;
+  const value = {
+    tokenVersion: user.tokenVersion || 1,
+    permissionsVersion: user.permissionsVersion || 1,
+  };
+  setCachedAuthVersions(userId, value);
+  return value;
+}
+
+/** Invalidate after password reset / permission changes if callers know the userId. */
+export function invalidateAuthVersionCache(userId) {
+  if (userId) authVersionCache.delete(String(userId));
+  else authVersionCache.clear();
+}
+
 // Page registry: maps pageId -> defaultRoles (backward compat)
 // This is the server-side source of truth for which roles have default access to each page
 export const PAGE_DEFAULT_ROLES = {
@@ -74,17 +114,26 @@ export const PAGE_DEFAULT_ROLES = {
   'AffiliateOrders': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // eBay Parameters
-  'SellingPrivileges': ['superadmin', 'listingadmin'],
+  'StoreOverview': ['superadmin', 'listingadmin'],
   'EbayApiUsage': ['superadmin', 'listingadmin'],
+  'Analytics': ['superadmin', 'listingadmin'],
+  'AnalyticsSellerStandards': ['superadmin', 'listingadmin'],
+  'EbayAnalyticsHub': ['superadmin', 'listingadmin'],
+  'EbayFeedback': ['superadmin', 'listingadmin'],
   'EbayApiTester': ['superadmin', 'listingadmin'],
+  'AdsAndMarketing': ['superadmin', 'listingadmin'],
+  'MarketingCampaigns': ['superadmin', 'listingadmin'],
+  'MarketingPromotions': ['superadmin', 'listingadmin'],
   'SellerFunds': ['superadmin', 'listingadmin'],
+  'FinancesTransactionSummary': ['superadmin', 'listingadmin'],
+  'FinancesTransactions': ['superadmin', 'listingadmin'],
+  'FinancesPayoutGroups': ['superadmin', 'listingadmin'],
 
   // HR & Management
   'IdeasAndIssues': ['superadmin', 'hradmin', 'operationhead', 'listingadmin'],
   'TeamChat': ['superadmin', 'hradmin', 'operationhead', 'listingadmin'],
   'LeaveAdmin': ['superadmin', 'hradmin'],
-  'EmployeeManagement': ['superadmin', 'hradmin'],
-  'AddUser': ['superadmin', 'listingadmin', 'hradmin', 'operationhead'],
+  'EmployeeManagement': ['superadmin', 'listingadmin', 'hradmin', 'operationhead'],
   'AddSeller': ['superadmin', 'hradmin', 'operationhead'],
   'UserSellerAssignments': ['superadmin', 'hradmin', 'hr'],
   'ViewAllMessages': ['superadmin'],
@@ -97,23 +146,13 @@ export const PAGE_DEFAULT_ROLES = {
   'ManagePlatforms': ['superadmin', 'listingadmin'],
   'ManageStores': ['superadmin', 'listingadmin'],
   'ProductTable': ['superadmin', 'listingadmin'],
+  // Legacy page IDs kept for shared assignment/task/range APIs used by other pages
   'TaskList': ['superadmin', 'listingadmin'],
   'Assignments': ['superadmin', 'listingadmin'],
-  'ListingsSummary': ['superadmin', 'listingadmin'],
-  'ListingSheet': ['superadmin', 'listingadmin'],
-  'StoreWiseTasks': ['superadmin', 'listingadmin'],
-  'StoreDailyTasks': ['superadmin', 'listingadmin'],
-  'ListerInfo': ['superadmin', 'listingadmin'],
-  'RangeAnalyzer': ['superadmin', 'listingadmin'],
-  'AmazonLookup': ['superadmin'],
-  'ProductUmbrellas': ['superadmin'],
-  'AsinStorage': ['superadmin', 'productadmin'],
+  'RangeAnalyzer': ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'],
   'ColumnCreator': ['superadmin', 'productadmin'],
   'ManageRanges': ['superadmin', 'productadmin'],
-  'UserCredentials': ['superadmin'],
   'UserPerformance': ['superadmin'],
-  'EmployeeDetails': ['superadmin', 'hradmin', 'operationhead'],
-
   // Etsy
   'EtsyProducts': ['superadmin', 'listingadmin'],
   'EtsyOrderFulfilment': ['superadmin', 'listingadmin'],
@@ -150,28 +189,22 @@ export async function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    
-    // Validate token version and permissions version against database
-    const user = await User.findById(payload.userId).select('tokenVersion permissionsVersion').lean();
-    if (!user) {
+
+    const versions = await loadAuthVersions(payload.userId);
+    if (!versions) {
       return res.status(401).json({ error: 'User not found' });
     }
-    
-    const userTokenVersion = user.tokenVersion || 1;
+
     const payloadTokenVersion = payload.tokenVersion || 1;
-    
-    if (payloadTokenVersion !== userTokenVersion) {
+    if (payloadTokenVersion !== versions.tokenVersion) {
       return res.status(401).json({ error: 'Token expired. Please login again.' });
     }
-    
-    // Check if permissions have been modified by admin
-    const userPermissionsVersion = user.permissionsVersion || 1;
+
     const payloadPermissionsVersion = payload.permissionsVersion || 1;
-    
-    if (payloadPermissionsVersion !== userPermissionsVersion) {
+    if (payloadPermissionsVersion !== versions.permissionsVersion) {
       return res.status(401).json({ error: 'Your access permissions have been updated. Please login again.' });
     }
-    
+
     req.user = payload; // { userId, role, tokenVersion, permissionsVersion }
     return next();
   } catch (e) {
@@ -193,13 +226,13 @@ export async function requireAuthSSE(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(payload.userId).select('tokenVersion permissionsVersion').lean();
-    if (!user) return res.status(401).json({ error: 'User not found' });
+    const versions = await loadAuthVersions(payload.userId);
+    if (!versions) return res.status(401).json({ error: 'User not found' });
 
-    if ((payload.tokenVersion || 1) !== (user.tokenVersion || 1)) {
+    if ((payload.tokenVersion || 1) !== versions.tokenVersion) {
       return res.status(401).json({ error: 'Token expired. Please login again.' });
     }
-    if ((payload.permissionsVersion || 1) !== (user.permissionsVersion || 1)) {
+    if ((payload.permissionsVersion || 1) !== versions.permissionsVersion) {
       return res.status(401).json({ error: 'Your access permissions have been updated. Please login again.' });
     }
     req.user = payload;
@@ -223,13 +256,13 @@ export async function requireAuthFile(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(payload.userId).select('tokenVersion permissionsVersion').lean();
-    if (!user) return res.status(401).json({ error: 'User not found' });
+    const versions = await loadAuthVersions(payload.userId);
+    if (!versions) return res.status(401).json({ error: 'User not found' });
 
-    if ((payload.tokenVersion || 1) !== (user.tokenVersion || 1)) {
+    if ((payload.tokenVersion || 1) !== versions.tokenVersion) {
       return res.status(401).json({ error: 'Token expired. Please login again.' });
     }
-    if ((payload.permissionsVersion || 1) !== (user.permissionsVersion || 1)) {
+    if ((payload.permissionsVersion || 1) !== versions.permissionsVersion) {
       return res.status(401).json({ error: 'Your access permissions have been updated. Please login again.' });
     }
     req.user = payload;

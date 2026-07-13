@@ -12,7 +12,7 @@ import Seller from '../models/Seller.js';
 import FeedUpload from '../models/FeedUpload.js';
 import CsvStorage from '../models/CsvStorage.js';
 
-const EBAY_OAUTH_SCOPES = 'https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.marketing https://api.ebay.com/oauth/api_scope/sell.analytics.readonly';
+import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
 
 async function ensureValidToken(seller) {
     const now = Date.now();
@@ -26,11 +26,7 @@ async function ensureValidToken(seller) {
 
     const refreshRes = await axios.post(
         'https://api.ebay.com/identity/v1/oauth2/token',
-        qs.stringify({
-            grant_type: 'refresh_token',
-            refresh_token: seller.ebayTokens.refresh_token,
-            scope: EBAY_OAUTH_SCOPES
-        }),
+        qs.stringify(buildRefreshTokenParams(seller)),
         {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',

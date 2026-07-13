@@ -1,7 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Box,
   Paper,
+  Card,
+  CardContent,
   Typography,
   CircularProgress,
   Alert,
@@ -13,6 +15,7 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TableSortLabel,
   Chip,
   Button,
   Stack,
@@ -35,6 +38,51 @@ const formatCurrency = (amountObj) => {
 };
 
 const fmtUSD = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
+
+const getFundValue = (amountObj) => parseFloat(amountObj?.value ?? amountObj ?? 0);
+
+const getAvailableColor = (amountObjOrNum) => (
+  getFundValue(amountObjOrNum) < 0 ? '#ef4444' : '#22c55e'
+);
+
+const SORT_COLUMNS = {
+  sellerName: { label: 'Seller', align: 'left', color: undefined },
+  totalFunds: { label: 'Total Funds', align: 'right', color: '#3b82f6' },
+  availableFunds: { label: 'Available', align: 'right', color: '#22c55e' },
+  processingFunds: { label: 'Processing', align: 'right', color: '#f59e0b' },
+  fundsOnHold: { label: 'On Hold', align: 'right', color: '#ef4444' },
+};
+
+function compareSellers(a, b, sortBy, sortOrder) {
+  const dir = sortOrder === 'asc' ? 1 : -1;
+  if (sortBy === 'sellerName') {
+    const nameA = String(a.sellerName || a.error || '').toLowerCase();
+    const nameB = String(b.sellerName || b.error || '').toLowerCase();
+    return dir * nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+  }
+  const field = SORT_COLUMNS[sortBy] ? sortBy : 'totalFunds';
+  const valA = a.error ? -Infinity : getFundValue(a[field]);
+  const valB = b.error ? -Infinity : getFundValue(b[field]);
+  if (valA === valB) {
+    return (a.sellerName || '').localeCompare(b.sellerName || '', undefined, { sensitivity: 'base' });
+  }
+  return dir * (valA - valB);
+}
+
+function SortableHeader({ column, sortBy, sortOrder, onSort }) {
+  const meta = SORT_COLUMNS[column];
+  return (
+    <TableCell align={meta.align} sx={{ fontWeight: 700, color: meta.color }}>
+      <TableSortLabel
+        active={sortBy === column}
+        direction={sortBy === column ? sortOrder : 'asc'}
+        onClick={() => onSort(column)}
+      >
+        {meta.label}
+      </TableSortLabel>
+    </TableCell>
+  );
+}
 
 // Format date+time in PST
 const formatDatePST = (dateStr) => {
@@ -170,7 +218,7 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
           </Typography>
         </TableCell>
         <TableCell align="right">
-          <Typography variant="body2" fontWeight={600} sx={{ color: '#22c55e' }}>
+          <Typography variant="body2" fontWeight={600} sx={{ color: getAvailableColor(seller.availableFunds) }}>
             {formatCurrency(seller.availableFunds)}
           </Typography>
         </TableCell>
@@ -545,6 +593,19 @@ const ProcessingByDateSection = ({ sellers }) => {
   );
 };
 
+const KpiCard = ({ label, value, color, bgcolor = 'action.hover' }) => (
+  <Card sx={{ p: 1, borderRadius: 2, bgcolor, height: '100%' }}>
+    <CardContent sx={{ '&:last-child': { pb: 2 } }}>
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
+        {label}
+      </Typography>
+      <Typography variant="h5" sx={{ fontWeight: 800, color, mt: 0.5 }}>
+        {value}
+      </Typography>
+    </CardContent>
+  </Card>
+);
+
 // ============================================
 // MAIN PAGE
 // ============================================
@@ -554,6 +615,22 @@ const SellerFundsPage = () => {
   const [error, setError] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
   const [expandedHolds, setExpandedHolds] = useState({});
+  const [sortBy, setSortBy] = useState('sellerName');
+  const [sortOrder, setSortOrder] = useState('asc');
+
+  const handleSort = (column) => {
+    if (sortBy === column) {
+      setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(column);
+      setSortOrder(column === 'sellerName' ? 'asc' : 'desc');
+    }
+  };
+
+  const sortedSellers = useMemo(
+    () => [...sellers].sort((a, b) => compareSellers(a, b, sortBy, sortOrder)),
+    [sellers, sortBy, sortOrder]
+  );
 
   const fetchFundsSummary = useCallback(async () => {
     setLoading(true);
@@ -587,6 +664,8 @@ const SellerFundsPage = () => {
     return acc;
   }, { total: 0, available: 0, processing: 0, onHold: 0 });
 
+  const sellerCount = sellers.filter((s) => !s.error).length;
+
   return (
     <Box sx={{ p: 3, maxWidth: 1400, mx: 'auto' }}>
       {/* Header */}
@@ -605,6 +684,48 @@ const SellerFundsPage = () => {
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
+      {!loading && sellers.length > 0 && (
+        <Box
+          sx={{
+            mb: 3,
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+            gap: 2,
+          }}
+        >
+          <KpiCard
+            label="Total Funds"
+            value={fmtUSD(totals.total)}
+            color="#3b82f6"
+            bgcolor="#eff6ff"
+          />
+          <KpiCard
+            label="Available"
+            value={fmtUSD(totals.available)}
+            color={getAvailableColor(totals.available)}
+            bgcolor={totals.available < 0 ? '#fef2f2' : '#f0fdf4'}
+          />
+          <KpiCard
+            label="Processing"
+            value={fmtUSD(totals.processing)}
+            color="#f59e0b"
+            bgcolor="#fffbeb"
+          />
+          <KpiCard
+            label="On Hold"
+            value={fmtUSD(totals.onHold)}
+            color="#ef4444"
+            bgcolor="#fef2f2"
+          />
+          <KpiCard
+            label="Stores"
+            value={sellerCount}
+            color="text.primary"
+            bgcolor="#f8fafc"
+          />
+        </Box>
+      )}
+
       {/* ===== SECTION 1: SELLER FUNDS OVERVIEW ===== */}
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress /></Box>
@@ -616,15 +737,19 @@ const SellerFundsPage = () => {
             <Table>
               <TableHead>
                 <TableRow sx={{ backgroundColor: '#f8fafc' }}>
-                  <TableCell sx={{ fontWeight: 700 }}>Seller</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700, color: '#3b82f6' }}>Total Funds</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700, color: '#22c55e' }}>Available</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700, color: '#f59e0b' }}>Processing</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700, color: '#ef4444' }}>On Hold</TableCell>
+                  {Object.keys(SORT_COLUMNS).map((column) => (
+                    <SortableHeader
+                      key={column}
+                      column={column}
+                      sortBy={sortBy}
+                      sortOrder={sortOrder}
+                      onSort={handleSort}
+                    />
+                  ))}
                 </TableRow>
               </TableHead>
               <TableBody>
-                {sellers.map((seller) => (
+                {sortedSellers.map((seller) => (
                   <SellerRow
                     key={`${seller.sellerId}-${lastRefresh?.getTime() || 0}`}
                     seller={seller}
@@ -639,7 +764,7 @@ const SellerFundsPage = () => {
                       <Typography variant="body1" fontWeight={700} sx={{ color: '#3b82f6' }}>{fmtUSD(totals.total)}</Typography>
                     </TableCell>
                     <TableCell align="right">
-                      <Typography variant="body1" fontWeight={700} sx={{ color: '#22c55e' }}>{fmtUSD(totals.available)}</Typography>
+                      <Typography variant="body1" fontWeight={700} sx={{ color: getAvailableColor(totals.available) }}>{fmtUSD(totals.available)}</Typography>
                     </TableCell>
                     <TableCell align="right">
                       <Typography variant="body1" fontWeight={700} sx={{ color: '#f59e0b' }}>{fmtUSD(totals.processing)}</Typography>

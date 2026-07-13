@@ -1,4 +1,5 @@
 import Seller from '../models/Seller.js';
+import mongoose from 'mongoose';
 import { getSellersMatchingAllRoute } from './sellersAllScope.js';
 
 const ORG_WIDE_SELLER_ROLES = new Set(['superadmin', 'listingadmin']);
@@ -51,4 +52,30 @@ export async function getSellersForStoreListings(req) {
 export function sellerIdsInMatch(sellerIds) {
   const ids = Array.isArray(sellerIds) ? sellerIds : [sellerIds];
   return { $in: [...new Set(ids.flatMap((id) => [id, String(id)]))] };
+}
+
+/**
+ * Mongo filter for Store Listings (ActiveListing). Uses $and so search $or
+ * does not overwrite listingStatus $or.
+ */
+export function buildStoreListingsMatch({ sellerIds = [], sellerId = '', search = '' } = {}) {
+  const clauses = [activeListingStatusFilter()];
+
+  const sid = String(sellerId || '').trim();
+  if (sid && mongoose.Types.ObjectId.isValid(sid)) {
+    const oid = new mongoose.Types.ObjectId(sid);
+    clauses.push({ seller: { $in: [oid, String(oid)] } });
+  } else if (sellerIds.length) {
+    clauses.push({ seller: sellerIdsInMatch(sellerIds) });
+  }
+
+  const q = String(search || '').trim();
+  if (q) {
+    const searchRegex = { $regex: q, $options: 'i' };
+    clauses.push({
+      $or: [{ title: searchRegex }, { sku: searchRegex }, { itemId: searchRegex }],
+    });
+  }
+
+  return clauses.length === 1 ? clauses[0] : { $and: clauses };
 }

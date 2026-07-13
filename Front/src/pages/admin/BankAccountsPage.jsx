@@ -41,6 +41,7 @@ import {
     splitBankSellersField,
     isMongoIdString,
     normalizeBankSellersPayload,
+    buildSellerOptions,
 } from '../../lib/bankAccountSellers.js';
 import { bankAccountMenuLabel, bankAccountListLabelDraft } from '../../lib/bankAccountLabel.js';
 
@@ -52,32 +53,6 @@ function sellersFieldToTokens(s) {
         .split(/[,;]+/)
         .map((t) => t.trim())
         .filter(Boolean);
-}
-
-/**
- * Same list as Settings → eBay Stores (`/sellers/all`): eBay seller accounts.
- * The form saves comma-separated seller document _id values so multiple stores under one user stay distinct;
- * Payoneer / eBay still match legacy username/email tokens in existing rows.
- */
-function buildSellerOptions(sellersList) {
-    const rows = (sellersList || [])
-        .map((s) => {
-            const username = (s.user?.username || '').trim();
-            const email = (s.user?.email || '').trim();
-            const bankToken = username || email;
-            if (!bankToken) return null;
-            const label =
-                username && email && username.toLowerCase() !== email.toLowerCase()
-                    ? `${username} (${email})`
-                    : bankToken;
-            const matchLower = new Set(
-                [username, email].filter(Boolean).map((x) => x.toLowerCase())
-            );
-            return { id: String(s._id), label, bankToken, matchLower };
-        })
-        .filter(Boolean);
-    rows.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
-    return rows;
 }
 
 function formatSellersCell(sellersStr, sellerOptions) {
@@ -256,16 +231,18 @@ const BankAccountsPage = () => {
             </Box>
 
             <Alert severity="info" sx={{ mb: 2, borderRadius: 2, background: theme => `linear-gradient(135deg, ${theme.palette.info.main}15 0%, ${theme.palette.secondary.main}15 100%)`, border: theme => `1px solid ${theme.palette.info.main}30` }}>
-                Use <strong>one bank account row per real bank account</strong>. Link{' '}
-                <strong>multiple stores</strong> on that row (Stores dropdown). Do not create a
-                separate bank row for each store unless they are separate bank accounts — add the{' '}
-                <strong>account number</strong> so same-name accounts stay distinct in Transactions.
+                <strong>One row per real bank account:</strong> link multiple stores on that row (Stores dropdown).
+                <br />
+                <strong>One row per store (same bank):</strong> duplicate the bank name/account number but set a different{' '}
+                <strong>Seller</strong> on each row — menus show the store after the account mask (e.g.{' '}
+                <em>Actus Corp (****9013) · rolex</em>).
             </Alert>
 
             <TableContainer component={Paper} sx={{ overflowX: 'auto', borderRadius: 2, boxShadow: theme => `0 8px 24px ${theme.palette.primary.main}10`, border: theme => `1px solid ${theme.palette.divider}` }}>
                 <Table>
                     <TableHead>
                         <TableRow sx={{ bgcolor: theme => theme.palette.primary.main, '& th': { color: 'white', fontWeight: 700 } }}>
+                            <TableCell sx={{ color: 'white', fontWeight: 700, width: 56 }}>#</TableCell>
                             <TableCell sx={{ color: 'white', fontWeight: 700 }}>Bank</TableCell>
                             <TableCell sx={{ color: 'white', fontWeight: 700 }}>Account Number</TableCell>
                             <TableCell sx={{ color: 'white', fontWeight: 700 }}>IFSC Code</TableCell>
@@ -276,9 +253,10 @@ const BankAccountsPage = () => {
                         </TableRow>
                     </TableHead>
                     <TableBody>
-                        {accounts.map((acc) => (
+                        {accounts.map((acc, index) => (
                             <TableRow key={acc._id}>
-                                <TableCell>{bankAccountMenuLabel(acc)}</TableCell>
+                                <TableCell sx={{ color: 'text.secondary', fontWeight: 600 }}>{index + 1}</TableCell>
+                                <TableCell>{bankAccountMenuLabel(acc, sellerOptions)}</TableCell>
                                 <TableCell sx={{ fontSize: { xs: '0.85rem', sm: '1rem' } }}>{acc.accountNumber}</TableCell>
                                 <TableCell sx={{ fontSize: { xs: '0.85rem', sm: '1rem' } }}>{acc.ifscCode}</TableCell>
                                 <TableCell
@@ -316,7 +294,7 @@ const BankAccountsPage = () => {
                         ))}
                         {accounts.length === 0 && (
                             <TableRow>
-                                <TableCell colSpan={7} align="center">No accounts found.</TableCell>
+                                <TableCell colSpan={8} align="center">No accounts found.</TableCell>
                             </TableRow>
                         )}
                     </TableBody>

@@ -20,7 +20,18 @@ export default function usePageAccess(user) {
       if (isSuper) return true;
 
       if (useCustom) {
-        return pagePermissions.includes(pageId);
+        if (pagePermissions.includes(pageId)) return true;
+        // Legacy feedback pages merged into EbayFeedback
+        if (pageId === 'EbayFeedback') {
+          return pagePermissions.some((p) => ['AwaitingFeedback', 'EbayFeedbackRatingSummary'].includes(p));
+        }
+        if (pageId === 'EbayAnalyticsHub') {
+          return pagePermissions.some((p) => ['Analytics', 'AnalyticsSellerStandards'].includes(p));
+        }
+        if (pageId === 'EmployeeManagement') {
+          return pagePermissions.some((p) => ['EmployeeManagement', 'AddUser', 'EmployeeDetails'].includes(p));
+        }
+        return false;
       }
 
       // Default mode: check role against page's defaultRoles

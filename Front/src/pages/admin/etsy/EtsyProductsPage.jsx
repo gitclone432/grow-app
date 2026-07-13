@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import AddIcon from '@mui/icons-material/Add';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import UploadIcon from '@mui/icons-material/Upload';
 import StorefrontIcon from '@mui/icons-material/Storefront';
 import {
   Alert,
@@ -34,6 +35,7 @@ import { normalizeEtsyRegion } from '../../../utils/etsyAddressZip.js';
 import { enrichEtsyProductRow, LISTED_DATE_TIME_LEFT_TRIGGER } from '../../../utils/etsyProductTimeLeft.js';
 import EtsyEditableCell, { EtsyRowNumberCell } from './EtsyEditableCell.jsx';
 import EtsySoldPriceCalculatorDialog from './EtsySoldPriceCalculatorDialog.jsx';
+import EtsyProductsImportDialog from '../../../components/EtsyProductsImportDialog.jsx';
 import { ETSY_PRODUCT_COLUMNS, normalizeListingStatus } from './etsyProductColumns.js';
 
 const ROWS_PER_PAGE = 25;
@@ -168,6 +170,8 @@ export default function EtsyProductsPage() {
   const [deletingIds, setDeletingIds] = useState({});
   const [calculatorProduct, setCalculatorProduct] = useState(null);
   const [applyingListedPrice, setApplyingListedPrice] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importStoreId, setImportStoreId] = useState('');
 
   const isAllStoresSelected = selectedStoreId === ALL_STORES_VALUE;
   const isSingleStoreSelected = Boolean(selectedStoreId) && !isAllStoresSelected;
@@ -285,6 +289,24 @@ export default function EtsyProductsPage() {
   const isRowSaving = (productId) => Object.keys(savingCells).some((key) => key.startsWith(`${productId}:`));
 
   const handleRefresh = () => loadProducts(selectedStoreId);
+
+  const openImportDialog = () => {
+    setImportStoreId(isSingleStoreSelected ? selectedStoreId : (stores[0]?._id || ''));
+    setImportOpen(true);
+  };
+
+  const handleImported = (summary) => {
+    if (selectedStoreId === ALL_STORES_VALUE) {
+      loadProducts(ALL_STORES_VALUE);
+    } else {
+      setSelectedStoreId(summary.storeId);
+    }
+    setSnackbar({
+      open: true,
+      message: `Imported ${summary.insertedCount} row(s)${summary.mode === 'replace' ? ' (replaced existing rows)' : ''}`,
+      severity: 'success',
+    });
+  };
 
   const handleAddRow = async () => {
     if (!isSingleStoreSelected) {
@@ -447,6 +469,15 @@ export default function EtsyProductsPage() {
             <Button
               variant="outlined"
               size="small"
+              startIcon={<UploadIcon />}
+              onClick={openImportDialog}
+              disabled={stores.length === 0}
+            >
+              Import CSV
+            </Button>
+            <Button
+              variant="outlined"
+              size="small"
               startIcon={loading ? <CircularProgress size={16} /> : <RefreshIcon />}
               onClick={handleRefresh}
               disabled={loading || !selectedStoreId}
@@ -543,11 +574,16 @@ export default function EtsyProductsPage() {
           <Typography color="text.secondary" gutterBottom>
             No product rows for {isAllStoresSelected ? 'any store' : (selectedStore?.name || 'this store')}.
           </Typography>
-          {isSingleStoreSelected && (
-            <Button variant="contained" size="small" startIcon={<AddIcon />} onClick={handleAddRow} disabled={creating} sx={{ mt: 1 }}>
-              Add Row
+          <Stack direction="row" spacing={1} justifyContent="center" sx={{ mt: 1 }}>
+            <Button variant="outlined" size="small" startIcon={<UploadIcon />} onClick={openImportDialog} disabled={stores.length === 0}>
+              Import CSV
             </Button>
-          )}
+            {isSingleStoreSelected && (
+              <Button variant="contained" size="small" startIcon={<AddIcon />} onClick={handleAddRow} disabled={creating}>
+                Add Row
+              </Button>
+            )}
+          </Stack>
         </Paper>
       ) : filteredProducts.length === 0 ? (
         <Paper sx={{ p: 4, textAlign: 'center', flexShrink: 0 }}>
@@ -651,6 +687,15 @@ export default function EtsyProductsPage() {
         applying={applyingListedPrice}
         onClose={() => setCalculatorProduct(null)}
         onApplyListedPrice={handleApplyListedPrice}
+      />
+
+      <EtsyProductsImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        stores={stores}
+        selectedStoreId={importStoreId}
+        onStoreChange={setImportStoreId}
+        onImported={handleImported}
       />
 
       <Snackbar

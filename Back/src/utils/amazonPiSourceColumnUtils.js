@@ -94,6 +94,7 @@ export function flattenProductInformationRows(pi, { dedupe = true } = {}) {
   const rows = [];
   if (pi == null || typeof pi !== 'object' || Array.isArray(pi)) return rows;
   walkProductInformation(pi, (jsonPath, raw) => {
+    if (isExcludedProductInformationPath(jsonPath)) return;
     rows.push({ jsonPath, value: productInfoLeafToString(raw) });
   });
   return dedupe ? dedupeProductInformationRows(rows) : rows;
@@ -123,6 +124,43 @@ export function resolveStorageJsonPath(jsonPath) {
     .replace(/^_+|_+$/g, '');
 }
 
+const EXCLUDED_PI_STORAGE_PATHS = new Set([
+  'asin',
+  'best_sellers_rank',
+  'customer_reviews.ratings_count',
+  'customer_reviews.stars',
+]);
+
+/** Keys for excluded paths — used to filter saved catalog / template dropdown options. */
+export const EXCLUDED_AMAZON_PI_KEYS = new Set([
+  'amazon_pi_asin',
+  'amazon_pi_best_sellers_rank',
+  'amazon_pi_customer_reviews__ratings_count',
+  'amazon_pi_customer_reviews__stars',
+]);
+
+export function isExcludedProductInformationPath(jsonPath) {
+  if (EXCLUDED_AMAZON_PI_KEYS.has(jsonPathToAmazonFieldKey(jsonPath))) return true;
+  const normalized = normalizePathForExclusion(jsonPath);
+  return EXCLUDED_PI_STORAGE_PATHS.has(normalized);
+}
+
+/** Normalize each dotted segment so "Customer Reviews.ratings_count" → customer_reviews.ratings_count */
+function normalizePathForExclusion(jsonPath) {
+  return String(jsonPath || '')
+    .trim()
+    .split('.')
+    .map((segment) => resolveStorageJsonPath(segment))
+    .filter(Boolean)
+    .join('.');
+}
+
+export function filterAmazonPiCatalogColumns(columns = []) {
+  return columns.filter(
+    (col) => !EXCLUDED_AMAZON_PI_KEYS.has(col.key) && !isExcludedProductInformationPath(col.jsonPath)
+  );
+}
+
 const AMAZON_PI_KEY_RE = /^amazon_pi_[a-z0-9_]+$/;
 const MAX_KEY_LEN = 120;
 const MAX_LABEL_LEN = 200;
@@ -133,7 +171,7 @@ export function buildAmazonPiCatalogEntry(row = {}) {
   if (!rawPath) return null;
 
   const jsonPath = resolveStorageJsonPath(rawPath).slice(0, MAX_JSON_PATH_LEN);
-  if (!jsonPath) return null;
+  if (!jsonPath || isExcludedProductInformationPath(jsonPath)) return null;
 
   const key = jsonPathToAmazonFieldKey(jsonPath);
   if (!AMAZON_PI_KEY_RE.test(key) || key.length > MAX_KEY_LEN) return null;

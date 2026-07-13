@@ -3,8 +3,12 @@ import { requireAuth, requirePageAccess, requireRole } from '../middleware/auth.
 import jwt from 'jsonwebtoken';
 import Seller from '../models/Seller.js';
 import User from '../models/User.js';
-import { getSellersMatchingAllRoute } from '../utils/sellersAllScope.js';
+import { getSellersMatchingAllRoute, getSellersForEbayApiPicker } from '../utils/sellersAllScope.js';
 import { getActiveUserIds } from '../utils/activeSellerScope.js';
+import {
+  getSellerPermanentDeleteBlockers,
+  permanentlyDeleteSeller,
+} from '../utils/permanentSellerDelete.js';
 
 const router = Router();
 
@@ -17,6 +21,17 @@ router.get('/all', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Error fetching sellers:', err);
     res.status(500).json({ error: 'Failed to fetch sellers' });
+  }
+});
+
+// OAuth-connected stores for eBay API admin pages (marketing, finances, etc.)
+router.get('/ebay-connected', requireAuth, async (req, res) => {
+  try {
+    const sellers = await getSellersForEbayApiPicker(req);
+    res.json(sellers);
+  } catch (err) {
+    console.error('Error fetching eBay-connected sellers:', err);
+    res.status(500).json({ error: 'Failed to fetch eBay-connected sellers' });
   }
 });
 
@@ -167,8 +182,42 @@ router.get('/:id/renew-ebay-url', requireAuth, requirePageAccess('StoresPage', [
   }
 });
 
+// Superadmin permanent delete (archived sellers only, no historical records)
+router.delete('/:id/permanent', requireAuth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { confirmUsername } = req.body || {};
+    const seller = await Seller.findById(id).populate('user');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const expectedUsername = String(seller.user?.username || '').trim();
+    if (!expectedUsername || String(confirmUsername || '').trim() !== expectedUsername) {
+      return res.status(400).json({ error: 'confirmUsername must match the seller username exactly' });
+    }
+
+    const result = await permanentlyDeleteSeller(id);
+    res.json({
+      success: true,
+      message: `Seller "${result.username}" permanently deleted`,
+      ...result,
+    });
+  } catch (err) {
+    if (err.status === 409) {
+      return res.status(409).json({
+        error: err.message,
+        blockers: err.blockers || [],
+      });
+    }
+    if (err.status === 400 || err.status === 404) {
+      return res.status(err.status).json({ error: err.message });
+    }
+    console.error('Error permanently deleting seller:', err);
+    res.status(500).json({ error: 'Failed to permanently delete seller' });
+  }
+});
+
 // Admin delete (archive) seller/store
-router.delete('/:id', requireAuth, requirePageAccess('StoresPage', ['superadmin', 'listingadmin']), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess(['StoresPage', 'AddSeller'], ['superadmin', 'listingadmin', 'hradmin', 'operationhead']), async (req, res) => {
   try {
     const { id } = req.params;
     const seller = await Seller.findById(id).populate('user');

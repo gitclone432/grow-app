@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import {
   Alert,
@@ -15,16 +15,32 @@ import {
 } from '@mui/material';
 import api from '../../lib/api';
 
+const ALL_SELLERS_VALUE = '__all__';
+const BULK_CALL_DELAY_MS = 1200;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const PRESETS = [
   // Sell Account / eBay Parameters
+  { group: 'Sell Account', label: 'Account Privileges (All Stores)', method: 'GET', path: '/ebay/account/privileges/all', params: {} },
+  { group: 'Sell Account', label: 'Account Privileges (Single Seller)', method: 'GET', path: '/ebay/account/privileges', params: { sellerId: '<sellerId>' } },
+  { group: 'Sell Account', label: 'Store Overview (All Stores)', method: 'GET', path: '/ebay/store-overview/all', params: {} },
   { group: 'Sell Account', label: 'Selling Privileges (All Stores)', method: 'GET', path: '/ebay/selling/summary/all', params: {} },
   { group: 'Sell Account', label: 'Selling Summary (Single Seller)', method: 'GET', path: '/ebay/selling/summary', params: { sellerId: '<sellerId>' } },
+  { group: 'Sell Account', label: 'Store Subscriptions (All Stores)', method: 'GET', path: '/ebay/account/subscriptions/all', params: {} },
+  { group: 'Sell Account', label: 'Store Subscriptions (Single Seller)', method: 'GET', path: '/ebay/account/subscriptions', params: { sellerId: '<sellerId>' } },
   { group: 'Sell Account', label: 'eBay API Usage Stats (All Stores)', method: 'GET', path: '/ebay/api-usage-stats/all', params: {} },
   { group: 'Sell Account', label: 'eBay API Usage Stats (Single Seller)', method: 'GET', path: '/ebay/api-usage-stats', params: { sellerId: '<sellerId>' } },
   { group: 'Sell Account', label: 'Seller Funds Summary', method: 'GET', path: '/ebay/seller-funds-summary', params: {} },
+  { group: 'Sell Account', label: 'Advertising Eligibility', method: 'GET', path: '/sell/account/v1/advertising_eligibility', params: {} },
 
   // Payouts / Finances
   { group: 'Payouts & Finances', label: 'Processing Transactions', method: 'GET', path: '/ebay/processing-transactions/<sellerId>', params: {} },
+  { group: 'Payouts & Finances', label: 'Transaction Summary', method: 'GET', path: '/sell/finances/v1/transaction_summary', params: { filter: 'transactionStatus:{FUNDS_AVAILABLE_FOR_PAYOUT},transactionDate:[2026-01-01T00:00:00.000Z..2026-06-30T23:59:59.999Z]' } },
+  { group: 'Payouts & Finances', label: 'Transactions (list)', method: 'GET', path: '/sell/finances/v1/transaction', params: { filter: 'transactionDate:[2026-01-01T00:00:00.000Z..2026-06-30T23:59:59.999Z]', limit: 50, offset: 0 } },
+  { group: 'Payouts & Finances', label: 'Order Earnings (by order ID)', method: 'GET', path: '/sell/finances/v1/order_earnings/<orderId>', params: {} },
   { group: 'Payouts & Finances', label: 'On Hold Transactions', method: 'GET', path: '/ebay/onhold-transactions/<sellerId>', params: {} },
   { group: 'Payouts & Finances', label: 'Upcoming + Recent Payouts', method: 'GET', path: '/ebay/upcoming-payouts/<sellerId>', params: {} },
   { group: 'Payouts & Finances', label: 'Payoneer Recent Completed Feed', method: 'GET', path: '/ebay/payoneer-recent-completed-feed', params: {} },
@@ -48,7 +64,7 @@ const PRESETS = [
     path: '/sell/analytics/v1/traffic_report',
     params: {
       dimension: 'LISTING',
-      metric: 'LISTING_IMPRESSION_SEARCH_RESULTS_PAGE,LISTING_IMPRESSION_STORE,LISTING_IMPRESSION_TOTAL',
+      metric: 'LISTING_IMPRESSION_SEARCH_RESULTS_PAGE,LISTING_IMPRESSION_STORE,LISTING_IMPRESSION_TOTAL,LISTING_VIEWS_SOURCE_DIRECT,LISTING_VIEWS_SOURCE_OFF_EBAY,LISTING_VIEWS_SOURCE_OTHER_EBAY,LISTING_VIEWS_SOURCE_SEARCH_RESULTS_PAGE,LISTING_VIEWS_SOURCE_STORE,LISTING_VIEWS_TOTAL,SALES_CONVERSION_RATE,TOTAL_IMPRESSION_TOTAL,TRANSACTION',
       filter: 'marketplace_ids:{EBAY_US},date_range:[20260401..20260430]',
       limit: 50,
       offset: 0
@@ -64,6 +80,54 @@ const PRESETS = [
       dimension: 'DAY',
       metric: 'LISTING_IMPRESSION_SEARCH_RESULTS_PAGE,LISTING_IMPRESSION_STORE,SALES_CONVERSION_RATE'
     },
+  },
+  {
+    group: 'Sell Analytics',
+    label: 'Analytics: Traffic Report (Single Listing)',
+    method: 'GET',
+    path: '/sell/analytics/v1/traffic_report',
+    params: {
+      dimension: 'DAY',
+      metric: 'LISTING_IMPRESSION_TOTAL,LISTING_VIEWS_TOTAL,SALES_CONVERSION_RATE,TRANSACTION',
+      filter: 'marketplace_ids:{EBAY_US},listing_ids:{127866369320},date_range:[20260601..20260630]',
+      sort: '-LISTING_VIEWS_TOTAL'
+    },
+  },
+  {
+    group: 'Sell Analytics',
+    label: 'Analytics: Seller Standards (All Profiles)',
+    method: 'GET',
+    path: '/sell/analytics/v1/seller_standards_profile',
+    params: {},
+  },
+  {
+    group: 'Sell Analytics',
+    label: 'Analytics: Seller Standards (US / CURRENT)',
+    method: 'GET',
+    path: '/sell/analytics/v1/seller_standards_profile/PROGRAM_US/CURRENT',
+    params: {},
+  },
+
+  {
+    group: 'Sell Feedback',
+    label: 'Feedback: Items Awaiting Feedback (seller)',
+    method: 'GET',
+    path: '/sell/feedback/v1/awaiting_feedback',
+    params: { filter: 'role:SELLER', limit: 25, offset: 0 },
+  },
+  {
+    group: 'Sell Feedback',
+    label: 'Feedback: Get Feedback (received)',
+    method: 'GET',
+    path: '/sell/feedback/v1/feedback',
+    params: { feedbackType: 'FEEDBACK_RECEIVED', limit: 25, offset: 0 },
+  },
+  {
+    group: 'Sell Feedback',
+    label: 'Feedback: Rating Summary',
+    method: 'GET',
+    path: '/sell/feedback/v1/feedback_rating_summary',
+    params: { filter: 'role:SELLER' },
   },
 
   // Post-Order (Legacy)
@@ -298,6 +362,15 @@ const PRESETS = [
   { group: 'Messages', label: 'Chat Threads', method: 'GET', path: '/ebay/chat/threads', params: { page: 1, limit: 20 } },
   { group: 'Messages', label: 'Chat Messages', method: 'GET', path: '/ebay/chat/messages', params: { sellerId: '<sellerId>', orderId: '<orderId>' } },
   { group: 'Messages', label: 'Chat Search by Order', method: 'GET', path: '/ebay/chat/search-order', params: { orderId: '<orderId>' } },
+  { group: 'Messages', label: 'Commerce: List Conversations (buyers)', method: 'GET', path: '/commerce/message/v1/conversation', params: { conversation_type: 'FROM_MEMBERS', limit: 50 } },
+  { group: 'Messages', label: 'Commerce: List Conversations (by buyer)', method: 'GET', path: '/commerce/message/v1/conversation', params: { conversation_type: 'FROM_MEMBERS', other_party_username: '<buyerUsername>', limit: 50 } },
+  { group: 'Messages', label: 'Commerce: Get Conversation Messages', method: 'GET', path: '/commerce/message/v1/conversation/<conversationId>', params: { conversation_type: 'FROM_MEMBERS', limit: 50 } },
+  { group: 'Messages', label: 'Commerce: Send Message', method: 'POST', path: '/commerce/message/v1/send_message', params: {} },
+
+  // Commerce Notification API (requires commerce.notification.subscription scope on seller token)
+  { group: 'Notifications', label: 'Notification: List Subscriptions', method: 'GET', path: '/commerce/notification/v1/subscription', params: { limit: 20 } },
+  { group: 'Notifications', label: 'Notification: List Topics', method: 'GET', path: '/commerce/notification/v1/topic', params: { limit: 20 } },
+  { group: 'Notifications', label: 'Notification: Get Topic', method: 'GET', path: '/commerce/notification/v1/topic/<topicId>', params: {} },
 
   // Master data
   { group: 'Master Data', label: 'Categories', method: 'GET', path: '/categories', params: {} },
@@ -426,6 +499,70 @@ function safeJsonParse(text, fallback = {}) {
   }
 }
 
+const CUSTOM_PRESET_LABEL = 'Custom (paste path)';
+
+function isInternalAppPath(pathValue) {
+  return /^\/ebay\//i.test(String(pathValue || '').trim());
+}
+
+function isExternalEbayPath(pathValue) {
+  const pathOnly = String(pathValue || '').trim().split('?')[0];
+  return (
+    /^\/(sell|commerce|buy|post-order|developer|identity)\//i.test(pathOnly) ||
+    /^https?:\/\/(?:[^/]+\.)?ebay\.com\//i.test(pathOnly)
+  );
+}
+
+function normalizeEbayPath(pathValue) {
+  const trimmed = String(pathValue || '').trim();
+  return trimmed.replace(/\/commerce\/notification\/v1\/subs\/?$/i, '/commerce/notification/v1/subscription');
+}
+
+function suggestParamsForPath(pathValue, marketplace = 'EBAY_US') {
+  const pathOnly = normalizeEbayPath(String(pathValue || '').trim().split('?')[0]);
+  if (/^\/commerce\/message\/v1\/conversation\/?$/i.test(pathOnly)) {
+    return { conversation_type: 'FROM_MEMBERS', limit: 50 };
+  }
+  if (/^\/commerce\/notification\/v1\/subscription\/?$/i.test(pathOnly)) {
+    return { limit: 20 };
+  }
+  if (/^\/commerce\/notification\/v1\/topic\/?$/i.test(pathOnly)) {
+    return { limit: 20 };
+  }
+  if (/^\/sell\/analytics\/v1\/customer_service_metric\//i.test(pathOnly)) {
+    return { evaluation_marketplace_id: marketplace || 'EBAY_US' };
+  }
+  return null;
+}
+
+function parseEbayEndpointInput(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return { path: '', params: null };
+
+  try {
+    if (/^https?:\/\//i.test(raw)) {
+      const u = new URL(raw);
+      if (!/\.ebay\.com$/i.test(u.hostname)) {
+        return { path: raw, params: null };
+      }
+      const path = normalizeEbayPath(u.pathname);
+      const params = Object.fromEntries(u.searchParams.entries());
+      return { path, params: Object.keys(params).length ? params : null };
+    }
+    if (raw.includes('?')) {
+      const [pathname, search] = raw.split('?', 2);
+      const path = normalizeEbayPath(pathname.startsWith('/') ? pathname : `/${pathname}`);
+      const sp = new URLSearchParams(search);
+      const params = Object.fromEntries(sp.entries());
+      return { path, params: Object.keys(params).length ? params : null };
+    }
+    const path = normalizeEbayPath(raw.startsWith('/') ? raw : `/${raw}`);
+    return { path, params: null };
+  } catch {
+    return { path: raw, params: null };
+  }
+}
+
 function replaceSellerIdPlaceholders(value, sellerId) {
   if (typeof value === 'string') {
     return value.replace(/<sellerId>/g, sellerId || '');
@@ -461,16 +598,17 @@ function replaceRuntimePlaceholders(value, map) {
 }
 
 export default function EbayApiTesterPage() {
-  const initialPreset = PRESETS[0];
-  const [method, setMethod] = useState(initialPreset.method);
-  const [path, setPath] = useState(initialPreset.path);
-  const [paramsText, setParamsText] = useState(JSON.stringify(initialPreset.params || {}, null, 2));
+  const [method, setMethod] = useState('GET');
+  const [path, setPath] = useState('');
+  const [paramsText, setParamsText] = useState('{}');
   const [bodyText, setBodyText] = useState('{}');
-  const [selectedPresetLabel, setSelectedPresetLabel] = useState(initialPreset.label);
-  const [rawEbayMode, setRawEbayMode] = useState(false);
-  const [sellerId, setSellerId] = useState('69f452ccccbff2f8810fcbdc');
+  const [selectedPresetLabel, setSelectedPresetLabel] = useState(CUSTOM_PRESET_LABEL);
+  const [rawEbayMode, setRawEbayMode] = useState(true);
+  const [showPresets, setShowPresets] = useState(false);
+  const [sellerId, setSellerId] = useState('');
+  const [sellers, setSellers] = useState([]);
   const [orderId, setOrderId] = useState('');
-  const [marketplaceId, setMarketplaceId] = useState('');
+  const [marketplaceId, setMarketplaceId] = useState('EBAY_US');
   const [tradingCallName, setTradingCallName] = useState('GetBestOffers');
   const [tradingSiteId, setTradingSiteId] = useState('0');
   const [tradingCompatibilityLevel, setTradingCompatibilityLevel] = useState('1423');
@@ -486,17 +624,65 @@ export default function EbayApiTesterPage() {
 </GetBestOffersRequest>`);
 
   const [loading, setLoading] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState('');
   const [error, setError] = useState('');
+  const [needsReconnect, setNeedsReconnect] = useState(false);
   const [status, setStatus] = useState(null);
   const [responseText, setResponseText] = useState('');
+  const [responseHint, setResponseHint] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
   const copyStatusTimerRef = useRef(null);
 
+  useEffect(() => {
+    api.get('/sellers/all')
+      .then(({ data }) => {
+        const list = data || [];
+        setSellers(list);
+        if (list.length > 0) {
+          setSellerId((prev) => prev || list[0]._id);
+        }
+      })
+      .catch(() => setSellers([]));
+  }, []);
+
   const prettyResponse = useMemo(() => responseText || 'Run a request to see response.', [responseText]);
   const pathText = String(path || '').trim();
-  const isLikelyExternalEbayPath =
-    /^\/(sell|commerce|buy|post-order|developer|identity)\//i.test(pathText) ||
-    /^https?:\/\/(?:[^/]+\.)?ebay\.com\//i.test(pathText);
+  const isLikelyExternalEbayPath = isExternalEbayPath(pathText);
+
+  const presetMismatch = useMemo(() => {
+    if (rawEbayMode || selectedPresetLabel === CUSTOM_PRESET_LABEL) return '';
+    const preset = PRESETS.find((p) => p.label === selectedPresetLabel);
+    if (!preset) return '';
+    if (preset.path !== path || preset.method !== method) {
+      return `Preset "${selectedPresetLabel}" expects ${preset.method} ${preset.path}, but the form shows ${method} ${path}. Re-select the preset to reset the path.`;
+    }
+    return '';
+  }, [rawEbayMode, selectedPresetLabel, path, method]);
+
+  const handlePathChange = (value) => {
+    const { path: parsedPath, params: parsedParams } = parseEbayEndpointInput(value);
+    setPath(parsedPath);
+    if (isExternalEbayPath(parsedPath) || /^https?:\/\/.*\.ebay\.com/i.test(value)) {
+      setRawEbayMode(true);
+      setSelectedPresetLabel(CUSTOM_PRESET_LABEL);
+      if (parsedParams) {
+        setParamsText(JSON.stringify(parsedParams, null, 2));
+      } else {
+        const suggested = suggestParamsForPath(parsedPath, marketplaceId);
+        if (suggested) {
+          setParamsText(JSON.stringify(suggested, null, 2));
+        }
+      }
+    }
+  };
+
+  const handleRawModeToggle = (enabled) => {
+    setRawEbayMode(enabled);
+    if (enabled) {
+      setSelectedPresetLabel(CUSTOM_PRESET_LABEL);
+      if (!path) setMethod('GET');
+    }
+  };
 
   const applyPreset = (presetLabel) => {
     const preset = PRESETS.find((p) => p.label === presetLabel);
@@ -504,6 +690,12 @@ export default function EbayApiTesterPage() {
     setSelectedPresetLabel(preset.label);
     setMethod(preset.method);
     setPath(preset.path);
+    setShowPresets(true);
+    if (isInternalAppPath(preset.path)) {
+      setRawEbayMode(false);
+    } else {
+      setRawEbayMode(true);
+    }
     setParamsText(JSON.stringify(preset.params || {}, null, 2));
     if (preset.label === 'Negotiation: Send Offer to Interested Buyers') {
       setBodyText(JSON.stringify({
@@ -1287,6 +1479,7 @@ export default function EbayApiTesterPage() {
       setBodyText('{}');
     }
     setError('');
+    setNeedsReconnect(false);
     setStatus(null);
   };
 
@@ -1304,27 +1497,129 @@ export default function EbayApiTesterPage() {
     }
 
     const placeholderMap = { sellerId, orderId };
-    const parsedParams = replaceRuntimePlaceholders(parsedParamsRaw, placeholderMap);
+    let parsedParams = replaceRuntimePlaceholders(parsedParamsRaw, placeholderMap);
     const parsedBody = replaceRuntimePlaceholders(parsedBodyRaw, placeholderMap);
 
     setLoading(true);
     setError('');
+    setNeedsReconnect(false);
     setStatus(null);
+    setResponseHint('');
     setCopyStatus('');
+    setBulkProgress('');
 
     try {
       let statusCode;
       let payload;
-      const shouldUseRawProxy = rawEbayMode || isLikelyExternalEbayPath;
 
-      const resolvedPath = String(replaceRuntimePlaceholders(path, placeholderMap) || '').trim();
+      const resolvedPath = normalizeEbayPath(String(replaceRuntimePlaceholders(path, placeholderMap) || '').trim());
+      if (!resolvedPath) {
+        setError('Paste an eBay API path or full URL');
+        setLoading(false);
+        return;
+      }
       if (/<[^>]+>/.test(resolvedPath)) {
         setError(`Unresolved placeholder in path: ${resolvedPath}`);
         setLoading(false);
         return;
       }
 
-      if (path === '/ebay/dev/trading-call') {
+      const shouldUseRawProxy =
+        !isInternalAppPath(resolvedPath) && (rawEbayMode || isLikelyExternalEbayPath);
+      const runForAllSellers = sellerId === ALL_SELLERS_VALUE;
+
+      if (shouldUseRawProxy && Object.keys(parsedParams || {}).length === 0) {
+        const suggested = suggestParamsForPath(resolvedPath, marketplaceId);
+        if (suggested) parsedParams = suggested;
+      }
+      if (
+        shouldUseRawProxy &&
+        /^\/sell\/analytics\/v1\/customer_service_metric\//i.test(resolvedPath) &&
+        !parsedParams?.evaluation_marketplace_id
+      ) {
+        parsedParams = {
+          ...parsedParams,
+          evaluation_marketplace_id: marketplaceId || 'EBAY_US'
+        };
+      }
+
+      if (shouldUseRawProxy && !sellerId) {
+        setError('Select a seller for raw eBay API calls');
+        setLoading(false);
+        return;
+      }
+
+      if (runForAllSellers && path === '/ebay/dev/trading-call') {
+        setError('Select a single seller for Trading API calls');
+        setLoading(false);
+        return;
+      }
+
+      if (runForAllSellers && method !== 'GET') {
+        setError('All sellers mode only supports GET requests');
+        setLoading(false);
+        return;
+      }
+
+      if (runForAllSellers && shouldUseRawProxy) {
+        if (!sellers.length) {
+          setError('No sellers available');
+          setLoading(false);
+          return;
+        }
+
+        const results = [];
+        for (let i = 0; i < sellers.length; i++) {
+          const s = sellers[i];
+          const sellerName = s.user?.username || s.user?.email || s._id;
+          setBulkProgress(`Seller ${i + 1} of ${sellers.length}: ${sellerName}`);
+          try {
+            const proxyRes = await api.post('/ebay/dev/raw-call', {
+              sellerId: s._id,
+              method,
+              endpoint: resolvedPath || pathText,
+              params: parsedParams,
+              body: parsedBody || {},
+              marketplace: marketplaceId || undefined,
+            });
+            results.push({
+              sellerId: s._id,
+              sellerName,
+              ...(proxyRes.data || {}),
+            });
+          } catch (e) {
+            const sellerNeedsReconnect = e?.response?.data?.needsReconnect === true;
+            if (sellerNeedsReconnect) setNeedsReconnect(true);
+            results.push({
+              sellerId: s._id,
+              sellerName,
+              ok: false,
+              needsReconnect: sellerNeedsReconnect,
+              statusCode: e?.response?.status || 500,
+              error: e?.response?.data?.error || e.message || 'Request failed',
+              data: e?.response?.data || null,
+            });
+          }
+          if (i < sellers.length - 1) {
+            await sleep(BULK_CALL_DELAY_MS);
+          }
+        }
+
+        const succeeded = results.filter((r) => r.ok && r.statusCode >= 200 && r.statusCode < 300).length;
+        const failed = results.length - succeeded;
+        statusCode = 200;
+        payload = {
+          allSellers: true,
+          endpoint: resolvedPath,
+          summary: { total: sellers.length, succeeded, failed },
+          results,
+        };
+        setResponseHint(
+          failed
+            ? `Fetched ${succeeded} of ${sellers.length} sellers (${failed} failed).`
+            : `Fetched all ${sellers.length} sellers.`
+        );
+      } else if (path === '/ebay/dev/trading-call') {
         const proxyRes = await api.post('/ebay/dev/trading-call', {
           sellerId,
           callName: tradingCallName,
@@ -1357,12 +1652,29 @@ export default function EbayApiTesterPage() {
       }
       setStatus(statusCode);
       setResponseText(JSON.stringify(payload, null, 2));
+      const ebayErrMsg = payload?.ebayErrors?.[0]?.longMessage || payload?.ebayErrors?.[0]?.message;
+      let hintText = payload?.hint || '';
+      if (Array.isArray(payload?.trafficReportFixes) && payload.trafficReportFixes.length) {
+        hintText = `${payload.trafficReportFixes.join(' ')} ${hintText}`.trim();
+      }
+      if (ebayErrMsg) {
+        hintText = hintText ? `${hintText} eBay says: ${ebayErrMsg}` : `eBay says: ${ebayErrMsg}`;
+      }
+      if (hintText) setResponseHint(hintText);
+      if (!payload?.ok && payload?.appTokenAttempt?.ok) {
+        setResponseHint(
+          (hintText ? `${hintText} ` : '')
+          + 'Seller token failed, but the app token succeeded — see appTokenAttempt in the response.'
+        );
+      }
     } catch (e) {
       setStatus(e?.response?.status || 500);
       setResponseText(JSON.stringify(e?.response?.data || { error: e.message }, null, 2));
+      setNeedsReconnect(e?.response?.data?.needsReconnect === true);
       setError(e?.response?.data?.error || e.message || 'Request failed');
     } finally {
       setLoading(false);
+      setBulkProgress('');
     }
   };
 
@@ -1382,96 +1694,247 @@ export default function EbayApiTesterPage() {
     <Box sx={{ p: 3 }}>
       <Typography variant="h4" sx={{ mb: 1 }}>eBay API Tester</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Run internal API calls and inspect raw response for debugging (orders, seller funds, categories, ranges, etc.).
+        {rawEbayMode
+          ? 'Paste an eBay REST path or full URL, select a seller (or All sellers for GET), optionally set filters, then Run. No preset required.'
+          : 'Run internal app API calls and inspect responses (orders, seller funds, categories, etc.).'}
       </Typography>
-      <Alert severity="info" sx={{ mb: 2 }}>
-        For paths with placeholders (for example <code>&lt;sellerId&gt;</code>), replace placeholders in Path before clicking Run.
-      </Alert>
+      {rawEbayMode ? (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          <strong>Buyer messages:</strong> <code>/commerce/message/v1/conversation</code> with params{' '}
+          <code>{'{"conversation_type":"FROM_MEMBERS","limit":50}'}</code>
+          <br />
+          <strong>Webhook subscriptions</strong> (different API): <code>/commerce/notification/v1/subscription</code>
+          <br />
+          <strong>Traffic report (single listing):</strong> use <code>dimension: &quot;DAY&quot;</code> or <code>&quot;LISTING&quot;</code> — put the item ID in{' '}
+          <code>filter</code> as <code>listing_ids:{'{127866369320}'}</code>, not in dimension.
+          <br />
+          <strong>Sell Account / Marketing APIs</strong> (e.g. <code>/sell/account/v1/advertising_eligibility</code>) require{' '}
+          <code>X-EBAY-C-MARKETPLACE-ID</code> — set Marketplace ID (defaults to <code>EBAY_US</code>).
+        </Alert>
+      ) : (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          For paths with placeholders (for example <code>&lt;sellerId&gt;</code>), replace placeholders in Path before clicking Run.
+        </Alert>
+      )}
       <FormControlLabel
         sx={{ mb: 1 }}
-        control={<Switch checked={rawEbayMode} onChange={(e) => setRawEbayMode(e.target.checked)} />}
+        control={<Switch checked={rawEbayMode} onChange={(e) => handleRawModeToggle(e.target.checked)} />}
         label="Use Raw eBay API mode (calls eBay directly via seller token)"
       />
+      {rawEbayMode && isInternalAppPath(pathText) && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Raw eBay mode is ignored for <code>/ebay/*</code> paths — those call your app backend, not eBay directly.
+        </Alert>
+      )}
+      {presetMismatch && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          {presetMismatch}
+        </Alert>
+      )}
 
       <Paper sx={{ p: 2, mb: 2 }}>
         <Stack spacing={2}>
-          <TextField
-            select
-            label="Preset"
-            value={selectedPresetLabel}
-            onChange={(e) => applyPreset(e.target.value)}
-            size="small"
-          >
-            {(() => {
-              let lastGroup = '';
-              const rows = [];
-              for (const preset of PRESETS) {
-                if (preset.group !== lastGroup) {
-                  rows.push(
-                    <MenuItem key={`group-${preset.group}`} disabled sx={{ fontWeight: 700, opacity: 1 }}>
-                      {preset.group}
-                    </MenuItem>
-                  );
-                  lastGroup = preset.group;
-                }
-                rows.push(
-                  <MenuItem key={preset.label} value={preset.label}>
-                    {preset.label}
-                  </MenuItem>
-                );
-              }
-              return rows;
-            })()}
-          </TextField>
-
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-            {(rawEbayMode || path === '/ebay/dev/trading-call' || isLikelyExternalEbayPath) && (
-              <>
+          {rawEbayMode ? (
+            <>
+              <TextField
+                label="eBay API Path or URL"
+                value={path}
+                onChange={(e) => handlePathChange(e.target.value)}
+                size="small"
+                fullWidth
+                placeholder="/commerce/message/v1/conversation"
+                helperText="Paste path only, path with ?query=, or full https://api.ebay.com/... URL"
+              />
+              <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
                 <TextField
-                  label="Seller ID (required)"
+                  select
+                  required
+                  label="Seller"
                   value={sellerId}
                   onChange={(e) => setSellerId(e.target.value)}
                   size="small"
                   sx={{ minWidth: 260 }}
-                />
+                  helperText={
+                    sellerId === ALL_SELLERS_VALUE
+                      ? `GET only — runs for all ${sellers.length} sellers sequentially`
+                      : sellerId
+                        ? `ID: ${sellerId}`
+                        : 'Required for raw eBay calls'
+                  }
+                >
+                  <MenuItem value=""><em>Select seller...</em></MenuItem>
+                  <MenuItem value={ALL_SELLERS_VALUE}>
+                    <em>All sellers ({sellers.length})</em>
+                  </MenuItem>
+                  {sellers.map((s) => (
+                    <MenuItem key={s._id} value={s._id}>
+                      {s.user?.username || s.user?.email || s._id}
+                    </MenuItem>
+                  ))}
+                </TextField>
                 <TextField
-                  label="Order ID (optional)"
-                  value={orderId}
-                  onChange={(e) => setOrderId(e.target.value)}
-                  size="small"
-                  sx={{ minWidth: 260 }}
-                />
-                <TextField
-                  label="Marketplace ID (optional)"
+                  label="Marketplace ID"
                   value={marketplaceId}
                   onChange={(e) => setMarketplaceId(e.target.value)}
                   size="small"
                   placeholder="EBAY_US"
+                  helperText="Required for Sell Account, Marketing, Inventory APIs"
                   sx={{ minWidth: 200 }}
                 />
-              </>
-            )}
-            <TextField
-              select
-              label="Method"
-              value={method}
-              onChange={(e) => setMethod(e.target.value)}
-              size="small"
-              sx={{ width: 160 }}
-            >
-              {['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].map((m) => (
-                <MenuItem key={m} value={m}>{m}</MenuItem>
-              ))}
-            </TextField>
-            <TextField
-              label="Path"
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-              size="small"
-              fullWidth
-              placeholder="/ebay/stored-orders"
-            />
-          </Stack>
+                <TextField
+                  select
+                  label="Method"
+                  value={method}
+                  onChange={(e) => setMethod(e.target.value)}
+                  size="small"
+                  sx={{ width: 160 }}
+                >
+                  {['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].map((m) => (
+                    <MenuItem key={m} value={m}>{m}</MenuItem>
+                  ))}
+                </TextField>
+              </Stack>
+              <Button
+                size="small"
+                variant="text"
+                onClick={() => setShowPresets((v) => !v)}
+                sx={{ alignSelf: 'flex-start' }}
+              >
+                {showPresets ? 'Hide presets' : 'Load from preset (optional)'}
+              </Button>
+              {showPresets && (
+                <TextField
+                  select
+                  label="Preset"
+                  value={selectedPresetLabel === CUSTOM_PRESET_LABEL ? '' : selectedPresetLabel}
+                  onChange={(e) => applyPreset(e.target.value)}
+                  size="small"
+                >
+                  <MenuItem value=""><em>Custom (paste path)</em></MenuItem>
+                  {(() => {
+                    let lastGroup = '';
+                    const rows = [];
+                    for (const preset of PRESETS) {
+                      if (preset.group !== lastGroup) {
+                        rows.push(
+                          <MenuItem key={`group-${preset.group}`} disabled sx={{ fontWeight: 700, opacity: 1 }}>
+                            {preset.group}
+                          </MenuItem>
+                        );
+                        lastGroup = preset.group;
+                      }
+                      rows.push(
+                        <MenuItem key={preset.label} value={preset.label}>
+                          {preset.label}
+                        </MenuItem>
+                      );
+                    }
+                    return rows;
+                  })()}
+                </TextField>
+              )}
+            </>
+          ) : (
+            <>
+              <TextField
+                select
+                label="Preset"
+                value={selectedPresetLabel === CUSTOM_PRESET_LABEL ? '' : selectedPresetLabel}
+                onChange={(e) => applyPreset(e.target.value)}
+                size="small"
+              >
+                <MenuItem value=""><em>Select preset...</em></MenuItem>
+                {(() => {
+                  let lastGroup = '';
+                  const rows = [];
+                  for (const preset of PRESETS) {
+                    if (preset.group !== lastGroup) {
+                      rows.push(
+                        <MenuItem key={`group-${preset.group}`} disabled sx={{ fontWeight: 700, opacity: 1 }}>
+                          {preset.group}
+                        </MenuItem>
+                      );
+                      lastGroup = preset.group;
+                    }
+                    rows.push(
+                      <MenuItem key={preset.label} value={preset.label}>
+                        {preset.label}
+                      </MenuItem>
+                    );
+                  }
+                  return rows;
+                })()}
+              </TextField>
+
+              <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+                {(path === '/ebay/dev/trading-call' || isLikelyExternalEbayPath) && (
+                  <>
+                    <TextField
+                      select
+                      label="Seller"
+                      value={sellerId}
+                      onChange={(e) => setSellerId(e.target.value)}
+                      size="small"
+                      sx={{ minWidth: 260 }}
+                      helperText={
+                        sellerId === ALL_SELLERS_VALUE
+                          ? `GET only — runs for all ${sellers.length} sellers sequentially`
+                          : sellerId
+                            ? `ID: ${sellerId}`
+                            : 'Select a seller'
+                      }
+                    >
+                      <MenuItem value=""><em>Select seller...</em></MenuItem>
+                      <MenuItem value={ALL_SELLERS_VALUE}>
+                        <em>All sellers ({sellers.length})</em>
+                      </MenuItem>
+                      {sellers.map((s) => (
+                        <MenuItem key={s._id} value={s._id}>
+                          {s.user?.username || s.user?.email || s._id}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                    <TextField
+                      label="Order ID (optional)"
+                      value={orderId}
+                      onChange={(e) => setOrderId(e.target.value)}
+                      size="small"
+                      sx={{ minWidth: 260 }}
+                    />
+                    <TextField
+                      label="Marketplace ID"
+                      value={marketplaceId}
+                      onChange={(e) => setMarketplaceId(e.target.value)}
+                      size="small"
+                      placeholder="EBAY_US"
+                      helperText="Required for Sell Account, Marketing, Inventory APIs"
+                      sx={{ minWidth: 200 }}
+                    />
+                  </>
+                )}
+                <TextField
+                  select
+                  label="Method"
+                  value={method}
+                  onChange={(e) => setMethod(e.target.value)}
+                  size="small"
+                  sx={{ width: 160 }}
+                >
+                  {['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].map((m) => (
+                    <MenuItem key={m} value={m}>{m}</MenuItem>
+                  ))}
+                </TextField>
+                <TextField
+                  label="Path"
+                  value={path}
+                  onChange={(e) => setPath(e.target.value)}
+                  size="small"
+                  fullWidth
+                  placeholder="/ebay/stored-orders"
+                />
+              </Stack>
+            </>
+          )}
 
           {path === '/ebay/dev/trading-call' && (
             <>
@@ -1532,10 +1995,19 @@ export default function EbayApiTesterPage() {
             />
           )}
 
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
             <Button variant="contained" onClick={runRequest} disabled={loading}>
-              {loading ? 'Running...' : 'Run'}
+              {loading
+                ? (bulkProgress || 'Running...')
+                : sellerId === ALL_SELLERS_VALUE
+                  ? 'Run for all sellers'
+                  : 'Run'}
             </Button>
+            {bulkProgress && loading && (
+              <Typography variant="body2" color="text.secondary">
+                {bulkProgress}
+              </Typography>
+            )}
             {status != null && (
               <Typography variant="body2" color={status >= 200 && status < 300 ? 'success.main' : 'error.main'}>
                 Status: {status}
@@ -1545,7 +2017,23 @@ export default function EbayApiTesterPage() {
         </Stack>
       </Paper>
 
-      {error && <Alert severity="warning" sx={{ mb: 2 }}>{error}</Alert>}
+      {error && (
+        <Alert severity={needsReconnect ? 'error' : 'warning'} sx={{ mb: 2 }}>
+          {needsReconnect && (
+            <>
+              <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                eBay reconnect required
+              </Typography>
+              <Typography variant="body2" sx={{ mt: 0.5, mb: 1 }}>
+                Open Seller Profile → Connect eBay for this seller. If reconnect fails, revoke this app under
+                eBay → Account → Third-party app access, then connect again.
+              </Typography>
+            </>
+          )}
+          {error}
+        </Alert>
+      )}
+      {responseHint && <Alert severity="info" sx={{ mb: 2 }}>{responseHint}</Alert>}
 
       <Paper sx={{ p: 2 }}>
         <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1} sx={{ mb: 1 }}>

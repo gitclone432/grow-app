@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Alert,
   Box,
   Button,
   Checkbox,
+  Chip,
   CircularProgress,
   FormControl,
+  IconButton,
+  InputAdornment,
   InputLabel,
   MenuItem,
   Paper,
@@ -19,8 +22,11 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import SearchIcon from '@mui/icons-material/Search';
 import api from '../../lib/api.js';
 
 const REGIONS = [
@@ -29,6 +35,50 @@ const REGIONS = [
   { value: 'CA', label: 'Canada' },
   { value: 'AU', label: 'Australia' },
 ];
+
+const TABLE_SCROLL_SX = { maxHeight: 420 };
+const EXCLUDED_PREVIEW_KEYS = new Set([
+  'amazon_pi_asin',
+  'amazon_pi_best_sellers_rank',
+  'amazon_pi_customer_reviews__ratings_count',
+  'amazon_pi_customer_reviews__stars',
+]);
+
+function isExcludedPreviewRow(row) {
+  if (EXCLUDED_PREVIEW_KEYS.has(row?.key)) return true;
+  const path = String(row?.jsonPath || '')
+    .trim()
+    .split('.')
+    .map((segment) =>
+      segment
+        .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+        .toLowerCase()
+        .replace(/[^\w\s]/g, ' ')
+        .replace(/\s+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '')
+    )
+    .filter(Boolean)
+    .join('.');
+  return (
+    path === 'asin'
+    || path === 'best_sellers_rank'
+    || path === 'customer_reviews.ratings_count'
+    || path === 'customer_reviews.stars'
+  );
+}
+
+function filterPreviewRows(rows = []) {
+  return rows.filter((row) => !isExcludedPreviewRow(row));
+}
+const PATH_CELL_SX = {
+  fontFamily: 'monospace',
+  fontSize: '0.78rem',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  maxWidth: 0,
+};
 
 /** Prefer path without "amazon" (ad blockers); fall back for older backends. */
 const PI_COLUMNS_API_CANDIDATES = ['/pi-source-columns', '/amazon-pi-source-columns'];
@@ -77,6 +127,57 @@ function formatApiError(e, fallback) {
   return e?.message || fallback;
 }
 
+function rowMatchesFilter(row, filter) {
+  const q = String(filter || '').trim().toLowerCase();
+  if (!q) return true;
+  return [row.jsonPath, row.key, row.label, row.value, row.lastSampleValue]
+    .some((part) => String(part || '').toLowerCase().includes(q));
+}
+
+function ClampedSampleText({ text, lines = 2 }) {
+  const [expanded, setExpanded] = useState(false);
+  const sample = String(text ?? '').trim();
+  if (!sample) {
+    return (
+      <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.8125rem' }}>
+        —
+      </Typography>
+    );
+  }
+  const long = sample.length > 100 || sample.includes('\n');
+  return (
+    <Box sx={{ minWidth: 0 }}>
+      <Typography
+        variant="body2"
+        sx={{
+          fontSize: '0.8125rem',
+          lineHeight: 1.45,
+          wordBreak: 'break-word',
+          ...(expanded || !long
+            ? {}
+            : {
+                display: '-webkit-box',
+                WebkitLineClamp: lines,
+                WebkitBoxOrient: 'vertical',
+                overflow: 'hidden',
+              }),
+        }}
+      >
+        {sample}
+      </Typography>
+      {long && (
+        <Button
+          size="small"
+          onClick={() => setExpanded((v) => !v)}
+          sx={{ py: 0, px: 0.5, minHeight: 22, fontSize: '0.75rem', mt: 0.25 }}
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </Button>
+      )}
+    </Box>
+  );
+}
+
 export default function AmazonPiSourceColumnsPage() {
   const [asin, setAsin] = useState('');
   const [region, setRegion] = useState('US');
@@ -84,6 +185,8 @@ export default function AmazonPiSourceColumnsPage() {
   const [previewMeta, setPreviewMeta] = useState({ asin: '', region: '' });
   const [selectedPaths, setSelectedPaths] = useState(() => new Set());
   const [savedColumns, setSavedColumns] = useState([]);
+  const [previewFilter, setPreviewFilter] = useState('');
+  const [catalogFilter, setCatalogFilter] = useState('');
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [loadingSaved, setLoadingSaved] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -96,7 +199,7 @@ export default function AmazonPiSourceColumnsPage() {
     setLoadWarning('');
     try {
       const { data } = await piColumnsGet();
-      setSavedColumns(data.columns || []);
+      setSavedColumns(filterPreviewRows(data.columns || []));
     } catch (e) {
       setSavedColumns([]);
       setLoadWarning(formatApiError(e, 'Failed to load saved columns'));
@@ -109,10 +212,21 @@ export default function AmazonPiSourceColumnsPage() {
     loadSaved();
   }, [loadSaved]);
 
+  const filteredPreviewRows = useMemo(
+    () => previewRows.filter((row) => rowMatchesFilter(row, previewFilter)),
+    [previewRows, previewFilter]
+  );
+
+  const filteredSavedColumns = useMemo(
+    () => savedColumns.filter((col) => rowMatchesFilter(col, catalogFilter)),
+    [savedColumns, catalogFilter]
+  );
+
   const runPreview = async () => {
     setError('');
     setSuccess('');
     setPreviewRows([]);
+    setPreviewFilter('');
     setSelectedPaths(new Set());
     const normalized = String(asin || '')
       .trim()
@@ -129,7 +243,7 @@ export default function AmazonPiSourceColumnsPage() {
         { asin: normalized, region },
         { timeout: 120000 }
       );
-      const rows = data.rows || [];
+      const rows = filterPreviewRows(data.rows || []);
       setPreviewRows(rows);
       setPreviewMeta({ asin: data.asin || normalized, region: data.region || region });
       setSelectedPaths(new Set(rows.map((r) => r.jsonPath)));
@@ -153,7 +267,7 @@ export default function AmazonPiSourceColumnsPage() {
   };
 
   const selectAllPreview = () => {
-    setSelectedPaths(new Set(previewRows.map((r) => r.jsonPath)));
+    setSelectedPaths(new Set(filteredPreviewRows.map((r) => r.jsonPath)));
   };
 
   const clearPreviewSelection = () => {
@@ -180,7 +294,7 @@ export default function AmazonPiSourceColumnsPage() {
         sourceAsin: previewMeta.asin,
         rows,
       });
-      setSavedColumns(data.columns || []);
+      setSavedColumns(filterPreviewRows(data.columns || []));
       setSuccess(
         `Saved ${data.saved ?? rows.length} column(s). They now appear under Amazon Source Field on Manage Templates.`
       );
@@ -204,52 +318,63 @@ export default function AmazonPiSourceColumnsPage() {
   };
 
   return (
-    <Box sx={{ p: 2, maxWidth: 1200, mx: 'auto' }}>
-      <Typography variant="h5" gutterBottom>
-        Amazon Product Info Columns
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Scrape <code>product_information</code> from one ASIN, review flattened <strong>column (path)</strong> and{' '}
-        <strong>value</strong> rows, then save the ones you want. Saved paths become extra{' '}
-        <strong>Amazon Source Field</strong> options in{' '}
-        <Link to="/admin/manage-templates">Manage Listing Templates</Link> (and seller template overrides) for direct mapping
-        and AI placeholders like <code>{'{amazon_pi_your_key}'}</code>.
-      </Typography>
+    <Box sx={{ p: { xs: 1.5, sm: 2 }, maxWidth: 1280, mx: 'auto' }}>
+      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'flex-start' }} spacing={1} sx={{ mb: 1.5 }}>
+        <Box>
+          <Typography variant="h5" gutterBottom sx={{ mb: 0.5 }}>
+            Amazon Product Info Columns
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Scrape <code>product_information</code>, pick paths to save, then map them in{' '}
+            <Link to="/admin/manage-templates">Manage Listing Templates</Link>.
+          </Typography>
+        </Box>
+        <Chip
+          label={loadingSaved ? 'Loading catalog…' : `${savedColumns.length} saved`}
+          size="small"
+          color={savedColumns.length ? 'primary' : 'default'}
+          variant="outlined"
+        />
+      </Stack>
 
-      <Alert severity="info" sx={{ mb: 2 }}>
-        Uses the same ScraperAPI product scrape as live listings (one credit per preview). Values shown are samples from
-        that ASIN; at listing time each row resolves from the current product&apos;s <code>product_information</code>.
+      <Alert severity="info" sx={{ mb: 1.5, py: 0.75 }}>
+        One ScraperAPI credit per preview. Sample values come from the preview ASIN; listings resolve live{' '}
+        <code>product_information</code> at publish time.
       </Alert>
 
       {loadWarning && (
-        <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setLoadWarning('')}>
+        <Alert severity="warning" sx={{ mb: 1.5 }} onClose={() => setLoadWarning('')}>
           {loadWarning}
         </Alert>
       )}
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+        <Alert severity="error" sx={{ mb: 1.5 }} onClose={() => setError('')}>
           {error}
         </Alert>
       )}
       {success && (
-        <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>
+        <Alert severity="success" sx={{ mb: 1.5 }} onClose={() => setSuccess('')}>
           {success}
         </Alert>
       )}
 
-      <Paper sx={{ p: 2, mb: 3 }}>
+      <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="subtitle1" gutterBottom>
           Preview from ASIN
         </Typography>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }} sx={{ mb: 2 }}>
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }} sx={{ mb: previewRows.length ? 1.5 : 0 }}>
           <TextField
             label="ASIN"
             value={asin}
             onChange={(e) => setAsin(e.target.value)}
             size="small"
-            sx={{ minWidth: 160 }}
+            placeholder="B0XXXXXXXXX"
+            sx={{ width: { xs: '100%', sm: 160 } }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !loadingPreview) runPreview();
+            }}
           />
-          <FormControl size="small" sx={{ minWidth: 180 }}>
+          <FormControl size="small" sx={{ minWidth: 160 }}>
             <InputLabel>Region</InputLabel>
             <Select label="Region" value={region} onChange={(e) => setRegion(e.target.value)}>
               {REGIONS.map((r) => (
@@ -260,54 +385,98 @@ export default function AmazonPiSourceColumnsPage() {
             </Select>
           </FormControl>
           <Button variant="contained" onClick={runPreview} disabled={loadingPreview}>
-            {loadingPreview ? <CircularProgress size={22} color="inherit" /> : 'Preview product_information'}
+            {loadingPreview ? <CircularProgress size={22} color="inherit" /> : 'Preview'}
           </Button>
           <Button variant="outlined" onClick={loadSaved} disabled={loadingSaved}>
-            Refresh saved list
+            Refresh catalog
           </Button>
+          {previewMeta.asin && (
+            <Chip size="small" label={`${previewMeta.asin} · ${previewMeta.region}`} variant="outlined" />
+          )}
         </Stack>
 
         {previewRows.length > 0 && (
           <>
-            <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
-              <Button size="small" onClick={selectAllPreview}>
-                Select all
-              </Button>
-              <Button size="small" onClick={clearPreviewSelection}>
-                Clear selection
-              </Button>
-              <Button size="small" variant="contained" color="secondary" onClick={saveSelected} disabled={saving}>
-                {saving ? 'Saving…' : `Save selected (${selectedPaths.size})`}
-              </Button>
+            <Stack
+              direction={{ xs: 'column', sm: 'row' }}
+              spacing={1}
+              alignItems={{ sm: 'center' }}
+              justifyContent="space-between"
+              sx={{ mb: 1 }}
+            >
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Button size="small" onClick={selectAllPreview}>
+                  Select visible
+                </Button>
+                <Button size="small" onClick={clearPreviewSelection}>
+                  Clear
+                </Button>
+                <Button size="small" variant="contained" color="secondary" onClick={saveSelected} disabled={saving}>
+                  {saving ? 'Saving…' : `Save selected (${selectedPaths.size})`}
+                </Button>
+              </Stack>
+              <TextField
+                size="small"
+                placeholder="Filter paths or values…"
+                value={previewFilter}
+                onChange={(e) => setPreviewFilter(e.target.value)}
+                sx={{ width: { xs: '100%', sm: 240 } }}
+                InputProps={{
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      <SearchIcon fontSize="small" color="action" />
+                    </InputAdornment>
+                  ),
+                }}
+              />
             </Stack>
-            <TableContainer>
-              <Table size="small">
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+              {filteredPreviewRows.length} of {previewRows.length} rows
+            </Typography>
+            <TableContainer sx={TABLE_SCROLL_SX}>
+              <Table size="small" stickyHeader sx={{ tableLayout: 'fixed' }}>
                 <TableHead>
                   <TableRow>
-                    <TableCell padding="checkbox" />
-                    <TableCell>Column (JSON path)</TableCell>
-                    <TableCell>Template key (amazonField)</TableCell>
-                    <TableCell>Value (sample)</TableCell>
+                    <TableCell padding="checkbox" width={48} />
+                    <TableCell width="28%">Column (JSON path)</TableCell>
+                    <TableCell width="22%">Template key</TableCell>
+                    <TableCell width="50%">Value (sample)</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {previewRows.map((row) => (
-                    <TableRow key={row.jsonPath} hover selected={selectedPaths.has(row.jsonPath)}>
-                      <TableCell padding="checkbox">
-                        <Checkbox
-                          checked={selectedPaths.has(row.jsonPath)}
-                          onChange={() => togglePath(row.jsonPath)}
-                        />
-                      </TableCell>
-                      <TableCell>{row.jsonPath}</TableCell>
-                      <TableCell>
-                        <code>{row.key}</code>
-                      </TableCell>
-                      <TableCell sx={{ maxWidth: 480, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                        {row.value}
+                  {filteredPreviewRows.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={4}>
+                        <Typography variant="body2" color="text.secondary">
+                          No rows match your filter.
+                        </Typography>
                       </TableCell>
                     </TableRow>
-                  ))}
+                  ) : (
+                    filteredPreviewRows.map((row) => (
+                      <TableRow key={row.jsonPath} hover selected={selectedPaths.has(row.jsonPath)}>
+                        <TableCell padding="checkbox">
+                          <Checkbox
+                            checked={selectedPaths.has(row.jsonPath)}
+                            onChange={() => togglePath(row.jsonPath)}
+                          />
+                        </TableCell>
+                        <TableCell sx={PATH_CELL_SX}>
+                          <Tooltip title={row.jsonPath} placement="top-start">
+                            <span>{row.jsonPath}</span>
+                          </Tooltip>
+                        </TableCell>
+                        <TableCell sx={PATH_CELL_SX}>
+                          <Tooltip title={row.key} placement="top-start">
+                            <code>{row.key}</code>
+                          </Tooltip>
+                        </TableCell>
+                        <TableCell>
+                          <ClampedSampleText text={row.value} />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
                 </TableBody>
               </Table>
             </TableContainer>
@@ -316,46 +485,97 @@ export default function AmazonPiSourceColumnsPage() {
       </Paper>
 
       <Paper sx={{ p: 2 }}>
-        <Typography variant="subtitle1" gutterBottom>
-          Saved catalog
-        </Typography>
+        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} spacing={1} sx={{ mb: 1.5 }}>
+          <Typography variant="subtitle1">Saved catalog</Typography>
+          {savedColumns.length > 0 && (
+            <TextField
+              size="small"
+              placeholder="Search saved columns…"
+              value={catalogFilter}
+              onChange={(e) => setCatalogFilter(e.target.value)}
+              sx={{ width: { xs: '100%', sm: 260 } }}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" color="action" />
+                  </InputAdornment>
+                ),
+              }}
+            />
+          )}
+        </Stack>
+
         {loadingSaved ? (
-          <CircularProgress size={28} />
+          <Box sx={{ py: 3, display: 'flex', justifyContent: 'center' }}>
+            <CircularProgress size={28} />
+          </Box>
         ) : savedColumns.length === 0 ? (
-          <Typography color="text.secondary">No saved columns yet. Preview an ASIN and save selected rows.</Typography>
+          <Box sx={{ py: 3, textAlign: 'center' }}>
+            <Typography color="text.secondary" gutterBottom>
+              No saved columns yet.
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Enter an ASIN above, preview <code>product_information</code>, select rows, and save.
+            </Typography>
+          </Box>
         ) : (
-          <TableContainer>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Label (dropdown)</TableCell>
-                  <TableCell>JSON path</TableCell>
-                  <TableCell>amazonField key</TableCell>
-                  <TableCell>Last sample</TableCell>
-                  <TableCell align="right">Actions</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {savedColumns.map((col) => (
-                  <TableRow key={col._id}>
-                    <TableCell>{col.label}</TableCell>
-                    <TableCell>{col.jsonPath}</TableCell>
-                    <TableCell>
-                      <code>{col.key}</code>
-                    </TableCell>
-                    <TableCell sx={{ maxWidth: 360, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                      {col.lastSampleValue}
-                    </TableCell>
-                    <TableCell align="right">
-                      <Button size="small" color="error" onClick={() => deleteSaved(col._id)}>
-                        Delete
-                      </Button>
-                    </TableCell>
+          <>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+              {filteredSavedColumns.length} of {savedColumns.length} columns
+            </Typography>
+            <TableContainer sx={TABLE_SCROLL_SX}>
+              <Table size="small" stickyHeader sx={{ tableLayout: 'fixed' }}>
+                <TableHead>
+                  <TableRow>
+                    <TableCell width="18%">Label</TableCell>
+                    <TableCell width="24%">JSON path</TableCell>
+                    <TableCell width="20%">amazonField key</TableCell>
+                    <TableCell width="34%">Last sample</TableCell>
+                    <TableCell width={52} align="right" />
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
+                </TableHead>
+                <TableBody>
+                  {filteredSavedColumns.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5}>
+                        <Typography variant="body2" color="text.secondary">
+                          No columns match your search.
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    filteredSavedColumns.map((col) => (
+                      <TableRow key={col._id} hover>
+                        <TableCell sx={{ fontSize: '0.8125rem' }}>
+                          {col.label || '—'}
+                        </TableCell>
+                        <TableCell sx={PATH_CELL_SX}>
+                          <Tooltip title={col.jsonPath || ''} placement="top-start">
+                            <span>{col.jsonPath || '—'}</span>
+                          </Tooltip>
+                        </TableCell>
+                        <TableCell sx={PATH_CELL_SX}>
+                          <Tooltip title={col.key || ''} placement="top-start">
+                            <code>{col.key || '—'}</code>
+                          </Tooltip>
+                        </TableCell>
+                        <TableCell>
+                          <ClampedSampleText text={col.lastSampleValue} />
+                        </TableCell>
+                        <TableCell align="right">
+                          <Tooltip title="Remove from catalog">
+                            <IconButton size="small" color="error" onClick={() => deleteSaved(col._id)}>
+                              <DeleteOutlineIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </>
         )}
       </Paper>
     </Box>

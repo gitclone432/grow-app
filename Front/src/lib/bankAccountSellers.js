@@ -13,6 +13,56 @@ export function isMongoIdString(s) {
     return typeof s === 'string' && MONGO_ID_HEX.test(s.trim());
 }
 
+/** eBay seller list → options for bank-account store linking and labels. */
+export function buildSellerOptions(sellersList) {
+    const rows = (sellersList || [])
+        .map((s) => {
+            const username = (s.user?.username || '').trim();
+            const email = (s.user?.email || '').trim();
+            const bankToken = username || email;
+            if (!bankToken) return null;
+            const label =
+                username && email && username.toLowerCase() !== email.toLowerCase()
+                    ? `${username} (${email})`
+                    : bankToken;
+            const matchLower = new Set(
+                [username, email].filter(Boolean).map((x) => x.toLowerCase())
+            );
+            return { id: String(s._id), label, bankToken, matchLower };
+        })
+        .filter(Boolean);
+    rows.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+    return rows;
+}
+
+function resolveSellerTokenLabel(token, sellerOptions) {
+    const opts = sellerOptions || [];
+    if (isMongoIdString(token)) {
+        const match = opts.find((o) => String(o.id) === token);
+        if (match) return match.bankToken || match.label;
+        return null;
+    }
+    const tl = String(token).toLowerCase();
+    const match = opts.find((o) => o.matchLower?.has(tl));
+    if (match) return match.bankToken || match.label;
+    return token;
+}
+
+/** Short store name(s) for menus, e.g. `bright vision` or `actus corp, rolex`. */
+export function formatBankSellersHint(sellersStr, sellerOptions = []) {
+    const tokens = splitBankSellersField(sellersStr);
+    if (!tokens.length) return '';
+
+    const labels = tokens
+        .map((token) => resolveSellerTokenLabel(token, sellerOptions))
+        .filter(Boolean);
+
+    if (labels.length === 1) return labels[0];
+    if (labels.length === 2) return labels.join(', ');
+    if (labels.length > 2) return `${labels.slice(0, 2).join(', ')} +${labels.length - 2}`;
+    return '';
+}
+
 /**
  * Filter sellers linked by BankAccount.sellers: comma-separated seller _id values
  * and/or legacy username/email tokens (same rules as before).
