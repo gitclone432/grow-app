@@ -9,21 +9,9 @@ import Range from '../models/Range.js';
 import Assignment from '../models/Assignment.js';
 import ListingCompletion from '../models/ListingCompletion.js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
+import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
 
 const router = Router();
-
-// ============================================
-// EBAY OAUTH SCOPES - Single source of truth
-// ============================================
-const EBAY_OAUTH_SCOPES = [
-  'https://api.ebay.com/oauth/api_scope',
-  'https://api.ebay.com/oauth/api_scope/sell.fulfillment',
-  'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
-  'https://api.ebay.com/oauth/api_scope/sell.finances',
-  'https://api.ebay.com/oauth/api_scope/sell.account',
-  'https://api.ebay.com/oauth/api_scope/sell.inventory',
-  'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly'
-].join(' ');
 
 // ============================================
 // CACHING SYSTEM FOR VEHICLE MODELS
@@ -197,11 +185,7 @@ async function ensureValidToken(seller) {
   
   const refreshRes = await axios.post(
     'https://api.ebay.com/identity/v1/oauth2/token',
-    qs.stringify({
-      grant_type: 'refresh_token',
-      refresh_token: seller.ebayTokens.refresh_token,
-      scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-    }),
+    qs.stringify(buildRefreshTokenParams(seller)),
     {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',

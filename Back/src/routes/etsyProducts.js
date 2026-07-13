@@ -47,6 +47,11 @@ function normalizeFieldValue(key, value) {
   const str = value == null ? '' : String(value);
   if (key === 'region') return normalizeEtsyRegion(str);
   if (key === 'listingStatus') return normalizeListingStatus(str);
+  if (key === 'supplierPrice' || key === 'listedPrice') {
+    const cleaned = str.replace(/[$₹,\s]/g, '');
+    const num = parseFloat(cleaned);
+    return Number.isFinite(num) ? String(num) : str;
+  }
   return str;
 }
 
@@ -158,6 +163,13 @@ async function backfillMissingSkus(products = []) {
   return changed;
 }
 
+function assignImportRowOrders(rows, { mode, maxRowOrder = -1 }) {
+  return rows.map((row, index) => ({
+    ...row,
+    rowOrder: mode === 'replace' ? index : maxRowOrder + index + 1,
+  }));
+}
+
 // GET /api/etsy/products?storeId=
 router.get('/', requireAuth, requirePageAccess('EtsyProducts'), async (req, res) => {
   try {
@@ -216,6 +228,74 @@ router.post('/', requireAuth, requirePageAccess('EtsyProducts'), async (req, res
     });
   } catch (err) {
     console.error('[Etsy Products] create failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/etsy/products/bulk-import
+router.post('/bulk-import', requireAuth, requirePageAccess('EtsyProducts'), async (req, res) => {
+  try {
+    const { storeId, rows, mode = 'append' } = req.body;
+    const store = await resolveStoreId(storeId);
+
+    if (!store) {
+      return res.status(400).json({ error: 'Valid storeId is required' });
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: 'rows array is required' });
+    }
+    if (!['append', 'replace'].includes(mode)) {
+      return res.status(400).json({ error: 'mode must be append or replace' });
+    }
+
+    const prepared = [];
+    for (const row of rows) {
+      const fields = pickAllowedFields(row);
+      if (isRowEmpty(fields)) continue;
+
+      const doc = {
+        ...createEmptyRecord(),
+        ...fields,
+        timeLeft: computeTimeLeftFromListedDate(fields.listedDate),
+        store: store._id,
+      };
+
+      await applyAutoSku(doc, doc);
+      prepared.push(doc);
+    }
+
+    if (prepared.length === 0) {
+      return res.status(400).json({ error: 'No data rows found in upload' });
+    }
+
+    let deletedCount = 0;
+    if (mode === 'replace') {
+      const deleteResult = await EtsyProduct.deleteMany({ store: store._id });
+      deletedCount = deleteResult.deletedCount || 0;
+    }
+
+    const maxRowOrder = mode === 'replace' ? -1 : await getMaxRowOrder(store._id);
+    const docs = assignImportRowOrders(prepared, { mode, maxRowOrder });
+
+    const chunkSize = 500;
+    let insertedCount = 0;
+
+    for (let i = 0; i < docs.length; i += chunkSize) {
+      const chunk = docs.slice(i, i + chunkSize);
+      const inserted = await EtsyProduct.insertMany(chunk, { ordered: false });
+      insertedCount += inserted.length;
+    }
+
+    res.json({
+      success: true,
+      storeId: store._id,
+      mode,
+      deletedCount,
+      insertedCount,
+      skippedEmptyRows: rows.length - prepared.length,
+    });
+  } catch (err) {
+    console.error('[Etsy Products] bulk import failed:', err);
     res.status(500).json({ error: err.message });
   }
 });

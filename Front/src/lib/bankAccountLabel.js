@@ -1,5 +1,17 @@
-/** Label for bank account dropdowns when multiple rows can share the same `name`. */
-export function bankAccountMenuLabel(acc) {
+import { formatBankSellersHint } from './bankAccountSellers.js';
+
+/** Same key as backend `bankAccountLedgerKey` — one real bank account. */
+export function bankAccountLedgerKey(acc) {
+    if (!acc) return '';
+    const name = String(acc.name || '').trim().toLowerCase();
+    const acct = String(acc.accountNumber || '').replace(/\s/g, '');
+    if (acct) return `${name}::${acct}`;
+    const id = acc._id != null ? String(acc._id) : '';
+    return id ? `${name}::${id}` : name;
+}
+
+/** Name + mask only (no linked store suffix). */
+export function bankAccountUniqueLabel(acc) {
     if (!acc) return '';
     const name = String(acc.name || '').trim() || 'Bank';
     const digits = String(acc.accountNumber || '').replace(/\D/g, '');
@@ -8,6 +20,37 @@ export function bankAccountMenuLabel(acc) {
     const id = String(acc._id || '');
     const tail = id.length >= 6 ? id.slice(-6) : id;
     return tail ? `${name} (#${tail})` : name;
+}
+
+/** One menu row per physical bank account (merged store-specific DB rows). */
+export function uniqueBankAccountsByLedger(accounts = []) {
+    const seen = new Map();
+    for (const acc of accounts) {
+        const key = bankAccountLedgerKey(acc);
+        if (!seen.has(key)) seen.set(key, acc);
+    }
+    return [...seen.values()].sort((a, b) =>
+        bankAccountUniqueLabel(a).localeCompare(bankAccountUniqueLabel(b), undefined, { sensitivity: 'base' })
+    );
+}
+
+/** Label for bank account dropdowns when multiple rows can share the same `name`. */
+export function bankAccountMenuLabel(acc, sellerOptions) {
+    if (!acc) return '';
+    const name = String(acc.name || '').trim() || 'Bank';
+    const digits = String(acc.accountNumber || '').replace(/\D/g, '');
+    const mask = digits.length >= 4 ? `****${digits.slice(-4)}` : digits ? `****${digits}` : '';
+    let base;
+    if (mask) base = `${name} (${mask})`;
+    else {
+        const id = String(acc._id || '');
+        const tail = id.length >= 6 ? id.slice(-6) : id;
+        base = tail ? `${name} (#${tail})` : name;
+    }
+
+    const sellerHint = acc.linkedSellerHint
+        || formatBankSellersHint(acc.sellers, sellerOptions);
+    return sellerHint ? `${base} · ${sellerHint}` : base;
 }
 
 const looksLikeMongoId = (s) => typeof s === 'string' && /^[a-f\d]{24}$/i.test(s.trim());

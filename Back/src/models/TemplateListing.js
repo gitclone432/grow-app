@@ -124,6 +124,14 @@ const templateListingSchema = new mongoose.Schema({
     default: 'draft',
     index: true
   },
+
+  /** template_listings = Add Template Listings workflow; direct_list = Direct List to eBay page */
+  listingOrigin: {
+    type: String,
+    enum: ['template_listings', 'direct_list'],
+    default: 'template_listings',
+    index: true,
+  },
   
   // eBay integration fields (for future use)
   ebayItemId: {

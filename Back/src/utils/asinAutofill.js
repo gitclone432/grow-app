@@ -3,7 +3,7 @@ import { calculateStartPrice } from './pricingCalculator.js';
 import { processImagePlaceholders } from './imageReplacer.js';
 import { scrapeAmazonProductWithScraperAPI } from './scraperApiProduct.js';
 import AmazonPiSourceColumn from '../models/AmazonPiSourceColumn.js';
-import { augmentAmazonDataWithPiColumns } from './amazonPiSourceColumnUtils.js';
+import { augmentAmazonDataWithPiColumns, filterAmazonPiCatalogColumns } from './amazonPiSourceColumnUtils.js';
 import {
   fillMissingCustomColumnsFromAmazon,
   inferAmazonFieldForCustomColumn,
@@ -43,7 +43,9 @@ async function loadAmazonPiSourceColumnsForAutofill() {
   if (piSourceColCache.rows && Date.now() - piSourceColCache.t < PI_SOURCE_COL_CACHE_MS) {
     return piSourceColCache.rows;
   }
-  const rows = await AmazonPiSourceColumn.find({}).sort({ label: 1 }).lean();
+  const rows = filterAmazonPiCatalogColumns(
+    await AmazonPiSourceColumn.find({}).sort({ label: 1 }).lean()
+  );
   piSourceColCache = { t: Date.now(), rows };
   return rows;
 }

@@ -13,8 +13,11 @@ import { requireAuth, requirePageAccess, requireRole } from '../middleware/auth.
 import Seller from '../models/Seller.js';
 import BankAccount from '../models/BankAccount.js';
 import PayoneerFeedCache from '../models/PayoneerFeedCache.js';
+import FinancesPayoutGroupsCache from '../models/FinancesPayoutGroupsCache.js';
 import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.js';
 import { applyActiveSellerScope } from '../utils/activeSellerScope.js';
+import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
+import { postEbayTradingApi } from '../utils/ebayTradingApi.js';
 import Order from '../models/Order.js';
 import Return from '../models/Return.js';
 import Case from '../models/Case.js';
@@ -22,15 +25,29 @@ import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
 import ActiveListing from '../models/ActiveListing.js';
+import CustomerServiceMetricSnapshot from '../models/CustomerServiceMetricSnapshot.js';
+import SellerStandardsProfileSnapshot from '../models/SellerStandardsProfileSnapshot.js';
 import CashflowEntry from '../models/CashflowEntry.js';
 import SyncAllSellersLock from '../models/SyncAllSellersLock.js';
 import SyncAllSellersStatusCache from '../models/SyncAllSellersStatusCache.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import ChatAgent from '../models/ChatAgent.js';
+import MarketingViewCache from '../models/MarketingViewCache.js';
 import { getOrderQtyExcludedLegacyIdSet } from '../utils/orderQtyExcludeLegacyCache.js';
 import { enrichOrdersWithSupplierLinks } from '../utils/supplierLinkFromListings.js';
 import { buildSellerAnalyticsFromOrders } from '../utils/sellerAnalyticsFinancials.js';
+import {
+  processEbayMessage,
+  enrichThreadFromMyMessages,
+  collectExternalMessageIdsFromExchanges,
+  syncMyMessagesForThread,
+  backfillThreadOrderId,
+  syncCommerceConversationsForSeller,
+  resolveCommerceConversationId,
+  sendCommerceMessage,
+  backfillConversationId
+} from '../utils/ebayMessageSync.js';
 import {
   applyUsdFieldsSync,
   enrichOrderLikeAllOrdersSheet,
@@ -42,6 +59,7 @@ import {
   importFulfillmentRows,
 } from '../utils/applyOrderManualFieldUpdates.js';
 import { parseStringPromise } from 'xml2js';
+import pLimit from 'p-limit';
 import imageCache from '../lib/imageCache.js';
 import multer from 'multer';
 import FeedUpload from '../models/FeedUpload.js';
@@ -49,9 +67,11 @@ import UserSellerAssignment from '../models/UserSellerAssignment.js';
 import UserDailyQuantity from '../models/UserDailyQuantity.js';
 import CompatibilityBatchLog from '../models/CompatibilityBatchLog.js';
 import User from '../models/User.js';
-import { getSellersMatchingAllRoute, resolveStoreDisplayName } from '../utils/sellersAllScope.js';
+import { getSellersMatchingAllRoute, getSellersForEbayApiPicker, resolveStoreDisplayName } from '../utils/sellersAllScope.js';
+import { applySellerStandardsThresholdLabels } from '../utils/sellerStandardsThresholds.js';
 import {
   activeListingStatusFilter,
+  buildStoreListingsMatch,
   getSellersForStoreListings,
   sellerIdsInMatch,
 } from '../utils/storeListingsQuery.js';
@@ -74,6 +94,13 @@ import {
   getOrderTotalAmount
 } from '../utils/exchangeRateUtils.js';
 import { enrichNewOrderData } from '../utils/ebayStoreOrderSettings.js';
+import {
+  processPendingPolicyMessagesIfEnabled,
+} from '../utils/policyMessageSettings.js';
+import {
+  isOrderListingQtyUpdateEnabled,
+  processPendingListingQtyUpdatesIfEnabled,
+} from '../utils/orderListingQtySettings.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
@@ -162,6 +189,11 @@ async function buildPayoneerSucceededPayoutFeedRows() {
   };
 
   const cutoff = Date.now() - PAYONEER_FEED_MAX_AGE_MS;
+  const cutoffIso = new Date(cutoff).toISOString();
+  const nowIso = new Date().toISOString();
+  // Only SUCCEEDED payouts — unfiltered responses are dominated by INITIATED (future)
+  // payouts at the top of -payoutDate sort and can push completed payouts past our page cap.
+  const payoutFilter = `payoutStatus:{SUCCEEDED},payoutDate:[${cutoffIso}..${nowIso}]`;
   const rows = [];
 
   for (let i = 0; i < sellers.length; i += PAYONEER_FEED_SELLER_CONCURRENCY) {
@@ -176,21 +208,15 @@ async function buildPayoneerSucceededPayoutFeedRows() {
           const limit = 200;
           let offset = 0;
           let guard = 0;
-          let hitAgeCutoff = false;
 
-          while (guard < PAYONEER_FEED_MAX_PAGES_PER_SELLER && !hitAgeCutoff) {
+          while (guard < PAYONEER_FEED_MAX_PAGES_PER_SELLER) {
             const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
               headers: financesApiHeaders(accessToken, marketplaceId),
-              params: { sort: '-payoutDate', limit, offset },
+              params: { sort: '-payoutDate', limit, offset, filter: payoutFilter },
             });
             const pageRows = payoutsRes.data?.payouts || [];
             for (const p of pageRows) {
-              if (p.payoutStatus !== 'SUCCEEDED' || !p.payoutDate) continue;
-              const pd = new Date(p.payoutDate).getTime();
-              if (pd < cutoff) {
-                hitAgeCutoff = true;
-                break;
-              }
+              if (!p.payoutDate) continue;
               sellerRows.push({
                 payoutId: p.payoutId,
                 payoutDate: p.payoutDate,
@@ -204,7 +230,7 @@ async function buildPayoneerSucceededPayoutFeedRows() {
                 financesMarketplaceId: marketplaceId,
               });
             }
-            if (pageRows.length < limit || hitAgeCutoff) break;
+            if (pageRows.length < limit) break;
             offset += limit;
             guard += 1;
           }
@@ -289,6 +315,45 @@ function normalizeEbayOAuthCode(code) {
     }
   }
   return c;
+}
+
+function escapeRegexLiteral(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Resolve Seller by Mongo _id or linked User username/email (Seller has no username field). */
+async function findSellerByIdOrUsername(lookup, { populate = null, select = null } = {}) {
+  const key = String(lookup || '').trim();
+  if (!key) return null;
+
+  let query;
+  if (mongoose.Types.ObjectId.isValid(key)) {
+    query = Seller.findById(key);
+  } else {
+    const user = await User.findOne({
+      $or: [
+        { username: { $regex: new RegExp(`^${escapeRegexLiteral(key)}$`, 'i') } },
+        { email: { $regex: new RegExp(`^${escapeRegexLiteral(key)}$`, 'i') } }
+      ]
+    }).select('_id').lean();
+    if (!user) return null;
+    query = Seller.findOne({ user: user._id });
+  }
+
+  if (select) query = query.select(select);
+  if (populate === true || populate === 'user') {
+    query = query.populate('user', 'username email');
+  } else if (populate) {
+    query = query.populate(populate);
+  }
+
+  return query;
+}
+
+function sendTokenReconnectError(err, res) {
+  if (err?.code !== 'NEEDS_RECONNECT') return false;
+  res.status(401).json({ error: err.message, needsReconnect: true });
+  return true;
 }
 
 // Identifies which server instance owns/resumes batches.
@@ -1181,8 +1246,8 @@ router.get('/feed/result/:taskId', requireAuth, async (req, res) => {
 });
 
 // ============================================
-// EBAY OAUTH SCOPES - Single source of truth
-// Used in both initial authorization AND token refresh
+// EBAY OAUTH SCOPES - Single source of truth for OAuth consent (authorize URL + code exchange)
+// Token refresh must NOT send this list — use buildRefreshTokenParams() instead.
 // ============================================
 const EBAY_OAUTH_SCOPES = [
   'https://api.ebay.com/oauth/api_scope',
@@ -1197,6 +1262,7 @@ const EBAY_OAUTH_SCOPES = [
   'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
   'https://api.ebay.com/oauth/api_scope/sell.finances',
+  'https://api.ebay.com/oauth/api_scope/sell.finances.earnings.read',
   'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.reputation',
   'https://api.ebay.com/oauth/api_scope/sell.reputation.readonly',
@@ -1204,7 +1270,7 @@ const EBAY_OAUTH_SCOPES = [
   'https://api.ebay.com/oauth/api_scope/commerce.notification.subscription.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.stores',
   'https://api.ebay.com/oauth/api_scope/sell.stores.readonly',
-  'https://api.ebay.com/oauth/scope/sell.edelivery',
+  'https://api.ebay.com/oauth/api_scope/sell.edelivery',
   'https://api.ebay.com/oauth/api_scope/commerce.vero',
   'https://api.ebay.com/oauth/api_scope/sell.inventory.mapping',
   'https://api.ebay.com/oauth/api_scope/commerce.message',
@@ -1350,14 +1416,21 @@ async function calculateAmazonFinancials(order) {
 
 // HELPER: Ensure Seller Token is Valid (Refreshes if < 2 mins left)
 export async function ensureValidToken(seller, retries = 3) {
+  const tokens = seller?.ebayTokens;
+  if (!tokens?.refresh_token) {
+    const err = new Error('Seller has no eBay refresh token. Reconnect the eBay account from Seller Profile.');
+    err.code = 'NEEDS_RECONNECT';
+    throw err;
+  }
+
   const now = Date.now();
-  const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-  const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
+  const fetchedAt = tokens.fetchedAt ? new Date(tokens.fetchedAt).getTime() : 0;
+  const expiresInMs = (tokens.expires_in || 0) * 1000;
   const bufferTime = 2 * 60 * 1000; // 2 minutes buffer
 
   // If token is valid, return it
-  if (fetchedAt && (now - fetchedAt < expiresInMs - bufferTime)) {
-    return seller.ebayTokens.access_token;
+  if (tokens.access_token && fetchedAt && (now - fetchedAt < expiresInMs - bufferTime)) {
+    return tokens.access_token;
   }
 
   console.log(`[Token Refresh] Refreshing token for ${seller.user?.username || seller._id}`);
@@ -1366,11 +1439,7 @@ export async function ensureValidToken(seller, retries = 3) {
     try {
       const refreshRes = await axios.post(
         'https://api.ebay.com/identity/v1/oauth2/token',
-        qs.stringify({
-          grant_type: 'refresh_token',
-          refresh_token: seller.ebayTokens.refresh_token,
-          scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-        }),
+        qs.stringify(buildRefreshTokenParams(seller)),
         {
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -1402,7 +1471,24 @@ export async function ensureValidToken(seller, retries = 3) {
         continue;
       }
 
+      const oauthError = err.response?.data?.error;
+      const oauthDesc = String(err.response?.data?.error_description || '');
+      const isInvalidGrant = oauthError === 'invalid_grant'
+        || /invalid.?grant|revoked|expired refresh/i.test(oauthDesc);
+
       console.error(`[Token Refresh] ❌ Failed for ${seller._id} after ${attempt} attempts:`, err.message);
+      if (oauthError) {
+        console.error(`[Token Refresh] OAuth error: ${oauthError} — ${oauthDesc}`);
+      }
+
+      if (isInvalidGrant) {
+        const reconnectErr = new Error(
+          'eBay refresh token is invalid or expired. Reconnect the seller\'s eBay account (Seller Profile → Connect eBay).'
+        );
+        reconnectErr.code = 'NEEDS_RECONNECT';
+        throw reconnectErr;
+      }
+
       throw new Error(`Failed to refresh eBay token: ${err.response?.status || err.message}`);
     }
   }
@@ -1441,7 +1527,13 @@ function normalizeFinancesMarketplaceId(raw) {
   return 'EBAY_US';
 }
 
+const FINANCES_PICKER_MARKETPLACES = ['EBAY_US', 'EBAY_GB', 'EBAY_AU', 'EBAY_CA', 'EBAY_DE'];
+
 function resolveFinancesMarketplaceIds(seller, queryMarketplace) {
+  const rawQuery = String(queryMarketplace ?? '').trim().toLowerCase();
+  if (rawQuery === '__all__' || rawQuery === 'all') {
+    return FINANCES_PICKER_MARKETPLACES;
+  }
   const fromQuery = normalizeFinancesMarketplaceId(queryMarketplace);
   if (queryMarketplace != null && String(queryMarketplace).trim() !== '') {
     return [fromQuery];
@@ -1496,7 +1588,7 @@ function moneyFromNumber(value, currency = 'USD') {
 }
 
 /** Paginate GET /sell/finances/v1/transaction with one or more filters. */
-async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filterOrFilters) {
+async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filterOrFilters, { maxTransactions = 2000 } = {}) {
   const all = [];
   let offset = 0;
   const limit = 200;
@@ -1505,7 +1597,7 @@ async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, fil
   const filters = (Array.isArray(filterOrFilters) ? filterOrFilters : [filterOrFilters])
     .filter((f) => f != null && String(f).trim() !== '');
 
-  while (hasMore) {
+  while (hasMore && all.length < maxTransactions) {
     try {
       const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
         headers: financesApiHeaders(accessToken, mp),
@@ -1524,7 +1616,7 @@ async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, fil
       throw err;
     }
   }
-  return all;
+  return all.slice(0, maxTransactions);
 }
 
 async function fetchFinancesTransactionsAllPagesSafe(accessToken, marketplaceId, filterOrFilters, label) {
@@ -2159,154 +2251,6 @@ async function sendAutoWelcomeMessage(seller, order) {
   }
 }
 
-// HELPER: Extract clean text from HTML email bodies
-function extractTextFromHtml(html) {
-  if (!html) return '';
-
-  // Check if it's actually HTML (contains tags)
-  if (!/<[^>]+>/.test(html)) {
-    return html.trim();
-  }
-
-  let cleanText = '';
-
-  // Strategy 1: Try to extract from UserInputtedText div (buyer's actual message)
-  const userInputMatch = html.match(/<div\s+id=["']UserInputtedText["'][^>]*>(.*?)<\/div>/is);
-  if (userInputMatch && userInputMatch[1]) {
-    cleanText = userInputMatch[1];
-  } else {
-    // Strategy 2: Try to extract from V4PrimaryMessage hidden div
-    const v4Match = html.match(/<div\s+id=["']V4PrimaryMessage["'][^>]*>.*?<strong>Dear[^<]*<\/strong>\s*(?:<br\s*\/?>)*\s*(.*?)\s*(?:<br\s*\/?>)*\s*<\/font>/is);
-    if (v4Match && v4Match[1]) {
-      cleanText = v4Match[1];
-    } else {
-      // Strategy 3: Strip all HTML tags
-      cleanText = html;
-    }
-  }
-
-  // Remove all HTML tags
-  cleanText = cleanText.replace(/<[^>]+>/g, ' ');
-
-  // Decode common HTML entities
-  cleanText = cleanText
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'");
-
-  // Clean up whitespace
-  cleanText = cleanText
-    .replace(/\s+/g, ' ')  // Multiple spaces to single space
-    .replace(/\n\s*\n/g, '\n')  // Multiple newlines to single
-    .trim();
-
-  return cleanText;
-}
-
-// HELPER: Process a single eBay XML Message and save to DB
-async function processEbayMessage(msg, seller) {
-  try {
-    const question = msg.Question?.[0];
-    if (!question) return false;
-
-    const msgID = question.MessageID?.[0];
-    const senderID = question.SenderID?.[0];
-    const senderEmail = question.SenderEmail?.[0];
-    const rawBody = question.Body?.[0];
-    const body = extractTextFromHtml(rawBody); // Clean HTML if present
-    const subject = question.Subject?.[0];
-    const itemID = msg.Item?.[0]?.ItemID?.[0];
-    const itemTitle = msg.Item?.[0]?.Title?.[0];
-
-    // --- EXTRACT IMAGES (NEW) ---
-    const mediaUrls = [];
-    // Check if MessageMedia exists and is an array
-    if (msg.MessageMedia && Array.isArray(msg.MessageMedia)) {
-      msg.MessageMedia.forEach(media => {
-        if (media.MediaURL && media.MediaURL[0]) {
-          mediaUrls.push(media.MediaURL[0]);
-        }
-      });
-    }
-    // Sometimes it's inside the Question tag as well
-    if (question.MessageMedia && Array.isArray(question.MessageMedia)) {
-      question.MessageMedia.forEach(media => {
-        if (media.MediaURL && media.MediaURL[0]) {
-          mediaUrls.push(media.MediaURL[0]);
-        }
-      });
-    }
-    // ----------------------------
-
-    // --- DATE PARSING ---
-    const rawDate = question.CreationDate?.[0];
-    let messageDate = new Date();
-    if (rawDate) {
-      const parsedDate = new Date(rawDate);
-      if (!isNaN(parsedDate.getTime())) messageDate = parsedDate;
-    }
-
-    // 1. Prevent Duplicates
-    const exists = await Message.findOne({ externalMessageId: msgID });
-    if (exists) return false;
-
-    // 2. Determine Message Type (ORDER, INQUIRY, or DIRECT)
-    let orderId = null;
-    let messageType = 'INQUIRY'; // Default
-    let finalItemId = itemID;
-    let finalItemTitle = itemTitle;
-
-    if (itemID && senderID) {
-      // HAS ITEM: Check if it's an order or inquiry
-      const order = await Order.findOne({
-        'lineItems.legacyItemId': itemID,
-        'buyer.username': senderID
-      });
-      if (order) {
-        orderId = order.orderId;
-        messageType = 'ORDER';
-        console.log(`[Message] ORDER message for item ${itemID} from ${senderID}`);
-      } else {
-        messageType = 'INQUIRY';
-        console.log(`[Message] INQUIRY about item ${itemID} from ${senderID}`);
-      }
-    } else if (!itemID && senderID) {
-      // NO ITEM: Direct message to seller account
-      messageType = 'DIRECT';
-      finalItemId = 'DIRECT_MESSAGE';
-      finalItemTitle = 'Direct Message (No Item)';
-      console.log(`[Message] DIRECT message from ${senderID}: ${subject}`);
-    }
-
-    // 3. Save to DB
-    await Message.create({
-      seller: seller._id,
-      orderId,
-      itemId: finalItemId,
-      itemTitle: finalItemTitle,
-      buyerUsername: senderID,
-      externalMessageId: msgID,
-      sender: 'BUYER',
-      subject: subject,
-      body: body,
-      mediaUrls: mediaUrls,
-      read: false,
-      messageType,
-      messageDate: messageDate
-    });
-
-    return true;
-  } catch (err) {
-    console.error('Error processing message:', err.message);
-    return false;
-  }
-}
-
-
 // Helper function to extract tracking number from fulfillmentHrefs
 async function extractTrackingNumber(fulfillmentHrefs, accessToken) {
   if (!fulfillmentHrefs || fulfillmentHrefs.length === 0) return null;
@@ -2601,11 +2545,7 @@ router.get('/orders', async (req, res) => {
       try {
         const refreshRes = await axios.post(
           'https://api.ebay.com/identity/v1/oauth2/token',
-          qs.stringify({
-            grant_type: 'refresh_token',
-            refresh_token: seller.ebayTokens.refresh_token,
-            scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-          }),
+          qs.stringify(buildRefreshTokenParams(seller)),
           {
             headers: {
               'Content-Type': 'application/x-www-form-urlencoded',
@@ -4736,6 +4676,8 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
       });
     }
 
+    const queueListingQtyUpdate = await isOrderListingQtyUpdateEnabled();
+
     // Calculate 30 days ago in UTC
     const nowUTC = Date.now();
     const thirtyDaysAgoMs = 30 * 24 * 60 * 60 * 1000;
@@ -4762,11 +4704,7 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
           try {
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -4850,14 +4788,13 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
                     orderData.policyMessageEligibleAt = policyEligibleAt;
                   }
                 }
+                if (queueListingQtyUpdate) {
+                  orderData.listingQtyUpdatePending = true;
+                }
                 const newOrder = await Order.create(orderData);
                 newOrders.push(newOrder);
                 console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
                 await sendAutoWelcomeMessage(seller, newOrder);
-
-                // Fire-and-forget: Update listing quantity to 1
-                updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName)
-                  .catch(err => console.error(`[Quantity Update] Background error for ${ebayOrder.orderId}:`, err.message));
               } else {
                 // Order exists, check if needs update
                 const ebayModTime = new Date(ebayOrder.lastModifiedDate).getTime();
@@ -5086,14 +5023,24 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
       totalUpdatedOrders
     });
 
-    // Trigger delayed policy messaging in background after polling
-    processPendingPolicyMessages(50)
+    // Trigger delayed policy messaging in background after polling (respects Cron Jobs toggle)
+    processPendingPolicyMessagesIfEnabled(processPendingPolicyMessages, 50)
       .then((r) => {
+        if (r.skipped) return;
         if (r.processed > 0) {
           console.log(`[PolicyMessage] Background run: processed=${r.processed}, sent=${r.sent}, failed=${r.failed}`);
         }
       })
       .catch((e) => console.error('[PolicyMessage] Background run failed:', e.message));
+
+    processPendingListingQtyUpdatesIfEnabled(processPendingListingQtyUpdates, 50)
+      .then((r) => {
+        if (r.skipped) return;
+        if (r.processed > 0) {
+          console.log(`[Quantity Update] Background run: processed=${r.processed}, updated=${r.updated}, failed=${r.failed}`);
+        }
+      })
+      .catch((e) => console.error('[Quantity Update] Background run failed:', e.message));
 
     console.log('\n========== POLLING SUMMARY ==========');
     console.log(`Total sellers polled: ${sellers.length}`);
@@ -5121,6 +5068,8 @@ export async function scheduledPollNewOrders() {
       };
     }
 
+    const queueListingQtyUpdate = await isOrderListingQtyUpdateEnabled();
+
     const nowUTC = Date.now();
     console.log(`\n========== POLLING NEW ORDERS FOR ${sellers.length} SELLERS ==========`);
     console.log(`UTC Time: ${new Date(nowUTC).toISOString()}`);
@@ -5140,11 +5089,7 @@ export async function scheduledPollNewOrders() {
           console.log(`[${sellerName}] Refreshing token...`);
           const refreshRes = await axios.post(
             'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify({
-              grant_type: 'refresh_token',
-              refresh_token: seller.ebayTokens.refresh_token,
-              scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-            }),
+            qs.stringify(buildRefreshTokenParams(seller)),
             {
               headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -5209,14 +5154,13 @@ export async function scheduledPollNewOrders() {
                   orderData.policyMessageEligibleAt = policyEligibleAt;
                 }
               }
+              if (queueListingQtyUpdate) {
+                orderData.listingQtyUpdatePending = true;
+              }
               const newOrder = await Order.create(orderData);
               newOrders.push(newOrder);
               console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
               await sendAutoWelcomeMessage(seller, newOrder);
-
-              // Fire-and-forget: Update listing quantity to 1
-              updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName)
-                .catch(err => console.error(`[Quantity Update] Background error for ${ebayOrder.orderId}:`, err.message));
 
               // Fetch ad fee from eBay Finances API
               try {
@@ -5301,14 +5245,24 @@ export async function scheduledPollNewOrders() {
       totalEbayFetched,
     };
 
-    // Trigger delayed policy messaging in background after polling
-    processPendingPolicyMessages(50)
+    // Trigger delayed policy messaging in background after polling (respects Cron Jobs toggle)
+    processPendingPolicyMessagesIfEnabled(processPendingPolicyMessages, 50)
       .then((r) => {
+        if (r.skipped) return;
         if (r.processed > 0) {
           console.log(`[PolicyMessage] Background run: processed=${r.processed}, sent=${r.sent}, failed=${r.failed}`);
         }
       })
       .catch((e) => console.error('[PolicyMessage] Background run failed:', e.message));
+
+    processPendingListingQtyUpdatesIfEnabled(processPendingListingQtyUpdates, 50)
+      .then((r) => {
+        if (r.skipped) return;
+        if (r.processed > 0) {
+          console.log(`[Quantity Update] Background run: processed=${r.processed}, updated=${r.updated}, failed=${r.failed}`);
+        }
+      })
+      .catch((e) => console.error('[Quantity Update] Background run failed:', e.message));
 
     console.log(`\n========== NEW ORDERS SUMMARY ==========`);
     console.log(`Total new orders: ${totalNewOrders}`);
@@ -5576,11 +5530,7 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
           console.log(`[${sellerName}] Refreshing token...`);
           const refreshRes = await axios.post(
             'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify({
-              grant_type: 'refresh_token',
-              refresh_token: seller.ebayTokens.refresh_token,
-              scope: EBAY_OAUTH_SCOPES, // Using centralized scopes constant
-            }),
+            qs.stringify(buildRefreshTokenParams(seller)),
             {
               headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -5902,11 +5852,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
           console.log(`[${sellerName}] Refreshing token...`);
           const refreshRes = await axios.post(
             'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify({
-              grant_type: 'refresh_token',
-              refresh_token: seller.ebayTokens.refresh_token,
-              scope: EBAY_OAUTH_SCOPES,
-            }),
+            qs.stringify(buildRefreshTokenParams(seller)),
             {
               headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -6360,6 +6306,59 @@ async function updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName) 
   }
 }
 
+function buildEbayOrderShapeForListingQtyUpdate(order) {
+  const lineItems = Array.isArray(order.lineItems) && order.lineItems.length > 0
+    ? order.lineItems
+    : (order.itemNumber
+      ? [{ legacyItemId: order.itemNumber, title: order.productName || 'Unknown' }]
+      : []);
+  return { orderId: order.orderId, lineItems };
+}
+
+async function processPendingListingQtyUpdates(limit = 50) {
+  const orders = await Order.find({ listingQtyUpdatePending: true })
+    .sort({ creationDate: 1 })
+    .limit(Math.max(1, Math.min(200, Number(limit) || 50)))
+    .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } });
+
+  let processed = 0;
+  let updated = 0;
+  let failed = 0;
+
+  for (const order of orders) {
+    processed += 1;
+    const seller = order.seller;
+    if (!seller?.ebayTokens?.access_token) {
+      failed += 1;
+      console.error(`[Quantity Update] No token for order ${order.orderId}, skipping`);
+      continue;
+    }
+
+    try {
+      const accessToken = await ensureValidToken(seller);
+      const sellerName = seller.user?.username || seller.user?.email || String(seller._id);
+      const ebayOrder = buildEbayOrderShapeForListingQtyUpdate(order);
+      if (!ebayOrder.lineItems.length) {
+        order.listingQtyUpdatePending = false;
+        await order.save();
+        console.log(`[Quantity Update] No line items for order ${order.orderId}, cleared pending`);
+        continue;
+      }
+
+      await updateListingQuantityOnOrder(ebayOrder, accessToken, sellerName);
+      order.listingQtyUpdatePending = false;
+      order.listingQtyUpdatedAt = new Date();
+      await order.save();
+      updated += 1;
+    } catch (err) {
+      failed += 1;
+      console.error(`[Quantity Update] Pending order ${order.orderId} failed:`, err.message);
+    }
+  }
+
+  return { processed, updated, failed };
+}
+
 // Helper function to build order data object for insert/update
 async function buildOrderData(ebayOrder, sellerId, accessToken) {
   const lineItem = ebayOrder.lineItems?.[0] || {};
@@ -6710,11 +6709,7 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
             console.log(`[Fetch Returns] Refreshing token for seller ${sellerName}`);
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -7003,11 +6998,7 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
             console.log(`[Fetch INR Cases] Refreshing token for seller ${sellerName}`);
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -7251,11 +7242,7 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
             console.log(`[Fetch Payment Disputes] Refreshing token for seller ${sellerName}`);
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -7509,82 +7496,119 @@ router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), asyn
     console.log('[Sync Inbox] Starting smart message sync...');
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } }).populate('user', 'username email');
     let totalNew = 0;
-    const syncResults = []; // Track per-seller results
+    const syncResults = [];
 
     for (const seller of sellers) {
       const sellerName = seller.user?.username || seller.user?.email || seller._id;
       try {
-        // 1. Ensure Token is Valid
         const token = await ensureValidToken(seller);
 
-        // 2. Determine Time Window (Smart Polling)
+        // 1. Commerce API first — fast summary (latest message per conversation)
+        const commerceResult = await syncCommerceConversationsForSeller(seller, token, {
+          summaryOnly: true,
+          maxConversations: 200
+        });
+
+        let newForThisSeller = commerceResult.buyerNew || 0;
+        let newSellerForThisSeller = commerceResult.sellerNew || 0;
+        totalNew += newForThisSeller;
+
+        // 2. Trading API — supplemental historical messages
         const now = new Date();
+        const minLookback = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
         let startTime;
 
         if (seller.lastMessagePolledAt) {
-          // INCREMENTAL SYNC: Fetch from last poll time
-          // We subtract 15 minutes overlap to ensure no messages are missed due to server latency
-          startTime = new Date(new Date(seller.lastMessagePolledAt).getTime() - 15 * 60 * 1000);
-          console.log(`[${sellerName}] Incremental sync from: ${startTime.toISOString()}`);
+          const incremental = new Date(new Date(seller.lastMessagePolledAt).getTime() - 15 * 60 * 1000);
+          startTime = new Date(Math.min(incremental.getTime(), minLookback.getTime()));
         } else {
-          // INITIAL SYNC: Fetch last 12 Days
-          startTime = new Date(now.getTime() - 12 * 24 * 60 * 60 * 1000);
-          console.log(`[${sellerName}] First-time sync from: ${startTime.toISOString()} (Last 10 Days)`);
+          startTime = minLookback;
+          console.log(`[${sellerName}] First-time sync from: ${startTime.toISOString()} (Last 90 Days)`);
+        }
+
+        if (seller.lastMessagePolledAt) {
+          console.log(`[${sellerName}] Sync from: ${startTime.toISOString()} (90-day lookback)`);
         }
 
         const startTimeStr = startTime.toISOString();
         const endTimeStr = now.toISOString();
 
-        // 3. XML Request
-        const xmlRequest = `
+        const fetchMemberMessagesPage = async (pageNumber) => {
+          const xmlRequest = `
           <?xml version="1.0" encoding="utf-8"?>
           <GetMemberMessagesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
             <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-            
             <MailMessageType>All</MailMessageType>
-            
             <StartCreationTime>${startTimeStr}</StartCreationTime>
             <EndCreationTime>${endTimeStr}</EndCreationTime>
-            
             <Pagination>
               <EntriesPerPage>200</EntriesPerPage>
-              <PageNumber>1</PageNumber>
+              <PageNumber>${pageNumber}</PageNumber>
             </Pagination>
+            <DetailLevel>ReturnAll</DetailLevel>
           </GetMemberMessagesRequest>
         `;
 
-        const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-          headers: {
-            'X-EBAY-API-SITEID': '0',
-            'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-            'X-EBAY-API-CALL-NAME': 'GetMemberMessages',
-            'Content-Type': 'text/xml'
+          const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+            headers: {
+              'X-EBAY-API-SITEID': '0',
+              'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+              'X-EBAY-API-CALL-NAME': 'GetMemberMessages',
+              'Content-Type': 'text/xml'
+            }
+          });
+
+          return parseStringPromise(response.data);
+        };
+
+        let pageNumber = 1;
+        let totalPages = 1;
+        let allMessages = [];
+        let syncFailed = false;
+
+        do {
+          const result = await fetchMemberMessagesPage(pageNumber);
+
+          if (result.GetMemberMessagesResponse.Ack[0] === 'Failure') {
+            const error = result.GetMemberMessagesResponse.Errors?.[0]?.LongMessage?.[0];
+            console.error(`eBay API Failure for seller ${seller._id}:`, error);
+            syncResults.push({ sellerName, newMessages: 0, error: error });
+            syncFailed = true;
+            break;
           }
-        });
 
-        const result = await parseStringPromise(response.data);
+          const pageMessages = result.GetMemberMessagesResponse.MemberMessage?.[0]?.MemberMessageExchange || [];
+          allMessages = allMessages.concat(pageMessages);
 
-        if (result.GetMemberMessagesResponse.Ack[0] === 'Failure') {
-          const error = result.GetMemberMessagesResponse.Errors?.[0]?.LongMessage?.[0];
-          console.error(`eBay API Failure for seller ${seller._id}:`, error);
-          syncResults.push({ sellerName, newMessages: 0, error: error });
-          continue;
-        }
+          const pagination = result.GetMemberMessagesResponse.PaginationResult?.[0];
+          totalPages = parseInt(pagination?.TotalNumberOfPages?.[0] || '1', 10);
+          pageNumber++;
+        } while (pageNumber <= totalPages && pageNumber <= 10);
 
-        const messages = result.GetMemberMessagesResponse.MemberMessage?.[0]?.MemberMessageExchange || [];
+        if (syncFailed) continue;
 
-        // 4. Process Messages
-        let newForThisSeller = 0;
+        const messages = allMessages;
+
+        // 4. Process Trading messages
         for (const msg of messages) {
-          const isNew = await processEbayMessage(msg, seller);
-          if (isNew) {
+          const result = await processEbayMessage(msg, seller);
+          if (result.buyerNew) {
             newForThisSeller++;
             totalNew++;
           }
+          newSellerForThisSeller += result.sellerNew;
         }
 
-        console.log(`[Sync Inbox] Seller ${sellerName}: Fetched ${messages.length}. Saved ${newForThisSeller} new.`);
-        syncResults.push({ sellerName, newMessages: newForThisSeller, fetched: messages.length });
+        console.log(`[Sync Inbox] Seller ${sellerName}: Commerce ${commerceResult.conversationsFetched || 0} threads, Trading ${messages.length} msgs.`);
+
+        syncResults.push({
+          sellerName,
+          newMessages: newForThisSeller,
+          newSellerMessages: newSellerForThisSeller,
+          fetched: messages.length,
+          commerceConversations: commerceResult.conversationsFetched || 0,
+          commerceError: commerceResult.error || null
+        });
 
         // 5. Update Polling Timestamp (Only on success)
         seller.lastMessagePolledAt = now;
@@ -7609,59 +7633,145 @@ router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), asyn
 // Filters by SenderID to be lightweight
 // 2. LIGHT SYNC: Active Thread Poll
 router.post('/sync-thread', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
-  const { sellerId, buyerUsername, itemId } = req.body;
+  const { sellerId, buyerUsername, itemId, orderId } = req.body;
 
   if (!sellerId || !buyerUsername) return res.status(400).json({ error: 'Missing identifiers' });
 
   try {
-    const seller = await Seller.findById(sellerId);
+    const seller = await Seller.findById(sellerId).populate('user', 'username email');
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
 
-    // 1. Ensure Token is Valid
     const token = await ensureValidToken(seller);
 
-    // 2. Time Filters
     const now = new Date();
-    const startTime = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const startTime = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
     const endTime = now.toISOString();
 
-    const xmlRequest = `
+    const fetchThreadMessagesPage = async (pageNumber) => {
+      const xmlRequest = `
       <?xml version="1.0" encoding="utf-8"?>
       <GetMemberMessagesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
         <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-        
         <MailMessageType>All</MailMessageType>
-        
         <SenderID>${buyerUsername}</SenderID>
-        
         <StartCreationTime>${startTime}</StartCreationTime>
         <EndCreationTime>${endTime}</EndCreationTime>
-        
         ${itemId ? `<ItemID>${itemId}</ItemID>` : ''}
-        
-        <Pagination><EntriesPerPage>50</EntriesPerPage><PageNumber>1</PageNumber></Pagination>
+        <Pagination><EntriesPerPage>200</EntriesPerPage><PageNumber>${pageNumber}</PageNumber></Pagination>
+        <DetailLevel>ReturnAll</DetailLevel>
       </GetMemberMessagesRequest>
     `;
 
-    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-      headers: {
-        'X-EBAY-API-SITEID': '0',
-        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-        'X-EBAY-API-CALL-NAME': 'GetMemberMessages',
-        'Content-Type': 'text/xml'
-      }
-    });
+      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+        headers: {
+          'X-EBAY-API-SITEID': '0',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+          'X-EBAY-API-CALL-NAME': 'GetMemberMessages',
+          'Content-Type': 'text/xml'
+        }
+      });
 
-    const result = await parseStringPromise(response.data);
-    const messages = result.GetMemberMessagesResponse.MemberMessage?.[0]?.MemberMessageExchange || [];
+      return parseStringPromise(response.data);
+    };
 
-    let hasNew = false;
+    let pageNumber = 1;
+    let totalPages = 1;
+    let messages = [];
+
+    do {
+      const result = await fetchThreadMessagesPage(pageNumber);
+      if (result.GetMemberMessagesResponse.Ack[0] === 'Failure') break;
+
+      const pageMessages = result.GetMemberMessagesResponse.MemberMessage?.[0]?.MemberMessageExchange || [];
+      messages = messages.concat(pageMessages);
+
+      const pagination = result.GetMemberMessagesResponse.PaginationResult?.[0];
+      totalPages = parseInt(pagination?.TotalNumberOfPages?.[0] || '1', 10);
+      pageNumber++;
+    } while (pageNumber <= totalPages && pageNumber <= 10);
+
+    let buyerNew = 0;
+    let sellerNew = 0;
     for (const msg of messages) {
-      const isNew = await processEbayMessage(msg, seller);
-      if (isNew) hasNew = true;
+      const syncResult = await processEbayMessage(msg, seller);
+      buyerNew += syncResult.buyerNew ? 1 : 0;
+      sellerNew += syncResult.sellerNew;
     }
 
-    res.json({ success: true, newMessagesFound: hasNew });
+    let threadOrderId = orderId || null;
+    let finalItemId = itemId;
+    let itemTitle = null;
+    let messageType = 'INQUIRY';
+
+    if (threadOrderId) {
+      const order = await Order.findOne({ orderId: threadOrderId }).select('lineItems productName').lean();
+      finalItemId = order?.lineItems?.[0]?.legacyItemId || itemId;
+      itemTitle = order?.productName || null;
+      messageType = 'ORDER';
+    } else if (itemId && itemId !== 'DIRECT_MESSAGE') {
+      const order = await Order.findOne({
+        'lineItems.legacyItemId': itemId,
+        'buyer.username': buyerUsername
+      }).select('orderId productName').lean();
+      if (order) {
+        threadOrderId = order.orderId;
+        itemTitle = order.productName || null;
+        messageType = 'ORDER';
+      }
+    } else if (!itemId || itemId === 'DIRECT_MESSAGE') {
+      messageType = 'DIRECT';
+      finalItemId = 'DIRECT_MESSAGE';
+    }
+
+    const externalIds = collectExternalMessageIdsFromExchanges(messages);
+    const myMsgResult = await enrichThreadFromMyMessages({
+      token,
+      seller,
+      externalMessageIds: externalIds,
+      buyerUsername,
+      orderId: threadOrderId,
+      itemId: finalItemId,
+      itemTitle,
+      messageType
+    });
+    buyerNew += myMsgResult.buyerNew;
+    sellerNew += myMsgResult.sellerNew;
+
+    const myMailResult = await syncMyMessagesForThread({
+      token,
+      seller,
+      buyerUsername,
+      orderId: threadOrderId,
+      itemId: finalItemId,
+      itemTitle,
+      messageType
+    });
+    buyerNew += myMailResult.buyerNew;
+    sellerNew += myMailResult.sellerNew;
+
+    await backfillThreadOrderId({
+      sellerId: seller._id,
+      buyerUsername,
+      itemId: finalItemId,
+      orderId: threadOrderId,
+      messageType
+    });
+
+    const commerceResult = await syncCommerceConversationsForSeller(seller, token, {
+      buyerUsername,
+      summaryOnly: false,
+      maxConversations: 20
+    });
+    buyerNew += commerceResult.buyerNew || 0;
+    sellerNew += commerceResult.sellerNew || 0;
+
+    res.json({
+      success: true,
+      newMessagesFound: buyerNew > 0 || sellerNew > 0,
+      buyerMessagesSynced: buyerNew,
+      sellerMessagesSynced: sellerNew,
+      myMessagesFetched: myMailResult.fetched
+    });
   } catch (err) {
     console.error('Thread sync error:', err.message);
     res.status(500).json({ error: err.message });
@@ -7770,7 +7880,16 @@ async function uploadImageToEbay(token, filePath) {
 
 // 3. SEND MESSAGE (Chat Window)
 router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
-  const { orderId, buyerUsername, itemId, body, subject, mediaUrls } = req.body;
+  const {
+    orderId,
+    buyerUsername,
+    itemId,
+    body,
+    subject,
+    mediaUrls,
+    conversationId: reqConversationId,
+    sellerId: reqSellerId
+  } = req.body;
 
   try {
     let seller = null;
@@ -7780,21 +7899,22 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
     let isDirect = false;
     let parentMessageId = null;
 
-    // Check if this is a DIRECT message (no item)
     if (itemId === 'DIRECT_MESSAGE' || !itemId) {
       isDirect = true;
     }
 
-    // Determine if this is a transaction (ORDER), inquiry (INQUIRY), or direct (DIRECT)
     if (orderId) {
       const order = await Order.findOne({ orderId }).populate('seller');
       if (!order) return res.status(404).json({ error: 'Order not found' });
       seller = order.seller;
       finalItemId = order.lineItems?.[0]?.legacyItemId;
       finalBuyer = order.buyer.username;
-      isTransaction = true; // This is a real transaction
+      isTransaction = true;
+    } else if (reqSellerId) {
+      seller = await Seller.findById(reqSellerId);
+      finalBuyer = buyerUsername;
+      isTransaction = Boolean(orderId);
     } else {
-      // Get the most recent message from this buyer
       const query = isDirect
         ? { buyerUsername, itemId: 'DIRECT_MESSAGE', sender: 'BUYER' }
         : { buyerUsername, itemId, sender: 'BUYER' };
@@ -7805,22 +7925,20 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
 
       if (prevMsg) {
         seller = prevMsg.seller;
-        parentMessageId = prevMsg.externalMessageId; // eBay's message ID
+        parentMessageId = prevMsg.externalMessageId;
 
-        // Check if this inquiry is related to an order
         if (prevMsg.orderId) {
           isTransaction = true;
         } else if (prevMsg.messageType === 'DIRECT') {
           isDirect = true;
         } else {
-          isTransaction = false; // Pre-sale inquiry
+          isTransaction = false;
         }
       }
     }
 
     if (!seller) return res.status(400).json({ error: 'Could not determine seller context' });
 
-    // DIRECT messages: Cannot reply via API (eBay limitation)
     if (isDirect) {
       return res.status(400).json({
         error: 'Cannot reply to direct messages via API. These are account-level messages that must be replied to through eBay\'s messaging center.',
@@ -7832,62 +7950,106 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
       return res.status(400).json({ error: 'ItemID required to send message' });
     }
 
-    // For inquiries (RTQ), we need the parent message ID
-    if (!isTransaction && !parentMessageId) {
-      return res.status(400).json({ error: 'Cannot reply to inquiry: Original message ID not found' });
-    }
-
-    // Ensure Token is Valid
     const token = await ensureValidToken(seller);
 
-    let xmlRequest;
-    let callName;
-
-    // Construct Media XML if images are present
     let finalMediaUrls = [];
     if (mediaUrls && mediaUrls.length > 0) {
-      console.log(`[Send Message] Processing ${mediaUrls.length} images...`);
-
-      // Convert local URLs to file paths and upload to eBay
       for (const url of mediaUrls) {
         try {
-          // Extract filename from URL (e.g., http://localhost:5000/uploads/123.jpg -> 123.jpg)
           const filename = url.split('/').pop();
           const filePath = path.join(process.cwd(), 'public/uploads', filename);
 
           if (fs.existsSync(filePath)) {
-            console.log(`[Send Message] Uploading ${filename} to eBay...`);
             const ebayUrl = await uploadImageToEbay(token, filePath);
-            console.log(`[Send Message] Uploaded: ${ebayUrl}`);
             finalMediaUrls.push(ebayUrl);
-          } else {
-            console.warn(`[Send Message] File not found: ${filePath}`);
           }
         } catch (err) {
           console.error(`[Send Message] Failed to upload image: ${err.message}`);
-          // Continue with other images if one fails
         }
       }
     }
 
-    // Prepare message body with image URLs (eBay APIs don't support MessageMedia for sending)
-    // Always escape the original message body first
-    let finalBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
+    let messageText = body;
     if (finalMediaUrls.length > 0) {
-      // Format image URLs as clickable links
-      // Try multiple formats to ensure maximum compatibility:
-      // 1. Plain URL (eBay should auto-detect)
-      // 2. With descriptive text
-      const imageLinks = finalMediaUrls.map((url, index) => {
-        return `Image ${index + 1}: ${url}`;
-      }).join('\n');
-
-      finalBody += '\n\n---\nAttached Image(s):\n' + imageLinks;
-      console.log('[Send Message] ⚠️ eBay APIs do not support MessageMedia for outgoing messages. Added URLs to message body.');
+      const imageLinks = finalMediaUrls.map((url, index) => `Image ${index + 1}: ${url}`).join('\n');
+      messageText += '\n\n---\nAttached Image(s):\n' + imageLinks;
     }
 
-    // CASE 1: Transaction Message (Use AddMemberMessageAAQToPartner)
+    const messageMedia = finalMediaUrls.map((url) => ({
+      mediaType: 'IMAGE',
+      mediaUrl: url
+    }));
+
+    // --- Primary: eBay Commerce Message API (POST /send_message) ---
+    try {
+      let commerceConversationId = reqConversationId || null;
+      if (!commerceConversationId) {
+        commerceConversationId = await resolveCommerceConversationId(token, {
+          sellerId: seller._id,
+          buyerUsername: finalBuyer,
+          itemId: finalItemId,
+          orderId: orderId || null
+        });
+      }
+
+      const commerceResult = await sendCommerceMessage(token, {
+        conversationId: commerceConversationId || undefined,
+        otherPartyUsername: commerceConversationId ? undefined : finalBuyer,
+        messageText,
+        referenceId: commerceConversationId ? undefined : finalItemId,
+        messageMedia
+      });
+
+      const resolvedConversationId = commerceResult.conversationId || commerceConversationId;
+      if (resolvedConversationId) {
+        await backfillConversationId({
+          sellerId: seller._id,
+          buyerUsername: finalBuyer,
+          itemId: finalItemId,
+          orderId: orderId || null,
+          conversationId: resolvedConversationId
+        });
+      }
+
+      const newMsg = await Message.create({
+        seller: seller._id,
+        orderId: orderId || null,
+        itemId: finalItemId,
+        buyerUsername: finalBuyer,
+        conversationId: resolvedConversationId || null,
+        sender: 'SELLER',
+        subject: subject || 'Reply',
+        body,
+        mediaUrls: finalMediaUrls,
+        read: true,
+        messageType: isTransaction ? 'ORDER' : 'INQUIRY',
+        messageDate: new Date(),
+        externalMessageId: commerceResult.messageId ? `commerce-${commerceResult.messageId}` : undefined
+      });
+
+      console.log('[Send Message] ✅ Sent via Commerce Message API');
+      return res.json({ success: true, message: newMsg, via: 'commerce' });
+    } catch (commerceErr) {
+      console.warn(
+        '[Send Message] Commerce API failed, falling back to Trading API:',
+        commerceErr.response?.data || commerceErr.message
+      );
+    }
+
+    // --- Fallback: Trading API (legacy XML) ---
+    if (!isTransaction && !parentMessageId) {
+      return res.status(400).json({ error: 'Cannot reply to inquiry: Original message ID not found' });
+    }
+
+    let finalBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (finalMediaUrls.length > 0) {
+      const imageLinks = finalMediaUrls.map((url, index) => `Image ${index + 1}: ${url}`).join('\n');
+      finalBody += '\n\n---\nAttached Image(s):\n' + imageLinks;
+    }
+
+    let xmlRequest;
+    let callName;
+
     if (isTransaction) {
       callName = 'AddMemberMessageAAQToPartner';
 
@@ -7947,7 +8109,7 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
         buyerUsername: finalBuyer,
         sender: 'SELLER',
         subject: subject || 'Reply',
-        body: body,
+        body,
         mediaUrls: finalMediaUrls || [],
         read: true,
         messageType: isTransaction ? 'ORDER' : 'INQUIRY',
@@ -7955,7 +8117,7 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
       });
 
       console.log(`[Send Message] ✅ Message sent successfully using ${callName}`);
-      return res.json({ success: true, message: newMsg });
+      return res.json({ success: true, message: newMsg, via: 'trading' });
     } else {
       const errMsg = result[responseKey].Errors?.[0]?.LongMessage?.[0] || 'eBay API Error';
       throw new Error(errMsg);
@@ -7972,23 +8134,29 @@ router.post('/send-message', requireAuth, requirePageAccess('BuyerMessages'), as
 // 4. GET THREADS (With Pagination & Search)
 router.get('/chat/threads', requireAuth, async (req, res) => {
   try {
-    const { sellerId, page = 1, limit = 20, search = '', filterType = 'ALL', filterMarketplace = '', showUnreadOnly = 'false' } = req.query;
+    const {
+      sellerId,
+      page = 1,
+      limit = 20,
+      search = '',
+      filterType = 'ALL',
+      filterMarketplace = '',
+      showUnreadOnly = 'false',
+      includeResolved = 'true',
+      maxAgeDays = '365'
+    } = req.query;
 
+    const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
+    const ageDays = parseInt(maxAgeDays, 10);
 
     // Build the aggregation pipeline
     const pipeline = [];
 
-    // 0. ALWAYS limit to recent messages to prevent sort memory overflow
-    //    (MongoDB free-tier has a 32MB sort limit and no allowDiskUse)
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - 45);
-    pipeline.push({ $match: { messageDate: { $gte: cutoffDate } } });
-
-    // 1. FILTER BY SELLER
+    // 1. FILTER BY SELLER (optional — applied before sort/group)
     if (sellerId) {
       pipeline.push({
         $match: { seller: new mongoose.Types.ObjectId(sellerId) }
@@ -8012,6 +8180,7 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         sender: { $first: "$sender" },
         itemTitle: { $first: "$itemTitle" },
         messageType: { $first: "$messageType" },
+        conversationIds: { $push: "$conversationId" },
         unreadCount: {
           $sum: { $cond: [{ $and: [{ $eq: ["$read", false] }, { $eq: ["$sender", "BUYER"] }] }, 1, 0] }
         }
@@ -8040,6 +8209,25 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         sender: 1,
         itemTitle: 1,
         messageType: 1,
+        conversationId: {
+          $let: {
+            vars: {
+              ids: {
+                $filter: {
+                  input: '$conversationIds',
+                  as: 'cid',
+                  cond: {
+                    $and: [
+                      { $ne: ['$$cid', null] },
+                      { $ne: ['$$cid', ''] }
+                    ]
+                  }
+                }
+              }
+            },
+            in: { $arrayElemAt: ['$$ids', 0] }
+          }
+        },
         unreadCount: 1,
         buyerName: { $arrayElemAt: ["$orderDetails.buyer.buyerRegistrationAddress.fullName", 0] },
         // NEW: Get Marketplace ID from Order
@@ -8145,25 +8333,37 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       }
     });
 
-    // 5.2. FILTER BY TYPE
+    // 5.15 LOOKUP SELLER (for search by store / seller username)
+    pipeline.push({
+      $lookup: {
+        from: 'sellers',
+        localField: 'sellerId',
+        foreignField: '_id',
+        as: 'sellerDoc'
+      }
+    });
+    pipeline.push({
+      $lookup: {
+        from: 'users',
+        localField: 'sellerDoc.user',
+        foreignField: '_id',
+        as: 'sellerUser'
+      }
+    });
+    pipeline.push({
+      $addFields: {
+        sellerUsername: { $arrayElemAt: ['$sellerUser.username', 0] },
+        sellerEmail: { $arrayElemAt: ['$sellerUser.email', 0] }
+      }
+    });
+
+    // 5.2. FILTER BY TYPE (use computed type — order linkage can change after sync)
     if (filterType === 'ORDER') {
-      pipeline.push({
-        $match: {
-          $or: [
-            { messageType: 'ORDER' },
-            { orderId: { $ne: null } }
-          ]
-        }
-      });
+      pipeline.push({ $match: { actualMessageType: 'ORDER' } });
     } else if (filterType === 'INQUIRY') {
-      pipeline.push({
-        $match: {
-          $and: [
-            { messageType: { $ne: 'ORDER' } },
-            { orderId: null }
-          ]
-        }
-      });
+      pipeline.push({ $match: { actualMessageType: 'INQUIRY' } });
+    } else if (filterType === 'DIRECT') {
+      pipeline.push({ $match: { actualMessageType: 'DIRECT' } });
     }
 
     // 5.3 FILTER BY MARKETPLACE (NEW)
@@ -8226,29 +8426,42 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       }
     });
 
-    // Exclude threads where ConversationMeta exists and status is 'Resolved'
-    pipeline.push({
-      $match: {
-        $or: [
-          { 'conversationMeta': { $size: 0 } },          // No meta record → not resolved
-          { 'conversationMeta.0.status': { $ne: 'Resolved' } } // Meta exists but not resolved
-        ]
-      }
-    });
+    // Exclude resolved threads unless explicitly opted out
+    if (includeResolved === 'false') {
+      pipeline.push({
+        $match: {
+          $or: [
+            { conversationMeta: { $size: 0 } },
+            { 'conversationMeta.0.status': { $ne: 'Resolved' } }
+          ]
+        }
+      });
+    }
 
     // 6. SEARCH FILTER (Applied AFTER grouping so we search distinct threads)
     if (search && search.trim() !== '') {
-      const regex = new RegExp(search.trim(), 'i'); // Case-insensitive
+      const regex = new RegExp(escapeRegex(search.trim()), 'i');
       pipeline.push({
         $match: {
           $or: [
             { orderId: regex },
             { buyerUsername: regex },
             { buyerName: regex },
-            { itemId: regex }
+            { itemId: regex },
+            { itemTitle: regex },
+            { lastMessage: regex },
+            { sellerUsername: regex },
+            { sellerEmail: regex }
           ]
         }
       });
+    }
+
+    // 6.5 Optional age filter on thread last activity (after grouping — keeps full threads)
+    if (!Number.isNaN(ageDays) && ageDays > 0) {
+      const threadCutoff = new Date();
+      threadCutoff.setDate(threadCutoff.getDate() - ageDays);
+      pipeline.push({ $match: { lastDate: { $gte: threadCutoff } } });
     }
 
     // 7. FINAL SORT & PAGINATION
@@ -8276,22 +8489,35 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
     // This handles the case where an order exists but has never had a message synced.
     if (search && search.trim() !== '') {
       const searchTrim = search.trim();
-      const regex = new RegExp(searchTrim, 'i');
+      const regex = new RegExp(escapeRegex(searchTrim), 'i');
+
+      // Sellers whose username/email matches search (e.g. store name in user account)
+      const matchingSellerDocs = await Seller.find()
+        .populate('user', 'username email')
+        .lean();
+      const sellerIdsFromSearch = matchingSellerDocs
+        .filter((s) => regex.test(s.user?.username || '') || regex.test(s.user?.email || ''))
+        .map((s) => s._id);
 
       // Build order query
-      const orderQuery = {
-        $or: [
-          { orderId: regex },
-          { legacyOrderId: regex },
-          { 'buyer.username': regex },
-          { 'buyer.buyerRegistrationAddress.fullName': regex }
-        ]
-      };
+      const orderOr = [
+        { orderId: regex },
+        { legacyOrderId: regex },
+        { 'buyer.username': regex },
+        { 'buyer.buyerRegistrationAddress.fullName': regex },
+        { productName: regex },
+        { 'lineItems.title': regex }
+      ];
+      if (sellerIdsFromSearch.length > 0) {
+        orderOr.push({ seller: { $in: sellerIdsFromSearch } });
+      }
+
+      const orderQuery = { $or: orderOr };
       if (sellerId) {
         orderQuery.seller = new mongoose.Types.ObjectId(sellerId);
       }
 
-      const matchingOrders = await Order.find(orderQuery).limit(20).lean();
+      const matchingOrders = await Order.find(orderQuery).limit(50).lean();
 
       // Get the set of orderIds already in message threads
       const existingOrderIds = new Set(threads.map(t => t.orderId).filter(Boolean));
@@ -8411,41 +8637,16 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       }
     }
 
-    // Process in parallel
-    await Promise.all(threads.map(async (thread) => {
-      // Use computed value from aggregation if available and valid
+    // Resolve marketplace from aggregation only — skip per-thread eBay API calls on list load
+    threads.forEach((thread) => {
       if (thread.computedMarketplaceId && thread.computedMarketplaceId !== 'Unknown') {
         thread.marketplaceId = thread.computedMarketplaceId;
-        return;
-      }
-
-      // Fallback: Check if we have valid IDs to check API (Only if computed was Unknown)
-      if (thread.itemId && thread.itemId !== 'DIRECT_MESSAGE') {
-        const apiResult = await fetchItemSiteFromApi(thread.itemId, thread.sellerId);
-        if (apiResult) {
-          thread.marketplaceId = apiResult.marketplaceId;
-
-          // Save to Listing DB so next time it's fast
-          try {
-            await Listing.findOneAndUpdate(
-              { itemId: thread.itemId },
-              {
-                seller: thread.sellerId,
-                itemId: thread.itemId,
-                currency: apiResult.currency,
-              },
-              { upsert: true, setDefaultsOnInsert: true }
-            );
-          } catch (e) {
-            console.error('Failed to cache listing marketplace', e);
-          }
-        } else {
-          thread.marketplaceId = 'Unknown';
-        }
+      } else if (!thread.itemId || thread.itemId === 'DIRECT_MESSAGE') {
+        thread.marketplaceId = 'System';
       } else {
-        thread.marketplaceId = 'System'; // Direct messages
+        thread.marketplaceId = 'Unknown';
       }
-    }));
+    });
 
     res.json({ threads, total, page: pageNum, pages: Math.ceil(total / limitNum) });
 
@@ -8460,17 +8661,27 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
 
 // 5. GET MESSAGES (Chat Window)
 router.get('/chat/messages', requireAuth, async (req, res) => {
-  const { orderId, buyerUsername, itemId } = req.query;
+  const { orderId, buyerUsername, itemId, sellerId } = req.query;
 
   try {
-    let query = {};
-    if (orderId) {
-      query.orderId = orderId;
-    } else if (buyerUsername && itemId) {
-      query.buyerUsername = buyerUsername;
-      query.itemId = itemId;
-    } else {
-      return res.status(400).json({ error: 'Invalid query params' });
+    if (!buyerUsername) {
+      return res.status(400).json({ error: 'buyerUsername is required' });
+    }
+
+    const matchClauses = [];
+    if (orderId) matchClauses.push({ orderId });
+    if (itemId) matchClauses.push({ itemId });
+    if (matchClauses.length === 0) {
+      return res.status(400).json({ error: 'orderId or itemId is required' });
+    }
+
+    const query = {
+      buyerUsername,
+      $or: matchClauses
+    };
+
+    if (sellerId) {
+      query.seller = new mongoose.Types.ObjectId(sellerId);
     }
 
     const messages = await Message.find(query).sort({ messageDate: 1 });
@@ -8580,11 +8791,7 @@ router.post('/fetch-messages', requireAuth, requirePageAccess('BuyerMessages'), 
             console.log(`[Fetch Messages] Refreshing token for seller ${sellerName}`);
             const refreshRes = await axios.post(
               'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify({
-                grant_type: 'refresh_token',
-                refresh_token: seller.ebayTokens.refresh_token,
-                scope: EBAY_OAUTH_SCOPES // Using centralized scopes constant
-              }),
+              qs.stringify(buildRefreshTokenParams(seller)),
               {
                 headers: {
                   'Content-Type': 'application/x-www-form-urlencoded',
@@ -8834,13 +9041,13 @@ router.post('/sync-listings', requireAuth, async (req, res) => {
           </GetSellerListRequest>
         `;
 
-      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-        headers: {
-          'X-EBAY-API-SITEID': '100',
-          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-          'X-EBAY-API-CALL-NAME': 'GetSellerList',
-          'Content-Type': 'text/xml'
-        }
+      const response = await postEbayTradingApi(xmlRequest, {
+        'X-EBAY-API-SITEID': '100',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'GetSellerList',
+        'Content-Type': 'text/xml',
+      }, {
+        logLabel: `Sync Listings p${page}`,
       });
 
       const result = await parseStringPromise(response.data);
@@ -9056,7 +9263,10 @@ router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
     });
   }
   try {
-    const sellersTotal = await Seller.countDocuments({ 'ebayTokens.access_token': { $exists: true } });
+    const sellersTotal = await Seller.countDocuments({
+      isStoreActive: { $ne: false },
+      'ebayTokens.refresh_token': { $exists: true, $nin: [null, ''] },
+    });
     if (sellersTotal === 0) {
       await releaseSyncAllSellersLock();
       return res.json({ success: true, message: 'No sellers with eBay tokens found', results: [] });
@@ -9957,7 +10167,7 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
           <WarningLevel>High</WarningLevel>
           <DetailLevel>ItemReturnDescription</DetailLevel>
           <StartTimeFrom>${new Date(startTimeFrom).toISOString()}</StartTimeFrom>
-          <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
+          <StartTimeTo>${new Date().toISOString()}</StartTimeTo>
           <IncludeWatchCount>true</IncludeWatchCount>
           <Pagination>
             <EntriesPerPage>100</EntriesPerPage>
@@ -9979,13 +10189,13 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
         </GetSellerListRequest>
       `;
 
-      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-        headers: {
-          'X-EBAY-API-SITEID': '0', // Use SiteID 0 for all listings (not just Motors)
-          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-          'X-EBAY-API-CALL-NAME': 'GetSellerList',
-          'Content-Type': 'text/xml'
-        }
+      const response = await postEbayTradingApi(xmlRequest, {
+        'X-EBAY-API-SITEID': '0', // Use SiteID 0 for all listings (not just Motors)
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'GetSellerList',
+        'Content-Type': 'text/xml',
+      }, {
+        logLabel: `Sync All Listings p${page}`,
       });
 
       const result = await parseStringPromise(response.data);
@@ -10181,11 +10391,33 @@ router.get('/all-listings', requireAuth, async (req, res) => {
   }
 });
 
-// GET ALL ACTIVE LISTINGS ACROSS ALL STORES/SELLERS
-// Merge ActiveListing + Listing: sync jobs may write to only one collection per store.
-// Old logic picked ActiveListing whenever it had any row, hiding Listing-only stores.
+// GET ALL ACTIVE LISTINGS ACROSS ALL STORES/SELLERS (ActiveListing cache from GetSellerList sync)
 router.get('/all-store-listings', requireAuth, async (req, res) => {
   const { page = 1, limit = 50, search, sellerId, sortBy = 'startDate', sortOrder = 'desc' } = req.query;
+  const emptyPayload = (pageNum, resolvedSortField, resolvedSortOrder) => ({
+    listings: [],
+    sourceCollection: 'ActiveListing',
+    sorting: {
+      sortBy: resolvedSortField,
+      sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
+    },
+    summary: {
+      totalAmount: 0,
+      totalQuantity: 0,
+      totalSoldQuantity: 0,
+      totalViews30d: 0,
+      totalWatchers: 0,
+      promotedCount: 0,
+      inventoryValue: 0,
+      uniqueStoreCount: 0,
+    },
+    pagination: {
+      total: 0,
+      page: pageNum,
+      pages: 0,
+    },
+  });
+
   try {
     const sortFieldMap = {
       currentPrice: 'currentPrice',
@@ -10207,180 +10439,83 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
     const activeSellers = await getSellersForStoreListings(req);
     const activeSellerIds = activeSellers.map((s) => s._id);
     if (activeSellerIds.length === 0) {
-      return res.json({
-        listings: [],
-        sourceCollection: 'ActiveListing+Listing',
-        sorting: {
-          sortBy: resolvedSortField,
-          sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
-        },
-        summary: {
-          totalAmount: 0,
-          totalQuantity: 0,
-          totalSoldQuantity: 0,
-          totalViews30d: 0,
-          totalWatchers: 0,
-          promotedCount: 0,
-          inventoryValue: 0,
-          uniqueStoreCount: 0,
-        },
-        pagination: {
-          total: 0,
-          page: pageNum,
-          pages: 0,
-        },
-      });
+      return res.json(emptyPayload(pageNum, resolvedSortField, resolvedSortOrder));
     }
-    const sellerInMatchList = sellerIdsInMatch(activeSellerIds).$in;
+
+    const sid = String(sellerId || '').trim();
+    if (sid && !mongoose.Types.ObjectId.isValid(sid)) {
+      return res.status(400).json({ error: 'Invalid sellerId' });
+    }
+    if (sid && !activeSellerIds.some((id) => String(id) === sid)) {
+      return res.json(emptyPayload(pageNum, resolvedSortField, resolvedSortOrder));
+    }
+
+    const match = buildStoreListingsMatch({
+      sellerIds: activeSellerIds,
+      sellerId: sid,
+      search,
+    });
+
     const sellerNameById = new Map(
       activeSellers.map((s) => [String(s._id), s?.user?.username || String(s._id)])
     );
 
-    let query = {
-      ...activeListingStatusFilter(),
-      seller: { $in: sellerInMatchList },
-    };
-
-    if (sellerId && String(sellerId).trim() !== '') {
-      const sid = String(sellerId).trim();
-      if (!mongoose.Types.ObjectId.isValid(sid)) {
-        return res.status(400).json({ error: 'Invalid sellerId' });
-      }
-      const sellerObjectId = new mongoose.Types.ObjectId(sid);
-      const allowed = activeSellerIds.some((id) => String(id) === String(sellerObjectId));
-      if (!allowed) {
-        return res.json({
-          listings: [],
-          sourceCollection: 'ActiveListing+Listing',
-          sorting: {
-            sortBy: resolvedSortField,
-            sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
-          },
-          summary: {
-            totalAmount: 0,
-            totalQuantity: 0,
-            totalSoldQuantity: 0,
-            totalViews30d: 0,
-            totalWatchers: 0,
-            promotedCount: 0,
-            inventoryValue: 0,
-            uniqueStoreCount: 0,
-          },
-          pagination: {
-            total: 0,
-            page: pageNum,
-            pages: 0,
-          },
-        });
-      }
-      query.seller = { $in: [sellerObjectId, String(sellerObjectId)] };
-    }
-
-    if (search && search.trim() !== '') {
-      const searchRegex = { $regex: search.trim(), $options: 'i' };
-      query.$or = [
-        { title: searchRegex },
-        { sku: searchRegex },
-        { itemId: searchRegex },
-      ];
-    }
-
-    const listingColl = Listing.collection.name;
-
-    const mergeStages = [
-      { $match: query },
-      {
-        $unionWith: {
-          coll: listingColl,
-          pipeline: [{ $match: query }],
-        },
-      },
-      {
-        $group: {
-          _id: '$itemId',
-          docs: { $push: '$$ROOT' },
-        },
-      },
-      {
-        $replaceRoot: {
-          newRoot: {
-            $reduce: {
-              input: { $reverseArray: '$docs' },
-              initialValue: {},
-              in: { $mergeObjects: ['$$value', '$$this'] },
+    const [listings, totalDocs, summaryRows] = await Promise.all([
+      ActiveListing.find(match).sort(sortSpec).skip(skip).limit(limitNum).lean(),
+      ActiveListing.countDocuments(match),
+      ActiveListing.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: null,
+            totalAmount: { $sum: { $ifNull: ['$currentPrice', 0] } },
+            totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } },
+            totalSoldQuantity: { $sum: { $ifNull: ['$soldQuantity', 0] } },
+            totalViews30d: { $sum: { $ifNull: ['$views30d', 0] } },
+            totalWatchers: { $sum: { $ifNull: ['$watchCount', 0] } },
+            promotedCount: { $sum: { $cond: [{ $eq: ['$promoted', true] }, 1, 0] } },
+            inventoryValue: {
+              $sum: {
+                $multiply: [
+                  { $ifNull: ['$currentPrice', 0] },
+                  { $ifNull: ['$quantity', 0] },
+                ],
+              },
+            },
+            sellerIds: {
+              $addToSet: { $toString: { $ifNull: ['$seller', ''] } },
             },
           },
         },
-      },
-    ];
-
-    const [facetRow] = await ActiveListing.aggregate(
-      [
-      ...mergeStages,
-      {
-        $facet: {
-          summary: [
-            {
-              $group: {
-                _id: null,
-                totalAmount: { $sum: { $ifNull: ['$currentPrice', 0] } },
-                totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } },
-                totalSoldQuantity: { $sum: { $ifNull: ['$soldQuantity', 0] } },
-                totalViews30d: { $sum: { $ifNull: ['$views30d', 0] } },
-                totalWatchers: { $sum: { $ifNull: ['$watchCount', 0] } },
-                promotedCount: { $sum: { $cond: [{ $eq: ['$promoted', true] }, 1, 0] } },
-                inventoryValue: {
-                  $sum: {
-                    $multiply: [
-                      { $ifNull: ['$currentPrice', 0] },
-                      { $ifNull: ['$quantity', 0] },
+        {
+          $project: {
+            totalAmount: 1,
+            totalQuantity: 1,
+            totalSoldQuantity: 1,
+            totalViews30d: 1,
+            totalWatchers: 1,
+            promotedCount: 1,
+            inventoryValue: 1,
+            uniqueStoreCount: {
+              $size: {
+                $filter: {
+                  input: { $ifNull: ['$sellerIds', []] },
+                  as: 'storeId',
+                  cond: {
+                    $and: [
+                      { $ne: ['$$storeId', null] },
+                      { $ne: ['$$storeId', ''] },
                     ],
                   },
                 },
-                sellerIds: {
-                  $addToSet: {
-                    $toString: { $ifNull: ['$seller', ''] },
-                  },
-                },
               },
             },
-            {
-              $project: {
-                totalAmount: 1,
-                totalQuantity: 1,
-                totalSoldQuantity: 1,
-                totalViews30d: 1,
-                totalWatchers: 1,
-                promotedCount: 1,
-                inventoryValue: 1,
-                uniqueStoreCount: {
-                  $size: {
-                    $filter: {
-                      input: { $ifNull: ['$sellerIds', []] },
-                      as: 'sid',
-                      cond: {
-                        $and: [
-                          { $ne: ['$$sid', null] },
-                          { $ne: ['$$sid', ''] },
-                        ],
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          ],
-          data: [{ $sort: sortSpec }, { $skip: skip }, { $limit: limitNum }],
-          meta: [{ $count: 'total' }],
+          },
         },
-      },
-      ],
-      { allowDiskUse: true },
-    );
+      ]).allowDiskUse(true),
+    ]);
 
-    const totalDocs = facetRow?.meta[0]?.total || 0;
-    const listings = facetRow?.data || [];
-    const summary = facetRow?.summary[0] || {};
+    const summary = summaryRows[0] || {};
     const toNum = (v) => Number(v || 0);
 
     const enriched = listings.map((listing) => ({
@@ -10390,7 +10525,7 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
 
     res.json({
       listings: enriched,
-      sourceCollection: 'ActiveListing+Listing',
+      sourceCollection: 'ActiveListing',
       sorting: {
         sortBy: resolvedSortField,
         sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
@@ -10412,7 +10547,110 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
       },
     });
   } catch (err) {
+    console.error('[Store Listings] Error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Per-store listing counts + last sync-all result (Store Listings diagnostics).
+router.get('/store-listings/store-status', requireAuth, async (req, res) => {
+  try {
+    const scopedSellers = await getSellersForStoreListings(req);
+    const sellerIds = scopedSellers.map((s) => s._id);
+    if (sellerIds.length === 0) {
+      return res.json({
+        sync: {
+          running: false,
+          currentSeller: '',
+          sellersTotal: 0,
+          sellersComplete: 0,
+          currentPage: 0,
+          currentTotalPages: 0,
+          completedAt: null,
+          startedAt: null,
+          errors: [],
+        },
+        stores: [],
+      });
+    }
+
+    let syncPayload = syncAllStatus;
+    try {
+      const row = await SyncAllSellersStatusCache.findById(SYNC_ALL_SELLERS_STATUS_ID).lean();
+      if (row?.payload && typeof row.payload === 'object') {
+        syncPayload = row.payload;
+      }
+    } catch {
+      // use in-memory fallback
+    }
+
+    const resultsById = new Map();
+    const resultsByName = new Map();
+    for (const r of syncPayload?.results || []) {
+      if (r?.sellerId) resultsById.set(String(r.sellerId), r);
+      if (r?.sellerName) resultsByName.set(String(r.sellerName).toLowerCase(), r);
+    }
+
+    const sellerInList = sellerIdsInMatch(sellerIds).$in;
+    const countRows = await ActiveListing.aggregate([
+      {
+        $match: {
+          ...activeListingStatusFilter(),
+          seller: { $in: sellerInList },
+        },
+      },
+      { $group: { _id: '$seller', count: { $sum: 1 } } },
+    ]);
+    const countBySeller = new Map(countRows.map((c) => [String(c._id), c.count]));
+
+    const sellerDocs = await Seller.find({ _id: { $in: sellerIds } })
+      .select('_id user ebayTokens.refresh_token lastAllListingsPolledAt isStoreActive')
+      .populate('user', 'username email active')
+      .lean();
+
+    const stores = sellerDocs
+      .map((s) => {
+        const sid = String(s._id);
+        const sellerName = s.user?.username || s.user?.email || sid;
+        const lastResult =
+          resultsById.get(sid) || resultsByName.get(sellerName.toLowerCase()) || null;
+        return {
+          sellerId: s._id,
+          sellerName,
+          listingCount: countBySeller.get(sid) || 0,
+          hasOAuth: Boolean(s.ebayTokens?.refresh_token),
+          userActive: s.user?.active !== false,
+          isStoreActive: s.isStoreActive !== false,
+          lastAllListingsPolledAt: s.lastAllListingsPolledAt || null,
+          lastSync: lastResult
+            ? {
+                processedCount: lastResult.processedCount ?? 0,
+                skippedCount: lastResult.skippedCount ?? 0,
+                error: lastResult.error || null,
+              }
+            : null,
+        };
+      })
+      .sort((a, b) => b.listingCount - a.listingCount || a.sellerName.localeCompare(b.sellerName));
+
+    res.json({
+      sync: {
+        running: Boolean(syncPayload?.running),
+        currentSeller: syncPayload?.currentSeller || '',
+        sellersTotal: syncPayload?.sellersTotal ?? 0,
+        sellersComplete: syncPayload?.sellersComplete ?? 0,
+        currentPage: syncPayload?.currentPage ?? 0,
+        currentTotalPages: syncPayload?.currentTotalPages ?? 0,
+        totalProcessed: syncPayload?.totalProcessed ?? 0,
+        completedAt: syncPayload?.completedAt || null,
+        startedAt: syncPayload?.startedAt || null,
+        errors: Array.isArray(syncPayload?.errors) ? syncPayload.errors : [],
+      },
+      stores,
+    });
+  } catch (err) {
+    console.error('[Store Listings Status] Error:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to load store status' });
   }
 });
 
@@ -11395,6 +11633,2256 @@ router.get('/seller-analytics', requireAuth, requirePageAccess('SellerAnalytics'
   }
 });
 
+function toEbayTrafficDateYmd(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/^\d{8}$/.test(raw)) return raw;
+  return raw.replace(/-/g, '');
+}
+
+function ebayTrafficMaxEndDateYmd() {
+  const pt = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  pt.setDate(pt.getDate() - 1);
+  const y = pt.getFullYear();
+  const m = String(pt.getMonth() + 1).padStart(2, '0');
+  const d = String(pt.getDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
+}
+
+function clampTrafficReportEndDate(endDate) {
+  const endYmd = toEbayTrafficDateYmd(endDate);
+  if (!endYmd) return endYmd;
+  const maxYmd = ebayTrafficMaxEndDateYmd();
+  return endYmd > maxYmd ? maxYmd : endYmd;
+}
+
+function buildTrafficReportFilter({ marketplace, startDate, endDate, listingIds }) {
+  const startYmd = toEbayTrafficDateYmd(startDate);
+  const endYmd = clampTrafficReportEndDate(endDate);
+  if (!startYmd || !endYmd) {
+    throw new Error('startDate and endDate are required (YYYY-MM-DD or YYYYMMDD)');
+  }
+  const mp = String(marketplace || 'EBAY_US').trim();
+  const datePart = `date_range:[${startYmd}..${endYmd}]`;
+  if (listingIds) {
+    const ids = String(listingIds)
+      .split(/[,|\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join('|');
+    if (ids) {
+      return `marketplace_ids:{${mp}},listing_ids:{${ids}},${datePart}`;
+    }
+  }
+  return `marketplace_ids:{${mp}},${datePart}`;
+}
+
+const TRAFFIC_REPORT_LISTING_BATCH_SIZE = 200;
+const TRAFFIC_REPORT_BATCH_MAX_RETRIES = 6;
+const TRAFFIC_REPORT_429_DELAYS_MS = [5000, 15000, 30000, 45000, 60000, 90000];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchTrafficReportWithRetry(fetchFn, { maxRetries = TRAFFIC_REPORT_BATCH_MAX_RETRIES } = {}) {
+  let lastRes;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    lastRes = await fetchFn();
+    if (lastRes.status >= 200 && lastRes.status < 300) return lastRes;
+    const retryable = lastRes.status === 429 || lastRes.status === 503;
+    if (!retryable || attempt === maxRetries) return lastRes;
+    const waitMs = TRAFFIC_REPORT_429_DELAYS_MS[Math.min(attempt, TRAFFIC_REPORT_429_DELAYS_MS.length - 1)];
+    await sleep(waitMs);
+  }
+  return lastRes;
+}
+
+function chunkStrings(items, size) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+function mergeTrafficReports(reports) {
+  const valid = (reports || []).filter((r) => r && Array.isArray(r.records));
+  if (!valid.length) return null;
+
+  const merged = { ...valid[0], records: [] };
+  const metadataByListingId = new Map();
+
+  for (const report of valid) {
+    merged.records.push(...report.records);
+    for (const block of report.dimensionMetadata || []) {
+      for (const rec of block.metadataRecords || []) {
+        const listingId = rec?.value?.value != null ? String(rec.value.value) : '';
+        if (listingId && !metadataByListingId.has(listingId)) {
+          metadataByListingId.set(listingId, rec);
+        }
+      }
+    }
+  }
+
+  if (metadataByListingId.size && merged.dimensionMetadata?.length) {
+    merged.dimensionMetadata = merged.dimensionMetadata.map((block, index) =>
+      index === 0
+        ? { ...block, metadataRecords: Array.from(metadataByListingId.values()) }
+        : block
+    );
+  }
+
+  return merged;
+}
+
+async function getSellerActiveListingIds(sellerId) {
+  const active = await ActiveListing.find({ seller: sellerId, listingStatus: 'Active' })
+    .select('itemId')
+    .lean();
+  if (active.length) {
+    return active.map((row) => String(row.itemId)).filter(Boolean);
+  }
+  const legacy = await Listing.find({ seller: sellerId, listingStatus: 'Active' })
+    .select('itemId')
+    .lean();
+  return legacy.map((row) => String(row.itemId)).filter(Boolean);
+}
+
+function trafficReportRowsAllZero(report) {
+  const records = report?.records || [];
+  if (!records.length) return true;
+  return records.every((record) =>
+    (record.metricValues || []).every((cell) => {
+      const n = Number(cell?.value);
+      return cell?.value == null || cell?.value === '' || (!Number.isNaN(n) && n === 0);
+    })
+  );
+}
+
+const ANALYTICS_MARKETPLACE_SITE_ID = {
+  EBAY_US: '0',
+  EBAY_GB: '3',
+  EBAY_DE: '77',
+  EBAY_AU: '15',
+  EBAY_CA: '2',
+  EBAY_FR: '71',
+  EBAY_IT: '101',
+  EBAY_ES: '186',
+  EBAY_MOTORS_US: '0',
+};
+
+const CORE_SINGLE_LISTING_METRICS = [
+  'LISTING_IMPRESSION_SEARCH_RESULTS_PAGE',
+  'LISTING_IMPRESSION_STORE',
+  'LISTING_IMPRESSION_TOTAL',
+  'LISTING_VIEWS_TOTAL',
+  'SALES_CONVERSION_RATE',
+  'TRANSACTION'
+].join(',');
+
+async function lookupListingInDatabase(itemId) {
+  const id = String(itemId || '').trim();
+  if (!id) return null;
+  const active = await ActiveListing.findOne({ itemId: id })
+    .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+    .lean();
+  if (active) return { source: 'ActiveListing', listing: active };
+  const legacy = await Listing.findOne({ itemId: id })
+    .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+    .lean();
+  if (legacy) return { source: 'Listing', listing: legacy };
+  return null;
+}
+
+async function fetchSellerEbayUserIdForAnalytics(token) {
+  const profile = await fetchTradingUserProfileSummary(token);
+  return profile?.ebayUserId || null;
+}
+
+async function verifyListingForSellerAnalytics(token, itemId, marketplace = 'EBAY_US') {
+  const id = String(itemId || '').trim();
+  if (!id) return { found: false, message: 'Listing ID is required' };
+
+  const siteId = ANALYTICS_MARKETPLACE_SITE_ID[String(marketplace || 'EBAY_US').trim()] || '0';
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <ItemID>${escapeXml(id)}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetItemRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-SITEID': siteId,
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'GetItem',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 45000,
+  });
+
+  const result = await parseStringPromise(response.data);
+  const ack = result?.GetItemResponse?.Ack?.[0];
+  if (ack === 'Failure') {
+    const errNode = result?.GetItemResponse?.Errors;
+    const err = Array.isArray(errNode) ? errNode[0] : errNode;
+    return {
+      found: false,
+      listingId: id,
+      siteId,
+      message: err?.LongMessage?.[0] || err?.ShortMessage?.[0] || 'GetItem failed for this seller/token',
+      errorCode: err?.ErrorCode?.[0] || null,
+    };
+  }
+
+  const item = result?.GetItemResponse?.Item?.[0];
+  if (!item) {
+    return { found: false, listingId: id, siteId, message: 'GetItem returned no item payload' };
+  }
+
+  return {
+    found: true,
+    listingId: id,
+    siteId,
+    title: item.Title?.[0] || null,
+    ebaySellerUserId: item.Seller?.[0]?.UserID?.[0] || null,
+    listingStatus: item.SellingStatus?.[0]?.ListingStatus?.[0] || null,
+    startTime: item.ListingDetails?.[0]?.StartTime?.[0] || null,
+    viewItemUrl: item.ListingDetails?.[0]?.ViewItemURL?.[0] || `https://www.ebay.com/itm/${id}`,
+  };
+}
+
+// Lookup listing owner in local DB (for Analytics single-listing seller auto-select)
+router.get('/analytics/listing-lookup', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
+  try {
+    const itemId = String(req.query.itemId || '').trim();
+    if (!itemId) {
+      return res.status(400).json({ error: 'itemId is required' });
+    }
+    const dbListing = await lookupListingInDatabase(itemId);
+    if (!dbListing?.listing) {
+      return res.json({ success: true, found: false, itemId });
+    }
+    const sellerDoc = dbListing.listing.seller;
+    const sellerUsername =
+      sellerDoc?.user?.username || sellerDoc?.user?.email || null;
+    return res.json({
+      success: true,
+      found: true,
+      itemId,
+      source: dbListing.source,
+      title: dbListing.listing.title || null,
+      listingStatus: dbListing.listing.listingStatus || null,
+      views30d: dbListing.listing.views30d ?? null,
+      sellerId: sellerDoc?._id ? String(sellerDoc._id) : null,
+      sellerUsername,
+    });
+  } catch (err) {
+    console.error('[Analytics Listing Lookup] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Listing lookup failed' });
+  }
+});
+
+// eBay Sell Analytics — Traffic Report (getTrafficReport)
+router.get('/analytics/traffic-report', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      marketplace = 'EBAY_US',
+      dimension = 'DAY',
+      metrics,
+      startDate,
+      endDate,
+      sort,
+      listingIds,
+      limit,
+      offset,
+      batchMode,
+      batchIndex: batchIndexQuery
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const upperDimension = String(dimension || 'DAY').toUpperCase();
+    if (!['DAY', 'LISTING'].includes(upperDimension)) {
+      return res.status(400).json({ error: 'dimension must be DAY or LISTING' });
+    }
+
+    const defaultMetrics = [
+      'LISTING_IMPRESSION_SEARCH_RESULTS_PAGE',
+      'LISTING_IMPRESSION_STORE',
+      'LISTING_IMPRESSION_TOTAL',
+      'LISTING_VIEWS_SOURCE_DIRECT',
+      'LISTING_VIEWS_SOURCE_OFF_EBAY',
+      'LISTING_VIEWS_SOURCE_OTHER_EBAY',
+      'LISTING_VIEWS_SOURCE_SEARCH_RESULTS_PAGE',
+      'LISTING_VIEWS_SOURCE_STORE',
+      'LISTING_VIEWS_TOTAL',
+      'SALES_CONVERSION_RATE',
+      'TOTAL_IMPRESSION_TOTAL',
+      'TRANSACTION'
+    ].join(',');
+    const metricList = String(metrics || defaultMetrics).trim();
+    const singleListingId = String(listingIds || '')
+      .split(/[,|\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const isSingleListing = singleListingId.length === 1;
+    const effectiveMetrics = isSingleListing ? CORE_SINGLE_LISTING_METRICS : metricList;
+
+    let filter;
+    try {
+      filter = buildTrafficReportFilter({
+        marketplace: String(marketplace || 'EBAY_US').trim(),
+        startDate,
+        endDate,
+        listingIds
+      });
+    } catch (filterErr) {
+      return res.status(400).json({ error: filterErr.message });
+    }
+
+    const params = {
+      dimension: upperDimension,
+      metric: effectiveMetrics,
+      filter
+    };
+
+    const firstMetric = effectiveMetrics.split(',')[0]?.trim();
+    const sortMetric = effectiveMetrics.includes('LISTING_IMPRESSION_TOTAL')
+      ? 'LISTING_IMPRESSION_TOTAL'
+      : (effectiveMetrics.includes('LISTING_VIEWS_TOTAL') ? 'LISTING_VIEWS_TOTAL' : firstMetric);
+    if (sort) {
+      params.sort = String(sort).trim();
+    } else if (upperDimension === 'DAY' && sortMetric) {
+      params.sort = `-${sortMetric}`;
+    } else if (upperDimension === 'LISTING' && sortMetric) {
+      params.sort = sortMetric;
+    }
+
+    if (limit != null && limit !== '') params.limit = Number(limit);
+    if (offset != null && offset !== '') params.offset = Number(offset);
+
+    const accessToken = await ensureValidToken(seller);
+
+    const fetchTrafficReport = async (dimensionValue, sortValue, filterOverride) => {
+      const p = { ...params, dimension: dimensionValue };
+      if (sortValue) p.sort = sortValue;
+      if (filterOverride) p.filter = filterOverride;
+      return axios.get('https://api.ebay.com/sell/analytics/v1/traffic_report', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json'
+        },
+        params: p,
+        timeout: 60000,
+        validateStatus: () => true
+      });
+    };
+
+    const shouldBatchAllListings =
+      !isSingleListing &&
+      upperDimension === 'LISTING' &&
+      !String(listingIds || '').trim();
+
+    let reportData;
+    let usedDimension = upperDimension;
+    let batchFetch = null;
+    let response;
+
+    if (shouldBatchAllListings) {
+      const allListingIds = await getSellerActiveListingIds(seller._id);
+      if (allListingIds.length > 0) {
+        const batches = chunkStrings(allListingIds, TRAFFIC_REPORT_LISTING_BATCH_SIZE);
+        const useSingleBatchMode = String(batchMode || 'single').trim() !== 'all';
+        const batchIndex = batchIndexQuery != null && batchIndexQuery !== '' && !Number.isNaN(Number(batchIndexQuery))
+          ? Math.max(0, Math.min(Number(batchIndexQuery), batches.length - 1))
+          : 0;
+        const batchIds = batches[batchIndex];
+        const batchFilter = buildTrafficReportFilter({
+          marketplace: String(marketplace || 'EBAY_US').trim(),
+          startDate,
+          endDate,
+          listingIds: batchIds.join('|')
+        });
+
+        if (useSingleBatchMode) {
+          const batchRes = await fetchTrafficReportWithRetry(() =>
+            fetchTrafficReport(upperDimension, params.sort, batchFilter)
+          );
+          if (batchRes.status < 200 || batchRes.status >= 300) {
+            const ebayError = batchRes.data?.errors?.[0];
+            const rateLimited = batchRes.status === 429;
+            return res.status(batchRes.status).json({
+              success: false,
+              error: rateLimited
+                ? 'eBay rate limit on this batch. The app will wait and retry automatically — or wait 1–2 minutes and click Run Report again.'
+                : (ebayError?.message || ebayError?.longMessage || batchRes.statusText || 'eBay traffic report failed'),
+              details: batchRes.data,
+              request: {
+                dimension: upperDimension,
+                metric: effectiveMetrics,
+                filter: `batch ${batchIndex + 1}/${batches.length} (${batchIds.length} listings)`,
+                sort: params.sort || null
+              },
+              batchFetch: {
+                enabled: true,
+                mode: 'single',
+                batchIndex,
+                totalBatches: batches.length,
+                totalListings: allListingIds.length,
+                hasMore: batchIndex < batches.length - 1,
+                completedBatches: batchIndex,
+                listingCount: batchIds.length
+              }
+            });
+          }
+          reportData = batchRes.data;
+          batchFetch = {
+            enabled: true,
+            mode: 'single',
+            batchIndex,
+            totalBatches: batches.length,
+            totalListings: allListingIds.length,
+            hasMore: batchIndex < batches.length - 1,
+            completedBatches: batchIndex + 1,
+            recordsReturned: reportData?.records?.length || 0,
+            listingCount: batchIds.length
+          };
+          response = { status: 200, data: reportData };
+        } else {
+          const mergedChunks = [];
+          let failedBatch = null;
+          for (let i = 0; i < batches.length; i++) {
+            const ids = batches[i];
+            const multiFilter = buildTrafficReportFilter({
+              marketplace: String(marketplace || 'EBAY_US').trim(),
+              startDate,
+              endDate,
+              listingIds: ids.join('|')
+            });
+            const batchRes = await fetchTrafficReportWithRetry(() =>
+              fetchTrafficReport(upperDimension, params.sort, multiFilter)
+            );
+            if (batchRes.status < 200 || batchRes.status >= 300) {
+              failedBatch = { index: i + 1, total: batches.length, status: batchRes.status };
+              if (!mergedChunks.length) {
+                const ebayError = batchRes.data?.errors?.[0];
+                const rateLimited = batchRes.status === 429;
+                return res.status(batchRes.status).json({
+                  success: false,
+                  error: rateLimited
+                    ? 'eBay rate limit — use sequential batch mode (default in Analytics UI).'
+                    : (ebayError?.message || ebayError?.longMessage || batchRes.statusText || 'eBay traffic report failed'),
+                  details: batchRes.data,
+                  request: {
+                    dimension: upperDimension,
+                    metric: effectiveMetrics,
+                    filter: `batch ${i + 1}/${batches.length} (${ids.length} listings)`,
+                    sort: params.sort || null
+                  },
+                  batchFetch: {
+                    totalListings: allListingIds.length,
+                    batches: batches.length,
+                    completedBatches: mergedChunks.length,
+                    failedBatch
+                  }
+                });
+              }
+              break;
+            }
+            mergedChunks.push(batchRes.data);
+            if (i < batches.length - 1) await sleep(8000);
+          }
+          reportData = mergeTrafficReports(mergedChunks);
+          batchFetch = {
+            enabled: true,
+            mode: 'all',
+            totalListings: allListingIds.length,
+            batches: batches.length,
+            completedBatches: mergedChunks.length,
+            recordsReturned: reportData?.records?.length || 0,
+            partial: failedBatch != null
+          };
+          response = { status: 200, data: reportData };
+        }
+      } else {
+        response = await fetchTrafficReport(upperDimension, params.sort);
+        reportData = response.data;
+        batchFetch = {
+          enabled: false,
+          reason: 'no_active_listings_in_database',
+          ebayCap: TRAFFIC_REPORT_LISTING_BATCH_SIZE
+        };
+      }
+    } else {
+      response = await fetchTrafficReport(upperDimension, params.sort);
+      reportData = response.data;
+    }
+
+    if (!shouldBatchAllListings || batchFetch?.enabled === false) {
+      if (response.status < 200 || response.status >= 300) {
+        const ebayError = response.data?.errors?.[0];
+        return res.status(response.status).json({
+          success: false,
+          error: ebayError?.message || ebayError?.longMessage || response.statusText || 'eBay traffic report failed',
+          details: response.data,
+          request: { dimension: upperDimension, metric: effectiveMetrics, filter, sort: params.sort || null }
+        });
+      }
+    }
+
+    if (shouldBatchAllListings && batchFetch?.enabled) {
+      // reportData already set from merged batches
+    } else if (!reportData) {
+      reportData = response.data;
+    }
+
+    const listingIdList = singleListingId;
+    const singleId = isSingleListing ? listingIdList[0] : null;
+
+    let listingCheck = null;
+    let dbListing = null;
+    if (singleId) {
+      dbListing = await lookupListingInDatabase(singleId);
+      try {
+        listingCheck = await verifyListingForSellerAnalytics(
+          accessToken,
+          singleId,
+          String(marketplace || 'EBAY_US').trim()
+        );
+        const tokenEbayUserId = await fetchSellerEbayUserIdForAnalytics(accessToken);
+        if (tokenEbayUserId) {
+          listingCheck = { ...listingCheck, tokenEbayUserId };
+        }
+
+        if (listingCheck.found && listingCheck.ebaySellerUserId && tokenEbayUserId) {
+          const ebayMatch =
+            listingCheck.ebaySellerUserId.toLowerCase() === tokenEbayUserId.toLowerCase();
+          if (!ebayMatch) {
+            listingCheck = {
+              ...listingCheck,
+              ownerMismatch: true,
+              message: `This listing is owned by eBay user "${listingCheck.ebaySellerUserId}", but the selected seller token is for "${tokenEbayUserId}".`,
+            };
+          }
+        } else if (!listingCheck.found && dbListing?.listing?.seller) {
+          const dbSellerId = String(dbListing.listing.seller._id);
+          if (dbSellerId !== String(seller._id)) {
+            const ownerName =
+              dbListing.listing.seller?.user?.username ||
+              dbListing.listing.seller?.user?.email ||
+              dbSellerId;
+            listingCheck = {
+              ...listingCheck,
+              ownerMismatch: true,
+              dbOwnerSellerId: dbSellerId,
+              dbOwnerUsername: ownerName,
+              message: `GetItem failed for the selected seller. In your database this listing belongs to "${ownerName}".`,
+            };
+          }
+        }
+      } catch (verifyErr) {
+        listingCheck = {
+          found: false,
+          listingId: singleId,
+          message: verifyErr.message || 'Could not verify listing',
+        };
+      }
+    }
+
+    let dailyReport = null;
+    if (singleId) {
+      const dayRes = await fetchTrafficReport('DAY', sortMetric ? `-${sortMetric}` : undefined);
+      if (dayRes.status >= 200 && dayRes.status < 300) {
+        dailyReport = dayRes.data;
+      }
+      const primaryEmpty = !reportData?.records?.length;
+      const dayHasRows = (dailyReport?.records || []).length > 0;
+      if (primaryEmpty && dayHasRows) {
+        reportData = dailyReport;
+        usedDimension = 'DAY';
+      }
+    }
+
+    const allZero = trafficReportRowsAllZero(reportData);
+    const noRows = !(reportData?.records || []).length;
+    let dataHint = null;
+    if (singleId && listingCheck?.ownerMismatch) {
+      dataHint =
+        listingCheck.message ||
+        `This listing belongs to seller "${listingCheck.dbOwnerUsername}" — not the seller you selected. Switch seller and retry.`;
+    } else if (singleId && listingCheck && !listingCheck.found) {
+      dataHint =
+        listingCheck.message ||
+        'Listing not found for the selected seller token. Confirm the item ID and seller account.';
+    } else if (singleId && listingCheck?.found && noRows) {
+      dataHint =
+        'Listing verified for this seller, but eBay returned no traffic rows for this date range. Use last 30 days ending yesterday (Pacific). Compare with Seller Hub if numbers still differ.';
+    } else if (singleId && listingCheck?.found && allZero) {
+      dataHint =
+        'Listing verified for this seller. eBay reports all metrics as 0 for these dates — common for low traffic or if the listing was recently listed.';
+    } else if (singleId && noRows) {
+      dataHint =
+        'eBay returned no traffic rows for this listing ID. Confirm the ID from the listing URL (ebay.com/itm/…), use last 30 days, and pick the seller that owns the listing.';
+    } else if (singleId && allZero) {
+      dataHint =
+        'eBay returned this listing but all metrics are 0 for the selected dates. Try last 30 days. Note: traffic data is typically available through yesterday (Pacific time), not today.';
+    } else if (!singleId && allZero) {
+      dataHint = 'All metrics are 0 for this date range — try wider dates or a different marketplace.';
+    } else if (batchFetch?.enabled) {
+      const completed = batchFetch.completedBatches ?? (batchFetch.batchIndex != null ? batchFetch.batchIndex + 1 : batchFetch.batches);
+      const total = batchFetch.totalBatches ?? batchFetch.batches;
+      if (batchFetch.partial) {
+        dataHint = `Partial results: fetched ${batchFetch.recordsReturned?.toLocaleString?.() ?? batchFetch.recordsReturned} listings from ${completed} of ${total} batches before eBay rate-limited. Run again to continue.`;
+      } else if (batchFetch.mode === 'single' && batchFetch.hasMore) {
+        dataHint = `Batch ${completed} of ${total} loaded (${batchFetch.recordsReturned ?? 0} listings in this batch).`;
+      } else {
+        dataHint = `Fetched traffic for ${batchFetch.recordsReturned?.toLocaleString?.() ?? batchFetch.recordsReturned} listings across ${completed} batch${completed === 1 ? '' : 'es'} (${batchFetch.totalListings?.toLocaleString?.() ?? batchFetch.totalListings} active in database).`;
+      }
+    } else if (batchFetch?.reason === 'no_active_listings_in_database' && !singleId && upperDimension === 'LISTING') {
+      dataHint = `No active listings found in your database — eBay returns at most ${TRAFFIC_REPORT_LISTING_BATCH_SIZE} listings. Run a listing sync to fetch all stores.`;
+    }
+
+    const localListing = dbListing?.listing
+      ? {
+          source: dbListing.source,
+          title: dbListing.listing.title,
+          listingStatus: dbListing.listing.listingStatus,
+          views30d: dbListing.listing.views30d ?? null,
+          sellerId: dbListing.listing.seller?._id ? String(dbListing.listing.seller._id) : null,
+          sellerUsername:
+            dbListing.listing.seller?.user?.username ||
+            dbListing.listing.seller?.user?.email ||
+            null,
+        }
+      : null;
+
+    return res.json({
+      success: true,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id)
+      },
+      request: {
+        dimension: usedDimension,
+        metrics: effectiveMetrics.split(',').map((m) => m.trim()).filter(Boolean),
+        marketplace: String(marketplace || 'EBAY_US').trim(),
+        startDate: toEbayTrafficDateYmd(startDate),
+        endDate: clampTrafficReportEndDate(endDate),
+        filter: batchFetch?.enabled
+          ? `batch ${(batchFetch.batchIndex ?? 0) + 1}/${batchFetch.totalBatches ?? batchFetch.batches} (${batchFetch.listingCount ?? TRAFFIC_REPORT_LISTING_BATCH_SIZE} listings)`
+          : filter,
+        sort: params.sort || null,
+        limit: params.limit ?? null,
+        offset: params.offset ?? null
+      },
+      listingCheck,
+      localListing,
+      dataHint,
+      allMetricsZero: allZero,
+      noRows,
+      batchFetch,
+      dailyReport: usedDimension === 'DAY' ? null : dailyReport,
+      report: reportData
+    });
+  } catch (err) {
+    console.error('[Analytics Traffic Report] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch traffic report'
+    });
+  }
+});
+
+async function refreshCustomerServiceMetricForSeller(seller, { upperMetric, upperEval, mp }) {
+  const sellerName =
+    seller.user?.username || seller.user?.email || seller.username || String(seller._id);
+  const cacheFilter = {
+    seller: seller._id,
+    marketplace: mp,
+    metricType: upperMetric,
+    evaluationType: upperEval,
+  };
+
+  if (!seller.ebayTokens?.access_token) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      skipped: true,
+      error: 'Seller not connected to eBay',
+    };
+  }
+
+  try {
+    const accessToken = await ensureValidToken(seller);
+    const apiPath = `/sell/analytics/v1/customer_service_metric/${upperMetric}/${upperEval}`;
+    const response = await axios.get(`https://api.ebay.com${apiPath}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+      params: { evaluation_marketplace_id: mp },
+      timeout: 60000,
+      validateStatus: () => true,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      const ebayError = response.data?.errors?.[0];
+      return {
+        success: false,
+        sellerId: String(seller._id),
+        sellerName,
+        status: response.status,
+        error:
+          ebayError?.longMessage ||
+          ebayError?.message ||
+          response.statusText ||
+          'eBay customer service metric failed',
+      };
+    }
+
+    const fetchedAt = new Date();
+    const evaluationDate = response.data?.evaluationCycle?.evaluationDate || null;
+    const snapshot = await CustomerServiceMetricSnapshot.findOneAndUpdate(
+      cacheFilter,
+      {
+        $set: {
+          report: response.data,
+          evaluationDate,
+          fetchedAt,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    return {
+      success: true,
+      sellerId: String(seller._id),
+      sellerName,
+      fetchedAt: snapshot.fetchedAt,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      error: err.message || 'Failed to fetch customer service metric',
+    };
+  }
+}
+
+const CSM_REFRESH_DELAY_MS = 1200;
+
+// eBay Sell Analytics — Customer Service Metric (getCustomerServiceMetric)
+router.get('/analytics/customer-service-metric', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      metricType = 'ITEM_NOT_RECEIVED',
+      evaluationType = 'PROJECTED',
+      marketplace = 'EBAY_US',
+      refresh
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const upperMetric = String(metricType || '').toUpperCase();
+    const upperEval = String(evaluationType || '').toUpperCase();
+    if (!['ITEM_NOT_RECEIVED', 'ITEM_NOT_AS_DESCRIBED'].includes(upperMetric)) {
+      return res.status(400).json({ error: 'metricType must be ITEM_NOT_RECEIVED or ITEM_NOT_AS_DESCRIBED' });
+    }
+    if (!['CURRENT', 'PROJECTED'].includes(upperEval)) {
+      return res.status(400).json({ error: 'evaluationType must be CURRENT or PROJECTED' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const mp = String(marketplace || 'EBAY_US').trim();
+    const cacheFilter = {
+      seller: seller._id,
+      marketplace: mp,
+      metricType: upperMetric,
+      evaluationType: upperEval,
+    };
+    const shouldRefresh = ['true', '1', 'yes'].includes(String(refresh || '').toLowerCase());
+
+    const respondWithSnapshot = (snapshot, { fromCache }) => res.json({
+      success: true,
+      fromCache,
+      fetchedAt: snapshot.fetchedAt,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+      },
+      request: { metricType: upperMetric, evaluationType: upperEval, marketplace: mp },
+      report: snapshot.report,
+    });
+
+    if (!shouldRefresh) {
+      const cached = await CustomerServiceMetricSnapshot.findOne(cacheFilter).lean();
+      if (cached?.report) {
+        return respondWithSnapshot(cached, { fromCache: true });
+      }
+      return res.json({
+        success: true,
+        fromCache: false,
+        noData: true,
+        seller: {
+          id: seller._id,
+          username: seller.user?.username || seller.username || String(seller._id),
+        },
+        request: { metricType: upperMetric, evaluationType: upperEval, marketplace: mp },
+        report: null,
+      });
+    }
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const refreshResult = await refreshCustomerServiceMetricForSeller(seller, {
+      upperMetric,
+      upperEval,
+      mp,
+    });
+
+    if (!refreshResult.success) {
+      const cached = await CustomerServiceMetricSnapshot.findOne(cacheFilter).lean();
+      return res.status(refreshResult.status || 400).json({
+        success: false,
+        error: refreshResult.error || 'eBay customer service metric failed',
+        hint: refreshResult.status === 409
+          ? 'Seller may have no transactions on this marketplace in the past 12 months, or is not eligible for this evaluation type yet. Try CURRENT vs PROJECTED or another marketplace.'
+          : null,
+        cachedReport: cached?.report || null,
+        fetchedAt: cached?.fetchedAt || null,
+      });
+    }
+
+    const snapshot = await CustomerServiceMetricSnapshot.findOne(cacheFilter).lean();
+    return respondWithSnapshot(snapshot, { fromCache: false });
+  } catch (err) {
+    console.error('[Analytics Customer Service Metric] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch customer service metric',
+    });
+  }
+});
+
+// Cases/orders behind a customer service metric (from stored Post-Order inquiries)
+router.get('/analytics/customer-service-metric/orders', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      metricType = 'ITEM_NOT_RECEIVED',
+      fromDate,
+      toDate,
+      limit = 50,
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ success: false, error: 'sellerId is required' });
+    }
+
+    const upperMetric = String(metricType || '').toUpperCase();
+    if (!['ITEM_NOT_RECEIVED', 'ITEM_NOT_AS_DESCRIBED'].includes(upperMetric)) {
+      return res.status(400).json({ success: false, error: 'metricType must be ITEM_NOT_RECEIVED or ITEM_NOT_AS_DESCRIBED' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { select: '_id' });
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const caseType = upperMetric === 'ITEM_NOT_AS_DESCRIBED' ? 'SNAD' : 'INR';
+    const query = { seller: seller._id, caseType };
+
+    if (fromDate || toDate) {
+      query.creationDate = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        if (!Number.isNaN(from.getTime())) query.creationDate.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        if (!Number.isNaN(to.getTime())) query.creationDate.$lte = to;
+      }
+      if (!Object.keys(query.creationDate).length) delete query.creationDate;
+    }
+
+    const max = Math.min(200, Math.max(1, parseInt(limit, 10) || 50));
+    const cases = await Case.find(query)
+      .sort({ creationDate: -1 })
+      .limit(max)
+      .select('caseId orderId buyerUsername status creationDate itemTitle itemId claimAmount worksheetStatus')
+      .lean();
+
+    return res.json({
+      success: true,
+      metricType: upperMetric,
+      caseType,
+      total: cases.length,
+      cases,
+    });
+  } catch (err) {
+    console.error('[Analytics CSM Orders] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load metric orders' });
+  }
+});
+
+router.post('/analytics/customer-service-metric/refresh-all', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
+  try {
+    const {
+      metricType = 'ITEM_NOT_RECEIVED',
+      evaluationType = 'PROJECTED',
+      marketplace = 'EBAY_US',
+    } = req.body || {};
+
+    const upperMetric = String(metricType || '').toUpperCase();
+    const upperEval = String(evaluationType || '').toUpperCase();
+    if (!['ITEM_NOT_RECEIVED', 'ITEM_NOT_AS_DESCRIBED'].includes(upperMetric)) {
+      return res.status(400).json({ error: 'metricType must be ITEM_NOT_RECEIVED or ITEM_NOT_AS_DESCRIBED' });
+    }
+    if (!['CURRENT', 'PROJECTED'].includes(upperEval)) {
+      return res.status(400).json({ error: 'evaluationType must be CURRENT or PROJECTED' });
+    }
+
+    const mp = String(marketplace || 'EBAY_US').trim();
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email')
+      : [];
+
+    const results = [];
+    for (let i = 0; i < sellers.length; i++) {
+      const result = await refreshCustomerServiceMetricForSeller(sellers[i], {
+        upperMetric,
+        upperEval,
+        mp,
+      });
+      results.push(result);
+      if (i < sellers.length - 1) {
+        await sleep(CSM_REFRESH_DELAY_MS);
+      }
+    }
+
+    const succeeded = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success && !r.skipped).length;
+    const skipped = results.filter((r) => r.skipped).length;
+
+    return res.json({
+      success: true,
+      request: { metricType: upperMetric, evaluationType: upperEval, marketplace: mp },
+      summary: {
+        total: sellers.length,
+        succeeded,
+        failed,
+        skipped,
+      },
+      results,
+    });
+  } catch (err) {
+    console.error('[Analytics Customer Service Metric Refresh All] Error:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to refresh customer service metrics for all sellers',
+    });
+  }
+});
+
+async function refreshSellerStandardsProfilesForSeller(seller) {
+  const sellerName =
+    seller.user?.username || seller.user?.email || seller.username || String(seller._id);
+
+  if (!seller.ebayTokens?.access_token) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      skipped: true,
+      error: 'Seller not connected to eBay',
+    };
+  }
+
+  try {
+    const accessToken = await ensureValidToken(seller);
+    const apiPath = '/sell/analytics/v1/seller_standards_profile';
+    const response = await axios.get(`https://api.ebay.com${apiPath}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+      timeout: 60000,
+      validateStatus: () => true,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      const ebayError = response.data?.errors?.[0];
+      return {
+        success: false,
+        sellerId: String(seller._id),
+        sellerName,
+        status: response.status,
+        error:
+          ebayError?.longMessage ||
+          ebayError?.message ||
+          response.statusText ||
+          'eBay seller standards profile failed',
+      };
+    }
+
+    const fetchedAt = new Date();
+    const report = applySellerStandardsThresholdLabels(response.data);
+    const snapshot = await SellerStandardsProfileSnapshot.findOneAndUpdate(
+      { seller: seller._id },
+      {
+        $set: {
+          report,
+          fetchedAt,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    return {
+      success: true,
+      sellerId: String(seller._id),
+      sellerName,
+      fetchedAt: snapshot.fetchedAt,
+      profileCount: Array.isArray(response.data?.standardsProfiles)
+        ? response.data.standardsProfiles.length
+        : 0,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      error: err.message || 'Failed to fetch seller standards profiles',
+    };
+  }
+}
+
+async function refreshSellerStandardsProfileSingleForSeller(seller, { program, cycle }) {
+  const sellerName =
+    seller.user?.username || seller.user?.email || seller.username || String(seller._id);
+
+  if (!seller.ebayTokens?.access_token) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      skipped: true,
+      error: 'Seller not connected to eBay',
+    };
+  }
+
+  try {
+    const accessToken = await ensureValidToken(seller);
+    const apiPath = `/sell/analytics/v1/seller_standards_profile/${program}/${cycle}`;
+    const response = await axios.get(`https://api.ebay.com${apiPath}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+      timeout: 60000,
+      validateStatus: () => true,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      const ebayError = response.data?.errors?.[0];
+      return {
+        success: false,
+        sellerId: String(seller._id),
+        sellerName,
+        status: response.status,
+        error:
+          ebayError?.longMessage ||
+          ebayError?.message ||
+          response.statusText ||
+          'eBay seller standards profile failed',
+      };
+    }
+
+    const profile = response.data?.standardsProfiles?.[0] || response.data;
+    if (!profile?.program || !profile?.cycle?.cycleType) {
+      return {
+        success: false,
+        sellerId: String(seller._id),
+        sellerName,
+        error: 'Unexpected eBay response shape for seller standards profile',
+      };
+    }
+    const existing = await SellerStandardsProfileSnapshot.findOne({ seller: seller._id }).lean();
+    const profiles = Array.isArray(existing?.report?.standardsProfiles)
+      ? [...existing.report.standardsProfiles]
+      : [];
+    const idx = profiles.findIndex(
+      (p) => p?.program === program && p?.cycle?.cycleType === cycle
+    );
+    if (idx >= 0) {
+      profiles[idx] = profile;
+    } else {
+      profiles.push(profile);
+    }
+
+    const fetchedAt = new Date();
+    const report = applySellerStandardsThresholdLabels({ standardsProfiles: profiles });
+    const snapshot = await SellerStandardsProfileSnapshot.findOneAndUpdate(
+      { seller: seller._id },
+      { $set: { report, fetchedAt } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    return {
+      success: true,
+      sellerId: String(seller._id),
+      sellerName,
+      fetchedAt: snapshot.fetchedAt,
+      profile,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      sellerId: String(seller._id),
+      sellerName,
+      error: err.message || 'Failed to fetch seller standards profile',
+    };
+  }
+}
+
+const SSP_REFRESH_DELAY_MS = 1200;
+
+// eBay Sell Analytics — Seller Standards Profile (findSellerStandardsProfiles / getSellerStandardsProfile)
+router.get('/analytics/seller-standards-profiles', requireAuth, requirePageAccess(['AnalyticsSellerStandards', 'EbayAnalyticsHub']), async (req, res) => {
+  try {
+    const { sellerId, refresh, program, cycle } = req.query;
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const shouldRefresh = ['true', '1', 'yes'].includes(String(refresh || '').toLowerCase());
+    const upperProgram = String(program || '').trim().toUpperCase();
+    const upperCycle = String(cycle || '').trim().toUpperCase();
+    const singleProfileMode = upperProgram && upperCycle;
+
+    const respondWithSnapshot = (snapshot, { fromCache, profile = null }) => res.json({
+      success: true,
+      fromCache,
+      fetchedAt: snapshot?.fetchedAt || null,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+      },
+      report: applySellerStandardsThresholdLabels(snapshot?.report) || null,
+      profile,
+    });
+
+    if (!shouldRefresh) {
+      const cached = await SellerStandardsProfileSnapshot.findOne({ seller: seller._id }).lean();
+      if (cached?.report) {
+        if (singleProfileMode) {
+          const profiles = cached.report?.standardsProfiles || [];
+          const match = profiles.find(
+            (p) => p?.program === upperProgram && p?.cycle?.cycleType === upperCycle
+          );
+          return res.json({
+            success: true,
+            fromCache: true,
+            fetchedAt: cached.fetchedAt,
+            seller: {
+              id: seller._id,
+              username: seller.user?.username || seller.username || String(seller._id),
+            },
+            report: applySellerStandardsThresholdLabels(cached.report),
+            profile: match || null,
+            noData: !match,
+          });
+        }
+        return respondWithSnapshot(cached, { fromCache: true });
+      }
+      return res.json({
+        success: true,
+        fromCache: false,
+        noData: true,
+        seller: {
+          id: seller._id,
+          username: seller.user?.username || seller.username || String(seller._id),
+        },
+        report: null,
+      });
+    }
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const refreshResult = singleProfileMode
+      ? await refreshSellerStandardsProfileSingleForSeller(seller, {
+        program: upperProgram,
+        cycle: upperCycle,
+      })
+      : await refreshSellerStandardsProfilesForSeller(seller);
+
+    if (!refreshResult.success) {
+      const cached = await SellerStandardsProfileSnapshot.findOne({ seller: seller._id }).lean();
+      return res.status(refreshResult.status || 400).json({
+        success: false,
+        error: refreshResult.error || 'eBay seller standards profile failed',
+        hint: refreshResult.status === 409
+          ? 'Seller may not have standards data for this program/cycle yet. Try CURRENT vs PROJECTED or another program.'
+          : null,
+        cachedReport: applySellerStandardsThresholdLabels(cached?.report) || null,
+        fetchedAt: cached?.fetchedAt || null,
+      });
+    }
+
+    const snapshot = await SellerStandardsProfileSnapshot.findOne({ seller: seller._id }).lean();
+    if (singleProfileMode) {
+      return respondWithSnapshot(snapshot, { fromCache: false, profile: refreshResult.profile || null });
+    }
+    return respondWithSnapshot(snapshot, { fromCache: false });
+  } catch (err) {
+    console.error('[Analytics Seller Standards] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch seller standards profiles',
+    });
+  }
+});
+
+router.post('/analytics/seller-standards-profiles/refresh-all', requireAuth, requirePageAccess(['AnalyticsSellerStandards', 'EbayAnalyticsHub']), async (req, res) => {
+  try {
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email')
+      : [];
+
+    const results = [];
+    for (let i = 0; i < sellers.length; i++) {
+      const result = await refreshSellerStandardsProfilesForSeller(sellers[i]);
+      results.push(result);
+      if (i < sellers.length - 1) {
+        await sleep(SSP_REFRESH_DELAY_MS);
+      }
+    }
+
+    const succeeded = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success && !r.skipped).length;
+    const skipped = results.filter((r) => r.skipped).length;
+
+    return res.json({
+      success: true,
+      summary: { total: sellers.length, succeeded, failed, skipped },
+      results,
+    });
+  } catch (err) {
+    console.error('[Analytics Seller Standards Refresh All] Error:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to refresh seller standards for all sellers',
+    });
+  }
+});
+
+function parseTradingAmount(amount) {
+  if (amount == null || amount === '') return null;
+  if (typeof amount === 'object') {
+    const value = amount._ ?? amount.value ?? amount.amount ?? null;
+    const currency = amount.$?.currencyID || amount.currency || amount.currencyId || 'USD';
+    if (value == null || value === '') return null;
+    return { value, currency };
+  }
+  return { value: amount, currency: 'USD' };
+}
+
+function normalizeTradingAwaitingFeedbackTransactions(transactions) {
+  return transactions.map((tx) => ({
+    listingId: tx.Item?.ItemID || '',
+    itemId: tx.Item?.ItemID || '',
+    title: tx.Item?.Title || '',
+    orderLineItemId: tx.OrderLineItemID || tx.OrderLineItemId || '',
+    transactionId: tx.TransactionID || '',
+    userName: tx.Buyer?.UserID || tx.Item?.Seller?.UserID || '',
+    role: 'SELLER',
+    price: parseTradingAmount(tx.TransactionPrice) || parseTradingAmount(tx.Item?.SellingStatus?.CurrentPrice),
+    endDate: tx.Item?.ListingDetails?.EndTime || tx.CreatedDate || null,
+    transactionEndDate: tx.Item?.ListingDetails?.EndTime || null,
+    raw: tx,
+  }));
+}
+
+async function fetchItemsAwaitingFeedbackTrading(seller, { pageLimit, pageOffset, sort }) {
+  const token = await ensureValidToken(seller);
+  const pageNumber = Math.floor(pageOffset / pageLimit) + 1;
+  const sortValue = String(sort || 'EndTimeDescending').trim() || 'EndTimeDescending';
+
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemsAwaitingFeedbackRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <Pagination>
+    <EntriesPerPage>${pageLimit}</EntriesPerPage>
+    <PageNumber>${pageNumber}</PageNumber>
+  </Pagination>
+  <Sort>${sortValue}</Sort>
+</GetItemsAwaitingFeedbackRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-CALL-NAME': 'GetItemsAwaitingFeedback',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  const parsed = await parseStringPromise(response.data, { explicitArray: false });
+  const payload = parsed?.GetItemsAwaitingFeedbackResponse || {};
+
+  if (payload.Ack === 'Failure') {
+    const err = Array.isArray(payload.Errors) ? payload.Errors[0] : payload.Errors;
+    return {
+      success: false,
+      status: 400,
+      error: err?.LongMessage || err?.ShortMessage || 'GetItemsAwaitingFeedback failed',
+      details: payload,
+    };
+  }
+
+  const iaf = payload.ItemsAwaitingFeedback || {};
+  const pagination = iaf.PaginationResult || {};
+  const rawTx = iaf.TransactionArray?.Transaction || [];
+  const transactions = Array.isArray(rawTx) ? rawTx : [rawTx].filter(Boolean);
+
+  return {
+    success: true,
+    source: 'trading',
+    lineItems: normalizeTradingAwaitingFeedbackTransactions(transactions),
+    summary: {
+      buyerCount: null,
+      sellerCount: null,
+      total: Number(pagination.TotalNumberOfEntries) || transactions.length,
+      totalPages: Number(pagination.TotalNumberOfPages) || 1,
+    },
+    report: payload,
+  };
+}
+
+async function fetchItemsAwaitingFeedbackRest(seller, { pageLimit, pageOffset, filterParts, sortTrim }) {
+  const accessToken = await ensureValidToken(seller);
+  const params = { limit: pageLimit, offset: pageOffset };
+  if (filterParts.length) params.filter = filterParts.join(',');
+  if (sortTrim) params.sort = sortTrim;
+
+  const response = await axios.get('https://api.ebay.com/sell/feedback/v1/awaiting_feedback', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+    params,
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    return {
+      success: false,
+      status: response.status || 400,
+      error:
+        ebayError?.longMessage ||
+        ebayError?.message ||
+        response.statusText ||
+        'eBay awaiting feedback request failed',
+      details: response.data || null,
+      retryable: response.status === 404 || response.status === 405 || response.status === 501,
+    };
+  }
+
+  const payload = response.data || {};
+  const lineItems = Array.isArray(payload.lineItems)
+    ? payload.lineItems
+    : Array.isArray(payload.items)
+      ? payload.items
+      : [];
+
+  return {
+    success: true,
+    source: 'rest',
+    lineItems,
+    summary: {
+      buyerCount: payload.buyerCount ?? payload.buyerRoleCount ?? null,
+      sellerCount: payload.sellerCount ?? payload.sellerRoleCount ?? null,
+      total: payload.total ?? payload.totalCount ?? lineItems.length,
+      href: payload.href || null,
+      next: payload.next || null,
+      prev: payload.prev || null,
+    },
+    report: payload,
+  };
+}
+
+function applyAwaitingFeedbackClientFilters(lineItems, { listingIdTrim, userNameTrim, upperRole }) {
+  let rows = lineItems;
+  if (listingIdTrim) {
+    rows = rows.filter((item) => {
+      const id = String(item.listingId || item.itemId || item.item?.itemId || '').trim();
+      return id === listingIdTrim;
+    });
+  }
+  if (userNameTrim) {
+    const needle = userNameTrim.toLowerCase();
+    rows = rows.filter((item) => {
+      const partner = String(
+        item.userName
+        || item.partnerUserName
+        || item.transactionPartner?.userName
+        || item.buyer?.userName
+        || item.seller?.userName
+        || ''
+      ).toLowerCase();
+      return partner.includes(needle);
+    });
+  }
+  if (upperRole === 'BUYER') {
+    rows = rows.filter((item) => String(item.role || item.userRole || '').toUpperCase() === 'BUYER');
+  } else if (upperRole === 'SELLER') {
+    rows = rows.filter((item) => {
+      const role = String(item.role || item.userRole || 'SELLER').toUpperCase();
+      return role === 'SELLER' || role === '';
+    });
+  }
+  return rows;
+}
+
+function mapFeedbackTypeToTrading(feedbackType) {
+  const key = String(feedbackType || 'FEEDBACK_RECEIVED_AS_SELLER').trim().toUpperCase();
+  const map = {
+    FEEDBACK_RECEIVED_AS_SELLER: 'FeedbackReceivedAsSeller',
+    FEEDBACK_RECEIVED_AS_BUYER: 'FeedbackReceivedAsBuyer',
+    FEEDBACK_RECEIVED: 'FeedbackReceived',
+    FEEDBACK_LEFT: 'FeedbackLeft',
+  };
+  return map[key] || 'FeedbackReceivedAsSeller';
+}
+
+function normalizeTradingFeedbackEntries(entries) {
+  return entries.map((fb) => ({
+    feedbackId: fb.FeedbackID || '',
+    commentType: fb.CommentType || '',
+    commentText: fb.CommentText || '',
+    commentTime: fb.CommentTime || fb.FeedbackDate || null,
+    userName: fb.CommentingUser || fb.FeedbackUser || '',
+    listingId: fb.ItemID || fb.Item?.ItemID || '',
+    title: fb.ItemTitle || fb.Item?.Title || '',
+    role: fb.Role || '',
+    orderLineItemId: fb.OrderLineItemID || fb.OrderLineItemId || '',
+    transactionId: fb.TransactionID || '',
+    response: fb.FeedbackResponse || '',
+    raw: fb,
+  }));
+}
+
+function normalizeRestFeedbackEntries(items) {
+  return (items || []).map((fb) => ({
+    feedbackId: fb.feedbackId || fb.id || '',
+    commentType: fb.commentType || fb.ratingType || fb.type || '',
+    commentText: fb.comment || fb.commentText || fb.text || '',
+    commentTime: fb.commentTime || fb.creationDate || fb.date || null,
+    userName: fb.commentingUser || fb.userId || fb.fromUser || fb.commentingUserName || '',
+    listingId: fb.listingId || fb.itemId || '',
+    title: fb.listingTitle || fb.title || fb.itemTitle || '',
+    role: fb.role || fb.feedbackRole || '',
+    orderLineItemId: fb.orderLineItemId || '',
+    transactionId: fb.transactionId || '',
+    response: fb.response || fb.feedbackResponse || '',
+    raw: fb,
+  }));
+}
+
+async function resolveSellerEbayUserId(seller) {
+  if (seller.ebayUserId) return String(seller.ebayUserId).trim();
+  const token = await ensureValidToken(seller);
+  const profile = await fetchTradingUserProfileSummary(token);
+  if (profile?.ebayUserId) return profile.ebayUserId;
+  return null;
+}
+
+async function fetchTradingUserProfileSummary(token, { userId } = {}) {
+  try {
+    const userIdXml = userId ? `<UserID>${String(userId).replace(/[<>&]/g, '')}</UserID>` : '';
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetUserRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <DetailLevel>ReturnAll</DetailLevel>
+  ${userIdXml}
+</GetUserRequest>`;
+    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+      headers: {
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+        'X-EBAY-API-CALL-NAME': 'GetUser',
+        'Content-Type': 'text/xml',
+      },
+      timeout: 30000,
+      validateStatus: () => true,
+    });
+    const parsed = await parseStringPromise(response.data, { explicitArray: false });
+    const payload = parsed?.GetUserResponse || {};
+    if (payload.Ack === 'Failure') return null;
+    const user = payload.User || {};
+    return {
+      ebayUserId: user.UserID || userId || null,
+      overview: {
+        feedbackScore: user.FeedbackScore ?? null,
+        positiveFeedbackPercent: user.PositiveFeedbackPercent ?? null,
+        uniquePositive: user.UniquePositiveFeedbackCount ?? null,
+        uniqueNeutral: user.UniqueNeutralFeedbackCount ?? null,
+        uniqueNegative: user.UniqueNegativeFeedbackCount ?? null,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchFeedbackTrading(seller, {
+  pageLimit,
+  pageOffset,
+  feedbackType,
+  userId,
+  listingId,
+  commentType,
+}) {
+  const token = await ensureValidToken(seller);
+  const ebayUserId = userId || await resolveSellerEbayUserId(seller);
+  if (!ebayUserId) {
+    return { success: false, status: 400, error: 'Could not resolve eBay user ID for seller' };
+  }
+
+  const pageNumber = Math.floor(pageOffset / pageLimit) + 1;
+  const tradingFeedbackType = mapFeedbackTypeToTrading(feedbackType);
+  const commentTypeXml = commentType ? `<CommentType>${commentType}</CommentType>` : '';
+  const itemIdXml = listingId ? `<ItemID>${listingId}</ItemID>` : '';
+
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetFeedbackRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <UserID>${ebayUserId}</UserID>
+  <FeedbackType>${tradingFeedbackType}</FeedbackType>
+  ${commentTypeXml}
+  ${itemIdXml}
+  <Pagination>
+    <EntriesPerPage>${pageLimit}</EntriesPerPage>
+    <PageNumber>${pageNumber}</PageNumber>
+  </Pagination>
+</GetFeedbackRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-CALL-NAME': 'GetFeedback',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  const parsed = await parseStringPromise(response.data, { explicitArray: false });
+  const payload = parsed?.GetFeedbackResponse || {};
+
+  if (payload.Ack === 'Failure') {
+    const err = Array.isArray(payload.Errors) ? payload.Errors[0] : payload.Errors;
+    return {
+      success: false,
+      status: 400,
+      error: err?.LongMessage || err?.ShortMessage || 'GetFeedback failed',
+      details: payload,
+    };
+  }
+
+  const rawEntries = payload.FeedbackDetailArray?.FeedbackDetail || [];
+  const entries = Array.isArray(rawEntries) ? rawEntries : [rawEntries].filter(Boolean);
+  const pagination = payload.PaginationResult || {};
+  const feedbackSummary = payload.FeedbackSummary || {};
+
+  return {
+    success: true,
+    source: 'trading',
+    entries: normalizeTradingFeedbackEntries(entries),
+    summary: {
+      total: Number(payload.FeedbackDetailItemTotal)
+        || Number(pagination.TotalNumberOfEntries)
+        || entries.length,
+      totalPages: Number(pagination.TotalNumberOfPages) || 1,
+      feedbackScore: feedbackSummary.FeedbackScore ?? null,
+      positiveFeedbackPercent: feedbackSummary.PositiveFeedbackPercent ?? null,
+    },
+    report: payload,
+  };
+}
+
+async function fetchFeedbackRest(seller, {
+  pageLimit,
+  pageOffset,
+  feedbackType,
+  userId,
+  listingId,
+  transactionId,
+  orderLineItemId,
+  filterParts,
+  sortTrim,
+}) {
+  const accessToken = await ensureValidToken(seller);
+  const ebayUserId = userId || await resolveSellerEbayUserId(seller);
+  if (!ebayUserId) {
+    return { success: false, status: 400, error: 'Could not resolve eBay user ID for seller' };
+  }
+
+  const upperType = String(feedbackType || 'FEEDBACK_RECEIVED').trim().toUpperCase();
+  const restFeedbackType = upperType === 'FEEDBACK_LEFT' ? 'FEEDBACK_LEFT' : 'FEEDBACK_RECEIVED';
+
+  const params = {
+    feedbackType: restFeedbackType,
+    userId: ebayUserId,
+    limit: pageLimit,
+    offset: pageOffset,
+  };
+  if (listingId) params.listingId = listingId;
+  if (transactionId) params.transactionId = transactionId;
+  if (orderLineItemId) params.orderLineItemId = orderLineItemId;
+  if (filterParts.length) params.filter = filterParts.join(',');
+  if (sortTrim) params.sort = sortTrim;
+
+  const response = await axios.get('https://api.ebay.com/sell/feedback/v1/feedback', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+    params,
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    return {
+      success: false,
+      status: response.status || 400,
+      error:
+        ebayError?.longMessage ||
+        ebayError?.message ||
+        response.statusText ||
+        'eBay feedback request failed',
+      details: response.data || null,
+      retryable: response.status === 404 || response.status === 405 || response.status === 501,
+    };
+  }
+
+  const payload = response.data || {};
+  const rawEntries = payload.feedbackEntries
+    || payload.feedbacks
+    || payload.entries
+    || payload.feedback
+    || [];
+
+  return {
+    success: true,
+    source: 'rest',
+    entries: normalizeRestFeedbackEntries(Array.isArray(rawEntries) ? rawEntries : [rawEntries].filter(Boolean)),
+    summary: {
+      total: payload.total ?? payload.totalCount ?? (Array.isArray(rawEntries) ? rawEntries.length : 0),
+      feedbackScore: payload.feedbackScore ?? null,
+      positiveFeedbackPercent: payload.positiveFeedbackPercent ?? null,
+      href: payload.href || null,
+      next: payload.next || null,
+      prev: payload.prev || null,
+    },
+    report: payload,
+  };
+}
+
+function buildFeedbackFilterParts({ feedbackType, commentType, periodDays, role }) {
+  const filterParts = [];
+  const upperType = String(feedbackType || '').trim().toUpperCase();
+
+  if (upperType === 'FEEDBACK_RECEIVED_AS_SELLER') filterParts.push('role:SELLER');
+  if (upperType === 'FEEDBACK_RECEIVED_AS_BUYER') filterParts.push('role:BUYER');
+
+  const upperComment = String(commentType || '').trim().toUpperCase();
+  if (['POSITIVE', 'NEGATIVE', 'NEUTRAL'].includes(upperComment)) {
+    filterParts.push(`commentType:${upperComment}`);
+  }
+
+  const days = Number(periodDays);
+  if (Number.isFinite(days) && days > 0) {
+    filterParts.push(`period:${Math.min(365, Math.floor(days))}`);
+  }
+
+  const upperRole = String(role || '').trim().toUpperCase();
+  if (upperRole && upperRole !== 'ALL' && !filterParts.some((f) => f.startsWith('role:'))) {
+    filterParts.push(`role:${upperRole}`);
+  }
+
+  return filterParts;
+}
+
+function collectTradingFeedbackPeriods(periodArray, type) {
+  const raw = periodArray?.FeedbackPeriod || [];
+  const list = Array.isArray(raw) ? raw : [raw].filter(Boolean);
+  return list.map((p) => ({
+    type,
+    periodDays: Number(p.PeriodInDays) || null,
+    count: Number(p.Count) || 0,
+  }));
+}
+
+function normalizeTradingFeedbackRatingSummary(summary) {
+  if (!summary || typeof summary !== 'object') {
+    return { overview: {}, ratings: [], periods: [] };
+  }
+
+  const overview = {
+    feedbackScore: summary.FeedbackScore ?? null,
+    positiveFeedbackPercent: summary.PositiveFeedbackPercent ?? null,
+    uniquePositive: summary.UniquePositiveFeedbackCount ?? null,
+    uniqueNeutral: summary.UniqueNeutralFeedbackCount ?? null,
+    uniqueNegative: summary.UniqueNegativeFeedbackCount ?? null,
+  };
+
+  const periods = [
+    ...collectTradingFeedbackPeriods(summary.PositiveFeedbackPeriodArray, 'POSITIVE'),
+    ...collectTradingFeedbackPeriods(summary.NegativeFeedbackPeriodArray, 'NEGATIVE'),
+    ...collectTradingFeedbackPeriods(summary.NeutralFeedbackPeriodArray, 'NEUTRAL'),
+    ...collectTradingFeedbackPeriods(summary.TotalFeedbackPeriodArray, 'TOTAL'),
+  ];
+
+  const ratings = [];
+  const dsrArrays = summary.SellerRatingSummaryArray?.AverageRatingSummary || [];
+  const dsrList = Array.isArray(dsrArrays) ? dsrArrays : [dsrArrays].filter(Boolean);
+  for (const block of dsrList) {
+    const period = block.FeedbackSummaryPeriod || '';
+    const details = block.AverageRatingDetails || [];
+    const detailList = Array.isArray(details) ? details : [details].filter(Boolean);
+    for (const d of detailList) {
+      ratings.push({
+        ratingType: d.RatingDetail || 'DSR',
+        role: 'SELLER',
+        period,
+        average: d.Rating != null ? Number(d.Rating) : null,
+        count: d.RatingCount != null ? Number(d.RatingCount) : null,
+        positivePercent: null,
+      });
+    }
+  }
+
+  return { overview, ratings, periods };
+}
+
+function normalizeRestFeedbackRatingSummary(payload) {
+  const overview = {
+    feedbackScore: payload?.feedbackScore ?? payload?.score ?? null,
+    positiveFeedbackPercent: payload?.positiveFeedbackPercent ?? payload?.positivePercent ?? null,
+    uniquePositive: payload?.uniquePositiveCount ?? payload?.positiveCount ?? null,
+    uniqueNeutral: payload?.uniqueNeutralCount ?? payload?.neutralCount ?? null,
+    uniqueNegative: payload?.uniqueNegativeCount ?? payload?.negativeCount ?? null,
+  };
+
+  const rawRatings = payload?.ratingSummaries
+    || payload?.feedbackRatingSummaries
+    || payload?.ratings
+    || payload?.summary
+    || [];
+
+  const ratings = (Array.isArray(rawRatings) ? rawRatings : [rawRatings])
+    .filter(Boolean)
+    .map((r) => ({
+      ratingType: r.ratingType || r.type || r.name || r.metricKey || '—',
+      role: r.role || r.userRole || '',
+      period: r.period || r.lookbackPeriod || r.periodLabel || r.feedbackSummaryPeriod || '',
+      average: r.average ?? r.averageRating ?? r.value ?? r.scalar ?? null,
+      count: r.count ?? r.ratingCount ?? r.totalCount ?? r.uniqueFeedbackGivers ?? null,
+      positivePercent: r.positivePercent ?? r.positiveFeedbackPercent ?? r.positivePercentage ?? null,
+      distribution: r.distribution || r.ratingDistribution || r.values || null,
+      raw: r,
+    }));
+
+  const rawPeriods = payload?.periods || payload?.feedbackPeriods || [];
+  const periods = (Array.isArray(rawPeriods) ? rawPeriods : [rawPeriods])
+    .filter(Boolean)
+    .map((p) => ({
+      type: p.type || p.commentType || p.ratingType || 'TOTAL',
+      periodDays: p.periodDays ?? p.period ?? p.days ?? null,
+      count: p.count ?? p.total ?? 0,
+    }));
+
+  return { overview, ratings, periods };
+}
+
+async function fetchFeedbackRatingSummaryTrading(seller, { userId, role }) {
+  const token = await ensureValidToken(seller);
+  const profile = await fetchTradingUserProfileSummary(token, { userId: userId || undefined });
+  const ebayUserId = userId || profile?.ebayUserId;
+  if (!ebayUserId) {
+    return { success: false, status: 400, error: 'Could not resolve eBay user ID for seller' };
+  }
+
+  const upperRole = String(role || 'SELLER').trim().toUpperCase();
+  const tradingFeedbackType = upperRole === 'BUYER' ? 'FeedbackReceivedAsBuyer' : 'FeedbackReceivedAsSeller';
+  const safeUserId = String(ebayUserId).replace(/[<>&]/g, '');
+
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetFeedbackRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <UserID>${safeUserId}</UserID>
+  <FeedbackType>${tradingFeedbackType}</FeedbackType>
+  <Pagination>
+    <EntriesPerPage>25</EntriesPerPage>
+    <PageNumber>1</PageNumber>
+  </Pagination>
+</GetFeedbackRequest>`;
+
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-CALL-NAME': 'GetFeedback',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  const parsed = await parseStringPromise(response.data, { explicitArray: false });
+  const payload = parsed?.GetFeedbackResponse || {};
+
+  if (payload.Ack === 'Failure') {
+    const err = Array.isArray(payload.Errors) ? payload.Errors[0] : payload.Errors;
+    if (profile?.overview) {
+      return {
+        success: true,
+        source: 'trading',
+        overview: profile.overview,
+        ratings: [],
+        periods: [],
+        report: { getUser: profile, getFeedbackError: err },
+        warning: err?.LongMessage || err?.ShortMessage || 'GetFeedback failed; showing GetUser summary only',
+      };
+    }
+    return {
+      success: false,
+      status: 400,
+      error: err?.LongMessage || err?.ShortMessage || 'GetFeedback summary failed',
+      details: payload,
+    };
+  }
+
+  const normalized = normalizeTradingFeedbackRatingSummary(payload.FeedbackSummary || {});
+  if (profile?.overview) {
+    normalized.overview = {
+      ...profile.overview,
+      ...Object.fromEntries(
+        Object.entries(normalized.overview || {}).filter(([, v]) => v != null && v !== '')
+      ),
+    };
+  }
+
+  return {
+    success: true,
+    source: 'trading',
+    ...normalized,
+    report: payload,
+  };
+}
+
+async function fetchFeedbackRatingSummaryRest(seller, { userId, filterParts }) {
+  const accessToken = await ensureValidToken(seller);
+  const ebayUserId = userId || await resolveSellerEbayUserId(seller);
+  if (!ebayUserId) {
+    return { success: false, status: 400, error: 'Could not resolve eBay user ID for seller' };
+  }
+
+  const params = { userId: ebayUserId };
+  if (filterParts.length) params.filter = filterParts.join(',');
+
+  const response = await axios.get('https://api.ebay.com/sell/feedback/v1/feedback_rating_summary', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+    params,
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    return {
+      success: false,
+      status: response.status || 400,
+      error:
+        ebayError?.longMessage ||
+        ebayError?.message ||
+        response.statusText ||
+        'eBay feedback rating summary request failed',
+      details: response.data || null,
+      retryable: response.status === 404 || response.status === 405 || response.status === 501,
+    };
+  }
+
+  const normalized = normalizeRestFeedbackRatingSummary(response.data || {});
+
+  return {
+    success: true,
+    source: 'rest',
+    ...normalized,
+    report: response.data || {},
+  };
+}
+
+// eBay Sell Feedback — Items Awaiting Feedback (getItemsAwaitingFeedback)
+// @see https://developer.ebay.com/develop/api/sell/feedback_api#sell-feedback_api-awaiting_feedback-getitemsawaitingfeedback
+router.get('/feedback/awaiting', requireAuth, requirePageAccess(['EbayFeedback', 'AwaitingFeedback', 'EbayFeedbackRatingSummary']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      role = 'SELLER',
+      listingId,
+      userName,
+      sort,
+      limit = '25',
+      offset = '0',
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const pageLimit = Math.max(1, Math.min(200, Number(limit) || 25));
+    const pageOffset = Math.max(0, Number(offset) || 0);
+
+    const filterParts = [];
+    const upperRole = String(role || '').trim().toUpperCase();
+    if (upperRole && upperRole !== 'ALL') {
+      if (!['SELLER', 'BUYER'].includes(upperRole)) {
+        return res.status(400).json({ error: 'role must be SELLER, BUYER, or ALL' });
+      }
+      filterParts.push(`role:${upperRole}`);
+    }
+    const listingIdTrim = String(listingId || '').trim();
+    if (listingIdTrim) filterParts.push(`listingId:${listingIdTrim}`);
+    const userNameTrim = String(userName || '').trim();
+    if (userNameTrim) filterParts.push(`userName:${userNameTrim}`);
+
+    const sortTrim = String(sort || '').trim();
+
+    let result = await fetchItemsAwaitingFeedbackTrading(seller, {
+      pageLimit,
+      pageOffset,
+      sort: sortTrim,
+    });
+
+    if (!result.success) {
+      console.warn('[Feedback Awaiting] Trading failed, trying REST API:', result.error);
+      const restResult = await fetchItemsAwaitingFeedbackRest(seller, {
+        pageLimit,
+        pageOffset,
+        filterParts,
+        sortTrim,
+      });
+      result = restResult.success ? restResult : result;
+    }
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error || 'eBay awaiting feedback request failed',
+        details: result.details || null,
+      });
+    }
+
+    const lineItems = applyAwaitingFeedbackClientFilters(result.lineItems, {
+      listingIdTrim,
+      userNameTrim,
+      upperRole,
+    });
+
+    return res.json({
+      success: true,
+      source: result.source,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+      },
+      request: {
+        role: upperRole || 'ALL',
+        listingId: listingIdTrim || null,
+        userName: userNameTrim || null,
+        sort: sortTrim || null,
+        limit: pageLimit,
+        offset: pageOffset,
+        filter: filterParts.length ? filterParts.join(',') : null,
+      },
+      summary: {
+        ...result.summary,
+        total: result.summary?.total ?? lineItems.length,
+        filteredCount: lineItems.length,
+      },
+      lineItems,
+      report: result.report,
+    });
+  } catch (err) {
+    console.error('[Feedback Awaiting] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch awaiting feedback',
+    });
+  }
+});
+
+// eBay Sell Feedback — Get Feedback (getFeedback)
+// @see https://developer.ebay.com/develop/api/sell/feedback_api#sell-feedback_api-feedback-getfeedback
+router.get('/feedback/list', requireAuth, requirePageAccess(['EbayFeedback', 'AwaitingFeedback', 'EbayFeedbackRatingSummary']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      feedbackType = 'FEEDBACK_RECEIVED_AS_SELLER',
+      userId,
+      listingId,
+      transactionId,
+      orderLineItemId,
+      commentType,
+      periodDays,
+      sort,
+      limit = '25',
+      offset = '0',
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const pageLimit = Math.max(1, Math.min(200, Number(limit) || 25));
+    const pageOffset = Math.max(0, Number(offset) || 0);
+    const listingIdTrim = String(listingId || '').trim();
+    const transactionIdTrim = String(transactionId || '').trim();
+    const orderLineItemIdTrim = String(orderLineItemId || '').trim();
+    const userIdTrim = String(userId || '').trim();
+    const commentTypeTrim = String(commentType || '').trim();
+    const sortTrim = String(sort || '').trim();
+    const upperFeedbackType = String(feedbackType || 'FEEDBACK_RECEIVED_AS_SELLER').trim().toUpperCase();
+
+    const filterParts = buildFeedbackFilterParts({
+      feedbackType: upperFeedbackType,
+      commentType: commentTypeTrim,
+      periodDays,
+    });
+
+    let result = await fetchFeedbackTrading(seller, {
+      pageLimit,
+      pageOffset,
+      feedbackType: upperFeedbackType,
+      userId: userIdTrim || null,
+      listingId: listingIdTrim || null,
+      commentType: commentTypeTrim || null,
+    });
+
+    if (!result.success) {
+      console.warn('[Feedback List] Trading failed, trying REST API:', result.error);
+      const restResult = await fetchFeedbackRest(seller, {
+        pageLimit,
+        pageOffset,
+        feedbackType: upperFeedbackType,
+        userId: userIdTrim || null,
+        listingId: listingIdTrim || null,
+        transactionId: transactionIdTrim || null,
+        orderLineItemId: orderLineItemIdTrim || null,
+        filterParts,
+        sortTrim,
+      });
+      result = restResult.success ? restResult : result;
+    }
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error || 'eBay feedback request failed',
+        details: result.details || null,
+      });
+    }
+
+    const ebayUserId = userIdTrim || await resolveSellerEbayUserId(seller);
+
+    return res.json({
+      success: true,
+      source: result.source,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+        ebayUserId: ebayUserId || null,
+      },
+      request: {
+        feedbackType: upperFeedbackType,
+        userId: ebayUserId || null,
+        listingId: listingIdTrim || null,
+        transactionId: transactionIdTrim || null,
+        orderLineItemId: orderLineItemIdTrim || null,
+        commentType: commentTypeTrim || null,
+        periodDays: periodDays ? Number(periodDays) : null,
+        sort: sortTrim || null,
+        limit: pageLimit,
+        offset: pageOffset,
+        filter: filterParts.length ? filterParts.join(',') : null,
+      },
+      summary: {
+        ...result.summary,
+        total: result.summary?.total ?? result.entries.length,
+        filteredCount: result.entries.length,
+      },
+      entries: result.entries,
+      report: result.report,
+    });
+  } catch (err) {
+    console.error('[Feedback List] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch feedback',
+    });
+  }
+});
+
+// eBay Sell Feedback — Feedback Rating Summary (getFeedbackRatingSummary)
+// @see https://developer.ebay.com/develop/api/sell/feedback_api#sell-feedback_api-feedback_rating_summary-getfeedbackratingsummary
+router.get('/feedback/rating-summary', requireAuth, requirePageAccess(['EbayFeedback', 'AwaitingFeedback', 'EbayFeedbackRatingSummary']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      userId,
+      role = 'SELLER',
+      periodDays,
+    } = req.query;
+
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay' });
+    }
+
+    const userIdTrim = String(userId || '').trim();
+    const upperRole = String(role || 'SELLER').trim().toUpperCase();
+    if (!['SELLER', 'BUYER', 'ALL'].includes(upperRole)) {
+      return res.status(400).json({ error: 'role must be SELLER, BUYER, or ALL' });
+    }
+
+    const filterParts = buildFeedbackFilterParts({
+      role: upperRole === 'ALL' ? '' : upperRole,
+      periodDays,
+    });
+
+    let result = await fetchFeedbackRatingSummaryTrading(seller, {
+      userId: userIdTrim || null,
+      role: upperRole === 'ALL' ? 'SELLER' : upperRole,
+    });
+
+    if (!result.success) {
+      console.warn('[Feedback Rating Summary] Trading failed, trying REST API:', result.error);
+      const restResult = await fetchFeedbackRatingSummaryRest(seller, {
+        userId: userIdTrim || null,
+        filterParts,
+      });
+      result = restResult.success ? restResult : result;
+    }
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error || 'eBay feedback rating summary request failed',
+        details: result.details || null,
+      });
+    }
+
+    const ebayUserId = userIdTrim || await resolveSellerEbayUserId(seller);
+
+    return res.json({
+      success: true,
+      source: result.source,
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || seller.username || String(seller._id),
+        ebayUserId: ebayUserId || null,
+      },
+      request: {
+        userId: ebayUserId || null,
+        role: upperRole,
+        periodDays: periodDays ? Number(periodDays) : null,
+        filter: filterParts.length ? filterParts.join(',') : null,
+      },
+      overview: result.overview || {},
+      ratings: result.ratings || [],
+      periods: result.periods || [],
+      warning: result.warning || null,
+      report: result.report,
+    });
+  } catch (err) {
+    console.error('[Feedback Rating Summary] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch feedback rating summary',
+    });
+  }
+});
+
 // Update worksheet status for an order (cancellation)
 router.patch('/orders/:orderId/worksheet-status', requireAuth, async (req, res) => {
   try {
@@ -12110,10 +14598,224 @@ router.get('/awaiting-sheet-summary', requireAuth, requirePageAccess('AwaitingSh
 });
 
 
+const STORE_OVERVIEW_CACHE_TTL_MS = 10 * 60 * 1000;
+const STORE_OVERVIEW_SELLER_CONCURRENCY = 6;
+const storeOverviewCache = new Map();
+
+function getStoreOverviewCacheEntry(sellerId) {
+  const entry = storeOverviewCache.get(String(sellerId));
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    storeOverviewCache.delete(String(sellerId));
+    return null;
+  }
+  return entry.data;
+}
+
+function setStoreOverviewCacheEntry(sellerId, data) {
+  storeOverviewCache.set(String(sellerId), {
+    data,
+    expiresAt: Date.now() + STORE_OVERVIEW_CACHE_TTL_MS,
+  });
+}
+
+function pickBestStoreSubscription(subscriptions = []) {
+  if (!subscriptions.length) return null;
+  return subscriptions.find((sub) => sub.subscriptionLevel) || subscriptions[0];
+}
+
+async function fetchSellerSellingSummary(accessToken) {
+  try {
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>${accessToken}</eBayAuthToken>
+  </RequesterCredentials>
+  <SellingSummary>
+    <Include>true</Include>
+  </SellingSummary>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <Version>1173</Version>
+</GetMyeBaySellingRequest>`;
+
+    const response = await axios.post(
+      'https://api.ebay.com/ws/api.dll',
+      xmlRequest,
+      {
+        headers: {
+          'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
+          'X-EBAY-API-SITEID': '0',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1173',
+          'Content-Type': 'text/xml',
+        },
+        timeout: 30000,
+      }
+    );
+
+    const result = await parseStringPromise(response.data, { explicitArray: false });
+    if (result.GetMyeBaySellingResponse.Ack === 'Failure') {
+      return {
+        success: false,
+        error: result.GetMyeBaySellingResponse.Errors?.LongMessage || 'eBay API Error',
+      };
+    }
+
+    const summary = result.GetMyeBaySellingResponse.Summary;
+    return {
+      success: true,
+      quantityLimitRemaining: summary?.QuantityLimitRemaining,
+      amountLimitRemaining: summary?.AmountLimitRemaining?._,
+      amountLimitCurrency: summary?.AmountLimitRemaining?.$?.currencyID,
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+function buildDisconnectedStoreOverviewRow(seller) {
+  return {
+    sellerId: seller._id,
+    sellerName: resolveStoreDisplayName(seller),
+    notConnected: true,
+    quantityLimitRemaining: null,
+    amountLimitRemaining: null,
+    amountLimitCurrency: null,
+    accountLimitQuantity: null,
+    accountLimitAmount: null,
+    accountLimitCurrency: null,
+    accountPrivilegeError: null,
+    subscriptionLevel: null,
+    termValue: null,
+    termUnit: null,
+    privilegeError: null,
+    subscriptionError: null,
+    needsReconnect: false,
+    noPlan: false,
+  };
+}
+
+async function fetchStoreOverviewForSeller(seller, { forceRefresh = false } = {}) {
+  const sellerId = String(seller._id);
+
+  if (!forceRefresh) {
+    const cached = getStoreOverviewCacheEntry(sellerId);
+    if (cached) return { row: cached, fromCache: true };
+  }
+
+  if (!seller.ebayTokens?.access_token || !seller.ebayTokens?.refresh_token) {
+    const row = buildDisconnectedStoreOverviewRow(seller);
+    setStoreOverviewCacheEntry(sellerId, row);
+    return { row, fromCache: false };
+  }
+
+  try {
+    const accessToken = await ensureValidToken(seller);
+    const [sellingResult, privResult, subResult] = await Promise.all([
+      fetchSellerSellingSummary(accessToken),
+      fetchSellerAccountPrivileges(seller, { accessToken }),
+      fetchSellerAccountSubscriptions(seller, { accessToken }),
+    ]);
+
+    const sub = subResult.success
+      ? pickBestStoreSubscription(subResult.subscriptions)
+      : null;
+
+    const row = {
+      sellerId: seller._id,
+      sellerName: resolveStoreDisplayName(seller),
+      quantityLimitRemaining: sellingResult.success ? sellingResult.quantityLimitRemaining : null,
+      amountLimitRemaining: sellingResult.success ? sellingResult.amountLimitRemaining : null,
+      amountLimitCurrency: sellingResult.success ? sellingResult.amountLimitCurrency : null,
+      accountLimitQuantity: privResult.success ? privResult.limitQuantity : null,
+      accountLimitAmount: privResult.success ? privResult.limitAmount : null,
+      accountLimitCurrency: privResult.success ? privResult.limitCurrency : null,
+      accountPrivilegeError: privResult.success ? null : (privResult.error || null),
+      subscriptionLevel: sub?.subscriptionLevel || null,
+      termValue: sub?.term?.value ?? null,
+      termUnit: sub?.term?.unit || null,
+      notConnected: false,
+      privilegeError: sellingResult.success ? null : (sellingResult.error || null),
+      subscriptionError: subResult.success ? null : (subResult.error || null),
+      needsReconnect: Boolean(privResult.needsReconnect || subResult.needsReconnect),
+      noPlan: Boolean(subResult.success && !subResult.subscriptions?.length),
+    };
+
+    setStoreOverviewCacheEntry(sellerId, row);
+    return { row, fromCache: false };
+  } catch (err) {
+    console.error(`[Store Overview] Failed for seller ${seller._id}:`, err.message);
+    const row = {
+      sellerId: seller._id,
+      sellerName: resolveStoreDisplayName(seller),
+      notConnected: false,
+      quantityLimitRemaining: null,
+      amountLimitRemaining: null,
+      amountLimitCurrency: null,
+      accountLimitQuantity: null,
+      accountLimitAmount: null,
+      accountLimitCurrency: null,
+      accountPrivilegeError: null,
+      subscriptionLevel: null,
+      termValue: null,
+      termUnit: null,
+      privilegeError: err.message,
+      subscriptionError: null,
+      needsReconnect: false,
+      noPlan: false,
+    };
+    setStoreOverviewCacheEntry(sellerId, row);
+    return { row, fromCache: false };
+  }
+}
+
+// Merged Store Overview — one seller loop, shared token refresh, per-store cache
+router.get('/store-overview/all', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+  try {
+    const forceRefresh = ['1', 'true', 'yes'].includes(String(req.query.refresh || '').toLowerCase());
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email active')
+      : [];
+
+    console.log(`[Store Overview] Loading ${sellers.length} stores (refresh=${forceRefresh})...`);
+
+    const runLimited = pLimit(STORE_OVERVIEW_SELLER_CONCURRENCY);
+    const outcomes = await Promise.all(
+      sellers.map((seller) => runLimited(() => fetchStoreOverviewForSeller(seller, { forceRefresh })))
+    );
+
+    let hitCount = 0;
+    let missCount = 0;
+    const rows = outcomes.map(({ row, fromCache }) => {
+      if (fromCache) hitCount += 1;
+      else missCount += 1;
+      return row;
+    });
+    rows.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
+
+    return res.json({
+      success: true,
+      fetchedAt: new Date().toISOString(),
+      storeCount: rows.length,
+      rows,
+      cache: {
+        hitCount,
+        missCount,
+        ttlMs: STORE_OVERVIEW_CACHE_TTL_MS,
+        refreshed: forceRefresh,
+      },
+    });
+  } catch (error) {
+    console.error('[Store Overview All] Error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================
 // GET ALL SELLING PRIVILEGES (BULK)
 // ============================================
-router.get('/selling/summary/all', requireAuth, requirePageAccess('SellingPrivileges'), async (req, res) => {
+router.get('/selling/summary/all', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
   try {
     const scoped = await getSellersMatchingAllRoute(req);
     const sellerIds = scoped.map((s) => s._id);
@@ -12208,6 +14910,536 @@ router.get('/selling/summary/all', requireAuth, requirePageAccess('SellingPrivil
   }
 });
 
+async function fetchSellerAccountSubscriptions(seller, { limit, continuationToken, accessToken: providedToken } = {}) {
+  const accessToken = providedToken || await ensureValidToken(seller);
+  const params = {};
+  if (limit != null && String(limit).trim() !== '') params.limit = String(limit);
+  if (continuationToken) params.continuation_token = String(continuationToken);
+
+  const response = await axios.get('https://api.ebay.com/sell/account/v1/subscription', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    params,
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    const message = ebayError?.longMessage || ebayError?.message || response.statusText || 'eBay subscription request failed';
+    const needsReconnect = /scope|access|unauthorized|invalid token/i.test(String(message));
+    return {
+      success: false,
+      status: response.status || 400,
+      error: message,
+      details: response.data || null,
+      needsReconnect,
+    };
+  }
+
+  const payload = response.data || {};
+  const subscriptions = Array.isArray(payload.subscriptions) ? payload.subscriptions : [];
+
+  return {
+    success: true,
+    total: payload.total ?? subscriptions.length,
+    subscriptions,
+    href: payload.href || null,
+    limit: payload.limit ?? null,
+    continuationToken: payload.continuation_token || null,
+    report: payload,
+  };
+}
+
+// eBay Sell Account API — getSubscription (eBay Store plans per seller)
+// @see https://developer.ebay.com/api-docs/sell/account/resources/subscription/methods/getSubscription
+router.get('/account/subscriptions', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+  try {
+    const { sellerId, limit, continuation_token: continuationToken } = req.query;
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay', notConnected: true });
+    }
+
+    const result = await fetchSellerAccountSubscriptions(seller, { limit, continuationToken });
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error,
+        details: result.details || null,
+        needsReconnect: result.needsReconnect || false,
+      });
+    }
+
+    return res.json({
+      success: true,
+      seller: {
+        id: seller._id,
+        name: resolveStoreDisplayName(seller),
+      },
+      total: result.total,
+      subscriptions: result.subscriptions,
+      href: result.href,
+      limit: result.limit,
+      continuationToken: result.continuationToken,
+    });
+  } catch (err) {
+    console.error('[Account Subscriptions] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch store subscriptions',
+    });
+  }
+});
+
+router.get('/account/subscriptions/all', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+  try {
+    const { limit } = req.query;
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email active')
+      : [];
+
+    console.log(`[Store Subscriptions] Fetching for ${sellers.length} stores...`);
+
+    const results = await Promise.all(sellers.map(async (seller) => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        if (!seller.ebayTokens?.access_token || !seller.ebayTokens?.refresh_token) {
+          return {
+            sellerId: seller._id,
+            sellerName,
+            notConnected: true,
+            total: 0,
+            subscriptions: [],
+          };
+        }
+
+        const result = await fetchSellerAccountSubscriptions(seller, { limit });
+        if (!result.success) {
+          return {
+            sellerId: seller._id,
+            sellerName,
+            error: result.error,
+            needsReconnect: result.needsReconnect || false,
+            total: 0,
+            subscriptions: [],
+          };
+        }
+
+        return {
+          sellerId: seller._id,
+          sellerName,
+          total: result.total,
+          subscriptions: result.subscriptions,
+          continuationToken: result.continuationToken || null,
+        };
+      } catch (err) {
+        console.error(`[Store Subscriptions] Failed for seller ${seller._id}:`, err.message);
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message,
+          total: 0,
+          subscriptions: [],
+        };
+      }
+    }));
+
+    results.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
+
+    const flatRows = results.flatMap((row) => {
+      if (row.notConnected || row.error) {
+        return [{
+          sellerId: row.sellerId,
+          sellerName: row.sellerName,
+          notConnected: row.notConnected || false,
+          error: row.error || null,
+          needsReconnect: row.needsReconnect || false,
+          marketplaceId: null,
+          subscriptionId: null,
+          subscriptionLevel: null,
+          subscriptionType: null,
+          termValue: null,
+          termUnit: null,
+        }];
+      }
+      if (!row.subscriptions?.length) {
+        return [{
+          sellerId: row.sellerId,
+          sellerName: row.sellerName,
+          noPlan: true,
+          marketplaceId: null,
+          subscriptionId: null,
+          subscriptionLevel: null,
+          subscriptionType: null,
+          termValue: null,
+          termUnit: null,
+        }];
+      }
+      return row.subscriptions.map((sub) => ({
+        sellerId: row.sellerId,
+        sellerName: row.sellerName,
+        marketplaceId: sub.marketplaceId || null,
+        subscriptionId: sub.subscriptionId || null,
+        subscriptionLevel: sub.subscriptionLevel || null,
+        subscriptionType: sub.subscriptionType || null,
+        termValue: sub.term?.value ?? null,
+        termUnit: sub.term?.unit || null,
+      }));
+    });
+
+    return res.json({
+      success: true,
+      fetchedAt: new Date().toISOString(),
+      storeCount: results.length,
+      rowCount: flatRows.length,
+      data: results,
+      rows: flatRows,
+    });
+  } catch (error) {
+    console.error('[Store Subscriptions All] Error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+async function fetchSellerAccountPrivileges(seller, { accessToken: providedToken } = {}) {
+  const accessToken = providedToken || await ensureValidToken(seller);
+
+  const response = await axios.get('https://api.ebay.com/sell/account/v1/privilege', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    const message = ebayError?.longMessage || ebayError?.message || response.statusText || 'eBay privileges request failed';
+    const needsReconnect = /scope|access|unauthorized|invalid token/i.test(String(message));
+    return {
+      success: false,
+      status: response.status || 400,
+      error: message,
+      details: response.data || null,
+      needsReconnect,
+    };
+  }
+
+  const payload = response.data || {};
+  const sellingLimit = payload.sellingLimit || null;
+
+  return {
+    success: true,
+    sellerRegistrationCompleted: payload.sellerRegistrationCompleted ?? null,
+    limitAmount: sellingLimit?.amount?.value ?? null,
+    limitCurrency: sellingLimit?.amount?.currency ?? 'USD',
+    limitQuantity: sellingLimit?.quantity ?? null,
+    report: payload,
+  };
+}
+
+// eBay Sell Account API — getPrivileges
+// @see https://developer.ebay.com/api-docs/sell/account/resources/privilege/methods/getPrivileges
+router.get('/account/privileges', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+  try {
+    const { sellerId } = req.query;
+    const sellerLookup = String(sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay', notConnected: true });
+    }
+
+    const result = await fetchSellerAccountPrivileges(seller);
+
+    if (!result.success) {
+      return res.status(result.status || 400).json({
+        success: false,
+        error: result.error,
+        details: result.details || null,
+        needsReconnect: result.needsReconnect || false,
+      });
+    }
+
+    return res.json({
+      success: true,
+      seller: {
+        id: seller._id,
+        name: resolveStoreDisplayName(seller),
+      },
+      sellerRegistrationCompleted: result.sellerRegistrationCompleted,
+      limitAmount: result.limitAmount,
+      limitCurrency: result.limitCurrency,
+      limitQuantity: result.limitQuantity,
+    });
+  } catch (err) {
+    console.error('[Account Privileges] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to fetch account privileges',
+    });
+  }
+});
+
+router.get('/account/privileges/all', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+  try {
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email active')
+      : [];
+
+    console.log(`[Account Privileges] Fetching for ${sellers.length} stores...`);
+
+    const rows = await Promise.all(sellers.map(async (seller) => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        if (!seller.ebayTokens?.access_token || !seller.ebayTokens?.refresh_token) {
+          return {
+            sellerId: seller._id,
+            sellerName,
+            notConnected: true,
+            sellerRegistrationCompleted: null,
+            limitAmount: null,
+            limitCurrency: null,
+            limitQuantity: null,
+          };
+        }
+
+        const result = await fetchSellerAccountPrivileges(seller);
+        if (!result.success) {
+          return {
+            sellerId: seller._id,
+            sellerName,
+            error: result.error,
+            needsReconnect: result.needsReconnect || false,
+            sellerRegistrationCompleted: null,
+            limitAmount: null,
+            limitCurrency: null,
+            limitQuantity: null,
+          };
+        }
+
+        return {
+          sellerId: seller._id,
+          sellerName,
+          sellerRegistrationCompleted: result.sellerRegistrationCompleted,
+          limitAmount: result.limitAmount,
+          limitCurrency: result.limitCurrency,
+          limitQuantity: result.limitQuantity,
+        };
+      } catch (err) {
+        console.error(`[Account Privileges] Failed for seller ${seller._id}:`, err.message);
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message,
+          sellerRegistrationCompleted: null,
+          limitAmount: null,
+          limitCurrency: null,
+          limitQuantity: null,
+        };
+      }
+    }));
+
+    rows.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
+
+    return res.json({
+      success: true,
+      fetchedAt: new Date().toISOString(),
+      storeCount: rows.length,
+      rows,
+    });
+  } catch (error) {
+    console.error('[Account Privileges All] Error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+async function getEbayClientCredentialsToken(scope = 'https://api.ebay.com/oauth/api_scope') {
+  const response = await axios.post(
+    'https://api.ebay.com/identity/v1/oauth2/token',
+    qs.stringify({ grant_type: 'client_credentials', scope }),
+    {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64')
+      },
+      timeout: 15000
+    }
+  );
+  return response.data.access_token;
+}
+
+function pathRequiresMarketplaceHeader(path) {
+  // Analytics + commerce APIs encode marketplace in query params — do not send conflicting header.
+  return /^\/sell\/(negotiation|inventory|account|fulfillment|marketing|finances|recommendation)\//i.test(path);
+}
+
+function resolveRawCallMarketplace(seller, path, explicitMarketplace) {
+  if (!pathRequiresMarketplaceHeader(path)) return explicitMarketplace || null;
+  const explicit = explicitMarketplace ? String(explicitMarketplace).trim() : '';
+  if (explicit) return explicit;
+  return resolvePrimaryFinancesMarketplaceId(seller, null) || 'EBAY_US';
+}
+
+function buildEbayRawHeaders({ accessToken, method, path, marketplace }) {
+  const isPostOrder = /^\/post-order\//i.test(path);
+  const headers = {
+    Authorization: isPostOrder ? `IAF ${accessToken}` : `Bearer ${accessToken}`,
+    Accept: 'application/json'
+  };
+  if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const usesMarketplaceHeader = pathRequiresMarketplaceHeader(path);
+  if (marketplace && usesMarketplaceHeader) {
+    headers['X-EBAY-C-MARKETPLACE-ID'] = String(marketplace);
+  }
+  return headers;
+}
+
+function extractEbayApiErrors(data) {
+  if (!data) return [];
+  if (Array.isArray(data.errors)) return data.errors;
+  if (Array.isArray(data.error)) return data.error;
+  return [];
+}
+
+function parseEbayRawResponseData(response) {
+  let parsedData = response.data;
+  if (typeof parsedData === 'string' && parsedData.trim()) {
+    try {
+      parsedData = JSON.parse(parsedData);
+    } catch {
+      parsedData = { _rawBody: parsedData };
+    }
+  } else if (parsedData === '' || parsedData == null) {
+    parsedData = {
+      _note: 'Empty response body from eBay',
+      requestId: response.headers?.['x-ebay-c-request-id'] || response.headers?.['x-ebay-request-id'] || null
+    };
+  }
+  return parsedData;
+}
+
+function buildRawCallHint({ statusCode, path, method, params }) {
+  if (/^\/commerce\/notification\//i.test(path)) {
+    if (statusCode === 409 || statusCode === 403) {
+      return 'Notification API: seller token only returns user-based webhook subscriptions (scope: commerce.notification.subscription). If the seller connected before that scope was added, disconnect & reconnect eBay OAuth. App-level subscriptions use a client-credentials token — the tester will retry automatically on failure.';
+    }
+    if (method === 'GET' && /\/subscription\/?$/i.test(path)) {
+      return 'This lists webhook notification subscriptions, not buyer messages. For inbox threads use GET /commerce/message/v1/conversation with { "conversation_type": "FROM_MEMBERS", "limit": 50 }.';
+    }
+  }
+  if (/^\/commerce\/message\//i.test(path) && (statusCode === 403 || statusCode === 401)) {
+    return 'Message API requires commerce.message scope. Disconnect & reconnect the seller on eBay OAuth, then retry.';
+  }
+  if (/^\/sell\/analytics\/v1\/customer_service_metric\//i.test(path) && statusCode === 409) {
+    return 'eBay business error (409): metric not available for this seller/marketplace/evaluation type. Common causes: no transactions on that marketplace in the past 12 months, or seller not active long enough for CURRENT. Try evaluation_type=CURRENT, another marketplace, or a seller with recent sales on EBAY_US.';
+  }
+  if (/^\/sell\/analytics\//i.test(path) && (statusCode === 403 || statusCode === 401)) {
+    return 'Analytics API requires sell.analytics.readonly scope. Disconnect & reconnect the seller on eBay OAuth.';
+  }
+  if (/^\/sell\/analytics\/v1\/traffic_report\/?$/i.test(path) && statusCode === 400) {
+    const dim = String(params?.dimension || '').trim();
+    if (/^\d{10,}$/.test(dim)) {
+      return `dimension must be DAY or LISTING — not a listing ID. Put the listing ID in filter: listing_ids:{${dim}} with dimension "DAY" or "LISTING".`;
+    }
+    if (dim && !['DAY', 'LISTING'].includes(dim.toUpperCase())) {
+      return `dimension must be DAY or LISTING (got "${dim}"). Listing IDs belong in filter as listing_ids:{ID}.`;
+    }
+    return 'Traffic report filter format: marketplace_ids:{EBAY_US},listing_ids:{ITEM_ID},date_range:[YYYYMMDD..YYYYMMDD]. Data is through yesterday (Pacific).';
+  }
+  return null;
+}
+
+function normalizeTrafficReportParams(params) {
+  const fixes = [];
+  const p = params && typeof params === 'object' ? { ...params } : {};
+  const dim = String(p.dimension || '').trim();
+
+  if (/^\d{10,}$/.test(dim)) {
+    const listingId = dim;
+    p.dimension = 'DAY';
+    fixes.push(`dimension was listing ID "${listingId}" — changed to "DAY".`);
+
+    let filterStr = String(p.filter || '');
+    if (!/listing_ids:\{/i.test(filterStr)) {
+      const mp = filterStr.match(/marketplace_ids:\{([^}]+)\}/)?.[1] || 'EBAY_US';
+      const datePart = filterStr.match(/date_range:\[([^\]]+)\]/)?.[1];
+      const dateRange = datePart || 'YYYYMMDD..YYYYMMDD';
+      p.filter = `marketplace_ids:{${mp}},listing_ids:{${listingId}},date_range:[${dateRange}]`;
+      fixes.push(`Added listing_ids:{${listingId}} to filter.`);
+    }
+  }
+
+  const upperDim = String(p.dimension || '').toUpperCase();
+  if (upperDim === 'DAY' && !p.sort && p.metric) {
+    const firstMetric = String(p.metric).split(',')[0].trim();
+    if (firstMetric) {
+      p.sort = `-${firstMetric}`;
+      fixes.push(`Added sort "-${firstMetric}" (required for DAY dimension).`);
+    }
+  }
+
+  return { params: p, fixes };
+}
+
+async function executeEbayRawRequest({ method, targetUrl, path, params, body, accessToken, marketplace }) {
+  const upperMethod = String(method || 'GET').toUpperCase();
+  const headers = buildEbayRawHeaders({ accessToken, method: upperMethod, path, marketplace });
+  const safeParams = params && typeof params === 'object' ? params : {};
+  const safeBody = ['POST', 'PUT', 'PATCH'].includes(upperMethod) ? (body && typeof body === 'object' ? body : {}) : undefined;
+  const requestUrlWithParams = axios.getUri({ url: targetUrl, params: safeParams });
+
+  const response = await axios.request({
+    method: upperMethod,
+    url: targetUrl,
+    params: safeParams,
+    data: safeBody,
+    headers,
+    timeout: 45000,
+    validateStatus: () => true,
+    transformResponse: [(data) => data]
+  });
+
+  return {
+    ok: response.status >= 200 && response.status < 300,
+    statusCode: response.status,
+    statusText: response.statusText,
+    targetUrl: requestUrlWithParams,
+    request: {
+      method: upperMethod,
+      params: safeParams,
+      body: safeBody,
+      marketplace: headers['X-EBAY-C-MARKETPLACE-ID'] || null
+    },
+    data: parseEbayRawResponseData(response)
+  };
+}
+
 /**
  * Dev-only generic eBay API proxy for internal tester page.
  * Lets admins call arbitrary eBay REST paths with a selected seller token.
@@ -12232,11 +15464,11 @@ router.post('/dev/raw-call', requireAuth, requirePageAccess('EbayApiTester'), as
       return res.status(400).json({ error: 'endpoint is required' });
     }
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup)
-      : await Seller.findOne({ username: sellerLookup });
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
-    if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
+    if (!seller.ebayTokens?.refresh_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay', needsReconnect: true });
+    }
 
     const accessToken = await ensureValidToken(seller);
     const upperMethod = String(method || 'GET').toUpperCase();
@@ -12261,51 +15493,95 @@ router.post('/dev/raw-call', requireAuth, requirePageAccess('EbayApiTester'), as
     }
 
     const normalizedEndpointPath = endpointText.startsWith('/') ? endpointText : `/${endpointText}`;
-    const isPostOrder = /^\/post-order\//i.test(normalizedEndpointPath);
-    const headers = {
-      Authorization: isPostOrder ? `IAF ${accessToken}` : `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    };
-    const inferredMarketplace =
-      marketplace ||
-      (Array.isArray(seller?.ebayMarketplaces) && seller.ebayMarketplaces[0]) ||
-      'EBAY_US';
-    if (marketplace || /^\/sell\/(negotiation|inventory|account|fulfillment|marketing)\//i.test(normalizedEndpointPath)) {
-      headers['X-EBAY-C-MARKETPLACE-ID'] = String(inferredMarketplace);
+    const explicitMarketplace = marketplace ? String(marketplace).trim() : null;
+    const resolvedMarketplace = resolveRawCallMarketplace(seller, normalizedEndpointPath, explicitMarketplace);
+
+    const safeParams = params && typeof params === 'object' ? { ...params } : {};
+    if (
+      upperMethod === 'GET' &&
+      /^\/commerce\/notification\/v1\/subscription\/?$/i.test(normalizedEndpointPath) &&
+      safeParams.limit == null
+    ) {
+      safeParams.limit = 20;
     }
 
-    const safeParams = params && typeof params === 'object' ? params : {};
+    if (
+      upperMethod === 'GET' &&
+      /^\/sell\/analytics\/v1\/customer_service_metric\//i.test(normalizedEndpointPath) &&
+      !safeParams.evaluation_marketplace_id
+    ) {
+      safeParams.evaluation_marketplace_id =
+        explicitMarketplace ||
+        (Array.isArray(seller?.ebayMarketplaces) && seller.ebayMarketplaces[0]) ||
+        'EBAY_US';
+    }
+
     const safeBody = ['POST', 'PUT', 'PATCH'].includes(upperMethod) ? (body && typeof body === 'object' ? body : {}) : undefined;
-    const requestUrlWithParams = axios.getUri({
-      url: targetUrl,
+
+    let trafficReportFixes = [];
+    if (
+      upperMethod === 'GET' &&
+      /^\/sell\/analytics\/v1\/traffic_report\/?$/i.test(normalizedEndpointPath)
+    ) {
+      const normalized = normalizeTrafficReportParams(safeParams);
+      Object.assign(safeParams, normalized.params);
+      trafficReportFixes = normalized.fixes;
+    }
+
+    const result = await executeEbayRawRequest({
+      method: upperMethod,
+      targetUrl,
+      path: normalizedEndpointPath,
+      params: safeParams,
+      body: safeBody,
+      accessToken,
+      marketplace: resolvedMarketplace
+    });
+
+    let appTokenAttempt = null;
+    if (
+      !result.ok &&
+      upperMethod === 'GET' &&
+      /^\/commerce\/notification\/v1\/subscription\/?$/i.test(normalizedEndpointPath)
+    ) {
+      try {
+        const appToken = await getEbayClientCredentialsToken();
+        appTokenAttempt = await executeEbayRawRequest({
+          method: upperMethod,
+          targetUrl,
+          path: normalizedEndpointPath,
+          params: safeParams,
+          body: safeBody,
+          accessToken: appToken,
+          marketplace: resolvedMarketplace
+        });
+        appTokenAttempt.tokenType = 'application (client_credentials)';
+      } catch (appErr) {
+        appTokenAttempt = {
+          ok: false,
+          error: appErr.message || 'App token retry failed'
+        };
+      }
+    }
+
+    const hint = buildRawCallHint({
+      statusCode: result.statusCode,
+      path: normalizedEndpointPath,
+      method: upperMethod,
       params: safeParams
     });
-
-    const response = await axios.request({
-      method: upperMethod,
-      url: targetUrl,
-      params: safeParams,
-      data: safeBody,
-      headers,
-      timeout: 45000,
-      validateStatus: () => true
-    });
+    const ebayErrors = extractEbayApiErrors(result.data);
 
     return res.status(200).json({
-      ok: response.status >= 200 && response.status < 300,
-      statusCode: response.status,
-      statusText: response.statusText,
-      targetUrl: requestUrlWithParams,
-      request: {
-        method: upperMethod,
-        params: safeParams,
-        body: safeBody,
-        marketplace: headers['X-EBAY-C-MARKETPLACE-ID'] || null
-      },
-      data: response.data
+      ...result,
+      hint,
+      ebayErrors,
+      appTokenAttempt,
+      trafficReportFixes: trafficReportFixes.length ? trafficReportFixes : undefined
     });
   } catch (err) {
     console.error('[eBay Raw Call] Error:', err.response?.data || err.message);
+    if (sendTokenReconnectError(err, res)) return;
     return res.status(500).json({ error: err.message || 'Raw call failed' });
   }
 });
@@ -12333,11 +15609,11 @@ router.post('/dev/trading-call', requireAuth, requirePageAccess('EbayApiTester')
     if (!callNameText) return res.status(400).json({ error: 'callName is required' });
     if (!xmlText) return res.status(400).json({ error: 'requestXml is required' });
 
-    const seller = mongoose.Types.ObjectId.isValid(sellerLookup)
-      ? await Seller.findById(sellerLookup)
-      : await Seller.findOne({ username: sellerLookup });
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
-    if (!seller.ebayTokens?.access_token) return res.status(400).json({ error: 'Seller not connected to eBay' });
+    if (!seller.ebayTokens?.refresh_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay', needsReconnect: true });
+    }
 
     const token = await ensureValidToken(seller);
     const hasTokenTag = /<eBayAuthToken>[\s\S]*?<\/eBayAuthToken>/i.test(xmlText);
@@ -12365,6 +15641,7 @@ router.post('/dev/trading-call', requireAuth, requirePageAccess('EbayApiTester')
     });
   } catch (err) {
     console.error('[eBay Trading Call] Error:', err.response?.data || err.message);
+    if (sendTokenReconnectError(err, res)) return;
     return res.status(500).json({ error: err.message || 'Trading call failed' });
   }
 });
@@ -12489,7 +15766,7 @@ router.get('/best-offers/eligible/all', requireAuth, requirePageAccess('StoreLis
 });
 
 /** Trading API GetItem → normalized fields for eligible-offers UI when Mongo has no row yet */
-async function fetchTradingGetItemListingSnapshot(token, itemId) {
+async function fetchTradingGetItemListingSnapshot(token, itemId, siteId = '0') {
   const id = String(itemId || '').trim();
   if (!id) return null;
   const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
@@ -12503,7 +15780,7 @@ async function fetchTradingGetItemListingSnapshot(token, itemId) {
 
   const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
     headers: {
-      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-SITEID': String(siteId || '0'),
       'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
       'X-EBAY-API-CALL-NAME': 'GetItem',
       'Content-Type': 'text/xml',
@@ -12914,7 +16191,7 @@ router.post('/end-item', requireAuth, async (req, res) => {
 });
 
 // Export for optional external schedulers
-export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDate };
+export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDate, processPendingListingQtyUpdates };
 
 // ============================================
 // FEED UPLOAD SUCCESS STATS (aggregated day-wise by seller)
@@ -13017,6 +16294,3569 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
     res.status(500).json({ error: 'Failed to fetch feed upload stats' });
   }
 });
+// ============================================
+// FINANCES TRANSACTION FILTERS (shared by summary + getTransactions)
+// ============================================
+function buildFinancesTransactionFilters({
+  transactionStatus,
+  transactionType,
+  fromDate,
+  toDate,
+  orderId,
+  payoutId,
+  buyerUsername,
+  transactionId,
+  requireStatus = false,
+}) {
+  const filters = [];
+  const status = String(transactionStatus || '').trim();
+  if (requireStatus && !status) throw new Error('transactionStatus is required');
+  if (status) filters.push(`transactionStatus:{${status}}`);
+
+  if (transactionType?.trim()) {
+    filters.push(`transactionType:{${String(transactionType).trim()}}`);
+  }
+  if (fromDate || toDate) {
+    const from = fromDate ? new Date(fromDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const to = toDate ? new Date(toDate) : new Date();
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      throw new Error('Invalid fromDate or toDate');
+    }
+    filters.push(`transactionDate:[${from.toISOString()}..${to.toISOString()}]`);
+  }
+  if (orderId?.trim()) filters.push(`orderId:{${String(orderId).trim()}}`);
+  if (payoutId?.trim()) filters.push(`payoutId:{${String(payoutId).trim()}}`);
+  if (buyerUsername?.trim()) filters.push(`buyerUsername:{${String(buyerUsername).trim()}}`);
+  if (transactionId?.trim()) {
+    if (!transactionType?.trim()) {
+      throw new Error('transactionType is required when filtering by transactionId');
+    }
+    filters.push(`transactionId:{${String(transactionId).trim()}}`);
+  }
+  return filters;
+}
+
+function getFinancesReference(txn, referenceType) {
+  return (txn?.references || []).find((r) => r.referenceType === referenceType) || null;
+}
+
+function parseFeeTransactionItemId(transactionId) {
+  const match = String(transactionId || '').match(/^(?:TAX|FEE)-(\d+)_/);
+  return match?.[1] || null;
+}
+
+function buildFinancesOrderIdIndexes(transactions) {
+  const itemToOrder = new Map();
+  const srrToOrder = new Map();
+  const sales = [];
+
+  for (const txn of transactions || []) {
+    const orderId = txn?.orderId || getFinancesReference(txn, 'ORDER_ID')?.referenceId;
+    if (!orderId) continue;
+
+    const srr = txn.salesRecordReference;
+    if (srr && String(srr) !== '0') srrToOrder.set(String(srr), orderId);
+
+    for (const ref of txn.references || []) {
+      if (ref.referenceType === 'ITEM_ID' && ref.referenceId) {
+        itemToOrder.set(String(ref.referenceId), orderId);
+      }
+    }
+    for (const line of txn.orderLineItems || []) {
+      if (line.lineItemId) itemToOrder.set(String(line.lineItemId), orderId);
+    }
+
+    if (txn.transactionType === 'SALE') {
+      const time = new Date(txn.transactionDate).getTime();
+      if (!Number.isNaN(time)) sales.push({ orderId, time });
+    }
+  }
+
+  sales.sort((a, b) => a.time - b.time);
+  return { itemToOrder, srrToOrder, sales };
+}
+
+function resolveFinancesOrderId(txn, indexes) {
+  if (txn?.orderId) return txn.orderId;
+
+  const orderRef = getFinancesReference(txn, 'ORDER_ID');
+  if (orderRef?.referenceId) return orderRef.referenceId;
+
+  if (!indexes) return null;
+
+  const itemId = getFinancesReference(txn, 'ITEM_ID')?.referenceId || parseFeeTransactionItemId(txn?.transactionId);
+  if (itemId && indexes.itemToOrder.has(String(itemId))) {
+    return indexes.itemToOrder.get(String(itemId));
+  }
+
+  const srr = txn.salesRecordReference;
+  if (srr && String(srr) !== '0' && indexes.srrToOrder.has(String(srr))) {
+    return indexes.srrToOrder.get(String(srr));
+  }
+
+  const txnTime = new Date(txn.transactionDate).getTime();
+  if (Number.isNaN(txnTime) || !indexes.sales?.length) return null;
+
+  let bestOrderId = null;
+  let bestDelta = Infinity;
+  for (const sale of indexes.sales) {
+    if (sale.time > txnTime) continue;
+    const delta = txnTime - sale.time;
+    if (delta > 5 * 60 * 1000) continue;
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      bestOrderId = sale.orderId;
+    }
+  }
+  return bestOrderId;
+}
+
+/** Link tax/fee rows to orders via references, item id, sales record, or nearby SALE. */
+function enrichFinancesTransactions(transactions) {
+  const list = Array.isArray(transactions) ? transactions : [];
+  const indexes = buildFinancesOrderIdIndexes(list);
+  return list.map((txn) => {
+    const orderId = resolveFinancesOrderId(txn, indexes);
+    if (!orderId || orderId === txn.orderId) return txn;
+    return { ...txn, orderId };
+  });
+}
+
+function buildTransactionSummaryFilters(opts) {
+  return buildFinancesTransactionFilters({ ...opts, requireStatus: true });
+}
+
+router.get('/finances/transaction-summary', requireAuth, requirePageAccess('FinancesTransactionSummary'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+    if (!seller.ebayTokens?.access_token) {
+      return res.status(400).json({ success: false, error: 'Seller not connected to eBay' });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+    const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
+    const filters = buildTransactionSummaryFilters({
+      transactionStatus: req.query.transactionStatus || 'FUNDS_AVAILABLE_FOR_PAYOUT',
+      transactionType: req.query.transactionType,
+      fromDate: req.query.fromDate,
+      toDate: req.query.toDate,
+      orderId: req.query.orderId,
+      payoutId: req.query.payoutId,
+      buyerUsername: req.query.buyerUsername,
+      transactionId: req.query.transactionId,
+    });
+
+    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction_summary', {
+      headers: financesApiHeaders(accessToken, marketplaceId),
+      params: { filter: filters },
+      paramsSerializer: (params) => qs.stringify(params, { arrayFormat: 'repeat' }),
+      timeout: 90000,
+    });
+
+    return res.json({
+      success: true,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId,
+      filters,
+      summary: response.data || {},
+    });
+  } catch (err) {
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = data?.errors || [];
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to load transaction summary';
+    console.error('[Transaction Summary] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
+// ============================================
+// TRANSACTIONS LIST (Finances API — getTransactions)
+// ============================================
+function resolveFeeTypeFilterValuesBackend(feeType) {
+  const key = String(feeType || '').trim().toUpperCase();
+  if (!key) return [];
+  if (key === 'STORE_SUBSCRIPTION' || key === 'OTHER_FEES' || key === 'STORE_SUBSCRIPTION_FEE') {
+    return ['OTHER_FEES', 'STORE_SUBSCRIPTION_FEE'];
+  }
+  return [key];
+}
+
+function isStoreSubscriptionFeeFilterBackend(feeType) {
+  const key = String(feeType || '').trim().toUpperCase();
+  return key === 'STORE_SUBSCRIPTION' || key === 'OTHER_FEES' || key === 'STORE_SUBSCRIPTION_FEE';
+}
+
+function applyFeeTypeFetchHints(query = {}) {
+  const feeType = String(query.feeType || '').trim();
+  if (!feeType) return query;
+  if (isStoreSubscriptionFeeFilterBackend(feeType)) {
+    return { ...query, transactionType: 'NON_SALE_CHARGE' };
+  }
+  return query;
+}
+
+function buildFinancesAppliedFilterList(query = {}) {
+  const effectiveQuery = applyFeeTypeFetchHints(query);
+  const feeType = String(effectiveQuery.feeType || '').trim();
+  const filters = buildFinancesTransactionFilters({
+    transactionStatus: effectiveQuery.transactionStatus,
+    transactionType: effectiveQuery.transactionType,
+    fromDate: effectiveQuery.fromDate,
+    toDate: effectiveQuery.toDate,
+    orderId: effectiveQuery.orderId,
+    payoutId: effectiveQuery.payoutId,
+    buyerUsername: effectiveQuery.buyerUsername,
+    transactionId: effectiveQuery.transactionId,
+    requireStatus: false,
+  });
+  if (feeType) filters.push(`feeType:{${feeType}}`);
+  return filters;
+}
+
+function tagFinancesTransactionsWithMarketplace(transactions, marketplaceId) {
+  return (transactions || []).map((txn) => ({ ...txn, marketplaceId: txn.marketplaceId || marketplaceId }));
+}
+
+function shouldIncludeFinancesPayoutRows(query = {}) {
+  const feeType = String(query.feeType || '').trim();
+  if (feeType) return false;
+  const txnType = String(query.transactionType || '').trim().toUpperCase();
+  if (txnType && txnType !== 'WITHDRAWAL') return false;
+  if (query.orderId?.trim()) return false;
+  if (query.buyerUsername?.trim()) return false;
+  if (query.transactionId?.trim()) return false;
+  const status = String(query.transactionStatus || '').trim().toUpperCase();
+  if (status && status !== 'PAYOUT') return false;
+  return true;
+}
+
+function formatFinancesPayoutInstrument(payout) {
+  const inst = payout?.payoutInstrument || {};
+  const type = String(inst.instrumentType || inst.type || '').toUpperCase();
+  if (type.includes('PAYONEER')) return 'Payoneer';
+  if (inst.nickname) return inst.nickname;
+  if (inst.instrumentType) return inst.instrumentType;
+  return 'Payoneer';
+}
+
+function formatFinancesPayoutAmountLabel(amount) {
+  const value = Math.abs(parseFloat(amount?.value || 0));
+  const currency = amount?.currency || 'USD';
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(value);
+  } catch {
+    return `${value.toFixed(2)} ${currency}`;
+  }
+}
+
+function normalizeFinancesPayoutRow(payout, marketplaceId) {
+  const payoutId = String(payout.payoutId || '').trim();
+  const amount = payout.amount || { value: '0.00', currency: 'USD' };
+  const payoutStatus = String(payout.payoutStatus || '').toUpperCase();
+  const statusNote = payoutStatus === 'INITIATED'
+    ? 'Scheduled payout'
+    : payoutStatus === 'SUCCEEDED'
+      ? 'Paid out'
+      : payoutStatus || 'Payout';
+  const instrument = formatFinancesPayoutInstrument(payout);
+  const amountLabel = formatFinancesPayoutAmountLabel(amount);
+
+  return {
+    transactionId: payoutId ? `PAYOUT-${payoutId}` : `PAYOUT-${payout.payoutDate || Date.now()}`,
+    transactionDate: payout.payoutDate || payout.lastAttemptedPayoutDate || null,
+    transactionType: 'WITHDRAWAL',
+    transactionStatus: 'PAYOUT',
+    bookingEntry: 'DEBIT',
+    amount,
+    totalFeeAmount: null,
+    payoutId,
+    payoutStatus,
+    transactionMemo: payoutId
+      ? `Payout ${payoutId} — ${amountLabel} to ${instrument} (${statusNote})`
+      : `Payout — ${amountLabel} to ${instrument} (${statusNote})`,
+    references: payoutId ? [{ referenceType: 'PAYOUT_ID', referenceId: payoutId }] : [],
+    orderLineItems: [],
+    _isPayoutRow: true,
+    marketplaceId,
+  };
+}
+
+async function fetchFinancesPayoutById(accessToken, marketplaceId, payoutId) {
+  const pid = String(payoutId || '').trim();
+  if (!pid) return null;
+  try {
+    const response = await axios.get(`https://apiz.ebay.com/sell/finances/v1/payout/${pid}`, {
+      headers: financesApiHeaders(accessToken, normalizeFinancesMarketplaceId(marketplaceId)),
+      timeout: 30000,
+    });
+    return response.data || null;
+  } catch (err) {
+    if (err.response?.status === 404) return null;
+    console.warn(`[Finances Payouts] getPayout ${pid} failed:`, err.response?.data || err.message);
+    return null;
+  }
+}
+
+function buildFinancesPayoutMetaMap(payouts) {
+  const map = new Map();
+  for (const payout of payouts || []) {
+    const payoutId = String(payout?.payoutId || '').trim();
+    if (!payoutId) continue;
+    map.set(payoutId, payout);
+  }
+  return map;
+}
+
+function collectFinancesTransactionPayoutIds(transactions) {
+  return [...new Set(
+    (transactions || [])
+      .map((txn) => String(txn.payoutId || '').trim())
+      .filter(Boolean),
+  )];
+}
+
+async function fetchFinancesPayoutsForTransactionSet(accessToken, marketplaceId, transactions, effectiveQuery) {
+  let payouts = await fetchFinancesPayoutsInRange(accessToken, marketplaceId, {
+    fromDate: effectiveQuery.fromDate,
+    toDate: effectiveQuery.toDate,
+    payoutId: effectiveQuery.payoutId,
+  });
+  const knownIds = new Set(payouts.map((p) => String(p.payoutId || '').trim()).filter(Boolean));
+  const missingIds = collectFinancesTransactionPayoutIds(transactions).filter((id) => !knownIds.has(id));
+
+  if (missingIds.length) {
+    const extras = await Promise.all(
+      missingIds.map((pid) => fetchFinancesPayoutById(accessToken, marketplaceId, pid)),
+    );
+    for (const payout of extras) {
+      if (!payout?.payoutId) continue;
+      const pid = String(payout.payoutId).trim();
+      if (!knownIds.has(pid)) {
+        knownIds.add(pid);
+        payouts.push(payout);
+      }
+    }
+  }
+
+  return payouts.filter((p) => ['INITIATED', 'SUCCEEDED'].includes(
+    String(p.payoutStatus || '').toUpperCase(),
+  ));
+}
+
+function inferFinancesGroupPayoutStatus(transactions, payoutMeta) {
+  for (const txn of transactions || []) {
+    if (txn.payoutStatus) return txn.payoutStatus;
+    if (txn._isPayoutRow) return txn.payoutStatus || 'INITIATED';
+  }
+  if (payoutMeta?.payoutStatus) return payoutMeta.payoutStatus;
+  const statuses = new Set(
+    (transactions || []).map((txn) => String(txn.transactionStatus || '').toUpperCase()).filter(Boolean),
+  );
+  if (statuses.has('PAYOUT')) return 'SUCCEEDED';
+  if (statuses.has('FUNDS_PROCESSING')) return 'INITIATED';
+  if (statuses.has('FUNDS_AVAILABLE_FOR_PAYOUT')) return 'INITIATED';
+  return null;
+}
+
+function applyFinancesPayoutMetaToGroup(group, payoutMeta) {
+  if (!group.payoutId || !payoutMeta) return;
+  if (!group.payoutStatus) {
+    group.payoutStatus = inferFinancesGroupPayoutStatus(group.transactions, payoutMeta);
+  }
+  if (!group.payoutAmount && payoutMeta.amount) {
+    group.payoutAmount = payoutMeta.amount;
+  }
+  if (!group.payoutDate && payoutMeta.payoutDate) {
+    group.payoutDate = payoutMeta.payoutDate;
+  }
+}
+
+async function fetchFinancesPayoutsInRange(accessToken, marketplaceId, {
+  fromDate,
+  toDate,
+  payoutId,
+  maxPayouts = 500,
+} = {}) {
+  const filters = [];
+  if (fromDate || toDate) {
+    const from = fromDate ? new Date(fromDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const to = toDate ? new Date(toDate) : new Date();
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      throw new Error('Invalid fromDate or toDate');
+    }
+    filters.push(`payoutDate:[${from.toISOString()}..${to.toISOString()}]`);
+  }
+  if (payoutId?.trim()) filters.push(`payoutId:{${String(payoutId).trim()}}`);
+
+  const all = [];
+  let offset = 0;
+  const limit = 200;
+  let hasMore = true;
+  const mp = normalizeFinancesMarketplaceId(marketplaceId);
+
+  while (hasMore && all.length < maxPayouts) {
+    const params = { sort: '-payoutDate', limit, offset };
+    if (filters.length) params.filter = filters;
+    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
+      headers: financesApiHeaders(accessToken, mp),
+      params,
+      paramsSerializer: (p) => qs.stringify(p, { arrayFormat: 'repeat' }),
+      timeout: 90000,
+    });
+    const batch = response.data?.payouts || [];
+    all.push(...batch);
+    if (batch.length < limit) hasMore = false;
+    else offset += limit;
+  }
+
+  return all
+    .filter((p) => ['INITIATED', 'SUCCEEDED'].includes(String(p.payoutStatus || '').toUpperCase()))
+    .slice(0, maxPayouts);
+}
+
+function mergeFinancesTransactionsWithPayouts(transactions, payouts, marketplaceId) {
+  const payoutRows = (payouts || []).map((p) => normalizeFinancesPayoutRow(p, marketplaceId));
+  const payoutIdSet = new Set(payoutRows.map((r) => r.payoutId).filter(Boolean));
+  const txnRows = (transactions || []).filter((txn) => {
+    const pid = String(txn.payoutId || '').trim();
+    if (!pid || !payoutIdSet.has(pid)) return true;
+    return String(txn.transactionType || '').toUpperCase() !== 'WITHDRAWAL';
+  });
+  return dedupeFinancesTransactions([...txnRows, ...payoutRows]);
+}
+
+async function mergeFinancesPayoutRowsIfNeeded(accessToken, marketplaceId, effectiveQuery, transactions) {
+  if (!shouldIncludeFinancesPayoutRows(effectiveQuery)) return { transactions, payoutMetaById: new Map() };
+  try {
+    const payouts = await fetchFinancesPayoutsForTransactionSet(
+      accessToken,
+      marketplaceId,
+      transactions,
+      effectiveQuery,
+    );
+    const payoutMetaById = buildFinancesPayoutMetaMap(payouts);
+    return {
+      transactions: mergeFinancesTransactionsWithPayouts(transactions, payouts, marketplaceId),
+      payoutMetaById,
+    };
+  } catch (err) {
+    console.warn('[Finances Payouts] fetch failed:', err.response?.data || err.message);
+    return { transactions, payoutMetaById: new Map() };
+  }
+}
+
+function buildFinancesTransactionFiltersForQuery(effectiveQuery) {
+  return buildFinancesTransactionFilters({
+    transactionStatus: effectiveQuery.transactionStatus,
+    transactionType: effectiveQuery.transactionType,
+    fromDate: effectiveQuery.fromDate,
+    toDate: effectiveQuery.toDate,
+    orderId: effectiveQuery.orderId,
+    payoutId: effectiveQuery.payoutId,
+    buyerUsername: effectiveQuery.buyerUsername,
+    transactionId: effectiveQuery.transactionId,
+    requireStatus: false,
+  });
+}
+
+function dedupeFinancesTransactions(transactions) {
+  const seen = new Set();
+  const deduped = [];
+  for (const txn of transactions || []) {
+    const key = String(txn?.transactionId || '').trim();
+    if (!key) {
+      deduped.push(txn);
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(txn);
+  }
+  return deduped;
+}
+
+async function fetchFinancesTransactionsForSellerMarketplace(accessToken, marketplaceId, effectiveQuery, responseFilters, {
+  limitOverride,
+  offsetOverride,
+} = {}) {
+  const limit = limitOverride ?? Math.min(200, Math.max(1, parseInt(effectiveQuery.limit || '50', 10) || 50));
+  const offset = offsetOverride ?? Math.max(0, parseInt(effectiveQuery.offset || '0', 10) || 0);
+  const feeType = String(effectiveQuery.feeType || '').trim();
+
+  const filters = buildFinancesTransactionFiltersForQuery(effectiveQuery);
+
+  if (feeType) {
+    const raw = await fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filters, {
+      maxTransactions: 2000,
+    });
+    const filtered = filterFinancesTransactionsByFeeType(enrichFinancesTransactions(raw), feeType);
+    const sorted = sortFinancesTransactionsByDate(
+      tagFinancesTransactionsWithMarketplace(filtered, marketplaceId),
+      'desc',
+    );
+    return {
+      marketplaceId,
+      filters: responseFilters,
+      total: sorted.length,
+      limit,
+      offset,
+      href: null,
+      next: null,
+      prev: null,
+      transactions: sorted,
+      feeType,
+    };
+  }
+
+  const params = { limit, offset };
+  if (filters.length) params.filter = filters;
+  if (effectiveQuery.sort) params.sort = String(effectiveQuery.sort);
+
+  const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+    headers: financesApiHeaders(accessToken, marketplaceId),
+    params,
+    paramsSerializer: (p) => qs.stringify(p, { arrayFormat: 'repeat' }),
+    timeout: 90000,
+  });
+
+  return {
+    marketplaceId,
+    filters: responseFilters,
+    total: response.data?.total ?? null,
+    limit: response.data?.limit ?? limit,
+    offset: response.data?.offset ?? offset,
+    href: response.data?.href,
+    next: response.data?.next,
+    prev: response.data?.prev,
+    transactions: tagFinancesTransactionsWithMarketplace(
+      enrichFinancesTransactions(response.data?.transactions),
+      marketplaceId,
+    ),
+  };
+}
+
+async function fetchFinancesTransactionsBulkForSeller(seller, query = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const effectiveQuery = applyFeeTypeFetchHints(query);
+  const marketplaceIds = resolveFinancesMarketplaceIds(sellerDoc, effectiveQuery.marketplace);
+  const feeType = String(effectiveQuery.feeType || '').trim();
+  const responseFilters = buildFinancesAppliedFilterList(query);
+  const payoutMarketplaceId = marketplaceIds[0];
+  const filters = buildFinancesTransactionFiltersForQuery(effectiveQuery);
+
+  if (feeType) {
+    const txnPages = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+      try {
+        const raw = await fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filters, {
+          maxTransactions: 2000,
+        });
+        const filtered = filterFinancesTransactionsByFeeType(enrichFinancesTransactions(raw), feeType);
+        return tagFinancesTransactionsWithMarketplace(filtered, marketplaceId);
+      } catch {
+        return [];
+      }
+    }));
+    const merged = sortFinancesTransactionsByDate(txnPages.flat(), 'desc');
+    return {
+      marketplaceId: marketplaceIds.length === 1 ? marketplaceIds[0] : 'ALL',
+      filters: responseFilters,
+      transactions: merged,
+      feeType,
+      payoutMetaById: new Map(),
+    };
+  }
+
+  const txnPages = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      const raw = await fetchFinancesTransactionsAllPages(accessToken, marketplaceId, filters, {
+        maxTransactions: 2000,
+      });
+      return tagFinancesTransactionsWithMarketplace(enrichFinancesTransactions(raw), marketplaceId);
+    } catch {
+      return [];
+    }
+  }));
+  let merged = txnPages.flat();
+  let payoutMetaById = new Map();
+  if (shouldIncludeFinancesPayoutRows(effectiveQuery)) {
+    const payoutMerge = await mergeFinancesPayoutRowsIfNeeded(
+      accessToken,
+      payoutMarketplaceId,
+      effectiveQuery,
+      merged,
+    );
+    merged = payoutMerge.transactions;
+    payoutMetaById = payoutMerge.payoutMetaById;
+  }
+  merged = sortFinancesTransactionsByDate(merged, 'desc');
+
+  return {
+    marketplaceId: marketplaceIds.length === 1 ? marketplaceIds[0] : 'ALL',
+    filters: responseFilters,
+    transactions: merged,
+    payoutMetaById,
+  };
+}
+
+function parseFinancesMoneyValue(amount) {
+  const value = parseFloat(amount?.value);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function signedFinancesMoneyValue(amount, bookingEntry) {
+  const abs = Math.abs(parseFinancesMoneyValue(amount));
+  const entry = String(bookingEntry || '').toUpperCase();
+  if (entry === 'DEBIT') return -abs;
+  if (entry === 'CREDIT') return abs;
+  return parseFinancesMoneyValue(amount);
+}
+
+function isFinancesWithdrawalTransaction(txn) {
+  return Boolean(txn?._isPayoutRow)
+    || String(txn?.transactionType || '').toUpperCase() === 'WITHDRAWAL';
+}
+
+function isPromotedListingsFinancesTransaction(txn) {
+  const memo = String(txn?.transactionMemo || '').toLowerCase();
+  const feeType = String(txn?.feeType || '').toUpperCase();
+  return feeType === 'AD_FEE' || memo.includes('promoted listing');
+}
+
+function financesTransactionFeeTotal(txn) {
+  const fromFeeField = Math.abs(parseFinancesMoneyValue(txn?.totalFeeAmount));
+  if (fromFeeField) return fromFeeField;
+  if (isPromotedListingsFinancesTransaction(txn)) {
+    return Math.abs(parseFinancesMoneyValue(txn?.amount));
+  }
+  return 0;
+}
+
+function groupFinancesTransactionsByPayoutId(transactions, meta = {}, payoutMetaById = null) {
+  const NO_PAYOUT_PREFIX = '__no_payout__';
+  const metaMap = payoutMetaById instanceof Map ? payoutMetaById : new Map();
+  const map = new Map();
+
+  for (const txn of transactions || []) {
+    const payoutId = String(txn.payoutId || '').trim();
+    const groupKey = payoutId || `${NO_PAYOUT_PREFIX}:${txn.sellerId || meta.sellerId || 'one'}`;
+    if (!map.has(groupKey)) {
+      map.set(groupKey, {
+        groupKey,
+        payoutId: payoutId || null,
+        payoutDate: null,
+        payoutStatus: null,
+        payoutAmount: null,
+        pendingPayout: !payoutId,
+        sellerId: txn.sellerId || meta.sellerId || null,
+        sellerName: txn.sellerName || meta.sellerName || null,
+        marketplaceId: txn.marketplaceId || meta.marketplaceId || null,
+        transactionCount: 0,
+        totalAmount: 0,
+        totalFees: 0,
+        currency: txn.amount?.currency || 'USD',
+        transactions: [],
+      });
+    }
+
+    const group = map.get(groupKey);
+    group.transactions.push(txn);
+    group.totalAmount += signedFinancesMoneyValue(txn.amount, txn.bookingEntry);
+    group.totalFees += financesTransactionFeeTotal(txn);
+    if (!isFinancesWithdrawalTransaction(txn)) {
+      group.transactionCount += 1;
+    }
+    if (txn.amount?.currency) group.currency = txn.amount.currency;
+
+    const isPayoutRow = isFinancesWithdrawalTransaction(txn);
+    if (isPayoutRow) {
+      group.payoutDate = txn.transactionDate || group.payoutDate;
+      group.payoutStatus = txn.payoutStatus || group.payoutStatus;
+      group.payoutAmount = txn.amount || group.payoutAmount;
+    }
+  }
+
+  for (const [payoutId, payoutMeta] of metaMap) {
+    if (map.has(payoutId)) {
+      applyFinancesPayoutMetaToGroup(map.get(payoutId), payoutMeta);
+      continue;
+    }
+    const synthetic = normalizeFinancesPayoutRow(payoutMeta, meta.marketplaceId || 'EBAY_US');
+    map.set(payoutId, {
+      groupKey: payoutId,
+      payoutId,
+      payoutDate: synthetic.transactionDate,
+      payoutStatus: synthetic.payoutStatus,
+      payoutAmount: synthetic.amount,
+      pendingPayout: false,
+      sellerId: meta.sellerId || null,
+      sellerName: meta.sellerName || null,
+      marketplaceId: meta.marketplaceId || synthetic.marketplaceId || null,
+      transactionCount: 0,
+      totalAmount: 0,
+      totalFees: 0,
+      currency: synthetic.amount?.currency || 'USD',
+      transactions: [synthetic],
+    });
+  }
+
+  for (const group of map.values()) {
+    if (group.payoutId && metaMap.has(group.payoutId)) {
+      applyFinancesPayoutMetaToGroup(group, metaMap.get(group.payoutId));
+    }
+    if (group.payoutId && !group.payoutStatus) {
+      group.payoutStatus = inferFinancesGroupPayoutStatus(group.transactions, metaMap.get(group.payoutId));
+    }
+    if (group.payoutId && !group.payoutAmount) {
+      const withdrawal = group.transactions.find((txn) => isFinancesWithdrawalTransaction(txn));
+      if (withdrawal?.amount) group.payoutAmount = withdrawal.amount;
+    }
+    if (!group.payoutDate && group.transactions.length) {
+      const times = group.transactions
+        .map((txn) => new Date(txn.transactionDate).getTime())
+        .filter((time) => !Number.isNaN(time));
+      if (times.length) group.payoutDate = new Date(Math.max(...times)).toISOString();
+    }
+    group.transactions.sort(
+      (a, b) => new Date(b.transactionDate || 0) - new Date(a.transactionDate || 0),
+    );
+    group.totalAmount = parseFloat(group.totalAmount.toFixed(2));
+    group.totalFees = parseFloat(group.totalFees.toFixed(2));
+  }
+
+  return [...map.values()].sort((a, b) => {
+    const av = new Date(a.payoutDate || 0).getTime();
+    const bv = new Date(b.payoutDate || 0).getTime();
+    if (av !== bv) return bv - av;
+    return String(a.payoutId || '').localeCompare(String(b.payoutId || ''));
+  }).map((group) => ({ ...group, transactionsLoaded: group.transactionsLoaded !== false }));
+}
+
+const FINANCES_PAYOUT_TXN_CONCURRENCY = 4;
+const FINANCES_PAYOUT_GROUP_MAX = 120;
+const FINANCES_PAYOUT_PENDING_TXN_MAX = 400;
+
+function buildFinancesPayoutSummaryGroups(payouts, meta, marketplaceId) {
+  return (payouts || []).map((payout) => {
+    const mp = payout._marketplaceId || marketplaceId;
+    const synthetic = normalizeFinancesPayoutRow(payout, mp);
+    return {
+      groupKey: synthetic.payoutId,
+      payoutId: synthetic.payoutId,
+      payoutDate: synthetic.transactionDate,
+      payoutStatus: synthetic.payoutStatus,
+      payoutAmount: synthetic.amount,
+      pendingPayout: false,
+      sellerId: meta.sellerId || null,
+      sellerName: meta.sellerName || null,
+      marketplaceId: mp,
+      transactionCount: null,
+      totalAmount: null,
+      totalFees: null,
+      currency: synthetic.amount?.currency || 'USD',
+      transactions: [],
+      transactionsLoaded: false,
+    };
+  }).sort((a, b) => {
+    const av = new Date(a.payoutDate || 0).getTime();
+    const bv = new Date(b.payoutDate || 0).getTime();
+    if (av !== bv) return bv - av;
+    return String(a.payoutId || '').localeCompare(String(b.payoutId || ''));
+  });
+}
+
+/** List-row cache shape: keep payout metadata + aggregates, omit transaction blobs. */
+function toFinancesPayoutGroupSummary(group) {
+  if (!group) return null;
+  const hasTxns = Array.isArray(group.transactions) && group.transactions.length > 0;
+  let transactionCount = group.transactionCount;
+  let totalAmount = group.totalAmount;
+  let totalFees = group.totalFees;
+  let currency = group.currency || group.payoutAmount?.currency || 'USD';
+
+  if (hasTxns && (transactionCount == null || totalAmount == null || totalFees == null)) {
+    const grouped = groupFinancesTransactionsByPayoutId(group.transactions, {
+      sellerId: group.sellerId,
+      sellerName: group.sellerName,
+      marketplaceId: group.marketplaceId,
+    }, new Map());
+    const match = grouped.find((g) => String(g.payoutId || '') === String(group.payoutId || '')) || grouped[0];
+    if (match) {
+      transactionCount = match.transactionCount;
+      totalAmount = match.totalAmount;
+      totalFees = match.totalFees;
+      currency = match.currency || currency;
+    }
+  }
+
+  return {
+    groupKey: group.groupKey || group.payoutId,
+    payoutId: group.payoutId,
+    payoutDate: group.payoutDate,
+    payoutStatus: group.payoutStatus,
+    payoutAmount: group.payoutAmount,
+    pendingPayout: Boolean(group.pendingPayout),
+    sellerId: group.sellerId || null,
+    sellerName: group.sellerName || null,
+    marketplaceId: group.marketplaceId || null,
+    transactionCount: transactionCount ?? null,
+    totalAmount: totalAmount ?? null,
+    totalFees: totalFees ?? null,
+    currency,
+    transactions: [],
+    transactionsLoaded: false,
+  };
+}
+
+async function enrichFinancesPayoutSummaryGroupsWithAggregates(accessToken, payouts, summaryGroups, meta, marketplaceIds) {
+  const summaryByPayoutId = new Map(
+    (summaryGroups || []).filter((g) => g.payoutId).map((g) => [String(g.payoutId), g]),
+  );
+  const details = {};
+  const runLimited = pLimit(FINANCES_PAYOUT_TXN_CONCURRENCY);
+  await Promise.all((payouts || []).map((payout) => runLimited(async () => {
+    const pid = String(payout.payoutId || '').trim();
+    const summary = summaryByPayoutId.get(pid);
+    if (!summary || !pid) return;
+    const mp = payout._marketplaceId || marketplaceIds[0];
+    try {
+      const raw = await fetchFinancesTransactionsForPayoutId(accessToken, mp, pid);
+      const merged = mergeFinancesTransactionsWithPayouts(raw, [payout], mp);
+      const tagged = merged.map((row) => tagFinancesTransactionsWithMarketplace(
+        { ...row, sellerId: meta.sellerId, sellerName: meta.sellerName },
+        mp,
+      ));
+      const grouped = groupFinancesTransactionsByPayoutId(
+        tagged,
+        meta,
+        buildFinancesPayoutMetaMap([payout]),
+      );
+      const agg = grouped.find((g) => String(g.payoutId || '') === pid) || grouped[0];
+      if (!agg) return;
+      summary.transactionCount = agg.transactionCount;
+      summary.totalAmount = agg.totalAmount;
+      summary.totalFees = agg.totalFees;
+      summary.currency = agg.currency || summary.currency;
+      details[pid] = { ...agg, transactionsLoaded: true };
+    } catch {
+      /* keep payout-only row */
+    }
+  })));
+  return details;
+}
+
+function hydrateFinancesPayoutGroupSummariesFromDetails(groups, details = {}) {
+  return (groups || []).map((group) => {
+    const hasTotals = group.transactionCount != null
+      && group.totalAmount != null
+      && group.totalFees != null;
+    if (hasTotals) return group;
+    const pid = String(group.payoutId || '').trim();
+    const detail = pid ? details[pid] : null;
+    if (!detail) return group;
+    return {
+      ...group,
+      transactionCount: group.transactionCount ?? detail.transactionCount ?? null,
+      totalAmount: group.totalAmount ?? detail.totalAmount ?? null,
+      totalFees: group.totalFees ?? detail.totalFees ?? null,
+      currency: group.currency || detail.currency || 'USD',
+      transactionsLoaded: Boolean(group.transactionsLoaded || detail.transactionsLoaded),
+    };
+  });
+}
+
+async function collectFinancesPayoutsForSeller(accessToken, marketplaceIds, effectiveQuery) {
+  const payoutById = new Map();
+  for (const mp of marketplaceIds) {
+    try {
+      const page = await fetchFinancesPayoutsInRange(accessToken, mp, {
+        fromDate: effectiveQuery.fromDate,
+        toDate: effectiveQuery.toDate,
+        payoutId: effectiveQuery.payoutId,
+        maxPayouts: FINANCES_PAYOUT_GROUP_MAX,
+      });
+      for (const payout of page) {
+        const id = String(payout.payoutId || '').trim();
+        if (!id || payoutById.has(id)) continue;
+        payoutById.set(id, { ...payout, _marketplaceId: mp });
+      }
+    } catch (err) {
+      console.warn('[Finances Payouts] list failed for', mp, err.response?.data || err.message);
+    }
+  }
+  return [...payoutById.values()];
+}
+
+async function fetchFinancesTransactionsForPayoutId(accessToken, marketplaceId, payoutId) {
+  const pid = String(payoutId || '').trim();
+  if (!pid) return [];
+  const mp = normalizeFinancesMarketplaceId(marketplaceId);
+  const raw = await fetchFinancesTransactionsAllPages(
+    accessToken,
+    mp,
+    [`payoutId:{${pid}}`],
+    { maxTransactions: 400 },
+  );
+  return tagFinancesTransactionsWithMarketplace(enrichFinancesTransactions(raw), mp);
+}
+
+async function fetchFinancesPayoutGroupsForSeller(seller, query = {}, {
+  loadTransactions = true,
+  loadPendingGroup = true,
+} = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const effectiveQuery = applyFeeTypeFetchHints(query);
+  const marketplaceIds = resolveFinancesMarketplaceIds(sellerDoc, effectiveQuery.marketplace);
+  const responseFilters = buildFinancesAppliedFilterList(query);
+  const sellerName = seller.user?.username || resolveStoreDisplayName(sellerDoc);
+  const meta = {
+    sellerId: String(sellerDoc._id),
+    sellerName,
+    marketplaceId: marketplaceIds.length === 1 ? marketplaceIds[0] : 'ALL',
+  };
+
+  const payouts = await collectFinancesPayoutsForSeller(accessToken, marketplaceIds, effectiveQuery);
+  const payoutMetaById = buildFinancesPayoutMetaMap(payouts);
+
+  if (!loadTransactions) {
+    const summaryGroups = buildFinancesPayoutSummaryGroups(payouts, meta, marketplaceIds[0]);
+    const payoutDetails = await enrichFinancesPayoutSummaryGroupsWithAggregates(
+      accessToken,
+      payouts,
+      summaryGroups,
+      meta,
+      marketplaceIds,
+    );
+    return {
+      marketplaceId: meta.marketplaceId,
+      filters: responseFilters,
+      groups: summaryGroups,
+      payoutDetails,
+      payoutMetaById,
+    };
+  }
+
+  const runLimited = pLimit(FINANCES_PAYOUT_TXN_CONCURRENCY);
+  const txnBatches = await Promise.all(payouts.map((payout) => runLimited(async () => {
+    try {
+      return await fetchFinancesTransactionsForPayoutId(
+        accessToken,
+        payout._marketplaceId || marketplaceIds[0],
+        payout.payoutId,
+      );
+    } catch {
+      return [];
+    }
+  })));
+  let allTransactions = txnBatches.flat();
+
+  if (loadPendingGroup && !effectiveQuery.payoutId?.trim()) {
+    const filters = buildFinancesTransactionFiltersForQuery(effectiveQuery);
+    for (const mp of marketplaceIds) {
+      try {
+        const raw = await fetchFinancesTransactionsAllPages(
+          accessToken,
+          mp,
+          filters,
+          { maxTransactions: FINANCES_PAYOUT_PENDING_TXN_MAX },
+        );
+        const pending = enrichFinancesTransactions(raw).filter(
+          (txn) => !String(txn.payoutId || '').trim(),
+        );
+        allTransactions.push(...tagFinancesTransactionsWithMarketplace(pending, mp));
+      } catch {
+        /* skip marketplace */
+      }
+    }
+  }
+
+  allTransactions = mergeFinancesTransactionsWithPayouts(
+    allTransactions,
+    payouts,
+    marketplaceIds[0],
+  );
+
+  const groups = groupFinancesTransactionsByPayoutId(
+    allTransactions,
+    meta,
+    payoutMetaById,
+  ).map((group) => ({ ...group, transactionsLoaded: true }));
+
+  return {
+    marketplaceId: meta.marketplaceId,
+    filters: responseFilters,
+    groups,
+    payoutMetaById,
+  };
+}
+
+const FINANCES_PAYOUT_CACHE_MIN_DAYS = 90;
+let financesPayoutGroupsRefreshInFlight = null;
+
+function buildFinancesPayoutCacheRefreshQuery(query = {}) {
+  const to = query.toDate ? new Date(query.toDate) : new Date();
+  const toDate = Number.isNaN(to.getTime()) ? new Date() : to;
+  let from = query.fromDate ? new Date(query.fromDate) : new Date(toDate);
+  if (Number.isNaN(from.getTime())) {
+    from = new Date(toDate);
+    from.setUTCDate(from.getUTCDate() - FINANCES_PAYOUT_CACHE_MIN_DAYS);
+  }
+  const minFrom = new Date(toDate);
+  minFrom.setUTCDate(minFrom.getUTCDate() - FINANCES_PAYOUT_CACHE_MIN_DAYS);
+  if (from > minFrom) from = minFrom;
+  return {
+    ...query,
+    fromDate: from.toISOString(),
+    toDate: toDate.toISOString(),
+  };
+}
+
+function financesPayoutGroupsCacheMeta(cachedAt, { hit = true, source = 'mongodb', savedToDatabase = false } = {}) {
+  const cachedAtMs = cachedAt ? new Date(cachedAt).getTime() : null;
+  return {
+    hit,
+    source,
+    savedToDatabase,
+    cachedAt: cachedAtMs ? new Date(cachedAtMs).toISOString() : null,
+    ageMs: cachedAtMs ? Date.now() - cachedAtMs : null,
+  };
+}
+
+function mergeFinancesPayoutGroupsQuery(req) {
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  return { ...req.query, ...body };
+}
+
+function isFinancesPayoutForceRefresh(query = {}) {
+  return String(query.forceRefresh || '').toLowerCase() === 'true';
+}
+
+function stripFinancesPayoutRefreshFlag(query = {}) {
+  const next = { ...query };
+  delete next.forceRefresh;
+  return next;
+}
+
+async function refreshFinancesPayoutGroupsFromEbay(req, query = {}) {
+  const isAllStores = !query.sellerId || String(query.sellerId).trim() === '__all__';
+
+  if (financesPayoutGroupsRefreshInFlight) {
+    const err = new Error('A payout refresh is already in progress. Please wait.');
+    err.status = 409;
+    throw err;
+  }
+
+  financesPayoutGroupsRefreshInFlight = (async () => {
+    try {
+      if (isAllStores) {
+        const sellers = await getSellersForEbayApiPicker(req);
+        return refreshAllFinancesPayoutGroupsCaches(sellers, query);
+      }
+      const seller = await Seller.findById(query.sellerId).populate('user', 'username');
+      if (!seller) throw new Error('Seller not found');
+      const payload = await refreshFinancesPayoutGroupsCacheForSeller(seller, query, {
+        loadTransactions: true,
+        loadPendingGroup: true,
+      });
+      return {
+        refreshQuery: payload.refreshQuery,
+        results: [{
+          sellerId: seller._id,
+          sellerName: seller.user?.username || String(seller._id),
+          groups: payload.groups,
+          cachedAt: payload.cachedAt,
+        }],
+      };
+    } finally {
+      financesPayoutGroupsRefreshInFlight = null;
+    }
+  })();
+
+  const { refreshQuery, results } = await financesPayoutGroupsRefreshInFlight;
+  const errors = results.filter((r) => r.error).map((r) => ({
+    sellerId: r.sellerId,
+    sellerName: r.sellerName,
+    error: r.error,
+  }));
+
+  let groups;
+  if (isAllStores) {
+    groups = results.flatMap((r) => (r.groups || []).map((row) => ({
+      ...row,
+      sellerId: String(r.sellerId),
+      sellerName: r.sellerName,
+    })));
+    groups = filterFinancesPayoutGroups(groups, query);
+    groups.sort((a, b) => new Date(b.payoutDate || 0) - new Date(a.payoutDate || 0));
+  } else {
+    groups = filterFinancesPayoutGroups(results[0]?.groups || [], query);
+  }
+
+  const latestCachedAt = results.reduce((latest, r) => {
+    if (!r.cachedAt) return latest;
+    if (!latest || new Date(r.cachedAt) > new Date(latest)) return r.cachedAt;
+    return latest;
+  }, null);
+
+  return {
+    success: true,
+    allStores: isAllStores,
+    sellersQueried: results.length,
+    errors,
+    filters: buildFinancesAppliedFilterList(query),
+    marketplaceId: isAllMarketplacesQuery(query.marketplace) ? 'ALL' : (query.marketplace || 'ALL'),
+    totalGroups: groups.length,
+    groups,
+    cache: financesPayoutGroupsCacheMeta(latestCachedAt, {
+      hit: false,
+      source: 'ebay',
+      savedToDatabase: true,
+    }),
+    cacheRange: {
+      fromDate: refreshQuery.fromDate,
+      toDate: refreshQuery.toDate,
+    },
+  };
+}
+
+function filterFinancesPayoutGroups(groups, query = {}) {
+  const fromMs = query.fromDate ? new Date(query.fromDate).getTime() : null;
+  const toMs = query.toDate ? new Date(query.toDate).getTime() : null;
+  const payoutFilter = String(query.payoutId || '').trim();
+  const marketplace = String(query.marketplace || '').trim();
+  const isAllMp = !marketplace || marketplace.toLowerCase() === '__all__' || marketplace.toLowerCase() === 'all';
+
+  return (groups || []).filter((group) => {
+    if (payoutFilter && String(group.payoutId || '') !== payoutFilter) return false;
+    if (!isAllMp && group.marketplaceId && group.marketplaceId !== 'ALL' && group.marketplaceId !== marketplace) {
+      return false;
+    }
+    if (fromMs != null || toMs != null) {
+      const pd = new Date(group.payoutDate || 0).getTime();
+      if (Number.isNaN(pd)) return false;
+      if (fromMs != null && pd < fromMs) return false;
+      if (toMs != null && pd > toMs) return false;
+    }
+    return true;
+  });
+}
+
+function buildFinancesPayoutDetailsFromGroups(groups) {
+  const details = {};
+  for (const group of groups || []) {
+    const pid = String(group.payoutId || '').trim();
+    if (!pid || !Array.isArray(group.transactions) || group.transactions.length === 0) continue;
+    details[pid] = { ...group, transactionsLoaded: true };
+  }
+  return details;
+}
+
+async function readFinancesPayoutGroupsCacheDoc(sellerId) {
+  const row = await FinancesPayoutGroupsCache.findById(String(sellerId)).lean();
+  if (!row?.cachedAt) return null;
+  return row;
+}
+
+async function writeFinancesPayoutGroupsCacheDoc(sellerId, {
+  groups,
+  details,
+  cacheFromDate,
+  cacheToDate,
+  marketplace,
+  mergeDetails = false,
+}) {
+  const id = String(sellerId);
+  const cachedAt = new Date();
+  const nextDetails = details || {};
+  if (mergeDetails) {
+    const existing = await FinancesPayoutGroupsCache.findById(id).lean();
+    if (existing?.details && typeof existing.details === 'object') {
+      Object.assign(nextDetails, existing.details);
+    }
+  }
+  await FinancesPayoutGroupsCache.findByIdAndUpdate(
+    id,
+    {
+      $set: {
+        groups: groups || [],
+        details: nextDetails,
+        cachedAt,
+        cacheFromDate: cacheFromDate || '',
+        cacheToDate: cacheToDate || '',
+        marketplace: marketplace || 'ALL',
+      },
+    },
+    { upsert: true },
+  );
+  return cachedAt;
+}
+
+async function refreshFinancesPayoutGroupsCacheForSeller(seller, query = {}, {
+  loadTransactions = false,
+  loadPendingGroup = false,
+} = {}) {
+  const refreshQuery = buildFinancesPayoutCacheRefreshQuery(query);
+  const payload = await fetchFinancesPayoutGroupsForSeller(seller, refreshQuery, {
+    loadTransactions,
+    loadPendingGroup,
+  });
+  const details = loadTransactions
+    ? buildFinancesPayoutDetailsFromGroups(payload.groups)
+    : (payload.payoutDetails || {});
+  const groupSummaries = (payload.groups || []).map(toFinancesPayoutGroupSummary).filter(Boolean);
+  const cachedAt = await writeFinancesPayoutGroupsCacheDoc(String(seller._id), {
+    groups: groupSummaries,
+    details,
+    cacheFromDate: refreshQuery.fromDate,
+    cacheToDate: refreshQuery.toDate,
+    marketplace: refreshQuery.marketplace || 'ALL',
+    mergeDetails: loadTransactions ? false : Object.keys(details).length === 0,
+  });
+  return { ...payload, cachedAt, refreshQuery };
+}
+
+async function refreshAllFinancesPayoutGroupsCaches(sellers, query = {}) {
+  const refreshQuery = buildFinancesPayoutCacheRefreshQuery(query);
+  const runLimited = pLimit(MARKETING_SELLER_CONCURRENCY);
+  const results = await Promise.all(sellers.map((seller) => runLimited(async () => {
+    const sellerName = resolveStoreDisplayName(seller);
+    try {
+      const payload = await refreshFinancesPayoutGroupsCacheForSeller(seller, refreshQuery, {
+        loadTransactions: false,
+        loadPendingGroup: false,
+      });
+      return {
+        sellerId: seller._id,
+        sellerName,
+        groups: payload.groups,
+        cachedAt: payload.cachedAt,
+      };
+    } catch (err) {
+      return {
+        sellerId: seller._id,
+        sellerName,
+        error: err.message || 'Failed to refresh payout groups',
+        groups: [],
+      };
+    }
+  })));
+  return { refreshQuery, results };
+}
+
+async function loadFinancesPayoutGroupsFromCacheForSeller(sellerId, query = {}) {
+  const doc = await readFinancesPayoutGroupsCacheDoc(sellerId);
+  if (!doc) {
+    return {
+      groups: [],
+      cachedAt: null,
+      cacheFromDate: null,
+      cacheToDate: null,
+      marketplaceId: query.marketplace || 'ALL',
+    };
+  }
+  return {
+    groups: hydrateFinancesPayoutGroupSummariesFromDetails(
+      filterFinancesPayoutGroups(doc.groups, query),
+      doc.details,
+    ),
+    cachedAt: doc.cachedAt,
+    cacheFromDate: doc.cacheFromDate,
+    cacheToDate: doc.cacheToDate,
+    marketplaceId: isAllMarketplacesQuery(query.marketplace) ? 'ALL' : (query.marketplace || doc.marketplace || 'ALL'),
+    details: doc.details || {},
+  };
+}
+
+async function loadFinancesPayoutGroupDetailFromCache(sellerId, payoutId, query = {}) {
+  const doc = await readFinancesPayoutGroupsCacheDoc(sellerId);
+  if (!doc) return null;
+  const pid = String(payoutId || '').trim();
+  const fromDetails = doc.details?.[pid];
+  if (fromDetails) return fromDetails;
+  const fromGroups = (doc.groups || []).find(
+    (g) => String(g.payoutId || '') === pid && Array.isArray(g.transactions) && g.transactions.length > 0,
+  );
+  return fromGroups || null;
+}
+
+async function saveFinancesPayoutGroupDetailToCache(sellerId, payoutId, group) {
+  const pid = String(payoutId || '').trim();
+  if (!pid || !group) return;
+  const summary = toFinancesPayoutGroupSummary(group);
+  const doc = await readFinancesPayoutGroupsCacheDoc(sellerId);
+  const groups = Array.isArray(doc?.groups) ? [...doc.groups] : [];
+  const idx = groups.findIndex((g) => String(g.payoutId || '') === pid);
+  if (idx >= 0) {
+    groups[idx] = { ...groups[idx], ...summary, transactions: [], transactionsLoaded: true };
+  } else if (summary) {
+    groups.push(summary);
+  }
+  await FinancesPayoutGroupsCache.findByIdAndUpdate(
+    String(sellerId),
+    {
+      $set: {
+        [`details.${pid}`]: { ...group, transactionsLoaded: true },
+        groups,
+      },
+    },
+    { upsert: true },
+  );
+}
+
+async function fetchFinancesTransactionsForSeller(seller, query = {}) {
+  const limit = Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  const feeType = String(query.feeType || '').trim();
+  const includePayouts = shouldIncludeFinancesPayoutRows(applyFeeTypeFetchHints(query)) && !feeType;
+
+  if (includePayouts || feeType) {
+    const bulk = await fetchFinancesTransactionsBulkForSeller(seller, query);
+    return {
+      marketplaceId: bulk.marketplaceId,
+      filters: bulk.filters,
+      total: bulk.transactions.length,
+      limit,
+      offset,
+      href: null,
+      next: null,
+      prev: null,
+      transactions: bulk.transactions.slice(offset, offset + limit),
+      feeType: bulk.feeType || undefined,
+    };
+  }
+
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const effectiveQuery = applyFeeTypeFetchHints(query);
+  const marketplaceIds = resolveFinancesMarketplaceIds(sellerDoc, effectiveQuery.marketplace);
+  const responseFilters = buildFinancesAppliedFilterList(query);
+
+  if (marketplaceIds.length === 1) {
+    return fetchFinancesTransactionsForSellerMarketplace(
+      accessToken,
+      marketplaceIds[0],
+      effectiveQuery,
+      responseFilters,
+    );
+  }
+
+  const pageResults = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      return await fetchFinancesTransactionsForSellerMarketplace(
+        accessToken,
+        marketplaceId,
+        effectiveQuery,
+        responseFilters,
+        { limitOverride: limit, offsetOverride: 0 },
+      );
+    } catch {
+      return { marketplaceId, transactions: [] };
+    }
+  }));
+
+  const merged = sortFinancesTransactionsByDate(
+    dedupeFinancesTransactions(pageResults.flatMap((result) => result.transactions)),
+    'desc',
+  );
+
+  return {
+    marketplaceId: 'ALL',
+    filters: responseFilters,
+    total: merged.length,
+    limit,
+    offset,
+    href: null,
+    next: null,
+    prev: null,
+    transactions: merged.slice(offset, offset + limit),
+  };
+}
+
+function sortFinancesTransactionsByDate(transactions, direction = 'desc') {
+  const dir = direction === 'asc' ? 1 : -1;
+  return [...(transactions || [])].sort((a, b) => {
+    const av = new Date(a?.transactionDate || 0).getTime();
+    const bv = new Date(b?.transactionDate || 0).getTime();
+    if (av === bv) return String(a?.transactionId || '').localeCompare(String(b?.transactionId || ''));
+    return (av - bv) * dir;
+  });
+}
+
+function collectTransactionFeeTypes(txn) {
+  const types = new Set();
+  if (txn?.feeType) types.add(String(txn.feeType).trim().toUpperCase());
+  for (const line of txn?.orderLineItems || []) {
+    for (const fee of line?.marketplaceFees || []) {
+      if (fee?.feeType) types.add(String(fee.feeType).trim().toUpperCase());
+    }
+  }
+  return types;
+}
+
+function filterFinancesTransactionsByFeeType(transactions, feeType) {
+  const targets = resolveFeeTypeFilterValuesBackend(feeType);
+  if (!targets.length) return transactions || [];
+  return (transactions || []).filter((txn) => {
+    const types = collectTransactionFeeTypes(txn);
+    return targets.some((target) => types.has(target));
+  });
+}
+
+router.get('/finances/transactions/all', requireAuth, requirePageAccess('FinancesTransactions'), async (req, res) => {
+  try {
+    const sellers = await getSellersForEbayApiPicker(req);
+    const feeType = String(req.query.feeType || '').trim();
+    const perSellerLimit = feeType
+      ? 200
+      : Math.min(200, Math.max(1, parseInt(req.query.perSellerLimit || '50', 10) || 50));
+    const bulkQuery = { ...req.query, limit: perSellerLimit, offset: 0 };
+    const runLimited = pLimit(MARKETING_SELLER_CONCURRENCY);
+
+    const storeResults = await Promise.all(sellers.map((seller) => runLimited(async () => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        const payload = await fetchFinancesTransactionsForSeller(seller, bulkQuery);
+        return {
+          sellerId: seller._id,
+          sellerName,
+          marketplaceId: payload.marketplaceId,
+          filters: payload.filters,
+          transactions: (payload.transactions || []).map((row) => ({
+            ...row,
+            sellerId: String(seller._id),
+            sellerName,
+            marketplaceId: row.marketplaceId || payload.marketplaceId,
+          })),
+        };
+      } catch (err) {
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message || 'Failed to load transactions',
+          transactions: [],
+        };
+      }
+    })));
+
+    const errors = storeResults.filter((r) => r.error).map((r) => ({
+      sellerId: r.sellerId,
+      sellerName: r.sellerName,
+      error: r.error,
+    }));
+    let transactions = sortFinancesTransactionsByDate(
+      storeResults.flatMap((r) => r.transactions),
+      'desc',
+    );
+    const filters = buildFinancesAppliedFilterList(req.query);
+
+    return res.json({
+      success: true,
+      allStores: true,
+      sellersQueried: sellers.length,
+      perSellerLimit,
+      errors,
+      filters,
+      feeType: feeType || undefined,
+      marketplaceId: isAllMarketplacesQuery(req.query.marketplace) ? 'ALL' : (req.query.marketplace || 'ALL'),
+      total: transactions.length,
+      transactions,
+    });
+  } catch (err) {
+    console.error('[Finances Transactions All] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load transactions for all stores' });
+  }
+});
+
+router.get('/finances/transactions', requireAuth, requirePageAccess('FinancesTransactions'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const payload = await fetchFinancesTransactionsForSeller(seller, req.query);
+    return res.json({
+      success: true,
+      seller: { id: seller._id, name: seller.user?.username },
+      ...payload,
+    });
+  } catch (err) {
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = data?.errors || [];
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to load transactions';
+    console.error('[Finances Transactions] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
+router.get('/finances/transactions/by-payout/all', requireAuth, requirePageAccess('FinancesPayoutGroups'), async (req, res) => {
+  try {
+    if (isFinancesPayoutForceRefresh(req.query)) {
+      const payload = await refreshFinancesPayoutGroupsFromEbay(req, stripFinancesPayoutRefreshFlag(req.query));
+      return res.json(payload);
+    }
+
+    const sellers = await getSellersForEbayApiPicker(req);
+    const cacheRows = await FinancesPayoutGroupsCache.find({
+      _id: { $in: sellers.map((s) => String(s._id)) },
+    }).lean();
+    const cacheBySeller = new Map(cacheRows.map((row) => [row._id, row]));
+
+    const errors = [];
+    let latestCachedAt = null;
+    const groups = [];
+
+    for (const seller of sellers) {
+      const sellerName = resolveStoreDisplayName(seller);
+      const doc = cacheBySeller.get(String(seller._id));
+      if (!doc?.cachedAt) continue;
+      if (!latestCachedAt || new Date(doc.cachedAt) > new Date(latestCachedAt)) {
+        latestCachedAt = doc.cachedAt;
+      }
+      const filtered = filterFinancesPayoutGroups(
+        hydrateFinancesPayoutGroupSummariesFromDetails(
+          (doc.groups || []).map((row) => ({
+            ...row,
+            sellerId: String(seller._id),
+            sellerName,
+          })),
+          doc.details,
+        ),
+        req.query,
+      );
+      groups.push(...filtered);
+    }
+
+    groups.sort((a, b) => {
+      const av = new Date(a.payoutDate || 0).getTime();
+      const bv = new Date(b.payoutDate || 0).getTime();
+      if (av !== bv) return bv - av;
+      return String(a.payoutId || '').localeCompare(String(b.payoutId || ''));
+    });
+
+    return res.json({
+      success: true,
+      allStores: true,
+      sellersQueried: sellers.length,
+      errors,
+      filters: buildFinancesAppliedFilterList(req.query),
+      marketplaceId: isAllMarketplacesQuery(req.query.marketplace) ? 'ALL' : (req.query.marketplace || 'ALL'),
+      totalGroups: groups.length,
+      groups,
+      cache: financesPayoutGroupsCacheMeta(latestCachedAt, {
+        hit: Boolean(latestCachedAt),
+        source: latestCachedAt ? 'mongodb' : 'none',
+      }),
+    });
+  } catch (err) {
+    console.error('[Finances Payout Groups All] Error:', err.message);
+    const status = err.status || 500;
+    return res.status(status).json({ success: false, error: err.message || 'Failed to load payout groups for all stores' });
+  }
+});
+
+router.get('/finances/transactions/by-payout', requireAuth, requirePageAccess('FinancesPayoutGroups'), async (req, res) => {
+  try {
+    if (isFinancesPayoutForceRefresh(req.query)) {
+      const payload = await refreshFinancesPayoutGroupsFromEbay(req, stripFinancesPayoutRefreshFlag(req.query));
+      return res.json(payload);
+    }
+
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerName = seller.user?.username || String(seller._id);
+    const cached = await loadFinancesPayoutGroupsFromCacheForSeller(String(seller._id), req.query);
+    const groups = (cached.groups || []).map((row) => ({
+      ...row,
+      sellerId: String(seller._id),
+      sellerName,
+    }));
+
+    return res.json({
+      success: true,
+      seller: { id: seller._id, name: sellerName },
+      marketplaceId: cached.marketplaceId,
+      filters: buildFinancesAppliedFilterList(req.query),
+      totalGroups: groups.length,
+      groups,
+      cache: financesPayoutGroupsCacheMeta(cached.cachedAt, {
+        hit: Boolean(cached.cachedAt),
+        source: cached.cachedAt ? 'mongodb' : 'none',
+      }),
+      cacheRange: cached.cachedAt ? {
+        fromDate: cached.cacheFromDate,
+        toDate: cached.cacheToDate,
+      } : null,
+    });
+  } catch (err) {
+    const message = err.message || 'Failed to load payout groups';
+    console.error('[Finances Payout Groups] Error:', message);
+    return res.status(500).json({ success: false, error: message });
+  }
+});
+
+async function handleFinancesPayoutGroupsRefreshRequest(req, res) {
+  try {
+    const query = stripFinancesPayoutRefreshFlag(mergeFinancesPayoutGroupsQuery(req));
+    const payload = await refreshFinancesPayoutGroupsFromEbay(req, query);
+    return res.json(payload);
+  } catch (err) {
+    financesPayoutGroupsRefreshInFlight = null;
+    const message = err.message || 'Failed to refresh payout groups from eBay';
+    const status = err.status || 500;
+    console.error('[Finances Payout Groups Refresh] Error:', message);
+    return res.status(status).json({ success: false, error: message });
+  }
+}
+
+router.get('/finances/transactions/by-payout/refresh', requireAuth, requirePageAccess('FinancesPayoutGroups'), handleFinancesPayoutGroupsRefreshRequest);
+
+router.post('/finances/transactions/by-payout/refresh', requireAuth, requirePageAccess('FinancesPayoutGroups'), handleFinancesPayoutGroupsRefreshRequest);
+
+router.get('/finances/transactions/by-payout/detail', requireAuth, requirePageAccess('FinancesPayoutGroups'), async (req, res) => {
+  try {
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+    const payoutId = String(req.query.payoutId || '').trim();
+    if (!payoutId) return res.status(400).json({ success: false, error: 'payoutId is required' });
+
+    const sellerName = seller.user?.username || String(seller._id);
+    let group = await loadFinancesPayoutGroupDetailFromCache(String(seller._id), payoutId, req.query);
+    let cacheSource = group ? 'mongodb' : 'none';
+
+    if (!group) {
+      const sellerDoc = await resolveSellerWithEbayTokens(seller);
+      const accessToken = await ensureValidToken(sellerDoc);
+      const marketplaceIds = resolveFinancesMarketplaceIds(sellerDoc, req.query.marketplace);
+      const mp = marketplaceIds[0];
+
+      let payoutMeta = await fetchFinancesPayoutById(accessToken, mp, payoutId);
+      if (!payoutMeta) {
+        const listed = await fetchFinancesPayoutsInRange(accessToken, mp, { payoutId, maxPayouts: 1 });
+        payoutMeta = listed[0] || null;
+      }
+
+      const transactions = await fetchFinancesTransactionsForPayoutId(accessToken, mp, payoutId);
+      const merged = payoutMeta
+        ? mergeFinancesTransactionsWithPayouts(transactions, [payoutMeta], mp)
+        : transactions;
+      const groups = groupFinancesTransactionsByPayoutId(
+        merged.map((row) => ({ ...row, sellerId: String(seller._id), sellerName })),
+        { sellerId: String(seller._id), sellerName, marketplaceId: mp },
+        payoutMeta ? buildFinancesPayoutMetaMap([payoutMeta]) : new Map(),
+      );
+      group = groups.find((g) => g.payoutId === payoutId) || groups[0] || null;
+      if (group) {
+        group = { ...group, transactionsLoaded: true };
+        await saveFinancesPayoutGroupDetailToCache(String(seller._id), payoutId, group);
+        cacheSource = 'ebay';
+      }
+    }
+
+    return res.json({
+      success: true,
+      seller: { id: seller._id, name: sellerName },
+      payoutId,
+      group,
+      cache: { source: cacheSource },
+    });
+  } catch (err) {
+    const message = err.message || 'Failed to load payout transactions';
+    console.error('[Finances Payout Detail] Error:', err.response?.data || message);
+    return res.status(500).json({ success: false, error: message });
+  }
+});
+
+// ============================================
+// LISTING RECOMMENDATIONS (Recommendation API — findListingRecommendations)
+// @see https://developer.ebay.com/develop/api/sell/recommendation_api#sell-recommendation_api-listing_recommendation-findlistingrecommendations
+// ============================================
+const LISTING_RECOMMENDATIONS_DOCS =
+  'https://developer.ebay.com/develop/api/sell/recommendation_api#sell-recommendation_api-listing_recommendation-findlistingrecommendations';
+
+function parseListingIdsQuery(raw) {
+  if (!raw) return [];
+  return String(raw)
+    .split(/[,\s]+/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .slice(0, 500);
+}
+
+function extractListingRecommendationEntries(data) {
+  if (!data) return [];
+  if (Array.isArray(data.listingRecommendations)) return data.listingRecommendations;
+  if (Array.isArray(data.listing_recommendations)) return data.listing_recommendations;
+  return [];
+}
+
+function normalizeListingRecommendationRow(entry = {}, context = {}) {
+  const ad = entry?.marketing?.ad || {};
+  const trending = (ad.bidPercentages || []).find((row) => row.basis === 'TRENDING')
+    || ad.bidPercentages?.[0]
+    || {};
+  return {
+    sellerId: context.sellerId ? String(context.sellerId) : '',
+    sellerName: context.sellerName || '',
+    marketplaceId: context.marketplaceId || '',
+    listingId: entry.listingId || entry.listing_id || '',
+    promoteWithAd: ad.promoteWithAd || ad.promote_with_ad || '',
+    trendingBidPercent: trending.value ?? '',
+    bidBasis: trending.basis || '',
+    message: entry.message || '',
+    error: Boolean(context.error),
+    errorMessage: context.errorMessage || '',
+  };
+}
+
+async function fetchListingRecommendationsForMarketplace(accessToken, marketplaceId, options = {}) {
+  const limit = Math.min(200, Math.max(1, parseInt(options.limit || '50', 10) || 50));
+  const offset = Math.max(0, parseInt(options.offset || '0', 10) || 0);
+  const listingIds = parseListingIdsQuery(options.listingIds);
+  const apiPath = '/sell/recommendation/v1/find';
+  const params = {
+    filter: 'recommendationTypes:{AD}',
+    limit,
+    offset,
+  };
+  const body = listingIds.length ? { listingIds } : {};
+
+  const response = await axios.post(`https://api.ebay.com${apiPath}`, body, {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'POST',
+      path: apiPath,
+      marketplace: marketplaceId,
+    }),
+    params,
+    timeout: 90000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    const message = ebayError?.longMessage || ebayError?.message || response.statusText || `eBay returned ${response.status}`;
+    throw new Error(message);
+  }
+
+  const recommendations = extractListingRecommendationEntries(response.data).map((entry) => (
+    normalizeListingRecommendationRow(entry, { marketplaceId })
+  ));
+
+  return {
+    recommendations,
+    pagination: {
+      limit: Number(response.data?.limit ?? limit),
+      offset: Number(response.data?.offset ?? offset),
+      total: response.data?.total != null ? Number(response.data.total) : null,
+      href: response.data?.href || null,
+      next: response.data?.next || null,
+      prev: response.data?.prev || null,
+    },
+  };
+}
+
+async function fetchListingRecommendationsForSeller(seller, query = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const marketplaceIds = resolveMarketingMarketplaceIds(sellerDoc, query.marketplace);
+  const sellerName = resolveStoreDisplayName(sellerDoc);
+  const isAllMarketplaces = marketplaceIds.length > 1;
+  const perMarketplaceLimit = isAllMarketplaces
+    ? Math.min(50, Math.max(1, parseInt(query.limit || '50', 10) || 50))
+    : Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = isAllMarketplaces ? 0 : Math.max(0, parseInt(query.offset || '0', 10) || 0);
+
+  const pageResults = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      return await fetchListingRecommendationsForMarketplace(accessToken, marketplaceId, {
+        limit: perMarketplaceLimit,
+        offset,
+        listingIds: query.listingIds,
+      });
+    } catch (err) {
+      return {
+        recommendations: [normalizeListingRecommendationRow({}, {
+          marketplaceId,
+          sellerId: sellerDoc._id,
+          sellerName,
+          error: true,
+          errorMessage: err.message || 'Failed to load listing recommendations',
+        })],
+        pagination: { limit: perMarketplaceLimit, offset: 0, total: null },
+      };
+    }
+  }));
+
+  const recommendations = pageResults.flatMap((result) => result.recommendations).map((row) => ({
+    ...row,
+    sellerId: String(sellerDoc._id),
+    sellerName,
+  }));
+
+  const pagination = isAllMarketplaces
+    ? {
+      limit: perMarketplaceLimit,
+      offset: 0,
+      total: recommendations.filter((row) => !row.error).length,
+      aggregated: true,
+    }
+    : (pageResults[0]?.pagination || { limit: perMarketplaceLimit, offset, total: null });
+
+  return {
+    marketplaceId: marketplaceIds.length === 1 ? marketplaceIds[0] : 'ALL',
+    recommendations,
+    pagination,
+  };
+}
+
+router.get('/marketing/listing-recommendations/all', requireAuth, requirePageAccess(['AdsAndMarketing', 'StoreListings']), async (req, res) => {
+  try {
+    const sellers = await getSellersForEbayApiPicker(req);
+    const runLimited = pLimit(MARKETING_SELLER_CONCURRENCY);
+    const perSellerLimit = Math.min(50, Math.max(1, parseInt(req.query.limit || '25', 10) || 25));
+
+    const storeResults = await Promise.all(sellers.map((seller) => runLimited(async () => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        const payload = await fetchListingRecommendationsForSeller(seller, {
+          ...req.query,
+          limit: perSellerLimit,
+          offset: 0,
+        });
+        return {
+          sellerId: seller._id,
+          sellerName,
+          recommendations: payload.recommendations,
+        };
+      } catch (err) {
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message || 'Failed to load listing recommendations',
+          recommendations: [],
+        };
+      }
+    })));
+
+    const errors = storeResults.filter((r) => r.error).map((r) => ({
+      sellerId: r.sellerId,
+      sellerName: r.sellerName,
+      error: r.error,
+    }));
+    const recommendations = storeResults.flatMap((r) => r.recommendations);
+
+    return res.json({
+      success: true,
+      docsUrl: LISTING_RECOMMENDATIONS_DOCS,
+      allStores: true,
+      sellersQueried: sellers.length,
+      errors,
+      recommendations,
+      total: recommendations.length,
+      pagination: {
+        limit: perSellerLimit,
+        offset: 0,
+        total: recommendations.length,
+        aggregated: true,
+      },
+    });
+  } catch (err) {
+    console.error('[Listing Recommendations All] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load listing recommendations for all stores' });
+  }
+});
+
+router.get('/marketing/listing-recommendations', requireAuth, requirePageAccess(['AdsAndMarketing', 'StoreListings']), async (req, res) => {
+  try {
+    const sellerLookup = String(req.query.sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ success: false, error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const payload = await fetchListingRecommendationsForSeller(seller, req.query);
+
+    return res.json({
+      success: true,
+      docsUrl: LISTING_RECOMMENDATIONS_DOCS,
+      seller: { id: seller._id, name: resolveStoreDisplayName(seller) },
+      marketplaceId: payload.marketplaceId,
+      recommendations: payload.recommendations,
+      total: payload.recommendations.length,
+      pagination: payload.pagination,
+    });
+  } catch (err) {
+    console.error('[Listing Recommendations] Error:', err.response?.data || err.message);
+    if (sendTokenReconnectError(err, res)) return;
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to load listing recommendations',
+    });
+  }
+});
+
+// ============================================
+// ADVERTISING ELIGIBILITY (Account API — getAdvertisingEligibility)
+// @see https://developer.ebay.com/develop/api/sell/account_api_v1#sell-account_api_v1-advertising_eligibility-getadvertisingeligibility
+// ============================================
+const ADVERTISING_ELIGIBILITY_DOCS =
+  'https://developer.ebay.com/develop/api/sell/account_api_v1#sell-account_api_v1-advertising_eligibility-getadvertisingeligibility';
+
+function extractAdvertisingEligibilityEntries(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.advertisingEligibility)) return data.advertisingEligibility;
+  if (Array.isArray(data.advertising_eligibility)) return data.advertising_eligibility;
+  return [];
+}
+
+function normalizeAdvertisingEligibilityRow(entry = {}, context = {}) {
+  return {
+    sellerId: context.sellerId ? String(context.sellerId) : '',
+    sellerName: context.sellerName || '',
+    marketplaceId: context.marketplaceId || '',
+    programType: entry.programType || entry.program_type || '',
+    status: entry.status || entry.eligibilityStatus || '',
+    reason: entry.reason || entry.ineligibleReason || '',
+    error: Boolean(context.error),
+    errorMessage: context.errorMessage || '',
+  };
+}
+
+async function fetchAdvertisingEligibilityForMarketplace(accessToken, marketplaceId, programTypes) {
+  const params = {};
+  const programTypesText = String(programTypes || '').trim();
+  if (programTypesText) params.program_types = programTypesText;
+
+  const response = await axios.get('https://api.ebay.com/sell/account/v1/advertising_eligibility', {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'GET',
+      path: '/sell/account/v1/advertising_eligibility',
+      marketplace: marketplaceId,
+    }),
+    params,
+    timeout: 60000,
+    validateStatus: () => true,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    const ebayError = response.data?.errors?.[0];
+    const message = ebayError?.longMessage || ebayError?.message || response.statusText || `eBay returned ${response.status}`;
+    throw new Error(message);
+  }
+
+  const entries = extractAdvertisingEligibilityEntries(response.data);
+
+  return entries.map((entry) => normalizeAdvertisingEligibilityRow(entry, { marketplaceId }));
+}
+
+async function fetchAdvertisingEligibilityForSeller(seller, query = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const marketplaceIds = resolveMarketingMarketplaceIds(sellerDoc, query.marketplace);
+  const sellerName = resolveStoreDisplayName(sellerDoc);
+
+  const pageResults = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      return await fetchAdvertisingEligibilityForMarketplace(
+        accessToken,
+        marketplaceId,
+        query.program_types,
+      );
+    } catch (err) {
+      return [normalizeAdvertisingEligibilityRow({}, {
+        marketplaceId,
+        sellerId: sellerDoc._id,
+        sellerName,
+        error: true,
+        errorMessage: err.message || 'Failed to load advertising eligibility',
+      })];
+    }
+  }));
+
+  const programs = pageResults.flat().map((row) => ({
+    ...row,
+    sellerId: String(sellerDoc._id),
+    sellerName,
+  }));
+
+  return {
+    marketplaceId: marketplaceIds.length === 1 ? marketplaceIds[0] : 'ALL',
+    programs,
+  };
+}
+
+router.get('/marketing/advertising-eligibility/all', requireAuth, requirePageAccess(['AdsAndMarketing']), async (req, res) => {
+  try {
+    const sellers = await getSellersForEbayApiPicker(req);
+    const runLimited = pLimit(MARKETING_SELLER_CONCURRENCY);
+
+    const storeResults = await Promise.all(sellers.map((seller) => runLimited(async () => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        const payload = await fetchAdvertisingEligibilityForSeller(seller, req.query);
+        return {
+          sellerId: seller._id,
+          sellerName,
+          programs: payload.programs,
+        };
+      } catch (err) {
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message || 'Failed to load advertising eligibility',
+          programs: [],
+        };
+      }
+    })));
+
+    const errors = storeResults.filter((r) => r.error).map((r) => ({
+      sellerId: r.sellerId,
+      sellerName: r.sellerName,
+      error: r.error,
+    }));
+    const programs = storeResults.flatMap((r) => r.programs);
+
+    return res.json({
+      success: true,
+      docsUrl: ADVERTISING_ELIGIBILITY_DOCS,
+      allStores: true,
+      sellersQueried: sellers.length,
+      errors,
+      programs,
+      total: programs.length,
+    });
+  } catch (err) {
+    console.error('[Advertising Eligibility All] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load advertising eligibility for all stores' });
+  }
+});
+
+router.get('/marketing/advertising-eligibility', requireAuth, requirePageAccess(['AdsAndMarketing']), async (req, res) => {
+  try {
+    const sellerLookup = String(req.query.sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ success: false, error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const payload = await fetchAdvertisingEligibilityForSeller(seller, req.query);
+
+    return res.json({
+      success: true,
+      docsUrl: ADVERTISING_ELIGIBILITY_DOCS,
+      seller: { id: seller._id, name: resolveStoreDisplayName(seller) },
+      marketplaceId: payload.marketplaceId,
+      programs: payload.programs,
+      total: payload.programs.length,
+    });
+  } catch (err) {
+    console.error('[Advertising Eligibility] Error:', err.response?.data || err.message);
+    if (sendTokenReconnectError(err, res)) return;
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message || 'Failed to load advertising eligibility',
+    });
+  }
+});
+
+// ============================================
+// MARKETING CAMPAIGNS (Marketing API — getCampaigns)
+// ============================================
+const MARKETING_CAMPAIGNS_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/campaign/methods/getCampaigns';
+
+const MARKETING_PICKER_MARKETPLACES = ['EBAY_US', 'EBAY_GB', 'EBAY_AU', 'EBAY_CA', 'EBAY_DE'];
+
+function isAllMarketplacesQuery(queryMarketplace) {
+  const raw = String(queryMarketplace ?? '').trim().toLowerCase();
+  return !raw || raw === '__all__' || raw === 'all';
+}
+
+function resolveMarketingMarketplaceIds(seller, queryMarketplace) {
+  if (isAllMarketplacesQuery(queryMarketplace)) {
+    return MARKETING_PICKER_MARKETPLACES;
+  }
+  return [resolvePrimaryFinancesMarketplaceId(seller, queryMarketplace)];
+}
+
+function normalizeMarketingCampaignRow(campaign = {}) {
+  const funding = campaign.fundingStrategy || {};
+  const daily = campaign.budget?.daily?.amount;
+  return {
+    campaignId: campaign.campaignId || '',
+    campaignName: campaign.campaignName || '',
+    campaignStatus: campaign.campaignStatus || '',
+    campaignTargetingType: campaign.campaignTargetingType || '',
+    marketplaceId: campaign.marketplaceId || '',
+    channels: Array.isArray(campaign.channels) ? campaign.channels : [],
+    startDate: campaign.startDate || null,
+    endDate: campaign.endDate || null,
+    fundingModel: funding.fundingModel || '',
+    bidPercentage: funding.bidPercentage || '',
+    biddingStrategy: funding.biddingStrategy || '',
+    adRateStrategy: funding.adRateStrategy || '',
+    dailyBudgetValue: daily?.value ?? null,
+    dailyBudgetCurrency: daily?.currency || '',
+    budgetStatus: campaign.budget?.daily?.budgetStatus || '',
+    raw: campaign,
+  };
+}
+
+function buildMarketingCampaignQueryParams(query) {
+  const params = {};
+  const limit = Math.min(500, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  params.limit = limit;
+  params.offset = offset;
+
+  const optionalKeys = [
+    'campaign_status',
+    'campaign_name',
+    'funding_strategy',
+    'campaign_targeting_type',
+    'start_date_range',
+    'end_date_range',
+  ];
+  for (const key of optionalKeys) {
+    const value = String(query[key] || '').trim();
+    if (value) params[key] = value;
+  }
+  return params;
+}
+
+async function resolveSellerWithEbayTokens(sellerOrId) {
+  const id = sellerOrId?._id || sellerOrId;
+  if (!id) throw new Error('Seller not found');
+
+  if (
+    sellerOrId
+    && typeof sellerOrId === 'object'
+    && sellerOrId.ebayTokens?.refresh_token
+    && typeof sellerOrId.save === 'function'
+  ) {
+    return sellerOrId;
+  }
+
+  const seller = await Seller.findById(id).populate('user', 'username');
+  if (!seller) throw new Error('Seller not found');
+  if (!seller.ebayTokens?.refresh_token) throw new Error('Seller not connected to eBay');
+  return seller;
+}
+
+async function fetchMarketingCampaignsPageForMarketplace(accessToken, marketplaceId, query, { limitOverride, offsetOverride } = {}) {
+  const params = buildMarketingCampaignQueryParams(query);
+  if (limitOverride != null) params.limit = limitOverride;
+  if (offsetOverride != null) params.offset = offsetOverride;
+
+  const response = await axios.get('https://api.ebay.com/sell/marketing/v1/ad_campaign', {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'GET',
+      path: '/sell/marketing/v1/ad_campaign',
+      marketplace: marketplaceId,
+    }),
+    params,
+    timeout: 90000,
+  });
+
+  return {
+    marketplaceId,
+    campaigns: (response.data?.campaigns || []).map((row) => {
+      const normalized = normalizeMarketingCampaignRow(row);
+      return {
+        ...normalized,
+        marketplaceId: normalized.marketplaceId || marketplaceId,
+      };
+    }),
+    pagination: {
+      limit: response.data?.limit ?? String(params.limit),
+      offset: response.data?.offset ?? String(params.offset),
+      total: response.data?.total ?? null,
+      href: response.data?.href || null,
+      next: response.data?.next || null,
+      prev: response.data?.prev || null,
+    },
+  };
+}
+
+async function fetchMarketingCampaignsForSeller(seller, query, { limitOverride, offsetOverride } = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const marketplaceIds = resolveMarketingMarketplaceIds(sellerDoc, query.marketplace);
+
+  if (marketplaceIds.length === 1) {
+    const payload = await fetchMarketingCampaignsPageForMarketplace(
+      accessToken,
+      marketplaceIds[0],
+      query,
+      { limitOverride, offsetOverride },
+    );
+    return {
+      marketplaceId: payload.marketplaceId,
+      params: buildMarketingCampaignQueryParams(query),
+      campaigns: payload.campaigns,
+      pagination: payload.pagination,
+    };
+  }
+
+  const perMarketplaceLimit = limitOverride ?? Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const pageResults = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      return await fetchMarketingCampaignsPageForMarketplace(accessToken, marketplaceId, query, {
+        limitOverride: perMarketplaceLimit,
+        offsetOverride: 0,
+      });
+    } catch {
+      return { marketplaceId, campaigns: [] };
+    }
+  }));
+
+  const merged = sortMergedMarketingRows(
+    dedupeMarketingRows(
+      pageResults.flatMap((result) => result.campaigns),
+      ['campaignId'],
+    ),
+    query.sort,
+    'campaignName',
+  );
+
+  const limit = limitOverride ?? Math.min(500, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = offsetOverride ?? Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  const bulkFetch = limitOverride != null && offsetOverride === 0;
+
+  return {
+    marketplaceId: 'ALL',
+    params: buildMarketingCampaignQueryParams(query),
+    campaigns: bulkFetch ? merged : merged.slice(offset, offset + limit),
+    pagination: {
+      limit: String(limit),
+      offset: String(offset),
+      total: merged.length,
+      href: null,
+      next: null,
+      prev: null,
+    },
+  };
+}
+
+function sortMergedMarketingRows(rows, sort, nameKey = 'campaignName') {
+  const sortKey = String(sort || '').trim();
+  if (!sortKey) return rows;
+  const desc = sortKey.startsWith('-');
+  const field = desc ? sortKey.slice(1) : sortKey;
+  const dir = desc ? -1 : 1;
+  const getter = (row) => {
+    if (field === 'PROMOTION_NAME' || field === 'CAMPAIGN_NAME') {
+      return String(row[nameKey] || row.promotionName || row.campaignName || '').toLowerCase();
+    }
+    if (field === 'START_DATE') return new Date(row.startDate || 0).getTime();
+    if (field === 'END_DATE') return new Date(row.endDate || 0).getTime();
+    return '';
+  };
+  return [...rows].sort((a, b) => {
+    const av = getter(a);
+    const bv = getter(b);
+    if (av === bv) return String(a.sellerName || '').localeCompare(String(b.sellerName || ''));
+    return av < bv ? -dir : dir;
+  });
+}
+
+function dedupeMarketingRows(rows, idFields, { includeSeller = false } = {}) {
+  const seen = new Set();
+  const deduped = [];
+  for (const row of rows) {
+    const keyParts = [];
+    if (includeSeller) keyParts.push(String(row.sellerId || '').trim());
+    for (const field of idFields) {
+      keyParts.push(String(row[field] || '').trim());
+    }
+    const key = keyParts.filter(Boolean).join(':');
+    if (!key) {
+      deduped.push(row);
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+  return deduped;
+}
+
+const MARKETING_CACHE_TTL_MS = 5 * 60 * 1000;
+const MARKETING_SELLER_MEMORY_CACHE_TTL_MS = 10 * 60 * 1000;
+const MARKETING_SELLER_CONCURRENCY = 6;
+const marketingSellerMemoryCache = new Map();
+
+function buildMarketingSellerMemoryKey(kind, sellerId, query, options = {}) {
+  return `${kind}:${sellerId}:${stableQueryString({
+    marketplace: query.marketplace,
+    promotion_status: query.promotion_status,
+    campaign_status: query.campaign_status,
+    promotion_type: query.promotion_type,
+    funding_strategy: query.funding_strategy,
+    campaign_targeting_type: query.campaign_targeting_type,
+    q: query.q,
+    sort: query.sort,
+    limit: options.limitOverride ?? query.limit,
+  })}`;
+}
+
+function readMarketingSellerMemory(cacheKey) {
+  const entry = marketingSellerMemoryCache.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    marketingSellerMemoryCache.delete(cacheKey);
+    return null;
+  }
+  return entry.data;
+}
+
+function writeMarketingSellerMemory(cacheKey, data) {
+  marketingSellerMemoryCache.set(cacheKey, {
+    data,
+    expiresAt: Date.now() + MARKETING_SELLER_MEMORY_CACHE_TTL_MS,
+  });
+}
+
+async function fetchMarketingCampaignsForSellerCached(seller, query, options = {}) {
+  const sellerId = String(seller._id || seller);
+  const cacheKey = buildMarketingSellerMemoryKey('campaigns', sellerId, query, options);
+  if (!options.forceRefresh) {
+    const cached = readMarketingSellerMemory(cacheKey);
+    if (cached) return cached;
+  }
+  const data = await fetchMarketingCampaignsForSeller(seller, query, options);
+  writeMarketingSellerMemory(cacheKey, data);
+  return data;
+}
+
+async function fetchMarketingPromotionsForSellerCached(seller, query, options = {}) {
+  const sellerId = String(seller._id || seller);
+  const cacheKey = buildMarketingSellerMemoryKey('promotions', sellerId, query, options);
+  if (!options.forceRefresh) {
+    const cached = readMarketingSellerMemory(cacheKey);
+    if (cached) return cached;
+  }
+  const data = await fetchMarketingPromotionsForSeller(seller, query, options);
+  writeMarketingSellerMemory(cacheKey, data);
+  return data;
+}
+
+function stableQueryString(query = {}) {
+  const pairs = Object.entries(query)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}:${String(value)}`);
+  return pairs.join('|');
+}
+
+function buildMarketingCacheKey(req, scope) {
+  const userKey = String(req.user?.userId || 'anon');
+  return `mkt:${userKey}:${scope}:${stableQueryString(req.query || {})}`;
+}
+
+async function readMarketingCache(cacheKey) {
+  const row = await MarketingViewCache.findById(cacheKey).lean();
+  if (!row) return null;
+  if (!row.expiresAt || new Date(row.expiresAt).getTime() < Date.now()) return null;
+  return row.payload || null;
+}
+
+async function writeMarketingCache(cacheKey, payload) {
+  const expiresAt = new Date(Date.now() + MARKETING_CACHE_TTL_MS);
+  await MarketingViewCache.findByIdAndUpdate(
+    cacheKey,
+    { payload, expiresAt, updatedAt: new Date() },
+    { upsert: true, setDefaultsOnInsert: true }
+  );
+}
+
+async function invalidateMarketingCacheForUser(userId) {
+  const prefix = `mkt:${String(userId)}:`;
+  await MarketingViewCache.deleteMany({ _id: { $regex: `^${prefix}` } });
+}
+
+router.get('/marketing/campaigns/all', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const refresh = String(req.query.refresh || '').toLowerCase();
+    const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
+    const cacheKey = buildMarketingCacheKey(req, 'campaigns_all');
+    if (!bypassCache) {
+      const cached = await readMarketingCache(cacheKey);
+      if (cached) return res.json({ ...cached, fromCache: true });
+    }
+
+    const sellers = await getSellersForEbayApiPicker(req);
+    const perSellerLimit = Math.min(200, Math.max(1, parseInt(req.query.perSellerLimit || '50', 10) || 50));
+    const bulkQuery = { ...req.query, limit: perSellerLimit, offset: 0 };
+    const runLimited = pLimit(MARKETING_SELLER_CONCURRENCY);
+
+    const storeResults = await Promise.all(sellers.map((seller) => runLimited(async () => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        const payload = await fetchMarketingCampaignsForSellerCached(seller, bulkQuery, {
+          limitOverride: perSellerLimit,
+          offsetOverride: 0,
+          forceRefresh: bypassCache,
+        });
+        return {
+          sellerId: seller._id,
+          sellerName,
+          campaigns: payload.campaigns.map((row) => ({
+            ...row,
+            sellerId: String(seller._id),
+            sellerName,
+          })),
+        };
+      } catch (err) {
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message || 'Failed to load campaigns',
+          campaigns: [],
+        };
+      }
+    })));
+
+    const errors = storeResults.filter((r) => r.error).map((r) => ({
+      sellerId: r.sellerId,
+      sellerName: r.sellerName,
+      error: r.error,
+    }));
+    const campaigns = sortMergedMarketingRows(
+      dedupeMarketingRows(
+        storeResults.flatMap((r) => r.campaigns),
+        ['campaignId'],
+        { includeSeller: true },
+      ),
+      req.query.sort,
+      'campaignName'
+    );
+
+    const payload = {
+      success: true,
+      docsUrl: MARKETING_CAMPAIGNS_DOCS,
+      allStores: true,
+      sellersQueried: sellers.length,
+      perSellerLimit,
+      errors,
+      campaigns,
+      total: campaigns.length,
+    };
+    await writeMarketingCache(cacheKey, payload);
+    return res.json({ ...payload, fromCache: false });
+  } catch (err) {
+    console.error('[Marketing Campaigns All] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load campaigns for all stores' });
+  }
+});
+
+router.get('/marketing/campaigns', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const refresh = String(req.query.refresh || '').toLowerCase();
+    const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
+    const cacheKey = buildMarketingCacheKey(req, 'campaigns_single');
+    if (!bypassCache) {
+      const cached = await readMarketingCache(cacheKey);
+      if (cached) return res.json({ ...cached, fromCache: true });
+    }
+
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const payload = await fetchMarketingCampaignsForSeller(seller, req.query);
+    const payloadJson = {
+      success: true,
+      docsUrl: MARKETING_CAMPAIGNS_DOCS,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId: payload.marketplaceId,
+      limit: payload.pagination.limit,
+      offset: payload.pagination.offset,
+      total: payload.pagination.total,
+      href: payload.pagination.href,
+      next: payload.pagination.next,
+      prev: payload.pagination.prev,
+      campaigns: payload.campaigns,
+    };
+    await writeMarketingCache(cacheKey, payloadJson);
+    return res.json({ ...payloadJson, fromCache: false });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = data?.errors || [];
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to load marketing campaigns';
+    console.error('[Marketing Campaigns] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
+const CREATE_CAMPAIGN_DOCS =
+  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-campaign-createcampaign';
+
+const END_CAMPAIGN_DOCS =
+  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-campaign-endcampaign';
+
+const PAUSE_CAMPAIGN_DOCS =
+  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-campaign-pausecampaign';
+
+const RESUME_CAMPAIGN_DOCS =
+  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-campaign-resumecampaign';
+
+function sendEbayMarketingCampaignError(res, response, data, fallbackMessage) {
+  const ebayErrors = extractEbayApiErrors(data);
+  const first = ebayErrors[0] || {};
+  const message = first.longMessage || first.message || data?.error || fallbackMessage;
+  return res.status(response?.status || 500).json({
+    success: false,
+    error: message,
+    details: data,
+  });
+}
+
+async function callEbayCampaignLifecycleApi({ sellerDoc, campaignId, action, marketplaceId }) {
+  const accessToken = await ensureValidToken(sellerDoc);
+  const encodedCampaignId = encodeURIComponent(campaignId);
+  const apiPath = `/sell/marketing/v1/ad_campaign/${encodedCampaignId}/${action}`;
+  const url = `https://api.ebay.com${apiPath}`;
+  const response = await axios.post(url, null, {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'POST',
+      path: apiPath,
+      marketplace: marketplaceId,
+    }),
+    timeout: 90000,
+    validateStatus: () => true,
+  });
+
+  return {
+    response,
+    data: parseEbayRawResponseData(response),
+  };
+}
+
+router.post('/marketing/campaigns/create', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const { sellerId, campaign } = req.body || {};
+    if (!sellerId) {
+      return res.status(400).json({ success: false, error: 'sellerId is required' });
+    }
+    if (!campaign || typeof campaign !== 'object' || Array.isArray(campaign)) {
+      return res.status(400).json({ success: false, error: 'campaign payload object is required' });
+    }
+    if (!String(campaign.campaignName || '').trim()) {
+      return res.status(400).json({ success: false, error: 'campaign.campaignName is required' });
+    }
+    if (!String(campaign.marketplaceId || '').trim()) {
+      return res.status(400).json({ success: false, error: 'campaign.marketplaceId is required' });
+    }
+    if (!String(campaign.startDate || '').trim()) {
+      return res.status(400).json({ success: false, error: 'campaign.startDate is required' });
+    }
+    if (!campaign.fundingStrategy?.fundingModel) {
+      return res.status(400).json({ success: false, error: 'campaign.fundingStrategy.fundingModel is required' });
+    }
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const accessToken = await ensureValidToken(sellerDoc);
+    const marketplaceId = normalizeFinancesMarketplaceId(campaign.marketplaceId);
+    const apiPath = '/sell/marketing/v1/ad_campaign';
+
+    const response = await axios.post(`https://api.ebay.com${apiPath}`, campaign, {
+      headers: buildEbayRawHeaders({
+        accessToken,
+        method: 'POST',
+        path: apiPath,
+        marketplace: marketplaceId,
+      }),
+      timeout: 90000,
+      validateStatus: () => true,
+    });
+
+    const location = response.headers?.location || response.headers?.Location || '';
+    const campaignId = location ? String(location).split('/').filter(Boolean).pop() : null;
+    const data = parseEbayRawResponseData(response);
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Campaign Create] Error:', data || response.status);
+      return sendEbayMarketingCampaignError(res, response, data, 'Failed to create campaign');
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.status(201).json({
+      success: true,
+      docsUrl: CREATE_CAMPAIGN_DOCS,
+      campaignId,
+      location,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId,
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Campaign Create] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to create campaign' });
+  }
+});
+
+async function handleCampaignLifecycleRoute(req, res, action, docsUrl) {
+  try {
+    const sellerId = req.body?.sellerId || req.query?.sellerId;
+    const campaignId = req.body?.campaignId || req.query?.campaignId;
+    const marketplaceId = req.body?.marketplaceId || req.query?.marketplaceId;
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!campaignId) return res.status(400).json({ success: false, error: 'campaignId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const { response, data } = await callEbayCampaignLifecycleApi({
+      sellerDoc,
+      campaignId,
+      action,
+      marketplaceId: mp,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error(`[Marketing Campaign ${action}] Error:`, data || response.status);
+      return sendEbayMarketingCampaignError(res, response, data, `Failed to ${action} campaign`);
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.json({
+      success: true,
+      docsUrl,
+      action,
+      campaignId,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId: mp,
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error(`[Marketing Campaign ${action}] Error:`, err.message);
+    return res.status(500).json({ success: false, error: err.message || `Failed to ${action} campaign` });
+  }
+}
+
+router.post('/marketing/campaigns/pause', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), (req, res) => (
+  handleCampaignLifecycleRoute(req, res, 'pause', PAUSE_CAMPAIGN_DOCS)
+));
+
+router.post('/marketing/campaigns/resume', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), (req, res) => (
+  handleCampaignLifecycleRoute(req, res, 'resume', RESUME_CAMPAIGN_DOCS)
+));
+
+router.post('/marketing/campaigns/end', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), (req, res) => (
+  handleCampaignLifecycleRoute(req, res, 'end', END_CAMPAIGN_DOCS)
+));
+
+const GET_CAMPAIGN_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/campaign/methods/getCampaign';
+
+const UPDATE_CAMPAIGN_IDENTIFICATION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/campaign/methods/updateCampaignIdentification';
+
+async function callEbayGetCampaignApi({ sellerDoc, campaignId, marketplaceId }) {
+  const accessToken = await ensureValidToken(sellerDoc);
+  const encodedCampaignId = encodeURIComponent(campaignId);
+  const apiPath = `/sell/marketing/v1/ad_campaign/${encodedCampaignId}`;
+  const url = `https://api.ebay.com${apiPath}`;
+  const response = await axios.get(url, {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'GET',
+      path: apiPath,
+      marketplace: marketplaceId,
+    }),
+    timeout: 90000,
+    validateStatus: () => true,
+  });
+
+  return {
+    response,
+    data: parseEbayRawResponseData(response),
+  };
+}
+
+async function callEbayUpdateCampaignIdentificationApi({
+  sellerDoc,
+  campaignId,
+  marketplaceId,
+  body,
+}) {
+  const accessToken = await ensureValidToken(sellerDoc);
+  const encodedCampaignId = encodeURIComponent(campaignId);
+  const apiPath = `/sell/marketing/v1/ad_campaign/${encodedCampaignId}/update_campaign_identification`;
+  const url = `https://api.ebay.com${apiPath}`;
+  const response = await axios.post(url, body, {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'POST',
+      path: apiPath,
+      marketplace: marketplaceId,
+    }),
+    timeout: 90000,
+    validateStatus: () => true,
+  });
+
+  return {
+    response,
+    data: parseEbayRawResponseData(response),
+  };
+}
+
+router.get('/marketing/campaigns/item', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const { sellerId, campaignId, marketplaceId } = req.query || {};
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!campaignId) return res.status(400).json({ success: false, error: 'campaignId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const { response, data } = await callEbayGetCampaignApi({
+      sellerDoc,
+      campaignId,
+      marketplaceId: mp,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Campaign Get] Error:', data || response.status);
+      return sendEbayMarketingCampaignError(res, response, data, 'Failed to load campaign');
+    }
+
+    return res.json({
+      success: true,
+      docsUrl: GET_CAMPAIGN_DOCS,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId: mp,
+      campaign: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Campaign Get] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load campaign' });
+  }
+});
+
+router.post('/marketing/campaigns/update-identification', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const {
+      sellerId,
+      campaignId,
+      marketplaceId,
+      campaignName,
+      startDate,
+      endDate,
+    } = req.body || {};
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!campaignId) return res.status(400).json({ success: false, error: 'campaignId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+    if (!String(campaignName || '').trim()) {
+      return res.status(400).json({ success: false, error: 'campaignName is required' });
+    }
+    if (!String(startDate || '').trim()) {
+      return res.status(400).json({ success: false, error: 'startDate is required' });
+    }
+    if (!String(endDate || '').trim()) {
+      return res.status(400).json({ success: false, error: 'endDate is required' });
+    }
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const { response, data } = await callEbayUpdateCampaignIdentificationApi({
+      sellerDoc,
+      campaignId,
+      marketplaceId: mp,
+      body: {
+        campaignName: String(campaignName).trim(),
+        startDate,
+        endDate,
+      },
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Campaign Update Identification] Error:', data || response.status);
+      return sendEbayMarketingCampaignError(res, response, data, 'Failed to update campaign');
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.json({
+      success: true,
+      docsUrl: UPDATE_CAMPAIGN_IDENTIFICATION_DOCS,
+      campaignId,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId: mp,
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Campaign Update Identification] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to update campaign' });
+  }
+});
+
+// ============================================
+// MARKETING PROMOTIONS (Marketing API — getPromotions)
+// ============================================
+const MARKETING_PROMOTIONS_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/promotion/methods/getPromotions';
+
+const CREATE_ITEM_PROMOTION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/createItemPromotion';
+
+const CREATE_ITEM_PRICE_MARKDOWN_DOCS =
+  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-item_price_markdown-createitempricemarkdownpromotion';
+
+const GET_ITEM_PROMOTION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/getItemPromotion';
+
+const GET_ITEM_PRICE_MARKDOWN_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_price_markdown/methods/getItemPriceMarkdownPromotion';
+
+const UPDATE_ITEM_PROMOTION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/updateItemPromotion';
+
+const UPDATE_ITEM_PRICE_MARKDOWN_DOCS =
+  'https://developer.ebay.com/develop/api/sell/marketing_api#sell-marketing_api-item_price_markdown-updateitempricemarkdownpromotion';
+
+const DELETE_ITEM_PROMOTION_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_promotion/methods/deleteItemPromotion';
+
+const DELETE_ITEM_PRICE_MARKDOWN_DOCS =
+  'https://developer.ebay.com/api-docs/sell/marketing/resources/item_price_markdown/methods/deleteItemPriceMarkdownPromotion';
+
+function isMarkdownPromotionType(promotionType) {
+  return String(promotionType || '').trim().toUpperCase() === 'MARKDOWN_SALE';
+}
+
+function buildEbayItemPromotionPathId(promotionId, marketplaceId) {
+  const id = String(promotionId || '').trim();
+  const mp = normalizeFinancesMarketplaceId(marketplaceId);
+  if (!id) throw new Error('promotionId is required');
+  if (!mp) throw new Error('marketplaceId is required');
+  return `${id}@${mp}`;
+}
+
+async function callEbayItemPromotionApi({ sellerDoc, promotionPathId, method, marketplaceId, body }) {
+  const accessToken = await ensureValidToken(sellerDoc);
+  const encodedPathId = encodeURIComponent(promotionPathId);
+  const apiPath = `/sell/marketing/v1/item_promotion/${encodedPathId}`;
+  const url = `https://api.ebay.com${apiPath}`;
+  const headers = buildEbayRawHeaders({
+    accessToken,
+    method,
+    path: apiPath,
+    marketplace: marketplaceId,
+  });
+  const config = { headers, timeout: 90000, validateStatus: () => true };
+
+  let response;
+  if (method === 'GET') response = await axios.get(url, config);
+  else if (method === 'PUT') response = await axios.put(url, body, config);
+  else if (method === 'DELETE') response = await axios.delete(url, config);
+  else throw new Error(`Unsupported method: ${method}`);
+
+  return {
+    response,
+    data: parseEbayRawResponseData(response),
+  };
+}
+
+async function callEbayItemPriceMarkdownApi({ sellerDoc, promotionPathId, method, marketplaceId, body }) {
+  const accessToken = await ensureValidToken(sellerDoc);
+  const encodedPathId = encodeURIComponent(promotionPathId);
+  const apiPath = `/sell/marketing/v1/item_price_markdown/${encodedPathId}`;
+  const url = `https://api.ebay.com${apiPath}`;
+  const headers = buildEbayRawHeaders({
+    accessToken,
+    method,
+    path: apiPath,
+    marketplace: marketplaceId,
+  });
+  const config = { headers, timeout: 90000, validateStatus: () => true };
+
+  let response;
+  if (method === 'GET') response = await axios.get(url, config);
+  else if (method === 'PUT') response = await axios.put(url, body, config);
+  else if (method === 'DELETE') response = await axios.delete(url, config);
+  else throw new Error(`Unsupported method: ${method}`);
+
+  return {
+    response,
+    data: parseEbayRawResponseData(response),
+  };
+}
+
+async function callEbayPromotionLifecycleApi({ sellerDoc, promotionPathId, action, marketplaceId }) {
+  const accessToken = await ensureValidToken(sellerDoc);
+  const encodedPathId = encodeURIComponent(promotionPathId);
+  const apiPath = `/sell/marketing/v1/promotion/${encodedPathId}/${action}`;
+  const url = `https://api.ebay.com${apiPath}`;
+  const headers = buildEbayRawHeaders({
+    accessToken,
+    method: 'POST',
+    path: apiPath,
+    marketplace: marketplaceId,
+  });
+  const response = await axios.post(url, null, {
+    headers,
+    timeout: 90000,
+    validateStatus: () => true,
+  });
+
+  return {
+    response,
+    data: parseEbayRawResponseData(response),
+  };
+}
+
+function sendEbayItemPromotionError(res, response, data, fallbackMessage) {
+  const ebayErrors = extractEbayApiErrors(data);
+  const first = ebayErrors[0] || {};
+  const message = first.longMessage || first.message || data?.error || fallbackMessage;
+  return res.status(response?.status || 500).json({
+    success: false,
+    error: message,
+    details: data,
+  });
+}
+
+function normalizeMarketingPromotionRow(promotion = {}) {
+  return {
+    promotionId: promotion.promotionId || '',
+    promotionName: promotion.name || promotion.promotionName || '',
+    promotionStatus: promotion.promotionStatus || '',
+    promotionType: promotion.promotionType || '',
+    marketplaceId: promotion.marketplaceId || '',
+    startDate: promotion.startDate || null,
+    endDate: promotion.endDate || null,
+    couponCode: promotion.couponCode || promotion.couponConfiguration?.couponCode || '',
+    description: promotion.description || promotion.promotionDescription || '',
+    promotionImageUrl: promotion.promotionImageUrl || '',
+    promotionHref: promotion.promotionHref || promotion.href || '',
+    raw: promotion,
+  };
+}
+
+function buildMarketingPromotionQueryParams(query, marketplaceId) {
+  const params = { marketplace_id: marketplaceId };
+  const limit = Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  params.limit = limit;
+  params.offset = offset;
+
+  const optionalKeys = ['promotion_status', 'promotion_type', 'q', 'sort'];
+  for (const key of optionalKeys) {
+    const value = String(query[key] || '').trim();
+    if (value) params[key] = value;
+  }
+  return params;
+}
+
+async function fetchMarketingPromotionsPageForMarketplace(accessToken, marketplaceId, query, { limitOverride, offsetOverride } = {}) {
+  const params = buildMarketingPromotionQueryParams(query, marketplaceId);
+  if (limitOverride != null) params.limit = limitOverride;
+  if (offsetOverride != null) params.offset = offsetOverride;
+
+  const response = await axios.get('https://api.ebay.com/sell/marketing/v1/promotion', {
+    headers: buildEbayRawHeaders({
+      accessToken,
+      method: 'GET',
+      path: '/sell/marketing/v1/promotion',
+      marketplace: marketplaceId,
+    }),
+    params,
+    timeout: 90000,
+  });
+
+  return {
+    marketplaceId,
+    promotions: (response.data?.promotions || []).map((row) => {
+      const normalized = normalizeMarketingPromotionRow(row);
+      return {
+        ...normalized,
+        marketplaceId: normalized.marketplaceId || marketplaceId,
+      };
+    }),
+    pagination: {
+      limit: response.data?.limit ?? String(params.limit),
+      offset: response.data?.offset ?? String(params.offset),
+      total: response.data?.total ?? null,
+      href: response.data?.href || null,
+      next: response.data?.next || null,
+      prev: response.data?.prev || null,
+    },
+  };
+}
+
+async function fetchMarketingPromotionsForSeller(seller, query, { limitOverride, offsetOverride } = {}) {
+  const sellerDoc = await resolveSellerWithEbayTokens(seller);
+  const accessToken = await ensureValidToken(sellerDoc);
+  const marketplaceIds = resolveMarketingMarketplaceIds(sellerDoc, query.marketplace);
+
+  if (marketplaceIds.length === 1) {
+    const payload = await fetchMarketingPromotionsPageForMarketplace(
+      accessToken,
+      marketplaceIds[0],
+      query,
+      { limitOverride, offsetOverride },
+    );
+    return {
+      marketplaceId: payload.marketplaceId,
+      params: buildMarketingPromotionQueryParams(query, payload.marketplaceId),
+      promotions: payload.promotions,
+      pagination: payload.pagination,
+    };
+  }
+
+  const perMarketplaceLimit = limitOverride ?? Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const pageResults = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    try {
+      return await fetchMarketingPromotionsPageForMarketplace(accessToken, marketplaceId, query, {
+        limitOverride: perMarketplaceLimit,
+        offsetOverride: 0,
+      });
+    } catch {
+      return { marketplaceId, promotions: [] };
+    }
+  }));
+
+  const merged = sortMergedMarketingRows(
+    dedupeMarketingRows(
+      pageResults.flatMap((result) => result.promotions),
+      ['promotionId', 'marketplaceId'],
+    ),
+    query.sort,
+    'promotionName',
+  );
+
+  const limit = limitOverride ?? Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = offsetOverride ?? Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  const bulkFetch = limitOverride != null && offsetOverride === 0;
+
+  return {
+    marketplaceId: 'ALL',
+    params: buildMarketingPromotionQueryParams(query, 'ALL'),
+    promotions: bulkFetch ? merged : merged.slice(offset, offset + limit),
+    pagination: {
+      limit: String(limit),
+      offset: String(offset),
+      total: merged.length,
+      href: null,
+      next: null,
+      prev: null,
+    },
+  };
+}
+
+router.get('/marketing/promotions/all', requireAuth, requirePageAccess(['MarketingPromotions', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const refresh = String(req.query.refresh || '').toLowerCase();
+    const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
+    const cacheKey = buildMarketingCacheKey(req, 'promotions_all');
+    if (!bypassCache) {
+      const cached = await readMarketingCache(cacheKey);
+      if (cached) return res.json({ ...cached, fromCache: true });
+    }
+
+    const sellers = await getSellersForEbayApiPicker(req);
+    const perSellerLimit = Math.min(200, Math.max(1, parseInt(req.query.perSellerLimit || '50', 10) || 50));
+    const bulkQuery = { ...req.query, limit: perSellerLimit, offset: 0 };
+    const runLimited = pLimit(MARKETING_SELLER_CONCURRENCY);
+
+    const storeResults = await Promise.all(sellers.map((seller) => runLimited(async () => {
+      const sellerName = resolveStoreDisplayName(seller);
+      try {
+        const payload = await fetchMarketingPromotionsForSellerCached(seller, bulkQuery, {
+          limitOverride: perSellerLimit,
+          offsetOverride: 0,
+          forceRefresh: bypassCache,
+        });
+        return {
+          sellerId: seller._id,
+          sellerName,
+          promotions: payload.promotions.map((row) => ({
+            ...row,
+            sellerId: String(seller._id),
+            sellerName,
+          })),
+        };
+      } catch (err) {
+        return {
+          sellerId: seller._id,
+          sellerName,
+          error: err.message || 'Failed to load promotions',
+          promotions: [],
+        };
+      }
+    })));
+
+    const errors = storeResults.filter((r) => r.error).map((r) => ({
+      sellerId: r.sellerId,
+      sellerName: r.sellerName,
+      error: r.error,
+    }));
+    const promotions = sortMergedMarketingRows(
+      dedupeMarketingRows(
+        storeResults.flatMap((r) => r.promotions),
+        ['promotionId', 'marketplaceId'],
+        { includeSeller: true },
+      ),
+      req.query.sort,
+      'promotionName'
+    );
+
+    const payload = {
+      success: true,
+      docsUrl: MARKETING_PROMOTIONS_DOCS,
+      allStores: true,
+      sellersQueried: sellers.length,
+      perSellerLimit,
+      errors,
+      promotions,
+      total: promotions.length,
+    };
+    await writeMarketingCache(cacheKey, payload);
+    return res.json({ ...payload, fromCache: false });
+  } catch (err) {
+    console.error('[Marketing Promotions All] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load promotions for all stores' });
+  }
+});
+
+router.get('/marketing/promotions', requireAuth, requirePageAccess(['MarketingPromotions', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const refresh = String(req.query.refresh || '').toLowerCase();
+    const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
+    const cacheKey = buildMarketingCacheKey(req, 'promotions_single');
+    if (!bypassCache) {
+      const cached = await readMarketingCache(cacheKey);
+      if (cached) return res.json({ ...cached, fromCache: true });
+    }
+
+    const seller = await Seller.findById(req.query.sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const payload = await fetchMarketingPromotionsForSeller(seller, req.query);
+    const payloadJson = {
+      success: true,
+      docsUrl: MARKETING_PROMOTIONS_DOCS,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId: payload.marketplaceId,
+      limit: payload.pagination.limit,
+      offset: payload.pagination.offset,
+      total: payload.pagination.total,
+      href: payload.pagination.href,
+      next: payload.pagination.next,
+      prev: payload.pagination.prev,
+      promotions: payload.promotions,
+    };
+    await writeMarketingCache(cacheKey, payloadJson);
+    return res.json({ ...payloadJson, fromCache: false });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = data?.errors || [];
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to load marketing promotions';
+    console.error('[Marketing Promotions] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
+router.post('/marketing/promotions/create', requireAuth, requirePageAccess(['MarketingPromotions', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const { sellerId, promotion } = req.body || {};
+    if (!sellerId) {
+      return res.status(400).json({ success: false, error: 'sellerId is required' });
+    }
+    if (!promotion || typeof promotion !== 'object' || Array.isArray(promotion)) {
+      return res.status(400).json({ success: false, error: 'promotion payload object is required' });
+    }
+    if (!String(promotion.name || '').trim()) {
+      return res.status(400).json({ success: false, error: 'promotion.name is required' });
+    }
+    if (!String(promotion.marketplaceId || '').trim()) {
+      return res.status(400).json({ success: false, error: 'promotion.marketplaceId is required' });
+    }
+
+    const promotionType = String(promotion.promotionType || req.body.promotionType || '').trim();
+    const isMarkdownSale = promotionType === 'MARKDOWN_SALE';
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const accessToken = await ensureValidToken(sellerDoc);
+    const marketplaceId = normalizeFinancesMarketplaceId(promotion.marketplaceId);
+
+    if (isMarkdownSale) {
+      const markdownPayload = { ...promotion };
+      delete markdownPayload.promotionType;
+
+      const response = await axios.post(
+        'https://api.ebay.com/sell/marketing/v1/item_price_markdown',
+        markdownPayload,
+        {
+          headers: buildEbayRawHeaders({
+            accessToken,
+            method: 'POST',
+            path: '/sell/marketing/v1/item_price_markdown',
+            marketplace: marketplaceId,
+          }),
+          timeout: 90000,
+          validateStatus: () => true,
+        },
+      );
+
+      const location = response.headers?.location || response.headers?.Location || '';
+      const promotionId = location ? String(location).split('/').filter(Boolean).pop() : null;
+      const data = parseEbayRawResponseData(response);
+
+      if (response.status < 200 || response.status >= 300) {
+        const ebayErrors = extractEbayApiErrors(data);
+        const first = ebayErrors[0] || {};
+        const message = first.longMessage || first.message || data?.error || 'Failed to create markdown promotion';
+        console.error('[Marketing Markdown Create] Error:', data || response.status);
+        return res.status(response.status || 500).json({
+          success: false,
+          error: message,
+          details: data,
+        });
+      }
+
+      await invalidateMarketingCacheForUser(req.user?.userId);
+      return res.status(201).json({
+        success: true,
+        docsUrl: CREATE_ITEM_PRICE_MARKDOWN_DOCS,
+        promotionType: 'MARKDOWN_SALE',
+        promotionId,
+        location,
+        seller: { id: seller._id, name: seller.user?.username },
+        marketplaceId,
+        response: data,
+      });
+    }
+
+    if (!promotionType) {
+      return res.status(400).json({ success: false, error: 'promotion.promotionType is required' });
+    }
+
+    const createPayload = { ...promotion };
+    if (
+      createPayload.promotionType === 'CODED_COUPON'
+      && createPayload.couponConfiguration?.couponType === 'PRIVATE_SINGLE_SELLER_COUPON'
+    ) {
+      delete createPayload.promotionImageUrl;
+    }
+
+    const response = await axios.post(
+      'https://api.ebay.com/sell/marketing/v1/item_promotion',
+      createPayload,
+      {
+        headers: buildEbayRawHeaders({
+          accessToken,
+          method: 'POST',
+          path: '/sell/marketing/v1/item_promotion',
+          marketplace: marketplaceId,
+        }),
+        timeout: 90000,
+        validateStatus: () => true,
+      },
+    );
+
+    const location = response.headers?.location || response.headers?.Location || '';
+    const promotionId = location ? String(location).split('/').filter(Boolean).pop() : null;
+    const data = parseEbayRawResponseData(response);
+
+    if (response.status < 200 || response.status >= 300) {
+      const ebayErrors = extractEbayApiErrors(data);
+      const first = ebayErrors[0] || {};
+      const message = first.longMessage || first.message || data?.error || 'Failed to create promotion';
+      console.error('[Marketing Promotions Create] Error:', data || response.status);
+      return res.status(response.status || 500).json({
+        success: false,
+        error: message,
+        details: data,
+      });
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.status(201).json({
+      success: true,
+      docsUrl: CREATE_ITEM_PROMOTION_DOCS,
+      promotionId,
+      location,
+      seller: { id: seller._id, name: seller.user?.username },
+      marketplaceId,
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    const status = err.response?.status || 500;
+    const data = err.response?.data;
+    const ebayErrors = extractEbayApiErrors(data);
+    const first = ebayErrors[0] || {};
+    const message = first.longMessage || first.message || data?.error || err.message || 'Failed to create promotion';
+    console.error('[Marketing Promotions Create] Error:', data || err.message);
+    return res.status(status).json({
+      success: false,
+      error: message,
+      details: data,
+    });
+  }
+});
+
+router.get('/marketing/promotions/item', requireAuth, requirePageAccess(['MarketingPromotions', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const { sellerId, promotionId, marketplaceId, promotionType } = req.query || {};
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!promotionId) return res.status(400).json({ success: false, error: 'promotionId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const promotionPathId = buildEbayItemPromotionPathId(promotionId, mp);
+    const isMarkdown = isMarkdownPromotionType(promotionType);
+    const { response, data } = isMarkdown
+      ? await callEbayItemPriceMarkdownApi({
+        sellerDoc,
+        promotionPathId,
+        method: 'GET',
+        marketplaceId: mp,
+      })
+      : await callEbayItemPromotionApi({
+        sellerDoc,
+        promotionPathId,
+        method: 'GET',
+        marketplaceId: mp,
+      });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Promotions Get] Error:', data || response.status);
+      return sendEbayItemPromotionError(res, response, data, 'Failed to load promotion');
+    }
+
+    return res.json({
+      success: true,
+      docsUrl: isMarkdown ? GET_ITEM_PRICE_MARKDOWN_DOCS : GET_ITEM_PROMOTION_DOCS,
+      promotionType: isMarkdown ? 'MARKDOWN_SALE' : (data?.promotionType || promotionType || ''),
+      promotionPathId,
+      seller: { id: seller._id, name: seller.user?.username },
+      promotion: isMarkdown ? { ...data, promotionType: 'MARKDOWN_SALE' } : data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Promotions Get] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load promotion' });
+  }
+});
+
+router.put('/marketing/promotions/update', requireAuth, requirePageAccess(['MarketingPromotions', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const { sellerId, promotionId, marketplaceId, promotion, promotionType } = req.body || {};
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!promotionId) return res.status(400).json({ success: false, error: 'promotionId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+    if (!promotion || typeof promotion !== 'object' || Array.isArray(promotion)) {
+      return res.status(400).json({ success: false, error: 'promotion payload object is required' });
+    }
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const promotionPathId = buildEbayItemPromotionPathId(promotionId, mp);
+    const isMarkdown = isMarkdownPromotionType(promotionType || promotion.promotionType);
+    const updateBody = { ...promotion };
+    delete updateBody.promotionType;
+
+    const { response, data } = isMarkdown
+      ? await callEbayItemPriceMarkdownApi({
+        sellerDoc,
+        promotionPathId,
+        method: 'PUT',
+        marketplaceId: mp,
+        body: updateBody,
+      })
+      : await callEbayItemPromotionApi({
+        sellerDoc,
+        promotionPathId,
+        method: 'PUT',
+        marketplaceId: mp,
+        body: updateBody,
+      });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Promotions Update] Error:', data || response.status);
+      return sendEbayItemPromotionError(res, response, data, 'Failed to update promotion');
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.json({
+      success: true,
+      docsUrl: isMarkdown ? UPDATE_ITEM_PRICE_MARKDOWN_DOCS : UPDATE_ITEM_PROMOTION_DOCS,
+      promotionType: isMarkdown ? 'MARKDOWN_SALE' : (promotionType || ''),
+      promotionPathId,
+      seller: { id: seller._id, name: seller.user?.username },
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Promotions Update] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to update promotion' });
+  }
+});
+
+async function handlePromotionLifecycleRoute(req, res, action) {
+  try {
+    const { sellerId, promotionId, marketplaceId } = req.body || {};
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!promotionId) return res.status(400).json({ success: false, error: 'promotionId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const promotionPathId = buildEbayItemPromotionPathId(promotionId, mp);
+    const { response, data } = await callEbayPromotionLifecycleApi({
+      sellerDoc,
+      promotionPathId,
+      action,
+      marketplaceId: mp,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error(`[Marketing Promotions ${action}] Error:`, data || response.status);
+      return sendEbayItemPromotionError(res, response, data, `Failed to ${action} promotion`);
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.json({
+      success: true,
+      action,
+      promotionPathId,
+      seller: { id: seller._id, name: seller.user?.username },
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error(`[Marketing Promotions ${action}] Error:`, err.message);
+    return res.status(500).json({ success: false, error: err.message || `Failed to ${action} promotion` });
+  }
+}
+
+router.post('/marketing/promotions/pause', requireAuth, requirePageAccess('MarketingPromotions'), (req, res) => (
+  handlePromotionLifecycleRoute(req, res, 'pause')
+));
+
+router.post('/marketing/promotions/resume', requireAuth, requirePageAccess('MarketingPromotions'), (req, res) => (
+  handlePromotionLifecycleRoute(req, res, 'resume')
+));
+
+router.delete('/marketing/promotions/delete', requireAuth, requirePageAccess(['MarketingPromotions', 'AdsAndMarketing']), async (req, res) => {
+  try {
+    const sellerId = req.body?.sellerId || req.query?.sellerId;
+    const promotionId = req.body?.promotionId || req.query?.promotionId;
+    const marketplaceId = req.body?.marketplaceId || req.query?.marketplaceId;
+    const promotionType = req.body?.promotionType || req.query?.promotionType;
+    if (!sellerId) return res.status(400).json({ success: false, error: 'sellerId is required' });
+    if (!promotionId) return res.status(400).json({ success: false, error: 'promotionId is required' });
+    if (!marketplaceId) return res.status(400).json({ success: false, error: 'marketplaceId is required' });
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username');
+    if (!seller) return res.status(404).json({ success: false, error: 'Seller not found' });
+
+    const sellerDoc = await resolveSellerWithEbayTokens(seller);
+    const mp = normalizeFinancesMarketplaceId(marketplaceId);
+    const promotionPathId = buildEbayItemPromotionPathId(promotionId, mp);
+    const isMarkdown = isMarkdownPromotionType(promotionType);
+    const { response, data } = isMarkdown
+      ? await callEbayItemPriceMarkdownApi({
+        sellerDoc,
+        promotionPathId,
+        method: 'DELETE',
+        marketplaceId: mp,
+      })
+      : await callEbayItemPromotionApi({
+        sellerDoc,
+        promotionPathId,
+        method: 'DELETE',
+        marketplaceId: mp,
+      });
+
+    if (response.status < 200 || response.status >= 300) {
+      console.error('[Marketing Promotions Delete] Error:', data || response.status);
+      return sendEbayItemPromotionError(res, response, data, 'Failed to delete promotion');
+    }
+
+    await invalidateMarketingCacheForUser(req.user?.userId);
+    return res.json({
+      success: true,
+      docsUrl: isMarkdown ? DELETE_ITEM_PRICE_MARKDOWN_DOCS : DELETE_ITEM_PROMOTION_DOCS,
+      promotionType: isMarkdown ? 'MARKDOWN_SALE' : (promotionType || ''),
+      promotionPathId,
+      seller: { id: seller._id, name: seller.user?.username },
+      response: data,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Marketing Promotions Delete] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to delete promotion' });
+  }
+});
+
 // ============================================
 // SELLER FUNDS SUMMARY (All connected sellers)
 // ============================================
@@ -14199,10 +21039,193 @@ router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res)
 // Set RUNNER_ID=render in Render's env vars.
 // ============================================
 
+const RECENT_LISTINGS_LOOKBACK_DAYS = 14;
+const STORE_LISTINGS_MOTORS_CATEGORIES = [
+  'eBay Motors',
+  'Parts & Accessories',
+  'Automotive Tools',
+  'Tools & Supplies',
+];
+
+/**
+ * Paginate GetSellerList (StartTime window) into ActiveListing (+ Motors Listing).
+ * Uses a fresh StartTimeTo on every page so listings created mid-sync are not skipped.
+ */
+async function paginateGetSellerListForActiveListings({
+  seller,
+  token,
+  sellerName,
+  startTimeFrom,
+  onPageProgress = null,
+  bumpGlobalProcessed = null,
+}) {
+  let page = 1;
+  let totalPages = 1;
+  let processedCount = 0;
+  let skippedCount = 0;
+  const startFromIso = new Date(startTimeFrom).toISOString();
+
+  do {
+    const startTimeTo = new Date();
+    if (onPageProgress) onPageProgress({ page, totalPages });
+
+    const xmlRequest = `
+        <?xml version="1.0" encoding="utf-8"?>
+        <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+          <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+          <ErrorLanguage>en_US</ErrorLanguage>
+          <WarningLevel>High</WarningLevel>
+          <DetailLevel>ItemReturnDescription</DetailLevel>
+          <StartTimeFrom>${startFromIso}</StartTimeFrom>
+          <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
+          <IncludeWatchCount>true</IncludeWatchCount>
+          <Pagination>
+            <EntriesPerPage>100</EntriesPerPage>
+            <PageNumber>${page}</PageNumber>
+          </Pagination>
+          <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
+          <OutputSelector>ItemArray.Item.Title</OutputSelector>
+          <OutputSelector>ItemArray.Item.SKU</OutputSelector>
+          <OutputSelector>ItemArray.Item.Quantity</OutputSelector>
+          <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
+          <OutputSelector>ItemArray.Item.WatchCount</OutputSelector>
+          <OutputSelector>ItemArray.Item.TimeLeft</OutputSelector>
+          <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
+          <OutputSelector>ItemArray.Item.Description</OutputSelector>
+          <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
+          <OutputSelector>ItemArray.Item.ItemCompatibilityList</OutputSelector>
+          <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
+          <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
+          <OutputSelector>PaginationResult</OutputSelector>
+        </GetSellerListRequest>
+      `;
+
+    const response = await postEbayTradingApi(xmlRequest, {
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'GetSellerList',
+      'Content-Type': 'text/xml',
+    }, {
+      logLabel: `Sync All ${sellerName} p${page}`,
+    });
+
+    const result = await parseStringPromise(response.data);
+    if (result.GetSellerListResponse.Ack[0] === 'Failure') {
+      throw new Error(result.GetSellerListResponse.Errors[0].LongMessage[0]);
+    }
+
+    const pagination = result.GetSellerListResponse.PaginationResult[0];
+    totalPages = parseInt(pagination.TotalNumberOfPages[0], 10) || 1;
+    if (onPageProgress) onPageProgress({ page, totalPages });
+
+    const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
+    for (const item of items) {
+      const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
+      if (status !== 'Active') continue;
+
+      const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
+      const isMotorsItem = STORE_LISTINGS_MOTORS_CATEGORIES.some((keyword) => categoryName.includes(keyword));
+      const rawHtml = item.Description ? item.Description[0] : '';
+      const cleanHtml = extractCleanDescription(rawHtml);
+      const promotedStatusRaw =
+        item.PromotedListingStatus?.[0]
+        || item.ListingDetails?.[0]?.PromotedListingStatus?.[0]
+        || item.AdvertisingStatus?.[0]
+        || '';
+      const adRateRaw =
+        item.PromotedListingDetails?.[0]?.PromotedListingAdRate?.[0]
+        || item.PromotedListingAdRate?.[0]
+        || item.AdRate?.[0]
+        || item.ListingDetails?.[0]?.AdRate?.[0]
+        || null;
+      const parsedAdRate = Number.parseFloat(adRateRaw);
+      const adRate = Number.isFinite(parsedAdRate) ? parsedAdRate : null;
+      let promoted = null;
+      if (typeof promotedStatusRaw === 'string' && promotedStatusRaw.trim()) {
+        const normalizedStatus = promotedStatusRaw.trim().toLowerCase();
+        promoted = !(normalizedStatus.includes('not')
+          || normalizedStatus.includes('off')
+          || normalizedStatus.includes('disabled')
+          || normalizedStatus.includes('ineligible'));
+      } else if (adRate !== null) {
+        promoted = adRate > 0;
+      }
+
+      let parsedCompatibility = [];
+      if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
+        parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map((comp) => ({
+          notes: comp.CompatibilityNotes ? comp.CompatibilityNotes[0] : '',
+          nameValueList: comp.NameValueList.map((nv) => ({
+            name: nv.Name[0],
+            value: nv.Value[0],
+          })),
+        }));
+      }
+
+      await ActiveListing.findOneAndUpdate(
+        { itemId: item.ItemID[0] },
+        {
+          seller: seller._id,
+          title: item.Title[0],
+          sku: item.SKU ? item.SKU[0] : '',
+          currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
+          currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
+          quantity: item.Quantity ? parseInt(item.Quantity[0], 10) || 0 : 0,
+          soldQuantity: item.SellingStatus?.[0]?.QuantitySold
+            ? parseInt(item.SellingStatus[0].QuantitySold[0], 10) || 0
+            : 0,
+          watchCount: item.WatchCount ? parseInt(item.WatchCount[0], 10) || 0 : 0,
+          timeLeft: item.TimeLeft?.[0] || '',
+          listingStatus: status,
+          mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+          categoryName,
+          descriptionPreview: cleanHtml,
+          startTime: item.ListingDetails?.[0]?.StartTime?.[0],
+          ...(promoted !== null ? { promoted } : {}),
+          ...(adRate !== null ? { adRate } : {}),
+        },
+        { upsert: true }
+      );
+
+      if (isMotorsItem) {
+        await Listing.findOneAndUpdate(
+          { itemId: item.ItemID[0] },
+          {
+            seller: seller._id,
+            title: item.Title[0],
+            sku: item.SKU ? item.SKU[0] : '',
+            currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
+            currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
+            listingStatus: status,
+            mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+            categoryName,
+            descriptionPreview: cleanHtml,
+            compatibility: parsedCompatibility,
+            startTime: item.ListingDetails?.[0]?.StartTime?.[0],
+          },
+          { upsert: true }
+        );
+      } else {
+        skippedCount++;
+      }
+
+      processedCount++;
+      if (bumpGlobalProcessed) bumpGlobalProcessed();
+    }
+
+    page++;
+  } while (page <= totalPages);
+
+  return { processedCount, skippedCount };
+}
+
 // Core logic for "Poll All Sellers".
 // Called by: POST /sync-all-sellers-listings (background) and the 1:00 AM IST cron job.
 async function executeSyncAllSellersWork() {
-  const allSellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+  const allSellers = await Seller.find({
+    isStoreActive: { $ne: false },
+    'ebayTokens.refresh_token': { $exists: true, $nin: [null, ''] },
+  })
     .populate('user', 'username email');
   if (allSellers.length === 0) {
     console.log('[Sync All] No sellers with eBay tokens found.');
@@ -14239,7 +21262,6 @@ async function executeSyncAllSellersWork() {
   };
   console.log(`[Sync All] Started for ${allSellers.length} seller(s).`);
   await persistSyncAllStatusToDb();
-  const VALID_MOTORS_CATEGORIES = ["eBay Motors", "Parts & Accessories", "Automotive Tools", "Tools & Supplies"];
   try {
     for (const seller of allSellers) {
       await renewSyncAllSellersLock();
@@ -14250,172 +21272,75 @@ async function executeSyncAllSellersWork() {
       console.log(`[Sync All] Starting sync for seller: ${sellerName}`);
       try {
         const token = await ensureValidToken(seller);
-        const listingCount = await Listing.countDocuments({ seller: seller._id, listingStatus: 'Active' });
-        const orderCount = await Order.countDocuments({ seller: seller._id });
-        const defaultStartDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
-        const startTimeTo = new Date();
-        let startTimeFrom;
-        if (listingCount === 0 && orderCount === 0) {
-          startTimeFrom = defaultStartDate;
-        } else {
-          startTimeFrom = seller.lastListingPolledAt || defaultStartDate;
-        }
-        startTimeFrom = getClampedSellerListStart(startTimeFrom, startTimeTo);
-        let page = 1;
-        let totalPages = 1;
+        const pollFinishedAt = new Date();
+        const fullStartTimeFrom = getClampedSellerListStart(
+          getEffectiveInitialSyncDate(seller.initialSyncDate),
+          pollFinishedAt
+        );
+        const recentStartTimeFrom = new Date(pollFinishedAt);
+        recentStartTimeFrom.setUTCDate(recentStartTimeFrom.getUTCDate() - RECENT_LISTINGS_LOOKBACK_DAYS);
+        const recentFrom = recentStartTimeFrom > fullStartTimeFrom
+          ? recentStartTimeFrom
+          : fullStartTimeFrom;
+
+        const onPageProgress = ({ page, totalPages }) => {
+          syncAllStatus.currentPage = page;
+          syncAllStatus.currentTotalPages = totalPages;
+          if (page === 1 || page % 3 === 0 || page >= totalPages) {
+            void persistSyncAllStatusToDb();
+          }
+        };
+        const bumpGlobalProcessed = () => {
+          syncAllStatus.totalProcessed++;
+        };
+
+        console.log(`[Sync All] ${sellerName} — recent pass (${RECENT_LISTINGS_LOOKBACK_DAYS}d start window)...`);
         let processedCount = 0;
         let skippedCount = 0;
-        do {
-          syncAllStatus.currentPage = page;
-          console.log(`[Sync All] ${sellerName} — Fetching Page ${page}...`);
-          const xmlRequest = `
-              <?xml version="1.0" encoding="utf-8"?>
-              <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-                <ErrorLanguage>en_US</ErrorLanguage>
-                <WarningLevel>High</WarningLevel>
-                <DetailLevel>ItemReturnDescription</DetailLevel>
-                <StartTimeFrom>${new Date(startTimeFrom).toISOString()}</StartTimeFrom>
-                <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
-                <IncludeWatchCount>true</IncludeWatchCount>
-                <Pagination>
-                  <EntriesPerPage>100</EntriesPerPage>
-                  <PageNumber>${page}</PageNumber>
-                </Pagination>
-                <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
-                <OutputSelector>ItemArray.Item.Title</OutputSelector>
-                <OutputSelector>ItemArray.Item.SKU</OutputSelector>
-                <OutputSelector>ItemArray.Item.Quantity</OutputSelector>
-                <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
-                <OutputSelector>ItemArray.Item.WatchCount</OutputSelector>
-                <OutputSelector>ItemArray.Item.TimeLeft</OutputSelector>
-                <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
-                <OutputSelector>ItemArray.Item.Description</OutputSelector>
-                <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
-                <OutputSelector>ItemArray.Item.ItemCompatibilityList</OutputSelector>
-                <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
-                <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
-                <OutputSelector>PaginationResult</OutputSelector>
-              </GetSellerListRequest>
-            `;
-          const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-            headers: {
-              'X-EBAY-API-SITEID': '0',
-              'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-              'X-EBAY-API-CALL-NAME': 'GetSellerList',
-              'Content-Type': 'text/xml'
-            }
-          });
-          const result = await parseStringPromise(response.data);
-          if (result.GetSellerListResponse.Ack[0] === 'Failure') {
-            throw new Error(result.GetSellerListResponse.Errors[0].LongMessage[0]);
-          }
-          const pagination = result.GetSellerListResponse.PaginationResult[0];
-          totalPages = parseInt(pagination.TotalNumberOfPages[0]);
-          syncAllStatus.currentTotalPages = totalPages;
-          const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
-          for (const item of items) {
-            const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
-            if (status !== 'Active') continue;
-            const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
-            const isMotorsItem = VALID_MOTORS_CATEGORIES.some(keyword => categoryName.includes(keyword));
-            const rawHtml = item.Description ? item.Description[0] : '';
-            const cleanHtml = extractCleanDescription(rawHtml);
-            const promotedStatusRaw =
-              item.PromotedListingStatus?.[0]
-              || item.ListingDetails?.[0]?.PromotedListingStatus?.[0]
-              || item.AdvertisingStatus?.[0]
-              || '';
-            const adRateRaw =
-              item.PromotedListingDetails?.[0]?.PromotedListingAdRate?.[0]
-              || item.PromotedListingAdRate?.[0]
-              || item.AdRate?.[0]
-              || item.ListingDetails?.[0]?.AdRate?.[0]
-              || null;
-            const parsedAdRate = Number.parseFloat(adRateRaw);
-            const adRate = Number.isFinite(parsedAdRate) ? parsedAdRate : null;
-            let promoted = null;
-            if (typeof promotedStatusRaw === 'string' && promotedStatusRaw.trim()) {
-              const normalizedStatus = promotedStatusRaw.trim().toLowerCase();
-              promoted = !(normalizedStatus.includes('not')
-                || normalizedStatus.includes('off')
-                || normalizedStatus.includes('disabled')
-                || normalizedStatus.includes('ineligible'));
-            } else if (adRate !== null) {
-              promoted = adRate > 0;
-            }
-            let parsedCompatibility = [];
-            if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
-              parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map(comp => ({
-                notes: comp.CompatibilityNotes ? comp.CompatibilityNotes[0] : '',
-                nameValueList: comp.NameValueList.map(nv => ({
-                  name: nv.Name[0],
-                  value: nv.Value[0]
-                }))
-              }));
-            }
-            // Store Listings: all active items (any category).
-            await ActiveListing.findOneAndUpdate(
-              { itemId: item.ItemID[0] },
-              {
-                seller: seller._id,
-                title: item.Title[0],
-                sku: item.SKU ? item.SKU[0] : '',
-                currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
-                currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
-                quantity: item.Quantity ? parseInt(item.Quantity[0], 10) || 0 : 0,
-                soldQuantity: item.SellingStatus?.[0]?.QuantitySold
-                  ? parseInt(item.SellingStatus[0].QuantitySold[0], 10) || 0
-                  : 0,
-                watchCount: item.WatchCount ? parseInt(item.WatchCount[0], 10) || 0 : 0,
-                timeLeft: item.TimeLeft?.[0] || '',
-                listingStatus: status,
-                mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
-                categoryName: categoryName,
-                descriptionPreview: cleanHtml,
-                startTime: item.ListingDetails?.[0]?.StartTime?.[0],
-                ...(promoted !== null ? { promoted } : {}),
-                ...(adRate !== null ? { adRate } : {}),
-              },
-              { upsert: true }
-            );
+        const recentResult = await paginateGetSellerListForActiveListings({
+          seller,
+          token,
+          sellerName,
+          startTimeFrom: recentFrom,
+          onPageProgress,
+          bumpGlobalProcessed,
+        });
+        processedCount += recentResult.processedCount;
+        skippedCount += recentResult.skippedCount;
 
-            // Compatibility dashboard: Motors categories only.
-            if (isMotorsItem) {
-              await Listing.findOneAndUpdate(
-                { itemId: item.ItemID[0] },
-                {
-                  seller: seller._id,
-                  title: item.Title[0],
-                  sku: item.SKU ? item.SKU[0] : '',
-                  currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
-                  currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
-                  listingStatus: status,
-                  mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
-                  categoryName: categoryName,
-                  descriptionPreview: cleanHtml,
-                  compatibility: parsedCompatibility,
-                  startTime: item.ListingDetails?.[0]?.StartTime?.[0]
-                },
-                { upsert: true }
-              );
-            } else {
-              skippedCount++;
-            }
-            processedCount++;
-          }
-          page++;
-        } while (page <= totalPages);
-        seller.lastListingPolledAt = startTimeTo;
+        console.log(`[Sync All] ${sellerName} — full pass (120d start window)...`);
+        const fullResult = await paginateGetSellerListForActiveListings({
+          seller,
+          token,
+          sellerName,
+          startTimeFrom: fullStartTimeFrom,
+          onPageProgress,
+          bumpGlobalProcessed,
+        });
+        processedCount += fullResult.processedCount;
+        skippedCount += fullResult.skippedCount;
+
+        seller.lastListingPolledAt = pollFinishedAt;
+        seller.lastAllListingsPolledAt = new Date();
         await seller.save();
         console.log(`[Sync All] ${sellerName} — Done: ${processedCount} processed, ${skippedCount} skipped`);
-        syncAllStatus.results.push({ sellerName, processedCount, skippedCount });
-        syncAllStatus.totalProcessed += processedCount;
+        syncAllStatus.results.push({
+          sellerId: String(seller._id),
+          sellerName,
+          processedCount,
+          skippedCount,
+        });
         syncAllStatus.totalSkipped += skippedCount;
       } catch (sellerErr) {
         console.error(`[Sync All] Error for seller ${sellerName}:`, sellerErr.message);
         syncAllStatus.errors.push(`${sellerName}: ${sellerErr.message}`);
-        syncAllStatus.results.push({ sellerName, processedCount: 0, skippedCount: 0, error: sellerErr.message });
+        syncAllStatus.results.push({
+          sellerId: String(seller._id),
+          sellerName,
+          processedCount: 0,
+          skippedCount: 0,
+          error: sellerErr.message,
+        });
       }
       syncAllStatus.sellersComplete++;
       await persistSyncAllStatusToDb();
@@ -14427,6 +21352,8 @@ async function executeSyncAllSellersWork() {
   } finally {
     syncAllStatus.running = false;
     syncAllStatus.currentSeller = '';
+    syncAllStatus.currentPage = 0;
+    syncAllStatus.currentTotalPages = 0;
     syncAllStatus.completedAt = new Date().toISOString();
     await persistSyncAllStatusToDb();
   }

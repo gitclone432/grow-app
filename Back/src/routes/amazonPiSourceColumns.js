@@ -6,6 +6,7 @@ import { scrapeAmazonProductWithScraperAPI } from '../utils/scraperApiProduct.js
 import {
   buildAmazonPiCatalogEntry,
   dedupeProductInformationRows,
+  filterAmazonPiCatalogColumns,
   flattenProductInformationRows,
   jsonPathToAmazonFieldKey,
   jsonPathToDefaultLabel
@@ -44,7 +45,11 @@ router.get(
   async (_req, res) => {
     const rows = await AmazonPiSourceColumn.find({}).sort({ label: 1 }).select('key label jsonPath').lean();
     res.json({
-      options: rows.map((r) => ({ value: r.key, label: r.label, jsonPath: r.jsonPath }))
+      options: filterAmazonPiCatalogColumns(rows).map((r) => ({
+        value: r.key,
+        label: r.label,
+        jsonPath: r.jsonPath,
+      })),
     });
   }
 );
@@ -56,7 +61,9 @@ router.get(
   requirePageAccess('AmazonPiSourceColumns'),
   async (_req, res) => {
     try {
-      const columns = await AmazonPiSourceColumn.find({}).sort({ label: 1 }).lean();
+      const columns = filterAmazonPiCatalogColumns(
+        await AmazonPiSourceColumn.find({}).sort({ label: 1 }).lean()
+      );
       res.json({ columns });
     } catch (e) {
       console.error('[amazon-pi-source-columns] list failed:', e);
@@ -162,7 +169,9 @@ router.post(
       const saved = entries.length;
 
       invalidateAmazonPiSourceColumnsAutofillCache();
-      const columns = await AmazonPiSourceColumn.find({}).sort({ label: 1 }).lean();
+      const columns = filterAmazonPiCatalogColumns(
+        await AmazonPiSourceColumn.find({}).sort({ label: 1 }).lean()
+      );
       res.json({ ok: true, saved, skipped, columns });
     } catch (e) {
       console.error('[amazon-pi-source-columns] import-rows failed:', e);

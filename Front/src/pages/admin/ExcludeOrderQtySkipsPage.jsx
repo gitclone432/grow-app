@@ -84,8 +84,9 @@ export default function ExcludeOrderQtySkipsPage() {
       <Typography variant="h6" sx={{ mb: 1 }}>Exclude &lt; $3</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 720 }}>
         Legacy eBay listing IDs listed here skip the automated &quot;set quantity to 1&quot; step when a new
-        order imports (Trading API ReviseInventoryStatus). This does not affect dashboard &quot;exclude &lt; $3
-        orders&quot; filters.
+        order imports (Trading API ReviseInventoryStatus). Enable or schedule that automation on{' '}
+        <strong>Cron Jobs → Set listing qty to 1 on new order</strong>. This page only controls per-listing
+        exclusions; it does not affect dashboard &quot;exclude &lt; $3 orders&quot; filters.
       </Typography>
 
       <Paper sx={{ p: 2, mb: 3 }}>

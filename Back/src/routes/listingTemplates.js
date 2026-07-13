@@ -294,10 +294,20 @@ function normalizeTemplateRecord(template) {
 // Get all templates
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { listProductId, rangeId } = req.query;
+    const { listProductId, rangeId, summary } = req.query;
     const filter = {};
     if (rangeId) filter.rangeId = rangeId;
     if (listProductId) filter.listProductId = listProductId;
+
+    const summaryMode = ['true', '1', 'yes'].includes(String(summary || '').toLowerCase());
+    if (summaryMode) {
+      const templates = await ListingTemplate.find(filter)
+        .select('name description rangeId listProductId createdAt updatedAt')
+        .sort({ createdAt: -1 })
+        .lean();
+      return res.json(templates);
+    }
+
     const templates = await ListingTemplate.find(filter)
       .populate('createdBy', 'username email')
       .sort({ createdAt: -1 })

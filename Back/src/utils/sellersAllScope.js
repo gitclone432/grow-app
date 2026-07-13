@@ -58,3 +58,34 @@ export async function getSellersMatchingAllRoute(req) {
     .populate('user', 'username email active')
     .lean();
 }
+
+function sortSellersByName(sellers) {
+  return [...sellers].sort((a, b) => {
+    const nameA = String(a?.user?.username || a?.user?.email || a?._id || '').toLowerCase();
+    const nameB = String(b?.user?.username || b?.user?.email || b?._id || '').toLowerCase();
+    return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+  });
+}
+
+/**
+ * Seller picker for eBay API pages (marketing, finances, etc.).
+ * Org-wide roles see every OAuth-connected store (including inactive-user stores).
+ * Everyone else sees OAuth-connected stores within their assignment scope.
+ */
+export async function getSellersForEbayApiPicker(req) {
+  const scoped = await getSellersMatchingAllRoute(req);
+  const oauthConnected = await Seller.find({
+    isStoreActive: { $ne: false },
+    'ebayTokens.refresh_token': { $exists: true, $nin: [null, ''] },
+  })
+    .select('_id user')
+    .populate('user', 'username email active')
+    .lean();
+
+  if (ORG_WIDE_SELLER_ROLES.has(req.user?.role)) {
+    return sortSellersByName(oauthConnected);
+  }
+
+  const allowed = new Set(scoped.map((s) => String(s._id)));
+  return sortSellersByName(oauthConnected.filter((s) => allowed.has(String(s._id))));
+}

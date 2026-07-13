@@ -117,7 +117,7 @@ export default function SellerTemplatesPage() {
     const countPromises = templatesList.map(async (template) => {
       try {
         const { data } = await api.get(
-          `/template-listings?templateId=${template._id}&sellerId=${sellerId}&page=1&limit=1`
+          `/template-listings?templateId=${template._id}&sellerId=${sellerId}&page=1&limit=1&excludeDirectList=1`
         );
         counts[template._id] = data.pagination?.total || 0;
       } catch (err) {

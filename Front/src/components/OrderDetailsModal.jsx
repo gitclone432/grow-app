@@ -9,14 +9,121 @@ import {
   Box,
   CircularProgress,
   Alert,
-  Divider,
   IconButton,
   Stack,
-  Chip
+  Chip,
+  Paper
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import api from '../lib/api';
+
+const formatDate = (dateStr) => {
+  if (!dateStr) return '-';
+  try {
+    return new Date(dateStr).toLocaleString('en-US', {
+      timeZone: 'America/Los_Angeles',
+      month: '2-digit',
+      day: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch {
+    return '-';
+  }
+};
+
+const formatCurrency = (amount, currency = 'USD') => {
+  if (amount === null || amount === undefined) return '-';
+  return `${currency} ${parseFloat(amount).toFixed(2)}`;
+};
+
+const getOrderTotalForTds = (order = {}) => {
+  const stored = parseFloat(order.orderTotal);
+  if (Number.isFinite(stored)) return stored;
+  const pricingTotal = parseFloat(order.pricingSummary?.total?.value);
+  const salesTax = parseFloat(order.salesTaxUSD ?? order.salesTax);
+  return (Number.isFinite(pricingTotal) ? pricingTotal : 0) + (Number.isFinite(salesTax) ? salesTax : 0);
+};
+
+const getOrderTds = (order = {}) => {
+  if (order.tds != null && order.tds !== undefined) return parseFloat(order.tds);
+  if (order.orderEarnings == null) return null;
+  return Math.round(getOrderTotalForTds(order) * 0.01 * 100) / 100;
+};
+
+const getStatusColor = (status) => {
+  if (!status) return 'default';
+  const s = status.toUpperCase();
+  if (s.includes('PAID')) return 'success';
+  if (s.includes('PENDING')) return 'warning';
+  if (s.includes('REFUND')) return 'error';
+  if (s.includes('FULFILLED') || s.includes('SHIPPED')) return 'success';
+  if (s.includes('PROGRESS') || s.includes('PROCESSING')) return 'info';
+  return 'default';
+};
+
+function DetailCell({ label, value, copyable = false, onCopy, fullWidth = false }) {
+  const display = value ?? '-';
+  const isElement = React.isValidElement(display);
+  return (
+    <Box
+      sx={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 1,
+        py: 0.4,
+        gridColumn: fullWidth ? '1 / -1' : undefined
+      }}
+    >
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ minWidth: 108, flexShrink: 0, lineHeight: 1.6 }}
+      >
+        {label}
+      </Typography>
+      <Stack direction="row" alignItems="center" spacing={0.25} sx={{ minWidth: 0, flex: 1 }}>
+        {isElement ? display : (
+          <Typography
+            variant="body2"
+            sx={{
+              fontSize: '0.8125rem',
+              lineHeight: 1.5,
+              fontFamily: copyable ? 'monospace' : 'inherit',
+              wordBreak: fullWidth ? 'break-word' : 'normal'
+            }}
+          >
+            {display}
+          </Typography>
+        )}
+        {copyable && !isElement && display && display !== '-' && (
+          <IconButton size="small" onClick={() => onCopy(display)} sx={{ p: 0.25 }}>
+            <ContentCopyIcon sx={{ fontSize: 13 }} />
+          </IconButton>
+        )}
+      </Stack>
+    </Box>
+  );
+}
+
+function Section({ title, children, titleColor }) {
+  return (
+    <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 1.5, height: '100%' }}>
+      <Typography
+        variant="subtitle2"
+        fontWeight={700}
+        sx={{ mb: 0.5, color: titleColor || 'text.primary' }}
+      >
+        {title}
+      </Typography>
+      <Box sx={{ display: 'grid', gridTemplateColumns: '1fr' }}>
+        {children}
+      </Box>
+    </Paper>
+  );
+}
 
 export default function OrderDetailsModal({ open, onClose, orderId }) {
   const [order, setOrder] = useState(null);
@@ -50,56 +157,28 @@ export default function OrderDetailsModal({ open, onClose, orderId }) {
     }
   };
 
-  const formatDate = (dateStr) => {
-    if (!dateStr) return '-';
-    try {
-      const d = new Date(dateStr);
-      return d.toLocaleDateString('en-US', {
-        timeZone: 'America/Los_Angeles',
-        month: '2-digit',
-        day: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-    } catch {
-      return '-';
-    }
-  };
+  const orderTotal = order
+    ? formatCurrency(
+        order.pricingSummary?.total?.value
+          || (parseFloat(order.subtotalUSD || order.subtotal || 0)
+            + parseFloat(order.shippingUSD || order.shipping || 0)
+            + parseFloat(order.salesTaxUSD || order.salesTax || 0)
+            + parseFloat(order.discountUSD || order.discount || 0)),
+        'USD'
+      )
+    : '-';
 
-  const formatCurrency = (amount, currency = 'USD') => {
-    if (amount === null || amount === undefined) return '-';
-    return `${currency} ${parseFloat(amount).toFixed(2)}`;
-  };
-
-  const getStatusColor = (status) => {
-    if (!status) return 'default';
-    const s = status.toUpperCase();
-    if (s.includes('PAID')) return 'success';
-    if (s.includes('PENDING')) return 'warning';
-    if (s.includes('REFUND')) return 'error';
-    if (s.includes('FULFILLED') || s.includes('SHIPPED')) return 'success';
-    if (s.includes('PROGRESS') || s.includes('PROCESSING')) return 'info';
-    return 'default';
-  };
-
-  const DetailRow = ({ label, value, copyable = false }) => (
-    <Box sx={{ mb: 1.5 }}>
-      <Typography variant="caption" color="text.secondary" display="block">
-        {label}
-      </Typography>
-      <Stack direction="row" alignItems="center" spacing={0.5}>
-        <Typography variant="body2" sx={{ fontFamily: copyable ? 'monospace' : 'inherit' }}>
-          {value || '-'}
-        </Typography>
-        {copyable && value && value !== '-' && (
-          <IconButton size="small" onClick={() => handleCopy(value)}>
-            <ContentCopyIcon sx={{ fontSize: 14 }} />
-          </IconButton>
-        )}
-      </Stack>
-    </Box>
-  );
+  const shippingAddress = order
+    ? (order.buyerAddress
+      || [
+        order.shippingAddressLine1,
+        order.shippingAddressLine2,
+        order.shippingCity,
+        order.shippingState,
+        order.shippingPostalCode,
+        order.shippingCountry
+      ].filter(Boolean).join(', '))
+    : '-';
 
   return (
     <Dialog
@@ -107,303 +186,253 @@ export default function OrderDetailsModal({ open, onClose, orderId }) {
       onClose={onClose}
       maxWidth="md"
       fullWidth
-      PaperProps={{
-        sx: {
-          minHeight: '400px'
-        }
-      }}
+      PaperProps={{ sx: { maxHeight: '90vh' } }}
     >
-      <DialogTitle>
+      <DialogTitle sx={{ py: 1.25, px: 2 }}>
         <Stack direction="row" alignItems="center" justifyContent="space-between">
-          <Typography variant="h6">Order Details</Typography>
+          <Typography variant="subtitle1" fontWeight={700}>Order Details</Typography>
           <IconButton onClick={onClose} size="small">
-            <CloseIcon />
+            <CloseIcon fontSize="small" />
           </IconButton>
         </Stack>
       </DialogTitle>
 
-      <DialogContent dividers>
+      <DialogContent dividers sx={{ py: 1.5, px: 2 }}>
         {loading && (
-          <Box display="flex" justifyContent="center" alignItems="center" minHeight="300px">
-            <CircularProgress />
+          <Box display="flex" justifyContent="center" alignItems="center" minHeight={200}>
+            <CircularProgress size={28} />
           </Box>
         )}
 
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {error}
-          </Alert>
-        )}
+        {error && <Alert severity="error" sx={{ mb: 1 }}>{error}</Alert>}
 
         {!loading && !error && order && (
-          <Box>
-            {/* Order Information */}
-            <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
-              Order Information
-            </Typography>
-            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2, mb: 3 }}>
-              <DetailRow label="Order ID" value={order.orderId} copyable />
-              <DetailRow label="Legacy Order ID" value={order.legacyOrderId} copyable />
-              <DetailRow label="Marketplace" value={order.purchaseMarketplaceId} />
-              <DetailRow label="Seller" value={order.seller?.user?.username} />
-              <DetailRow label="Order Date" value={formatDate(order.creationDate)} />
-              <DetailRow label="Last Modified" value={formatDate(order.lastModifiedDate)} />
-            </Box>
-
-            <Divider sx={{ my: 2 }} />
-
-            {/* Buyer Information */}
-            <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
-              Buyer Information
-            </Typography>
-            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2, mb: 3 }}>
-              <DetailRow label="Buyer Name" value={order.buyer?.username || order.shippingFullName} />
-              <DetailRow label="Email" value={order.buyer?.email} />
-              <DetailRow label="Phone" value={order.shippingPhone} />
-              <Box sx={{ gridColumn: { xs: '1', sm: '1 / -1' } }}>
-                <DetailRow
-                  label="Shipping Address"
-                  value={order.buyerAddress || `${order.shippingAddressLine1}${order.shippingAddressLine2 ? ', ' + order.shippingAddressLine2 : ''}, ${order.shippingCity}, ${order.shippingState} ${order.shippingPostalCode}, ${order.shippingCountry}`}
-                />
-              </Box>
-            </Box>
-
-            <Divider sx={{ my: 2 }} />
-
-            {/* Item Information */}
-            <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
-              Item Information
-            </Typography>
-            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2, mb: 3 }}>
-              <Box sx={{ gridColumn: { xs: '1', sm: '1 / -1' } }}>
-                <DetailRow label="Item Title" value={order.productName || order.lineItems?.[0]?.title} />
-              </Box>
-              <DetailRow label="Item Number" value={order.itemNumber || order.lineItems?.[0]?.legacyItemId} copyable />
-              <DetailRow label="Quantity" value={order.quantity} />
-              <DetailRow label="SKU" value={order.lineItems?.[0]?.sku} />
-              <DetailRow label="Line Item ID" value={order.lineItems?.[0]?.lineItemId} copyable />
-            </Box>
-
-            <Divider sx={{ my: 2 }} />
-
-            {/* Pricing Information */}
-            <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
-              Pricing
-            </Typography>
-            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2, mb: 3 }}>
-              <DetailRow label="Subtotal" value={formatCurrency(order.subtotalUSD || order.subtotal, order.purchaseMarketplaceId === 'EBAY_US' ? 'USD' : order.pricingSummary?.priceSubtotal?.currency)} />
-              <DetailRow label="Shipping" value={formatCurrency(order.shippingUSD || order.shipping, 'USD')} />
-              <DetailRow label="Sales Tax" value={formatCurrency(order.salesTaxUSD || order.salesTax, 'USD')} />
-              <DetailRow label="Discount" value={formatCurrency(order.discountUSD || order.discount, 'USD')} />
-              <DetailRow 
-                label="Total" 
-                value={formatCurrency(
-                  order.pricingSummary?.total?.value || 
-                  (parseFloat(order.subtotalUSD || order.subtotal || 0) + parseFloat(order.shippingUSD || order.shipping || 0) + parseFloat(order.salesTaxUSD || order.salesTax || 0) + parseFloat(order.discountUSD || order.discount || 0)),
-                  'USD'
-                )} 
-              />
-              <DetailRow label="Transaction Fees" value={formatCurrency(order.transactionFeesUSD || order.transactionFees, 'USD')} />
-              <DetailRow label="Ad Fee" value={formatCurrency(order.adFeeGeneralUSD || order.adFeeGeneral, 'USD')} />
-              {order.orderEarnings !== null && order.orderEarnings !== undefined && (
-                <DetailRow 
-                  label="Order Earnings" 
-                  value={
-                    <Typography 
-                      variant="body2" 
-                      sx={{ 
-                        color: order.orderEarnings >= 0 ? 'success.main' : 'error.main',
-                        fontWeight: 'bold'
-                      }}
-                    >
-                      {formatCurrency(order.orderEarnings, 'USD')}
-                    </Typography>
-                  } 
+          <Stack spacing={1.5}>
+            {/* Summary strip */}
+            <Stack
+              direction="row"
+              flexWrap="wrap"
+              alignItems="center"
+              gap={0.75}
+              sx={{ pb: 1, borderBottom: 1, borderColor: 'divider' }}
+            >
+              <Typography variant="subtitle2" fontWeight={700} sx={{ fontFamily: 'monospace' }}>
+                {order.orderId}
+              </Typography>
+              <IconButton size="small" onClick={() => handleCopy(order.orderId)} sx={{ p: 0.25 }}>
+                <ContentCopyIcon sx={{ fontSize: 14 }} />
+              </IconButton>
+              {order.purchaseMarketplaceId && (
+                <Chip
+                  label={order.purchaseMarketplaceId.replace('EBAY_', '')}
+                  size="small"
+                  sx={{ height: 22, fontSize: '0.7rem', fontWeight: 600 }}
                 />
               )}
-            </Box>
-
-            {/* Refund Information */}
-            {order.refunds && order.refunds.length > 0 && (
-              <>
-                <Divider sx={{ my: 2 }} />
-                <Typography variant="subtitle1" fontWeight="bold" gutterBottom color="error">
-                  Refund Information
-                </Typography>
-                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2, mb: 3 }}>
-                  <DetailRow 
-                    label="Total Refunded" 
-                    value={formatCurrency(order.refundTotalUSD || order.refunds.reduce((sum, r) => sum + parseFloat(r.amount?.value || 0), 0), 'USD')} 
-                  />
-                  <DetailRow label="Number of Refunds" value={order.refunds.length} />
-                  {order.refunds.map((refund, idx) => (
-                    <Box key={idx} sx={{ gridColumn: { xs: '1', sm: '1 / -1' } }}>
-                      <DetailRow 
-                        label={`Refund ${idx + 1}`}
-                        value={`${formatCurrency(refund.amount?.value, refund.amount?.currency)} - ${refund.refundStatus || 'Unknown'} - ${formatDate(refund.refundDate)}`}
-                      />
-                    </Box>
-                  ))}
-                </Box>
-              </>
-            )}
-
-            <Divider sx={{ my: 2 }} />
-
-            {/* Order Status */}
-            <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
-              Status
-            </Typography>
-            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2, mb: 3 }}>
-              <Box>
-                <Typography variant="caption" color="text.secondary" display="block">
-                  Payment Status
-                </Typography>
+              {order.orderPaymentStatus && (
                 <Chip
-                  label={order.orderPaymentStatus || 'Unknown'}
+                  label={order.orderPaymentStatus}
+                  size="small"
                   color={getStatusColor(order.orderPaymentStatus)}
-                  size="small"
-                  sx={{ mt: 0.5 }}
+                  sx={{ height: 22, fontSize: '0.7rem' }}
                 />
-              </Box>
-              <Box>
-                <Typography variant="caption" color="text.secondary" display="block">
-                  Fulfillment Status
-                </Typography>
+              )}
+              {order.orderFulfillmentStatus && (
                 <Chip
-                  label={order.orderFulfillmentStatus || 'Unknown'}
+                  label={order.orderFulfillmentStatus}
+                  size="small"
                   color={getStatusColor(order.orderFulfillmentStatus)}
-                  size="small"
-                  sx={{ mt: 0.5 }}
+                  sx={{ height: 22, fontSize: '0.7rem' }}
                 />
-              </Box>
-              <Box>
-                <Typography variant="caption" color="text.secondary" display="block">
-                  Cancel State
-                </Typography>
-                <Chip
-                  label={order.cancelState || order.cancelStatus?.cancelState || 'NONE_REQUESTED'}
-                  color={order.cancelState?.includes('CANCEL') || order.cancelState?.includes('PROGRESS') ? 'error' : 'success'}
-                  size="small"
-                  sx={{ mt: 0.5 }}
+              )}
+              <Box sx={{ flex: 1 }} />
+              <Typography variant="subtitle2" fontWeight={700} color="primary.main">
+                {orderTotal}
+              </Typography>
+            </Stack>
+
+            {/* Order + Buyer side by side */}
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 1.5 }}>
+              <Section title="Order">
+                <DetailCell label="Legacy ID" value={order.legacyOrderId} copyable onCopy={handleCopy} />
+                <DetailCell label="Seller" value={order.seller?.user?.username} />
+                <DetailCell label="Order Date" value={formatDate(order.creationDate)} />
+                <DetailCell label="Modified" value={formatDate(order.lastModifiedDate)} />
+                {order.trackingNumber && (
+                  <DetailCell label="Tracking" value={order.trackingNumber} copyable onCopy={handleCopy} />
+                )}
+                {order.shipByDate && (
+                  <DetailCell label="Ship By" value={formatDate(order.shipByDate)} />
+                )}
+                {order.estimatedDelivery && (
+                  <DetailCell label="Est. Delivery" value={formatDate(order.estimatedDelivery)} />
+                )}
+              </Section>
+
+              <Section title="Buyer">
+                <DetailCell
+                  label="Name"
+                  value={order.buyer?.buyerRegistrationAddress?.fullName || order.shippingFullName || order.buyer?.username}
                 />
-              </Box>
-              {order.itemStatus && (
-                <Box>
-                  <Typography variant="caption" color="text.secondary" display="block">
-                    Item Status
-                  </Typography>
-                  <Chip
-                    label={order.itemStatus}
-                    color={getStatusColor(order.itemStatus)}
-                    size="small"
-                    sx={{ mt: 0.5 }}
-                  />
-                </Box>
-              )}
-              {order.messagingStatus && (
-                <Box>
-                  <Typography variant="caption" color="text.secondary" display="block">
-                    Messaging Status
-                  </Typography>
-                  <Chip
-                    label={order.messagingStatus}
-                    color={getStatusColor(order.messagingStatus)}
-                    size="small"
-                    sx={{ mt: 0.5 }}
-                  />
-                </Box>
-              )}
-              {order.worksheetStatus && (
-                <Box>
-                  <Typography variant="caption" color="text.secondary" display="block">
-                    Worksheet Status
-                  </Typography>
-                  <Chip
-                    label={order.worksheetStatus}
-                    size="small"
-                    sx={{ mt: 0.5 }}
-                  />
-                </Box>
-              )}
-              {order.trackingNumber && (
-                <DetailRow label="Tracking Number" value={order.trackingNumber} copyable />
-              )}
-              {order.shipByDate && (
-                <DetailRow label="Ship By Date" value={formatDate(order.shipByDate)} />
-              )}
-              {order.estimatedDelivery && (
-                <DetailRow label="Estimated Delivery" value={formatDate(order.estimatedDelivery)} />
-              )}
+                <DetailCell label="Username" value={order.buyer?.username} copyable onCopy={handleCopy} />
+                <DetailCell label="Email" value={order.buyer?.email} />
+                <DetailCell label="Phone" value={order.shippingPhone} />
+                <DetailCell label="Address" value={shippingAddress} fullWidth />
+              </Section>
             </Box>
 
-            {/* Amazon/Fulfillment Info */}
-            {(order.amazonAccount || order.amazonOrderId || order.fulfillmentNotes) && (
-              <>
-                <Divider sx={{ my: 2 }} />
-                <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
-                  Fulfillment Information
-                </Typography>
-                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 2, mb: 3 }}>
-                  {order.amazonAccount && (
-                    <DetailRow label="Amazon Account" value={order.amazonAccount} />
-                  )}
-                  {order.amazonOrderId && (
-                    <DetailRow label="Amazon Order ID" value={order.amazonOrderId} copyable />
-                  )}
-                  {order.beforeTaxUSD !== null && order.beforeTaxUSD !== undefined && (
-                    <DetailRow label="Amazon Before Tax" value={formatCurrency(order.beforeTaxUSD, 'USD')} />
-                  )}
-                  {order.estimatedTaxUSD !== null && order.estimatedTaxUSD !== undefined && (
-                    <DetailRow label="Amazon Estimated Tax" value={formatCurrency(order.estimatedTaxUSD, 'USD')} />
-                  )}
-                  {order.fulfillmentNotes && (
-                    <Box sx={{ gridColumn: { xs: '1', sm: '1 / -1' } }}>
-                      <Typography variant="caption" color="text.secondary" display="block">
-                        Fulfillment Notes
-                      </Typography>
-                      <Typography variant="body2" sx={{ mt: 1, p: 2, bgcolor: 'warning.50', borderRadius: 1, border: '1px solid', borderColor: 'warning.200' }}>
-                        {order.fulfillmentNotes}
-                      </Typography>
-                    </Box>
+            {/* Item */}
+            <Section title="Item">
+              <DetailCell
+                label="Title"
+                value={order.productName || order.lineItems?.[0]?.title}
+                fullWidth
+              />
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, columnGap: 2 }}>
+                <DetailCell
+                  label="Item #"
+                  value={order.itemNumber || order.lineItems?.[0]?.legacyItemId}
+                  copyable
+                  onCopy={handleCopy}
+                />
+                <DetailCell label="Qty" value={order.quantity ?? order.lineItems?.[0]?.quantity} />
+                <DetailCell label="SKU" value={order.lineItems?.[0]?.sku} />
+                <DetailCell
+                  label="Line Item"
+                  value={order.lineItems?.[0]?.lineItemId}
+                  copyable
+                  onCopy={handleCopy}
+                />
+              </Box>
+            </Section>
+
+            {/* Pricing + Status */}
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1.2fr 1fr' }, gap: 1.5 }}>
+              <Section title="Pricing">
+                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, columnGap: 2 }}>
+                  <DetailCell
+                    label="Subtotal"
+                    value={formatCurrency(order.subtotalUSD || order.subtotal, 'USD')}
+                  />
+                  <DetailCell label="Shipping" value={formatCurrency(order.shippingUSD || order.shipping, 'USD')} />
+                  <DetailCell label="Tax" value={formatCurrency(order.salesTaxUSD || order.salesTax, 'USD')} />
+                  <DetailCell label="Discount" value={formatCurrency(order.discountUSD || order.discount, 'USD')} />
+                  <DetailCell
+                    label="Fees"
+                    value={formatCurrency(order.transactionFeesUSD || order.transactionFees, 'USD')}
+                  />
+                  <DetailCell label="Ad Fee" value={formatCurrency(order.adFeeGeneralUSD || order.adFeeGeneral, 'USD')} />
+                  <DetailCell label="TDS Fee" value={formatCurrency(getOrderTds(order), 'USD')} />
+                  {order.orderEarnings != null && (
+                    <DetailCell
+                      label="Earnings"
+                      value={
+                        <Typography
+                          component="span"
+                          variant="body2"
+                          sx={{
+                            fontSize: '0.8125rem',
+                            color: order.orderEarnings >= 0 ? 'success.main' : 'error.main',
+                            fontWeight: 700
+                          }}
+                        >
+                          {formatCurrency(order.orderEarnings, 'USD')}
+                        </Typography>
+                      }
+                    />
                   )}
                 </Box>
-              </>
+              </Section>
+
+              <Section title="Status">
+                <Stack direction="row" flexWrap="wrap" gap={0.75} sx={{ mb: 0.5 }}>
+                  {order.cancelState || order.cancelStatus?.cancelState ? (
+                    <Chip
+                      label={order.cancelState || order.cancelStatus?.cancelState}
+                      size="small"
+                      color={
+                        (order.cancelState || '').includes('CANCEL') || (order.cancelState || '').includes('PROGRESS')
+                          ? 'error'
+                          : 'success'
+                      }
+                      sx={{ height: 22, fontSize: '0.7rem' }}
+                    />
+                  ) : null}
+                  {order.itemStatus && (
+                    <Chip label={order.itemStatus} size="small" color={getStatusColor(order.itemStatus)} sx={{ height: 22, fontSize: '0.7rem' }} />
+                  )}
+                  {order.messagingStatus && (
+                    <Chip label={order.messagingStatus} size="small" color={getStatusColor(order.messagingStatus)} sx={{ height: 22, fontSize: '0.7rem' }} />
+                  )}
+                  {order.worksheetStatus && (
+                    <Chip label={order.worksheetStatus} size="small" sx={{ height: 22, fontSize: '0.7rem' }} />
+                  )}
+                </Stack>
+                {(order.amazonAccount || order.amazonOrderId) && (
+                  <>
+                    <DetailCell label="Amazon Acct" value={order.amazonAccount} />
+                    <DetailCell label="Amazon ID" value={order.amazonOrderId} copyable onCopy={handleCopy} />
+                  </>
+                )}
+              </Section>
+            </Box>
+
+            {/* Refunds */}
+            {order.refunds?.length > 0 && (
+              <Section title="Refunds" titleColor="error.main">
+                <DetailCell
+                  label="Total"
+                  value={formatCurrency(
+                    order.refundTotalUSD || order.refunds.reduce((sum, r) => sum + parseFloat(r.amount?.value || 0), 0),
+                    'USD'
+                  )}
+                />
+                {order.refunds.map((refund, idx) => (
+                  <DetailCell
+                    key={idx}
+                    label={`#${idx + 1}`}
+                    value={`${formatCurrency(refund.amount?.value, refund.amount?.currency)} · ${refund.refundStatus || 'Unknown'} · ${formatDate(refund.refundDate)}`}
+                    fullWidth
+                  />
+                ))}
+              </Section>
             )}
 
-            {/* Buyer Notes */}
-            {order.buyerCheckoutNotes && (
-              <>
-                <Divider sx={{ my: 2 }} />
-                <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
-                  Buyer Notes
-                </Typography>
-                <Typography variant="body2" sx={{ mb: 2, p: 2, bgcolor: 'grey.100', borderRadius: 1 }}>
-                  {order.buyerCheckoutNotes}
-                </Typography>
-              </>
+            {/* Notes */}
+            {(order.fulfillmentNotes || order.buyerCheckoutNotes || order.notes) && (
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 1.5 }}>
+                {order.fulfillmentNotes && (
+                  <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 1.5, bgcolor: 'warning.50' }}>
+                    <Typography variant="caption" fontWeight={700} color="warning.dark" display="block" sx={{ mb: 0.5 }}>
+                      Fulfillment Notes
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>{order.fulfillmentNotes}</Typography>
+                  </Paper>
+                )}
+                {order.buyerCheckoutNotes && (
+                  <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 1.5, bgcolor: 'grey.50' }}>
+                    <Typography variant="caption" fontWeight={700} display="block" sx={{ mb: 0.5 }}>
+                      Buyer Notes
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>{order.buyerCheckoutNotes}</Typography>
+                  </Paper>
+                )}
+                {order.notes && (
+                  <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 1.5, bgcolor: 'info.50', gridColumn: { md: order.fulfillmentNotes || order.buyerCheckoutNotes ? '1 / -1' : undefined } }}>
+                    <Typography variant="caption" fontWeight={700} color="info.dark" display="block" sx={{ mb: 0.5 }}>
+                      Internal Notes
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>{order.notes}</Typography>
+                  </Paper>
+                )}
+              </Box>
             )}
-
-            {/* Internal Notes */}
-            {order.notes && (
-              <>
-                <Divider sx={{ my: 2 }} />
-                <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
-                  Internal Notes
-                </Typography>
-                <Typography variant="body2" sx={{ mb: 2, p: 2, bgcolor: 'info.50', borderRadius: 1, border: '1px solid', borderColor: 'info.200' }}>
-                  {order.notes}
-                </Typography>
-              </>
-            )}
-          </Box>
+          </Stack>
         )}
       </DialogContent>
 
-      <DialogActions>
-        <Button onClick={onClose} variant="contained">
-          Close
-        </Button>
+      <DialogActions sx={{ py: 1, px: 2 }}>
+        <Button onClick={onClose} variant="contained" size="small">Close</Button>
       </DialogActions>
     </Dialog>
   );

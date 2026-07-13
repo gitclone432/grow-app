@@ -7,8 +7,10 @@ import { validate } from '../utils/validate.js';
 import { createTransactionSchema, updateTransactionSchema } from '../schemas/index.js';
 import PayoneerRecord from '../models/PayoneerRecord.js';
 import BankAccount from '../models/BankAccount.js';
+import Seller from '../models/Seller.js';
 import { importTransactionsFromGmail } from '../utils/gmailTransactionImporter.js';
 import { bankAccountLedgerKey, bankAccountDisplayLabel } from '../utils/bankAccountLedgerKey.js';
+import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.js';
 
 const router = express.Router();
 
@@ -78,6 +80,50 @@ function parseTransactionFilters(query) {
         (query.groupByBank === '1' || String(query.groupByBank).toLowerCase() === 'true');
 
     return { mongoQuery, sortQuery: dateSort, groupByBank };
+}
+
+/** Restrict to bank-account rows linked to the given eBay store (seller id). */
+async function applySellerStoreFilter(mongoQuery, sellerId) {
+    if (!sellerId || !mongoose.Types.ObjectId.isValid(String(sellerId))) {
+        return mongoQuery;
+    }
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username email').lean();
+    if (!seller) {
+        return { ...mongoQuery, bankAccount: { $in: [] } };
+    }
+
+    const banks = await BankAccount.find({ sellers: { $exists: true, $ne: '' } }).lean();
+    const matchingIds = banks
+        .filter((b) => sellerMatchesBankSellersField(b.sellers, seller))
+        .map((b) => b._id);
+
+    if (!matchingIds.length) {
+        return { ...mongoQuery, bankAccount: { $in: [] } };
+    }
+
+    const next = { ...mongoQuery };
+    if (next.bankAccount && !next.bankAccount.$in) {
+        const selected = String(next.bankAccount);
+        const ok = matchingIds.some((id) => String(id) === selected);
+        next.bankAccount = ok ? next.bankAccount : { $in: [] };
+    } else {
+        next.bankAccount = { $in: matchingIds };
+    }
+    return next;
+}
+
+async function buildTransactionListQuery(reqQuery) {
+    const { mongoQuery: rawQuery, sortQuery, groupByBank } = parseTransactionFilters(reqQuery);
+    let query = rawQuery;
+
+    if (reqQuery.sellerId) {
+        query = await applySellerStoreFilter(query, reqQuery.sellerId);
+    } else {
+        query = await applyLedgerExpandedQuery(query);
+    }
+
+    return { query, sortQuery, groupByBank };
 }
 
 const CHRONO_SORT = { date: 1, createdAt: 1, _id: 1 };
@@ -557,8 +603,7 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
         }
 
         const { page = 1, limit = 50 } = req.query;
-        const { mongoQuery: rawQuery, sortQuery, groupByBank } = parseTransactionFilters(req.query);
-        const query = await applyLedgerExpandedQuery(rawQuery);
+        const { query, sortQuery, groupByBank } = await buildTransactionListQuery(req.query);
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
         const limitNum = parseInt(limit);
@@ -583,8 +628,8 @@ router.get('/', requireAuth, requirePageAccess('Transactions'), async (req, res)
         ]);
 
         const summary = aggregateSum[0] || { totalCredit: 0, totalDebit: 0 };
-        const balanceMap = await runningBalanceByTransactionId(transactions, rawQuery, { groupByBank });
-        const balanceMode = !rawQuery.bankAccount && !groupByBank ? 'portfolio' : 'ledger';
+        const balanceMap = await runningBalanceByTransactionId(transactions, query, { groupByBank });
+        const balanceMode = !query.bankAccount && !groupByBank ? 'portfolio' : 'ledger';
 
         res.json({
             transactions: attachRunningBalances(transactions, balanceMap),
@@ -609,10 +654,9 @@ router.get('/export-csv', requireAuth, requirePageAccess('Transactions'), async 
             console.error('Failed syncing Payoneer transactions before CSV export:', syncErr);
         }
 
-        const { mongoQuery: rawQuery, sortQuery, groupByBank } = parseTransactionFilters(req.query);
-        const mongoQuery = await applyLedgerExpandedQuery(rawQuery);
+        const { query, sortQuery, groupByBank } = await buildTransactionListQuery(req.query);
         const rows = sortRowsForCsvExport(
-            await Transaction.find(mongoQuery)
+            await Transaction.find(query)
                 .populate('bankAccount', 'name accountNumber ifscCode sellers')
                 .populate('creditCardName', 'name')
                 .lean(),
@@ -620,7 +664,7 @@ router.get('/export-csv', requireAuth, requirePageAccess('Transactions'), async 
             groupByBank
         );
 
-        const balanceMap = await runningBalanceByTransactionId(rows, rawQuery, { groupByBank });
+        const balanceMap = await runningBalanceByTransactionId(rows, query, { groupByBank });
 
         const header = [
             'Date',

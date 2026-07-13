@@ -7,7 +7,8 @@ const MessageSchema = new mongoose.Schema(
     itemId: String,
     itemTitle: String,
     buyerUsername: { type: String, required: true },
-    
+    conversationId: { type: String, default: null },
+
     externalMessageId: { type: String, unique: true, sparse: true },
     sender: { type: String, enum: ['SELLER', 'BUYER'], required: true },
     subject: String,
@@ -26,6 +27,7 @@ const MessageSchema = new mongoose.Schema(
 
 MessageSchema.index({ seller: 1, orderId: 1 });
 MessageSchema.index({ seller: 1, buyerUsername: 1 });
+MessageSchema.index({ seller: 1, conversationId: 1 });
 MessageSchema.index({ messageDate: -1 });
 
 export default mongoose.model('Message', MessageSchema);

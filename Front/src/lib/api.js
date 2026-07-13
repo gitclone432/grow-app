@@ -1,5 +1,10 @@
 // src/lib/api.js
 import axios from 'axios';
+import {
+  getCachedSellersAll,
+  setCachedSellersAll,
+  invalidateSellersAllCache,
+} from './sellersAllCache.js';
 
 // Ensure a sensible default if VITE_API_URL isn't available in the dev build.
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
@@ -17,6 +22,7 @@ export function setAuthToken(token) {
     api.defaults.headers.common.Authorization = `Bearer ${currentToken}`;
   } else {
     delete api.defaults.headers.common.Authorization;
+    invalidateSellersAllCache();
   }
 }
 
@@ -24,17 +30,62 @@ export function getAuthToken() {
   return currentToken;
 }
 
-// Add response interceptor to handle 401 errors globally
+function isSellersAllGet(config) {
+  const method = String(config?.method || 'get').toLowerCase();
+  if (method !== 'get') return false;
+  const url = String(config?.url || '');
+  return url === '/sellers/all' || url.endsWith('/sellers/all');
+}
+
+function headerValue(headers, key) {
+  if (!headers) return undefined;
+  if (typeof headers.get === 'function') return headers.get(key);
+  return headers[key] ?? headers[key.toLowerCase()];
+}
+
+// Cache successful /sellers/all responses briefly so remounts skip the network.
+api.interceptors.request.use((config) => {
+  if (!isSellersAllGet(config)) return config;
+  if (headerValue(config.headers, 'x-bypass-sellers-cache') === '1') return config;
+  if (config.params && Object.keys(config.params).length > 0) return config;
+
+  const cached = getCachedSellersAll();
+  if (!cached) return config;
+
+  config.adapter = async () => ({
+    data: cached,
+    status: 200,
+    statusText: 'OK',
+    headers: { 'x-sellers-cache': 'HIT' },
+    config,
+    request: {},
+  });
+  return config;
+});
+
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    if (isSellersAllGet(response.config)) {
+      setCachedSellersAll(response.data);
+    }
+    return response;
+  },
   (error) => {
-    if (error.response?.status === 401) {
-      // Clear auth token and local storage
+    const status = error.response?.status;
+    const url = String(error.config?.url || '');
+    const message = String(error.response?.data?.error || '');
+    const isLoginRequest = url.includes('/auth/login');
+
+    // Only force-logout on real session invalidation — not every 401 from page APIs.
+    const isSessionInvalid = /token expired|invalid token|please login again|access permissions have been updated|unauthorized/i.test(message)
+      || (status === 401 && !error.response?.data?.error);
+
+    if (status === 401 && !isLoginRequest && currentToken && isSessionInvalid) {
       currentToken = null;
       delete api.defaults.headers.common.Authorization;
       localStorage.removeItem('auth_token');
-
-      // Redirect to login page
+      localStorage.removeItem('user');
+      invalidateSellersAllCache();
       if (window.location.pathname !== '/login') {
         window.location.href = '/login';
       }
