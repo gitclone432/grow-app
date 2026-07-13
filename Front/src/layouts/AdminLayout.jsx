@@ -38,6 +38,7 @@ import PersonOutlineIcon from '@mui/icons-material/PersonOutline';
 import SupervisorAccountIcon from '@mui/icons-material/SupervisorAccount';
 import TaskIcon from '@mui/icons-material/Task';
 import EditIcon from '@mui/icons-material/Edit';
+
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import AttachMoneyIcon from '@mui/icons-material/AttachMoney';
@@ -116,7 +117,7 @@ import {
   MarketingCampaignsPage,
   MarketingPromotionsPage,
   FinanceCashflowPage,
-  AffiliateBalancePage,
+  StoreSubscriptionPage,
   CompatibilityDashboard,
   EditListingsDashboard,
   ConversationManagementPage,
@@ -298,7 +299,7 @@ const COMPONENT_MAP = {
   'ExtraExpenses': ExtraExpensePage,
   'RevenueGrossNet': RevenueGrossNetPage,
   'Cashflow': FinanceCashflowPage,
-  'Affiliate': AffiliateBalancePage,
+  'Affiliate': StoreSubscriptionPage,
   'Salary': SalaryPage,
   'AllOrdersSheet': AllOrdersSheetPage,
   'PriceChangeHistory': PriceChangeHistoryPage,
@@ -923,6 +924,7 @@ export default function AdminLayout({ user, onLogout }) {
           <Route path="/user-performance" element={<UserPerformancePage />} />
 
           <Route path="/credit-card-names" element={<Navigate to="/admin/credit-cards" replace />} />
+          <Route path="/affiliate-balance" element={<Navigate to="/admin/store-subscriptions" replace />} />
           <Route path="/add-user" element={<Navigate to="/employee-management" replace />} />
           <Route path="/employee-details" element={<Navigate to="/employee-management" replace />} />
 

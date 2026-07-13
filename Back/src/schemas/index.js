@@ -229,24 +229,21 @@ export const createCustomColumnSchema = z.object({
   description: z.string().optional(),
 });
 
-// ── Affiliate Balance ─────────────────────────────────────────────────────────
+// ── Store Subscription ───────────────────────────────────────────────────────
 
-const affiliateBalanceFields = {
-  date: z.string().min(1, 'Date is required'),
-  accountName: z.string().min(1, 'Account name is required'),
-  availableBalance: z.coerce.number({ invalid_type_error: 'Available balance must be a number' }).default(0),
-  balanceAdded: z.coerce.number({ invalid_type_error: 'Balance added must be a number' }).default(0),
-  totalBalance: z.coerce.number({ invalid_type_error: 'Total balance must be a number' }).default(0),
-  cardNo: z.string().optional(),
-  expenses: z.coerce.number({ invalid_type_error: 'Expenses must be a number' }).default(0),
-  marketplace: z.enum(['US', 'AU', 'UK', 'CA']).default('US'),
-  remarks: z.string().optional(),
+const storeSubscriptionFields = {
+  month: z.string().regex(/^\d{4}-\d{2}$/, 'Month must be in YYYY-MM format'),
+  sellerId: z.string().min(1, 'Seller is required'),
+  billingCycle: z.enum(['monthly', 'yearly'], {
+    errorMap: () => ({ message: 'Billing cycle must be monthly or yearly' }),
+  }),
+  amount: z.coerce.number({ invalid_type_error: 'Amount must be a number' }).min(0, 'Amount cannot be negative'),
   notes: z.string().optional(),
 };
 
-export const createAffiliateBalanceSchema = z.object(affiliateBalanceFields);
+export const createStoreSubscriptionSchema = z.object(storeSubscriptionFields);
 
-export const updateAffiliateBalanceSchema = z.object(affiliateBalanceFields).partial();
+export const updateStoreSubscriptionSchema = z.object(storeSubscriptionFields).partial();
 
 // ── Remark templates ──────────────────────────────────────────────────────────
 
