@@ -2,13 +2,11 @@ import { useState, useEffect } from 'react';
 import {
     Box, Typography, Container, Paper, CircularProgress, Alert,
     Chip, Button, LinearProgress, TextField, InputAdornment,
-    Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-    Accordion, AccordionSummary, AccordionDetails, Divider
+    Accordion, AccordionSummary, AccordionDetails, Stack
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SearchIcon from '@mui/icons-material/Search';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import InfoIcon from '@mui/icons-material/Info';
 import api from '../../lib/api';
 
 function getUsageColor(percent) {
@@ -31,6 +29,8 @@ function formatResetTime(resetStr) {
     const m = Math.floor((diffMs % 3600000) / 60000);
     return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
+
+const CHIP_DENSE = { height: 22, fontSize: '0.7rem' };
 
 export default function EbayApiUsagePage() {
     const [rateLimits, setRateLimits] = useState([]);
@@ -63,7 +63,6 @@ export default function EbayApiUsagePage() {
         }
     };
 
-    // Filter contexts and resources by search
     const filtered = rateLimits
         .map(ctx => {
             const matchCtx = ctx.apiContext.toLowerCase().includes(search.toLowerCase());
@@ -73,7 +72,6 @@ export default function EbayApiUsagePage() {
             if (!search || matchCtx || matchedResources.length > 0) {
                 return {
                     ...ctx,
-                    // If searching by resource name, only show matched resources
                     resources: search && !matchCtx ? matchedResources : ctx.resources
                 };
             }
@@ -86,192 +84,293 @@ export default function EbayApiUsagePage() {
     const warning = filtered.filter(r => r.usagePercent >= 70 && r.usagePercent < 90).length;
 
     return (
-        <Container maxWidth="lg" sx={{ mt: 2, mb: 4 }}>
+        <Container maxWidth="lg" sx={{ mt: 1.5, mb: 3 }}>
             {/* Header */}
-            <Box display="flex" justifyContent="space-between" alignItems="flex-start" mb={2} flexWrap="wrap" gap={2}>
+            <Stack
+                direction={{ xs: 'column', sm: 'row' }}
+                justifyContent="space-between"
+                alignItems={{ xs: 'stretch', sm: 'center' }}
+                spacing={1.5}
+                sx={{ mb: 1.5 }}
+            >
                 <Box>
-                    <Typography variant="h4" fontWeight={700}>eBay API Usage</Typography>
-                    <Typography variant="body2" color="textSecondary">
-                        {fetchedAt
-                            ? `${cached ? '📦 Cached — ' : '🔄 Live — '}${fetchedAt.toLocaleTimeString()}`
-                            : 'Loading...'}
+                    <Typography variant="h5" fontWeight={700} sx={{ lineHeight: 1.3 }}>
+                        eBay API Usage
                     </Typography>
+                    <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 0.5 }}>
+                        {fetchedAt ? (
+                            <>
+                                <Chip
+                                    label={cached ? 'Cached' : 'Live'}
+                                    size="small"
+                                    color={cached ? 'default' : 'primary'}
+                                    variant={cached ? 'outlined' : 'filled'}
+                                    sx={CHIP_DENSE}
+                                />
+                                <Typography variant="caption" color="text.secondary">
+                                    {fetchedAt.toLocaleTimeString()}
+                                </Typography>
+                            </>
+                        ) : (
+                            <Typography variant="caption" color="text.secondary">Loading...</Typography>
+                        )}
+                    </Stack>
                 </Box>
-                <Box display="flex" gap={1}>
-                    <Button variant="outlined" size="small" startIcon={<RefreshIcon />}
-                        onClick={() => fetchData(false)} disabled={loading}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                    <Button
+                        variant="outlined"
+                        size="small"
+                        color="inherit"
+                        startIcon={<RefreshIcon />}
+                        onClick={() => fetchData(false)}
+                        disabled={loading}
+                    >
                         Use Cache
                     </Button>
-                    <Button variant="contained"
-                        startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
-                        onClick={() => fetchData(true)} disabled={loading}>
+                    <Button
+                        variant="contained"
+                        size="small"
+                        startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <RefreshIcon />}
+                        onClick={() => fetchData(true)}
+                        disabled={loading}
+                    >
                         {loading ? 'Loading...' : 'Refresh Live'}
                     </Button>
-                </Box>
-            </Box>
+                </Stack>
+            </Stack>
 
-            {/* Info */}
-            <Alert severity="info" icon={<InfoIcon />} sx={{ mb: 3 }}>
-                <Typography variant="body2" fontWeight={600} gutterBottom>
-                    eBay rate limits are per-app, not per-seller
-                </Typography>
-                <Typography variant="body2">
-                    All {sellers.length} sellers share the same daily call pool per API category.
-                    Every resource listed under a category (e.g. <em>GetMyeBaySelling</em>, <em>ReviseCompatibilityList</em>) draws from the same shared bucket — the used/limit numbers are the same for all of them.
+            {/* Info — one short line */}
+            <Alert severity="info" sx={{ mb: 1.5, py: 0.5, '& .MuiAlert-message': { py: 0.25 } }}>
+                <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>
+                    Rate limits are per-app, not per-seller — all {sellers.length || '…'} sellers share one daily pool per category.
                 </Typography>
             </Alert>
 
-            {error && <Alert severity="error" sx={{ mb: 3 }}>{error}</Alert>}
+            {error && <Alert severity="error" sx={{ mb: 1.5 }}>{error}</Alert>}
 
-            {/* Summary chips */}
+            {/* Filters: chips + search */}
             {!loading && filtered.length > 0 && (
-                <Box display="flex" gap={2} mb={2} flexWrap="wrap" alignItems="center">
-                    <Chip label={`${filtered.length} API categories`} color="primary" variant="outlined" />
-                    {critical > 0 && <Chip label={`${critical} Critical`} color="error" />}
-                    {warning > 0 && <Chip label={`${warning} Warning`} color="warning" />}
-                    {critical === 0 && warning === 0 && <Chip label="All healthy" color="success" />}
-                </Box>
+                <Stack
+                    direction={{ xs: 'column', sm: 'row' }}
+                    spacing={1.5}
+                    alignItems={{ xs: 'stretch', sm: 'center' }}
+                    justifyContent="space-between"
+                    sx={{ mb: 1.5 }}
+                >
+                    <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                        <Chip label={`${filtered.length} categories`} size="small" variant="outlined" sx={CHIP_DENSE} />
+                        {critical > 0 && <Chip label={`${critical} critical`} size="small" color="error" sx={CHIP_DENSE} />}
+                        {warning > 0 && <Chip label={`${warning} warning`} size="small" color="warning" sx={CHIP_DENSE} />}
+                        {critical === 0 && warning === 0 && (
+                            <Chip label="All healthy" size="small" color="success" sx={CHIP_DENSE} />
+                        )}
+                    </Stack>
+                    <TextField
+                        size="small"
+                        placeholder="Search category or resource..."
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                        InputProps={{
+                            startAdornment: (
+                                <InputAdornment position="start">
+                                    <SearchIcon sx={{ fontSize: 18 }} />
+                                </InputAdornment>
+                            ),
+                        }}
+                        sx={{ width: { xs: '100%', sm: 280 }, bgcolor: 'background.paper' }}
+                    />
+                </Stack>
             )}
 
-            {/* Search */}
-            {!loading && filtered.length > 0 && (
-                <TextField size="small" placeholder="Search category or resource name..."
-                    value={search} onChange={e => setSearch(e.target.value)}
-                    InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon /></InputAdornment> }}
-                    sx={{ mb: 2, width: 360, bgcolor: 'white' }}
-                />
-            )}
-
-            {/* Loading */}
             {loading && (
-                <Box display="flex" flexDirection="column" alignItems="center" py={8}>
-                    <CircularProgress size={48} sx={{ mb: 2 }} />
-                    <Typography color="textSecondary">Fetching API usage from eBay...</Typography>
+                <Box display="flex" flexDirection="column" alignItems="center" py={6}>
+                    <CircularProgress size={36} sx={{ mb: 1.5 }} />
+                    <Typography variant="body2" color="text.secondary">Fetching API usage from eBay...</Typography>
                 </Box>
             )}
 
-            {/* Accordions per category */}
-            {!loading && filtered.map((ctx, i) => (
-                <Accordion key={i} defaultExpanded={ctx.used > 0} disableGutters elevation={2}
-                    sx={{
-                        mb: 2, '&:before': { display: 'none' },
-                        border: ctx.usagePercent >= 90 ? '1px solid #ffcdd2'
-                            : ctx.usagePercent >= 70 ? '1px solid #ffe0b2'
-                                : '1px solid #e0e0e0'
-                    }}>
-                    <AccordionSummary expandIcon={<ExpandMoreIcon />}
-                        sx={{ bgcolor: ctx.usagePercent >= 90 ? '#fff8f8' : ctx.usagePercent >= 70 ? '#fffbf5' : '#fafafa' }}>
-                        <Box display="flex" alignItems="center" gap={1.5} width="100%" pr={1}>
-                            <Box flex={1}>
-                                <Box display="flex" alignItems="center" gap={1}>
-                                    <Typography fontWeight={700}>{ctx.apiContext}</Typography>
-                                    <Chip label={`${(ctx.resources || []).length} resources`} size="small" variant="outlined"
-                                        sx={{ fontSize: '0.65rem', height: 18 }} />
-                                    {ctx.usagePercent >= 90 && <Chip label="Critical" color="error" size="small" />}
-                                    {ctx.usagePercent >= 70 && ctx.usagePercent < 90 && <Chip label="Warning" color="warning" size="small" />}
-                                </Box>
-                                <Typography variant="caption" color="textSecondary">{ctx.apiName}</Typography>
-                            </Box>
-                            {/* Mini usage bar in header */}
-                            <Box sx={{ width: 180, display: { xs: 'none', sm: 'block' } }}>
-                                <Box display="flex" justifyContent="space-between" mb={0.3}>
-                                    <Typography variant="caption" color="textSecondary">
-                                        {ctx.used.toLocaleString()} / {ctx.limit.toLocaleString()}
+            {/* Category list */}
+            {!loading && filtered.map((ctx, i) => {
+                const borderColor = ctx.usagePercent >= 90
+                    ? 'error.light'
+                    : ctx.usagePercent >= 70
+                        ? 'warning.light'
+                        : 'divider';
+                const summaryBg = ctx.usagePercent >= 90
+                    ? 'rgba(211, 47, 47, 0.04)'
+                    : ctx.usagePercent >= 70
+                        ? 'rgba(237, 108, 2, 0.04)'
+                        : 'action.hover';
+
+                return (
+                    <Accordion
+                        key={`${ctx.apiContext}-${i}`}
+                        defaultExpanded={ctx.used > 0}
+                        disableGutters
+                        elevation={0}
+                        sx={{
+                            mb: 1,
+                            border: '1px solid',
+                            borderColor,
+                            borderRadius: '6px !important',
+                            overflow: 'hidden',
+                            '&:before': { display: 'none' },
+                        }}
+                    >
+                        <AccordionSummary
+                            expandIcon={<ExpandMoreIcon sx={{ fontSize: 20 }} />}
+                            sx={{
+                                minHeight: 48,
+                                bgcolor: summaryBg,
+                                px: 1.5,
+                                '& .MuiAccordionSummary-content': { my: 1 },
+                            }}
+                        >
+                            <Box display="flex" alignItems="center" gap={1.25} width="100%" pr={0.5}>
+                                <Box flex={1} minWidth={0}>
+                                    <Stack direction="row" alignItems="center" spacing={0.75} flexWrap="wrap" useFlexGap>
+                                        <Typography variant="body2" fontWeight={700} noWrap>
+                                            {ctx.apiContext}
+                                        </Typography>
+                                        <Chip
+                                            label={`${(ctx.resources || []).length}`}
+                                            size="small"
+                                            variant="outlined"
+                                            sx={{ ...CHIP_DENSE, height: 18, fontSize: '0.65rem', '& .MuiChip-label': { px: 0.75 } }}
+                                        />
+                                        {ctx.usagePercent >= 90 && (
+                                            <Chip label="Critical" color="error" size="small" sx={CHIP_DENSE} />
+                                        )}
+                                        {ctx.usagePercent >= 70 && ctx.usagePercent < 90 && (
+                                            <Chip label="Warning" color="warning" size="small" sx={CHIP_DENSE} />
+                                        )}
+                                    </Stack>
+                                    <Typography variant="caption" color="text.secondary" noWrap display="block">
+                                        {ctx.apiName}
                                     </Typography>
-                                    <Typography variant="caption" fontWeight={700} sx={{ color: getUsageHex(ctx.usagePercent) }}>
+                                </Box>
+                                <Box sx={{ width: 160, display: { xs: 'none', sm: 'block' }, flexShrink: 0 }}>
+                                    <Box display="flex" justifyContent="space-between" mb={0.25}>
+                                        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
+                                            {ctx.used.toLocaleString()} / {ctx.limit.toLocaleString()}
+                                        </Typography>
+                                        <Typography
+                                            variant="caption"
+                                            fontWeight={700}
+                                            sx={{ fontSize: '0.7rem', color: getUsageHex(ctx.usagePercent) }}
+                                        >
+                                            {ctx.usagePercent}%
+                                        </Typography>
+                                    </Box>
+                                    <LinearProgress
+                                        variant="determinate"
+                                        value={Math.min(ctx.usagePercent, 100)}
+                                        color={getUsageColor(ctx.usagePercent)}
+                                        sx={{ height: 5, borderRadius: 2 }}
+                                    />
+                                </Box>
+                                <Typography
+                                    variant="caption"
+                                    color="text.secondary"
+                                    sx={{ minWidth: 72, textAlign: 'right', flexShrink: 0, fontSize: '0.7rem' }}
+                                >
+                                    Resets {formatResetTime(ctx.reset)}
+                                </Typography>
+                            </Box>
+                        </AccordionSummary>
+
+                        <AccordionDetails sx={{ p: 0 }}>
+                            <Box
+                                sx={{
+                                    px: 1.5,
+                                    py: 0.75,
+                                    bgcolor: 'action.hover',
+                                    borderBottom: '1px solid',
+                                    borderColor: 'divider',
+                                }}
+                            >
+                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.75rem' }}>
+                                    Shared pool:{' '}
+                                    <Box component="span" fontWeight={600} color="text.primary">
+                                        {ctx.used.toLocaleString()} used
+                                    </Box>
+                                    {' / '}
+                                    {ctx.limit.toLocaleString()} limit
+                                    {' · '}
+                                    {ctx.remaining.toLocaleString()} remaining
+                                    {' · '}
+                                    <Box component="span" fontWeight={700} sx={{ color: getUsageHex(ctx.usagePercent) }}>
                                         {ctx.usagePercent}%
-                                    </Typography>
-                                </Box>
-                                <LinearProgress variant="determinate" value={Math.min(ctx.usagePercent, 100)}
-                                    color={getUsageColor(ctx.usagePercent)}
-                                    sx={{ height: 8, borderRadius: 4 }} />
+                                    </Box>
+                                </Typography>
                             </Box>
-                            <Typography variant="caption" color="textSecondary" sx={{ minWidth: 60, textAlign: 'right' }}>
-                                Resets {formatResetTime(ctx.reset)}
-                            </Typography>
-                        </Box>
-                    </AccordionSummary>
 
-                    <AccordionDetails sx={{ p: 0 }}>
-                        {/* Category summary row */}
-                        <Box sx={{ px: 2, py: 1.5, bgcolor: '#f9f9f9', borderBottom: '1px solid #e0e0e0' }}>
-                            <Typography variant="caption" color="textSecondary">
-                                📌 All resources below share one pool: <strong>{ctx.used.toLocaleString()} used</strong> of{' '}
-                                <strong>{ctx.limit.toLocaleString()} daily limit</strong> · <strong>{ctx.remaining.toLocaleString()} remaining</strong>
-                            </Typography>
-                        </Box>
+                            <Box
+                                component="ul"
+                                sx={{
+                                    m: 0,
+                                    px: 0,
+                                    py: 0,
+                                    listStyle: 'none',
+                                    maxHeight: 280,
+                                    overflow: 'auto',
+                                }}
+                            >
+                                {(ctx.resources || []).map((resourceName, j) => (
+                                    <Box
+                                        component="li"
+                                        key={`${resourceName}-${j}`}
+                                        sx={{
+                                            px: 1.5,
+                                            py: 0.5,
+                                            borderBottom: '1px solid',
+                                            borderColor: 'divider',
+                                            '&:last-child': { borderBottom: 0 },
+                                            '&:hover': { bgcolor: 'action.hover' },
+                                        }}
+                                    >
+                                        <Typography
+                                            variant="body2"
+                                            sx={{
+                                                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                                                fontSize: '0.75rem',
+                                                lineHeight: 1.4,
+                                            }}
+                                        >
+                                            {resourceName}
+                                        </Typography>
+                                    </Box>
+                                ))}
+                            </Box>
+                        </AccordionDetails>
+                    </Accordion>
+                );
+            })}
 
-                        {/* Resource list */}
-                        <TableContainer>
-                            <Table size="small">
-                                <TableHead>
-                                    <TableRow sx={{ bgcolor: '#f5f5f5' }}>
-                                        <TableCell sx={{ fontWeight: 700 }}>API Resource (Call Name)</TableCell>
-                                        <TableCell sx={{ fontWeight: 700 }} align="right">Shared Used</TableCell>
-                                        <TableCell sx={{ fontWeight: 700 }} align="right">Daily Limit</TableCell>
-                                        <TableCell sx={{ fontWeight: 700 }} align="right">Remaining</TableCell>
-                                        <TableCell sx={{ fontWeight: 700, width: '25%' }}>Usage</TableCell>
-                                    </TableRow>
-                                </TableHead>
-                                <TableBody>
-                                    {(ctx.resources || []).map((resourceName, j) => (
-                                        <TableRow key={j} sx={{ '&:hover': { bgcolor: '#f5f5f5' } }}>
-                                            <TableCell>
-                                                <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>
-                                                    {resourceName}
-                                                </Typography>
-                                            </TableCell>
-                                            <TableCell align="right">
-                                                <Typography variant="body2" fontWeight={600} sx={{ color: getUsageHex(ctx.usagePercent) }}>
-                                                    {ctx.used.toLocaleString()}
-                                                </Typography>
-                                            </TableCell>
-                                            <TableCell align="right">
-                                                <Typography variant="body2" color="textSecondary">
-                                                    {ctx.limit.toLocaleString()}
-                                                </Typography>
-                                            </TableCell>
-                                            <TableCell align="right">
-                                                <Typography variant="body2">{ctx.remaining.toLocaleString()}</Typography>
-                                            </TableCell>
-                                            <TableCell>
-                                                <Box display="flex" alignItems="center" gap={1}>
-                                                    <LinearProgress variant="determinate" value={Math.min(ctx.usagePercent, 100)}
-                                                        color={getUsageColor(ctx.usagePercent)}
-                                                        sx={{ flex: 1, height: 7, borderRadius: 4 }} />
-                                                    <Typography variant="caption" sx={{ minWidth: 35, fontWeight: 700, color: getUsageHex(ctx.usagePercent) }}>
-                                                        {ctx.usagePercent}%
-                                                    </Typography>
-                                                </Box>
-                                            </TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
-                        </TableContainer>
-                    </AccordionDetails>
-                </Accordion>
-            ))}
-
-            {/* No data */}
             {!loading && !error && filtered.length === 0 && (
-                <Paper sx={{ p: 6, textAlign: 'center' }}>
-                    <Typography variant="h6" color="textSecondary">No API usage data found</Typography>
+                <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}>
+                    <Typography variant="body1" color="text.secondary">No API usage data found</Typography>
                 </Paper>
             )}
 
-            {/* Connected sellers */}
+            {/* Sellers footer */}
             {!loading && sellers.length > 0 && (
-                <Paper elevation={1} sx={{ mt: 3, p: 2 }}>
-                    <Typography variant="subtitle2" fontWeight={700} mb={1}>
+                <Box sx={{ mt: 2, pt: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.75 }}>
                         {sellers.length} sellers share this API limit pool
                     </Typography>
-                    <Box display="flex" gap={1} flexWrap="wrap">
+                    <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
                         {sellers.map(s => (
-                            <Chip key={s._id} label={s.name} size="small" variant="outlined" color="primary" />
+                            <Chip
+                                key={s._id}
+                                label={s.name}
+                                size="small"
+                                variant="outlined"
+                                sx={{ ...CHIP_DENSE, height: 20, fontSize: '0.65rem' }}
+                            />
                         ))}
-                    </Box>
-                </Paper>
+                    </Stack>
+                </Box>
             )}
         </Container>
     );

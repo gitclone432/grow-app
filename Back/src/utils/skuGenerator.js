@@ -32,6 +32,34 @@ export const generateSKUWithCount = (asin, currentCount) => {
 };
 
 /**
+ * Pick the next free SKU for an ASIN: base, then base-1, base-2, ...
+ * Mutates `takenSkus` by adding the allocated value (safe for batch allocation).
+ *
+ * @param {string} asin
+ * @param {Set<string>} takenSkus - SKUs already used (DB + this batch)
+ * @param {number} [startCount=0] - preferred starting count (e.g. AsinDirectory.listingCount)
+ * @returns {string}
+ */
+export const allocateUniqueSKU = (asin, takenSkus, startCount = 0) => {
+  const base = generateSKUFromASIN(asin);
+  if (!base) return '';
+
+  let n = Math.max(0, Number(startCount) || 0);
+  for (let guard = 0; guard < 10000; guard++) {
+    const candidate = n === 0 ? base : `${base}-${n}`;
+    if (!takenSkus.has(candidate)) {
+      takenSkus.add(candidate);
+      return candidate;
+    }
+    n += 1;
+  }
+
+  const fallback = `${base}-${Date.now()}`;
+  takenSkus.add(fallback);
+  return fallback;
+};
+
+/**
  * Validates if a string is a valid ASIN format
  * @param {string} asin - String to validate
  * @returns {boolean} True if valid ASIN format

@@ -23,7 +23,7 @@ import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import ScheduleIcon from '@mui/icons-material/Schedule';
 import api from '../lib/api.js';
 
-export default function ListDirectlyDialog({ open, onClose, selectedListings, templateId, sellerId, inlineListings = null }) {
+export default function ListDirectlyDialog({ open, onClose, selectedListings, templateId, sellerId, inlineListings = null, listingStatus = 'active' }) {
   const navigate = useNavigate();
 
   // Sellers
@@ -182,6 +182,7 @@ export default function ListDirectlyDialog({ open, onClose, selectedListings, te
         if (selectedProductId) storageForm.append('productId', selectedProductId);
         storageForm.append('productName', products.find(p => p._id === selectedProductId)?.name || '');
         storageForm.append('source', 'asin_list');
+        storageForm.append('listingStatus', listingStatus === 'draft' ? 'draft' : 'active');
         const saveRes = await api.post('/csv-storage', storageForm, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
@@ -248,6 +249,7 @@ export default function ListDirectlyDialog({ open, onClose, selectedListings, te
       if (selectedProductId) storageForm.append('productId', selectedProductId);
       storageForm.append('productName', products.find(p => p._id === selectedProductId)?.name || '');
       storageForm.append('source', 'asin_list');
+      storageForm.append('listingStatus', listingStatus === 'draft' ? 'draft' : 'active');
 
       const saveRes = await api.post('/csv-storage', storageForm, {
         headers: { 'Content-Type': 'multipart/form-data' },

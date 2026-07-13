@@ -303,7 +303,7 @@ export default function AsinListPage() {
       setReviewModal(false);
       setPreviewItems([]);
       setSelected([]);
-      navigate(`/admin/template-listings?templateId=${activeTemplate._id}&sellerId=${activeSellerId}&fromAsinList=true`);
+      navigate(`/admin/select-seller-lab?templateId=${activeTemplate._id}&sellerId=${activeSellerId}&fromAsinList=true&status=active`);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to save listings');
     }

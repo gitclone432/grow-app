@@ -20,14 +20,18 @@ import {
   Button,
   Stack,
   Tooltip,
-  Divider,
-  TextField
+  TextField,
+  Tabs,
+  Tab,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
-import FilterListIcon from '@mui/icons-material/FilterList';
 import api from '../../lib/api';
 
 const formatCurrency = (amountObj) => {
@@ -119,6 +123,20 @@ const getDateKeyPST = (dateStr) => {
   return `${y}-${m}-${day}`;
 };
 
+// Get today's YYYY-MM-DD in Pacific time
+const getTodayPtDateKey = () => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const y = parts.find((p) => p.type === 'year')?.value;
+  const m = parts.find((p) => p.type === 'month')?.value;
+  const d = parts.find((p) => p.type === 'day')?.value;
+  return `${y}-${m}-${d}`;
+};
+
 // ============================================
 // SELLER ROW with Processing + On Hold expand
 // ============================================
@@ -189,6 +207,22 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
       setErrorHold(null);
     }
   };
+
+  // Align with seller_funds_summary processing balance: hide orders whose
+  // available date is already in the past (still returned by eBay as FUNDS_PROCESSING).
+  const todayPtKey = getTodayPtDateKey();
+  const activeProcessingTxns = useMemo(() => (
+    transactions.filter((txn) => {
+      if (!txn.availableDate) return true;
+      const key = getDateKeyPST(txn.availableDate);
+      return !key || key >= todayPtKey;
+    })
+  ), [transactions, todayPtKey]);
+  const hiddenPastProcessingCount = transactions.length - activeProcessingTxns.length;
+  const activeProcessingTotal = activeProcessingTxns.reduce(
+    (sum, txn) => sum + (parseFloat(txn.amount) || 0),
+    0,
+  );
 
   if (seller.error) {
     return (
@@ -273,8 +307,16 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
         <TableCell style={{ paddingBottom: 0, paddingTop: 0 }} colSpan={5}>
           <Collapse in={processingOpen} timeout="auto" unmountOnExit>
             <Box sx={{ py: 2, px: 3, backgroundColor: '#fffbeb' }}>
-              <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1.5, color: '#92400e' }}>
+              <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 0.5, color: '#92400e' }}>
                 Processing Orders
+              </Typography>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
+                Showing orders with available date today or later
+                {hiddenPastProcessingCount > 0
+                  ? ` · ${hiddenPastProcessingCount} older processing order(s) hidden`
+                  : ''}
+                {' · '}
+                Total {fmtUSD(activeProcessingTotal)}
               </Typography>
 
               {loadingProcessing && (
@@ -285,11 +327,15 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
 
               {errorProcessing && <Alert severity="error" sx={{ mb: 1 }}>{errorProcessing}</Alert>}
 
-              {!loadingProcessing && transactions.length === 0 && !errorProcessing && (
-                <Typography variant="body2" color="text.secondary">No processing transactions found.</Typography>
+              {!loadingProcessing && activeProcessingTxns.length === 0 && !errorProcessing && (
+                <Typography variant="body2" color="text.secondary">
+                  {transactions.length > 0
+                    ? 'No processing orders with available date today or later.'
+                    : 'No processing transactions found.'}
+                </Typography>
               )}
 
-              {!loadingProcessing && transactions.length > 0 && (
+              {!loadingProcessing && activeProcessingTxns.length > 0 && (
                 <TableContainer component={Paper} elevation={0} sx={{ border: '1px solid #fbbf24' }}>
                   <Table size="small">
                     <TableHead>
@@ -302,7 +348,7 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {transactions.map((txn, idx) => (
+                      {activeProcessingTxns.map((txn, idx) => (
                         <TableRow key={txn.orderId || idx} hover>
                           <TableCell>
                             <Typography variant="body2" fontFamily="monospace" fontSize={12}>
@@ -432,158 +478,297 @@ const SellerRow = ({ seller, onHoldExpanded, onToggleHold }) => {
   );
 };
 
+const PROCESSING_DATE_COUNT_OPTIONS = [5, 10, 15, 20, 30];
+const DEFAULT_PROCESSING_DATE_COUNT = 10;
+
 // ============================================
-// DATE FILTER - Processing sums by available date
+// Processing funds — next N dates that have funds
 // ============================================
 const ProcessingByDateSection = ({ sellers }) => {
-  const [filterDate, setFilterDate] = useState('');
-  const [results, setResults] = useState([]);
+  const [filterSellerId, setFilterSellerId] = useState('');
+  const [dateCount, setDateCount] = useState(DEFAULT_PROCESSING_DATE_COUNT);
+  const [dayGroups, setDayGroups] = useState([]);
+  const [expandedDates, setExpandedDates] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [fetched, setFetched] = useState(false);
+  const [totalDatesFound, setTotalDatesFound] = useState(0);
 
-  const handleSearch = async () => {
-    if (!filterDate) return;
-    setLoading(true);
-    setError(null);
-    setResults([]);
-    setFetched(true);
+  const sellerOptions = useMemo(
+    () => [...sellers]
+      .filter((s) => !s.error)
+      .sort((a, b) => String(a.sellerName || '').localeCompare(String(b.sellerName || ''), undefined, { sensitivity: 'base' })),
+    [sellers],
+  );
 
-    const sellerResults = [];
-
-    for (const seller of sellers.filter(s => !s.error)) {
-      try {
-        const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`);
-        const txns = res.data.transactions || [];
-
-        const matchingTxns = txns.filter(txn => {
-          if (!txn.availableDate) return false;
-          return getDateKeyPST(txn.availableDate) === filterDate;
-        });
-
-        const totalAmount = matchingTxns.reduce((sum, txn) => sum + txn.amount, 0);
-
-        if (matchingTxns.length > 0) {
-          sellerResults.push({
-            sellerId: seller.sellerId,
-            sellerName: seller.sellerName,
-            totalAmount,
-            transactionCount: matchingTxns.length,
-            transactions: matchingTxns
-          });
-        }
-      } catch {
-        // Skip sellers with errors
-      }
+  const loadUpcoming = useCallback(async () => {
+    if (sellerOptions.length === 0) {
+      setDayGroups([]);
+      setTotalDatesFound(0);
+      setExpandedDates({});
+      setFetched(true);
+      return;
     }
 
-    setResults(sellerResults);
+    setLoading(true);
+    setError(null);
+
+    const todayKey = getTodayPtDateKey();
+    const activeSellers = sellerOptions.filter((s) => (
+      !filterSellerId || String(s.sellerId) === String(filterSellerId)
+    ));
+
+    const byDate = new Map();
+
+    await Promise.all(
+      activeSellers.map(async (seller) => {
+        try {
+          const res = await api.get(`/ebay/processing-transactions/${seller.sellerId}`);
+          const txns = res.data.transactions || [];
+
+          for (const txn of txns) {
+            if (!txn.availableDate) continue;
+            const dateKey = getDateKeyPST(txn.availableDate);
+            if (!dateKey || dateKey < todayKey) continue;
+
+            if (!byDate.has(dateKey)) byDate.set(dateKey, new Map());
+            const sellerMap = byDate.get(dateKey);
+            const sid = String(seller.sellerId);
+            const existing = sellerMap.get(sid) || {
+              sellerId: seller.sellerId,
+              sellerName: seller.sellerName,
+              totalAmount: 0,
+              transactionCount: 0,
+            };
+            existing.totalAmount += Number(txn.amount) || 0;
+            existing.transactionCount += 1;
+            sellerMap.set(sid, existing);
+          }
+        } catch {
+          // skip failed sellers
+        }
+      }),
+    );
+
+    const allGroups = [...byDate.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([dateKey, sellerMap]) => {
+        const sellerRows = [...sellerMap.values()].sort((a, b) => (
+          String(a.sellerName || '').localeCompare(String(b.sellerName || ''), undefined, { sensitivity: 'base' })
+        ));
+        return {
+          dateKey,
+          sellers: sellerRows,
+          totalAmount: sellerRows.reduce((sum, r) => sum + r.totalAmount, 0),
+          orderCount: sellerRows.reduce((sum, r) => sum + r.transactionCount, 0),
+        };
+      })
+      .filter((g) => g.orderCount > 0);
+
+    setTotalDatesFound(allGroups.length);
+    setDayGroups(allGroups.slice(0, dateCount));
+    setExpandedDates({});
+    setFetched(true);
     setLoading(false);
+  }, [sellerOptions, filterSellerId, dateCount]);
+
+  useEffect(() => {
+    void loadUpcoming();
+  }, [loadUpcoming]);
+
+  const grandTotal = dayGroups.reduce((sum, g) => sum + g.totalAmount, 0);
+  const todayKey = getTodayPtDateKey();
+
+  const toggleDate = (dateKey) => {
+    setExpandedDates((prev) => ({ ...prev, [dateKey]: !prev[dateKey] }));
   };
 
-  const grandTotal = results.reduce((sum, r) => sum + r.totalAmount, 0);
-
   return (
-    <Paper elevation={3} sx={{ p: 4, borderRadius: 2, backgroundColor: '#fafafa' }}>
-      <Typography variant="h5" fontWeight={700} sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
-        <FilterListIcon sx={{ color: '#8b5cf6' }} />
-        Processing Funds by Available Date
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        Select a date to see total processing funds becoming available for each seller on that day
-      </Typography>
-
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
-        <TextField
-          type="date"
-          size="small"
-          label="Available Date"
-          value={filterDate}
-          onChange={(e) => setFilterDate(e.target.value)}
-          InputLabelProps={{ shrink: true }}
-          sx={{ width: 220 }}
-        />
+    <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 }, borderRadius: 2 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2, flexWrap: 'wrap' }}>
+        <FormControl size="small" sx={{ minWidth: 200 }}>
+          <InputLabel id="processing-seller-filter-label">Seller</InputLabel>
+          <Select
+            labelId="processing-seller-filter-label"
+            label="Seller"
+            value={filterSellerId}
+            onChange={(e) => setFilterSellerId(e.target.value)}
+          >
+            <MenuItem value="">
+              <em>All sellers</em>
+            </MenuItem>
+            {sellerOptions.map((s) => (
+              <MenuItem key={String(s.sellerId)} value={String(s.sellerId)}>
+                {s.sellerName}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <FormControl size="small" sx={{ minWidth: 180 }}>
+          <InputLabel id="processing-date-count-label">Future dates</InputLabel>
+          <Select
+            labelId="processing-date-count-label"
+            label="Future dates"
+            value={dateCount}
+            onChange={(e) => setDateCount(Number(e.target.value))}
+          >
+            {PROCESSING_DATE_COUNT_OPTIONS.map((n) => (
+              <MenuItem key={n} value={n}>
+                Next {n} dates
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
         <Button
           variant="contained"
-          onClick={handleSearch}
-          disabled={!filterDate || loading}
-          startIcon={loading ? <CircularProgress size={16} /> : <FilterListIcon />}
-          sx={{ backgroundColor: '#8b5cf6', '&:hover': { backgroundColor: '#7c3aed' } }}
+          onClick={() => void loadUpcoming()}
+          disabled={loading}
+          startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
         >
-          {loading ? 'Loading...' : 'Search'}
+          {loading ? 'Loading...' : 'Refresh'}
         </Button>
       </Box>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
-      {fetched && !loading && results.length === 0 && (
-        <Alert severity="info">No processing funds are becoming available on {filterDate}.</Alert>
+      {loading && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
+          <CircularProgress />
+        </Box>
       )}
 
-      {!loading && results.length > 0 && (
+      {!loading && fetched && dayGroups.length === 0 && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          No upcoming processing dates with funds.
+        </Alert>
+      )}
+
+      {!loading && dayGroups.length > 0 && (
         <Box>
-          <Box sx={{
-            p: 2,
-            mb: 3,
-            background: 'linear-gradient(135deg, #8b5cf6, #6d28d9)',
-            borderRadius: 2,
-            color: 'white'
-          }}>
-            <Typography variant="subtitle2" sx={{ opacity: 0.9 }}>
-              Total processing funds becoming available on {formatDateOnlyPST(filterDate + 'T12:00:00Z')}
+          <Box
+            sx={{
+              p: 2,
+              mb: 2,
+              bgcolor: 'action.hover',
+              borderRadius: 2,
+              border: '1px solid',
+              borderColor: 'divider',
+            }}
+          >
+            <Typography variant="body2" color="text.secondary">
+              Next {dayGroups.length} processing date{dayGroups.length === 1 ? '' : 's'}
+              {totalDatesFound > dayGroups.length ? ` (of ${totalDatesFound} found)` : ''}
             </Typography>
-            <Typography variant="h4" fontWeight={700}>
+            <Typography variant="h5" fontWeight={700} sx={{ color: '#8b5cf6', mt: 0.5 }}>
               {fmtUSD(grandTotal)}
-            </Typography>
-            <Typography variant="body2" sx={{ opacity: 0.8 }}>
-              Across {results.length} seller{results.length > 1 ? 's' : ''}
             </Typography>
           </Box>
 
-          <TableContainer component={Paper} elevation={2}>
+          <TableContainer component={Paper} variant="outlined">
             <Table size="small">
               <TableHead>
-                <TableRow sx={{ backgroundColor: '#f5f3ff' }}>
-                  <TableCell sx={{ fontWeight: 700 }}>Seller</TableCell>
+                <TableRow sx={{ bgcolor: '#f5f3ff' }}>
+                  <TableCell sx={{ width: 40 }} />
+                  <TableCell sx={{ fontWeight: 700 }}>Available Date</TableCell>
+                  <TableCell align="center" sx={{ fontWeight: 700 }}>Sellers</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 700 }}>Orders</TableCell>
                   <TableCell align="right" sx={{ fontWeight: 700 }}>Total Amount</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                {results.map((r) => (
-                  <TableRow key={r.sellerId} hover>
-                    <TableCell>
-                      <Typography variant="body2" fontWeight={600}>{r.sellerName}</Typography>
-                    </TableCell>
-                    <TableCell align="center">
-                      <Chip label={r.transactionCount} size="small" sx={{ fontWeight: 600 }} />
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body2" fontWeight={700} sx={{ color: '#8b5cf6' }}>
-                        {fmtUSD(r.totalAmount)}
-                      </Typography>
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {results.length > 1 && (
-                  <TableRow sx={{ backgroundColor: '#f5f3ff' }}>
-                    <TableCell>
-                      <Typography variant="body2" fontWeight={700}>TOTAL</Typography>
-                    </TableCell>
-                    <TableCell align="center">
-                      <Chip
-                        label={results.reduce((s, r) => s + r.transactionCount, 0)}
-                        size="small"
-                        sx={{ fontWeight: 700 }}
-                      />
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body1" fontWeight={700} sx={{ color: '#8b5cf6' }}>
-                        {fmtUSD(grandTotal)}
-                      </Typography>
-                    </TableCell>
-                  </TableRow>
-                )}
+                {dayGroups.map((group) => {
+                  const open = !!expandedDates[group.dateKey];
+                  const isToday = group.dateKey === todayKey;
+                  return (
+                    <React.Fragment key={group.dateKey}>
+                      <TableRow
+                        hover
+                        sx={{ cursor: 'pointer', bgcolor: open ? 'action.selected' : undefined }}
+                        onClick={() => toggleDate(group.dateKey)}
+                      >
+                        <TableCell>
+                          <IconButton size="small" aria-label={open ? 'collapse' : 'expand'}>
+                            {open ? <KeyboardArrowUpIcon /> : <KeyboardArrowDownIcon />}
+                          </IconButton>
+                        </TableCell>
+                        <TableCell>
+                          <Stack direction="row" spacing={1} alignItems="center">
+                            <Typography variant="body2" fontWeight={700}>
+                              {formatDateOnlyPST(`${group.dateKey}T12:00:00Z`)}
+                            </Typography>
+                            {isToday && <Chip label="Today" size="small" color="primary" sx={{ height: 20 }} />}
+                          </Stack>
+                        </TableCell>
+                        <TableCell align="center">
+                          <Typography variant="body2">{group.sellers.length}</Typography>
+                        </TableCell>
+                        <TableCell align="center">
+                          <Chip label={group.orderCount} size="small" sx={{ fontWeight: 600 }} />
+                        </TableCell>
+                        <TableCell align="right">
+                          <Typography variant="body2" fontWeight={700} sx={{ color: '#8b5cf6' }}>
+                            {fmtUSD(group.totalAmount)}
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                      <TableRow>
+                        <TableCell colSpan={5} sx={{ py: 0, border: 0 }}>
+                          <Collapse in={open} timeout="auto" unmountOnExit>
+                            <Box sx={{ px: 2, py: 1.5, bgcolor: 'grey.50' }}>
+                              <Table size="small">
+                                <TableHead>
+                                  <TableRow>
+                                    <TableCell sx={{ fontWeight: 600 }}>Seller</TableCell>
+                                    <TableCell align="center" sx={{ fontWeight: 600 }}>Orders</TableCell>
+                                    <TableCell align="right" sx={{ fontWeight: 600 }}>Amount</TableCell>
+                                  </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                  {group.sellers.map((r) => (
+                                    <TableRow key={String(r.sellerId)}>
+                                      <TableCell>
+                                        <Typography variant="body2">{r.sellerName}</Typography>
+                                      </TableCell>
+                                      <TableCell align="center">{r.transactionCount}</TableCell>
+                                      <TableCell align="right">
+                                        <Typography variant="body2" fontWeight={600}>
+                                          {fmtUSD(r.totalAmount)}
+                                        </Typography>
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </Box>
+                          </Collapse>
+                        </TableCell>
+                      </TableRow>
+                    </React.Fragment>
+                  );
+                })}
+                <TableRow sx={{ bgcolor: '#f5f3ff' }}>
+                  <TableCell />
+                  <TableCell>
+                    <Typography variant="body2" fontWeight={700}>TOTAL</Typography>
+                  </TableCell>
+                  <TableCell align="center">
+                    <Typography variant="body2" fontWeight={700}>
+                      {dayGroups.reduce((n, g) => n + g.sellers.length, 0)}
+                    </Typography>
+                  </TableCell>
+                  <TableCell align="center">
+                    <Chip
+                      label={dayGroups.reduce((n, g) => n + g.orderCount, 0)}
+                      size="small"
+                      sx={{ fontWeight: 700 }}
+                    />
+                  </TableCell>
+                  <TableCell align="right">
+                    <Typography variant="body2" fontWeight={700} sx={{ color: '#8b5cf6' }}>
+                      {fmtUSD(grandTotal)}
+                    </Typography>
+                  </TableCell>
+                </TableRow>
               </TableBody>
             </Table>
           </TableContainer>
@@ -614,9 +799,11 @@ const SellerFundsPage = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [cacheSource, setCacheSource] = useState(null); // 'mongodb' | 'ebay' | 'none' | null
   const [expandedHolds, setExpandedHolds] = useState({});
   const [sortBy, setSortBy] = useState('sellerName');
   const [sortOrder, setSortOrder] = useState('asc');
+  const [activeTab, setActiveTab] = useState(0);
 
   const handleSort = (column) => {
     if (sortBy === column) {
@@ -632,22 +819,37 @@ const SellerFundsPage = () => {
     [sellers, sortBy, sortOrder]
   );
 
-  const fetchFundsSummary = useCallback(async () => {
+  const applyFundsResponse = useCallback((data) => {
+    const rows = Array.isArray(data?.sellers)
+      ? data.sellers
+      : (Array.isArray(data) ? data : []);
+    setSellers(rows);
+    const cachedAt = data?.cache?.cachedAt ? new Date(data.cache.cachedAt) : new Date();
+    setLastRefresh(Number.isNaN(cachedAt.getTime()) ? new Date() : cachedAt);
+    setCacheSource(data?.cache?.source || (rows.length ? 'ebay' : 'none'));
+  }, []);
+
+  const fetchFundsSummary = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.get('/ebay/seller-funds-summary');
-      setSellers(res.data);
-      setLastRefresh(new Date());
+      const res = await api.get('/ebay/seller-funds-summary', {
+        params: forceRefresh ? { refresh: 'true' } : {},
+        timeout: forceRefresh ? 180000 : 30000,
+      });
+      if (res.data?.success === false) {
+        throw new Error(res.data?.error || 'Failed to fetch seller funds');
+      }
+      applyFundsResponse(res.data);
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to fetch seller funds');
+      setError(err.response?.data?.error || err.message || 'Failed to fetch seller funds');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyFundsResponse]);
 
   useEffect(() => {
-    fetchFundsSummary();
+    fetchFundsSummary(false);
   }, [fetchFundsSummary]);
 
   const toggleHold = (sellerId) => {
@@ -665,131 +867,172 @@ const SellerFundsPage = () => {
   }, { total: 0, available: 0, processing: 0, onHold: 0 });
 
   const sellerCount = sellers.filter((s) => !s.error).length;
+  const statusLabel = cacheSource === 'mongodb'
+    ? 'Cached'
+    : cacheSource === 'ebay'
+      ? 'Live'
+      : cacheSource === 'none'
+        ? 'No saved data'
+        : null;
 
   return (
     <Box sx={{ p: 3, maxWidth: 1400, mx: 'auto' }}>
       {/* Header */}
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2, flexWrap: 'wrap', gap: 2 }}>
         <Box>
-          <Typography variant="h4" fontWeight={700}>Seller Funds Overview</Typography>
+          <Typography variant="h5" fontWeight={700}>Seller Funds Overview</Typography>
           <Typography variant="body2" color="text.secondary">
-            Live data from eBay Finances API
-            {lastRefresh && ` • Last refreshed: ${lastRefresh.toLocaleTimeString()}`}
+            {statusLabel
+              ? `${statusLabel}${lastRefresh ? ` — ${lastRefresh.toLocaleString()}` : ''}`
+              : 'Loading…'}
           </Typography>
         </Box>
-        <Button variant="outlined" startIcon={<RefreshIcon />} onClick={fetchFundsSummary} disabled={loading}>
-          Refresh
-        </Button>
+        {activeTab === 0 && (
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+            onClick={() => fetchFundsSummary(true)}
+            disabled={loading}
+          >
+            {loading ? 'Loading…' : 'Refresh from eBay'}
+          </Button>
+        )}
       </Box>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      <Tabs
+        value={activeTab}
+        onChange={(_, value) => setActiveTab(value)}
+        sx={{
+          mb: 2,
+          minHeight: 40,
+          borderBottom: 1,
+          borderColor: 'divider',
+          '& .MuiTab-root': { minHeight: 40, textTransform: 'none', fontWeight: 600 },
+        }}
+      >
+        <Tab label="Seller Funds" />
+        <Tab label="Processing by Available Date" />
+      </Tabs>
 
-      {!loading && sellers.length > 0 && (
-        <Box
-          sx={{
-            mb: 3,
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
-            gap: 2,
-          }}
-        >
-          <KpiCard
-            label="Total Funds"
-            value={fmtUSD(totals.total)}
-            color="#3b82f6"
-            bgcolor="#eff6ff"
-          />
-          <KpiCard
-            label="Available"
-            value={fmtUSD(totals.available)}
-            color={getAvailableColor(totals.available)}
-            bgcolor={totals.available < 0 ? '#fef2f2' : '#f0fdf4'}
-          />
-          <KpiCard
-            label="Processing"
-            value={fmtUSD(totals.processing)}
-            color="#f59e0b"
-            bgcolor="#fffbeb"
-          />
-          <KpiCard
-            label="On Hold"
-            value={fmtUSD(totals.onHold)}
-            color="#ef4444"
-            bgcolor="#fef2f2"
-          />
-          <KpiCard
-            label="Stores"
-            value={sellerCount}
-            color="text.primary"
-            bgcolor="#f8fafc"
-          />
+      {activeTab === 0 && (
+        <Box>
+          {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+          {!loading && !error && sellers.length === 0 && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              No saved seller funds yet. Click Refresh from eBay to load and save data for all stores.
+            </Alert>
+          )}
+
+          {!loading && sellers.length > 0 && (
+            <Box
+              sx={{
+                mb: 2,
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+                gap: 1.5,
+              }}
+            >
+              <KpiCard
+                label="Total Funds"
+                value={fmtUSD(totals.total)}
+                color="#3b82f6"
+                bgcolor="#eff6ff"
+              />
+              <KpiCard
+                label="Available"
+                value={fmtUSD(totals.available)}
+                color={getAvailableColor(totals.available)}
+                bgcolor={totals.available < 0 ? '#fef2f2' : '#f0fdf4'}
+              />
+              <KpiCard
+                label="Processing"
+                value={fmtUSD(totals.processing)}
+                color="#f59e0b"
+                bgcolor="#fffbeb"
+              />
+              <KpiCard
+                label="On Hold"
+                value={fmtUSD(totals.onHold)}
+                color="#ef4444"
+                bgcolor="#fef2f2"
+              />
+              <KpiCard
+                label="Stores"
+                value={sellerCount}
+                color="text.primary"
+                bgcolor="#f8fafc"
+              />
+            </Box>
+          )}
+
+          {loading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress /></Box>
+          ) : sellers.length === 0 ? (
+            <Alert severity="info">No sellers with eBay connections found in cache. Refresh from eBay to load.</Alert>
+          ) : (
+            <Paper variant="outlined" sx={{ overflow: 'hidden', borderRadius: 2 }}>
+              <TableContainer sx={{ maxHeight: 'calc(100vh - 320px)' }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      {Object.keys(SORT_COLUMNS).map((column) => (
+                        <SortableHeader
+                          key={column}
+                          column={column}
+                          sortBy={sortBy}
+                          sortOrder={sortOrder}
+                          onSort={handleSort}
+                        />
+                      ))}
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {sortedSellers.map((seller) => (
+                      <SellerRow
+                        key={`${seller.sellerId}-${lastRefresh?.getTime() || 0}`}
+                        seller={seller}
+                        onHoldExpanded={!!expandedHolds[seller.sellerId]}
+                        onToggleHold={toggleHold}
+                      />
+                    ))}
+                    {sellers.length > 1 && (
+                      <TableRow sx={{ backgroundColor: '#f1f5f9' }}>
+                        <TableCell><Typography variant="body2" fontWeight={700}>TOTAL</Typography></TableCell>
+                        <TableCell align="right">
+                          <Typography variant="body2" fontWeight={700} sx={{ color: '#3b82f6' }}>{fmtUSD(totals.total)}</Typography>
+                        </TableCell>
+                        <TableCell align="right">
+                          <Typography variant="body2" fontWeight={700} sx={{ color: getAvailableColor(totals.available) }}>{fmtUSD(totals.available)}</Typography>
+                        </TableCell>
+                        <TableCell align="right">
+                          <Typography variant="body2" fontWeight={700} sx={{ color: '#f59e0b' }}>{fmtUSD(totals.processing)}</Typography>
+                        </TableCell>
+                        <TableCell align="right">
+                          <Typography variant="body2" fontWeight={700} sx={{ color: '#ef4444' }}>{fmtUSD(totals.onHold)}</Typography>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </Paper>
+          )}
         </Box>
       )}
 
-      {/* ===== SECTION 1: SELLER FUNDS OVERVIEW ===== */}
-      {loading ? (
-        <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress /></Box>
-      ) : sellers.length === 0 ? (
-        <Alert severity="info">No sellers with eBay connections found.</Alert>
-      ) : (
-        <Paper elevation={3} sx={{ mb: 5, overflow: 'hidden', borderRadius: 2 }}>
-          <TableContainer>
-            <Table>
-              <TableHead>
-                <TableRow sx={{ backgroundColor: '#f8fafc' }}>
-                  {Object.keys(SORT_COLUMNS).map((column) => (
-                    <SortableHeader
-                      key={column}
-                      column={column}
-                      sortBy={sortBy}
-                      sortOrder={sortOrder}
-                      onSort={handleSort}
-                    />
-                  ))}
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {sortedSellers.map((seller) => (
-                  <SellerRow
-                    key={`${seller.sellerId}-${lastRefresh?.getTime() || 0}`}
-                    seller={seller}
-                    onHoldExpanded={!!expandedHolds[seller.sellerId]}
-                    onToggleHold={toggleHold}
-                  />
-                ))}
-                {sellers.length > 1 && (
-                  <TableRow sx={{ backgroundColor: '#f1f5f9' }}>
-                    <TableCell><Typography variant="body2" fontWeight={700}>TOTAL</Typography></TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body1" fontWeight={700} sx={{ color: '#3b82f6' }}>{fmtUSD(totals.total)}</Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body1" fontWeight={700} sx={{ color: getAvailableColor(totals.available) }}>{fmtUSD(totals.available)}</Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body1" fontWeight={700} sx={{ color: '#f59e0b' }}>{fmtUSD(totals.processing)}</Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body1" fontWeight={700} sx={{ color: '#ef4444' }}>{fmtUSD(totals.onHold)}</Typography>
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        </Paper>
+      {activeTab === 1 && (
+        <Box>
+          {sellers.length === 0 ? (
+            <Alert severity="info">
+              Load seller funds first (Seller Funds tab → Refresh from eBay), then search processing by date here.
+            </Alert>
+          ) : (
+            <ProcessingByDateSection sellers={sellers} />
+          )}
+        </Box>
       )}
-
-      {/* ===== SECTION 2: PROCESSING FUNDS BY AVAILABLE DATE ===== */}
-      {!loading && sellers.length > 0 && (
-        <>
-          <Divider sx={{ my: 5 }}>
-            <Chip label="SECTION 2" size="small" sx={{ fontWeight: 600, backgroundColor: '#e0e7ff' }} />
-          </Divider>
-          <ProcessingByDateSection sellers={sellers} />
-        </>
-      )}
-
     </Box>
   );
 };

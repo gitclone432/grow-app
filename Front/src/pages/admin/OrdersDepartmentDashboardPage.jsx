@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Alert,
@@ -21,7 +21,6 @@ import {
   TableContainer,
   TableHead,
   TableRow,
-  TableSortLabel,
   TextField,
   Typography
 } from '@mui/material';
@@ -30,17 +29,15 @@ import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import api from '../../lib/api';
 import OrdersDashboardSkeleton from '../../components/skeletons/OrdersDashboardSkeleton';
 import { Fade } from '@mui/material';
+import { sortSellersByName, sellerDisplayName } from '../../lib/sellersSort';
 
 const DASHBOARD_DATE_KEY = 'orders_dashboard_date';
 const MARKETPLACE_OPTIONS = [
   { value: '', label: 'All Marketplaces' },
-  { value: 'EBAY_US', label: 'eBay US' },
-  { value: 'EBAY_CA', label: 'eBay CA' },
-  { value: 'EBAY_ENCA', label: 'eBay ENCA' },
-  { value: 'EBAY_GB', label: 'eBay GB' },
-  { value: 'GB', label: 'GB' },
-  { value: 'EBAY_AU', label: 'eBay AU' },
-  { value: 'EBAY_DE', label: 'eBay DE' },
+  { value: 'EBAY_US', label: 'USA' },
+  { value: 'EBAY_CA', label: 'CA' },
+  { value: 'EBAY_AU', label: 'AUS' },
+  { value: 'EBAY_GB', label: 'UK' },
 ];
 
 function fmtDateTimePt(value) {
@@ -109,15 +106,11 @@ export default function OrdersDepartmentDashboardPage() {
   const [excludeLowValue, setExcludeLowValue] = useState(true);
 
   const [overview, setOverview] = useState(null);
-  const [monthlyDelta, setMonthlyDelta] = useState([]);
   const [ordersTable, setOrdersTable] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [errors, setErrors] = useState([]);
   const [lastUpdatedAt, setLastUpdatedAt] = useState(null);
-
-  const [sortField, setSortField] = useState('delta');
-  const [sortDir, setSortDir] = useState('desc');
 
   useEffect(() => {
     sessionStorage.setItem(DASHBOARD_DATE_KEY, date);
@@ -135,7 +128,7 @@ export default function OrdersDepartmentDashboardPage() {
   async function loadSellers() {
     try {
       const { data } = await api.get('/sellers/all');
-      setSellers(data || []);
+      setSellers(sortSellersByName(data || []));
     } catch (e) {
       console.error('Failed to load sellers:', e);
       setSellers([]);
@@ -151,10 +144,8 @@ export default function OrdersDepartmentDashboardPage() {
     if (selectedSeller) params.sellerId = selectedSeller;
     if (selectedMarketplace) params.marketplace = selectedMarketplace;
 
-    const month = String(date || '').slice(0, 7);
     const settled = await Promise.allSettled([
       api.get('/orders/dashboard/overview', { params }),
-      api.get('/orders/dashboard/monthly-delta', { params: { month, sellerId: selectedSeller || undefined, marketplace: selectedMarketplace || undefined, excludeLowValue: excludeLowValue ? 'true' : 'false' } }),
       api.get('/ebay/stored-orders', { params: { sellerId: selectedSeller || undefined, dateSold: date, page: 1, limit: 25, searchMarketplace: selectedMarketplace || undefined, excludeLowValue: excludeLowValue ? 'true' : 'false' } })
     ]);
 
@@ -168,47 +159,16 @@ export default function OrdersDepartmentDashboardPage() {
     }
 
     if (settled[1].status === 'fulfilled') {
-      setMonthlyDelta(settled[1].value.data?.rows || []);
-    } else {
-      setMonthlyDelta([]);
-      nextErrors.push(`Monthly delta failed: ${settled[1].reason?.response?.data?.error || settled[1].reason?.message || 'Unknown error'}`);
-    }
-
-    if (settled[2].status === 'fulfilled') {
-      setOrdersTable(settled[2].value.data?.orders || []);
+      setOrdersTable(settled[1].value.data?.orders || []);
     } else {
       setOrdersTable([]);
-      nextErrors.push(`Today's order list failed: ${settled[2].reason?.response?.data?.error || settled[2].reason?.message || 'Unknown error'}`);
+      nextErrors.push(`Today's order list failed: ${settled[1].reason?.response?.data?.error || settled[1].reason?.message || 'Unknown error'}`);
     }
 
     setErrors(nextErrors);
     setLastUpdatedAt(new Date().toISOString());
     setLoading(false);
   }
-
-  function handleSort(field) {
-    if (sortField === field) {
-      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-      return;
-    }
-    setSortField(field);
-    setSortDir('desc');
-  }
-
-  const sortedMonthlyRows = useMemo(() => {
-    const rows = [...monthlyDelta];
-    rows.sort((a, b) => {
-      const av = a?.[sortField] ?? 0;
-      const bv = b?.[sortField] ?? 0;
-      if (typeof av === 'string' || typeof bv === 'string') {
-        return sortDir === 'asc'
-          ? String(av).localeCompare(String(bv))
-          : String(bv).localeCompare(String(av));
-      }
-      return sortDir === 'asc' ? av - bv : bv - av;
-    });
-    return rows;
-  }, [monthlyDelta, sortField, sortDir]);
 
   const quickLinks = [
     { label: 'All Orders', to: '/admin/fulfillment' },
@@ -262,7 +222,7 @@ export default function OrdersDepartmentDashboardPage() {
               <MenuItem value="">All Sellers</MenuItem>
               {sellers.map((s) => (
                 <MenuItem key={s._id} value={s._id}>
-                  {s.user?.username || s.user?.email || s._id}
+                  {sellerDisplayName(s) || s._id}
                 </MenuItem>
               ))}
             </Select>
@@ -367,32 +327,54 @@ export default function OrdersDepartmentDashboardPage() {
         <Grid item xs={12} lg={8}>
           <Paper sx={{ p: 2 }}>
             <Typography variant="h6" sx={{ mb: 1 }}>Today&apos;s Orders (Latest 25)</Typography>
-            <TableContainer>
-              <Table size="small">
+            <TableContainer sx={{ maxHeight: 420, overflow: 'auto' }}>
+              <Table
+                size="small"
+                stickyHeader
+                sx={{
+                  tableLayout: 'fixed',
+                  width: '100%',
+                  '& .MuiTableCell-root': {
+                    py: 0.35,
+                    px: 0.75,
+                    fontSize: '0.75rem',
+                    lineHeight: 1.25,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  },
+                }}
+              >
                 <TableHead>
                   <TableRow>
-                    <TableCell>Seller</TableCell>
-                    <TableCell>Order ID</TableCell>
-                    <TableCell>Date Sold</TableCell>
-                    <TableCell>Marketplace</TableCell>
-                    <TableCell>Ship By</TableCell>
-                    <TableCell>Tracking</TableCell>
+                    <TableCell sx={{ bgcolor: 'background.paper', width: '18%' }}>Seller</TableCell>
+                    <TableCell sx={{ bgcolor: 'background.paper', width: '22%' }}>Order ID</TableCell>
+                    <TableCell sx={{ bgcolor: 'background.paper', width: '20%' }}>Date Sold</TableCell>
+                    <TableCell sx={{ bgcolor: 'background.paper', width: '16%' }}>Marketplace</TableCell>
+                    <TableCell sx={{ bgcolor: 'background.paper', width: '12%' }}>Ship By</TableCell>
+                    <TableCell sx={{ bgcolor: 'background.paper', width: '12%' }}>Tracking</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {(ordersTable.length > 0 ? ordersTable : overview?.todayOrdersTable || []).map((o) => (
-                    <TableRow key={o._id || o.id || o.orderId}>
-                      <TableCell>{o.seller?.user?.username || o.sellerName || '-'}</TableCell>
-                      <TableCell>{o.orderId || '-'}</TableCell>
+                    <TableRow key={o._id || o.id || o.orderId} hover>
+                      <TableCell title={o.seller?.user?.username || o.sellerName || '-'}>
+                        {o.seller?.user?.username || o.sellerName || '-'}
+                      </TableCell>
+                      <TableCell sx={{ fontFamily: 'monospace' }} title={o.orderId || '-'}>
+                        {o.orderId || '-'}
+                      </TableCell>
                       <TableCell>{fmtDateTimePt(o.dateSold)}</TableCell>
-                      <TableCell>{o.purchaseMarketplaceId || '-'}</TableCell>
+                      <TableCell title={o.purchaseMarketplaceId || '-'}>{o.purchaseMarketplaceId || '-'}</TableCell>
                       <TableCell>{fmtDatePt(o.shipByDate)}</TableCell>
-                      <TableCell>{o.trackingNumber || '-'}</TableCell>
+                      <TableCell title={o.trackingNumber || '-'}>{o.trackingNumber || '-'}</TableCell>
                     </TableRow>
                   ))}
                   {(ordersTable.length === 0 && (!overview?.todayOrdersTable || overview.todayOrdersTable.length === 0)) && (
                     <TableRow>
-                      <TableCell colSpan={6} align="center">No orders found for selected date.</TableCell>
+                      <TableCell colSpan={6} align="center" sx={{ whiteSpace: 'normal !important' }}>
+                        No orders found for selected date.
+                      </TableCell>
                     </TableRow>
                   )}
                 </TableBody>
@@ -431,69 +413,6 @@ export default function OrdersDepartmentDashboardPage() {
           </Paper>
         </Grid>
       </Grid>
-
-      <Paper sx={{ p: 2, mb: 2 }}>
-        <Typography variant="h6" sx={{ mb: 1 }}>Seller-wise Monthly Difference</Typography>
-        <TableContainer>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell>
-                  <TableSortLabel
-                    active={sortField === 'sellerName'}
-                    direction={sortField === 'sellerName' ? sortDir : 'asc'}
-                    onClick={() => handleSort('sellerName')}
-                  >
-                    Seller
-                  </TableSortLabel>
-                </TableCell>
-                <TableCell align="right">
-                  <TableSortLabel
-                    active={sortField === 'currentMonthOrders'}
-                    direction={sortField === 'currentMonthOrders' ? sortDir : 'desc'}
-                    onClick={() => handleSort('currentMonthOrders')}
-                  >
-                    Current Month
-                  </TableSortLabel>
-                </TableCell>
-                <TableCell align="right">Previous Month</TableCell>
-                <TableCell align="right">
-                  <TableSortLabel
-                    active={sortField === 'delta'}
-                    direction={sortField === 'delta' ? sortDir : 'desc'}
-                    onClick={() => handleSort('delta')}
-                  >
-                    Delta
-                  </TableSortLabel>
-                </TableCell>
-                <TableCell align="right">Delta %</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {sortedMonthlyRows.map((row) => (
-                <TableRow key={row.sellerId}>
-                  <TableCell>{row.sellerName}</TableCell>
-                  <TableCell align="right">{row.currentMonthOrders}</TableCell>
-                  <TableCell align="right">{row.previousMonthOrders}</TableCell>
-                  <TableCell align="right">
-                    <Chip
-                      size="small"
-                      color={row.delta >= 0 ? 'success' : 'error'}
-                      label={`${row.delta >= 0 ? '+' : ''}${row.delta}`}
-                    />
-                  </TableCell>
-                  <TableCell align="right">{`${row.deltaPct >= 0 ? '+' : ''}${row.deltaPct}%`}</TableCell>
-                </TableRow>
-              ))}
-              {sortedMonthlyRows.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={5} align="center">No monthly delta data available.</TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </Paper>
 
       <Grid container spacing={2}>
         <Grid item xs={12} md={6}>

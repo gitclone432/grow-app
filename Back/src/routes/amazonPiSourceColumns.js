@@ -35,11 +35,11 @@ router.get(
   requirePageAccess([
     'AmazonPiSourceColumns',
     'ManageTemplates',
-    'SellerTemplates',
-    'SelectSeller',
+    'SellerTemplatesLab',
+    'SelectSellerLab',
     'ListingDirectory',
     'TemplateDirectory',
-    'TemplateListings',
+    'TemplateListingsLab',
     'TemplateListingAnalytics'
   ]),
   async (_req, res) => {

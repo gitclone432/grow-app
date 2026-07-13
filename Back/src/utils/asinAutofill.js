@@ -104,7 +104,7 @@ export async function fetchAmazonData(asin, region = 'US') {
     if (cached) {
       const cacheTime = Date.now() - startTime;
       console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${region}, ${cacheTime}ms)`);
-      return cached;
+      return { ...cached, scrapeSource: 'cache' };
     }
 
     // Reuse Amazon scrape saved on any Listings Database row for this ASIN
@@ -113,7 +113,7 @@ export async function fetchAmazonData(asin, region = 'US') {
       setCachedAsinData(asin, fromListingsDb, region);
       const dbTime = Date.now() - startTime;
       console.log(`[fetchAmazonData] 📚 Listings Database reused for ${asin} (${region}, ${dbTime}ms)`);
-      return fromListingsDb;
+      return { ...fromListingsDb, scrapeSource: 'listings_db' };
     }
     
     // Live ScraperAPI / ScrapingDog scrape
@@ -202,14 +202,16 @@ export async function fetchAmazonData(asin, region = 'US') {
         productInformation && typeof productInformation === 'object' && !Array.isArray(productInformation)
           ? productInformation
           : {},
-      rawData: scrapedData // Store scraped data for debugging
+      rawData: scrapedData, // Store scraped data for debugging
+      scrapeSource: 'live_scrape',
     };
     
     // Cache the result — skip if description is empty so the next request
     // triggers a fresh scrape rather than serving a stale empty-description entry
     if (result.description) {
-      setCachedAsinData(asin, result, region);
-      await rememberAmazonSourceSnapshot(asin, region, result);
+      const { scrapeSource: _scrapeSource, ...toCache } = result;
+      setCachedAsinData(asin, toCache, region);
+      await rememberAmazonSourceSnapshot(asin, region, toCache);
     } else {
       console.log(`[fetchAmazonData] ⚠️ Skipping cache for ${asin} (no description) — will retry on next request`);
     }
@@ -738,14 +740,13 @@ export async function applyFieldConfigs(
   }
   
   promoteMisroutedCustomFields(coreFields, customFields);
-  if (!reuseMode) {
-    fillMissingCustomColumnsFromAmazon(
-      plainCustomColumns,
-      amazonDataForMapping,
-      customFields,
-      plainFieldConfigs
-    );
-  }
+  // Fill empty custom columns from Amazon even in reuse mode (prior listing may be sparse)
+  fillMissingCustomColumnsFromAmazon(
+    plainCustomColumns,
+    amazonDataForMapping,
+    customFields,
+    plainFieldConfigs
+  );
 
   // DEBUG: Final results summary
   console.log(`\n✅ [ASIN: ${amazonData.asin}] === FIELD CONFIG DEBUG END ===`);

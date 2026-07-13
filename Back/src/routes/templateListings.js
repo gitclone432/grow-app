@@ -12,7 +12,11 @@ import {
 } from '../utils/customColumnAmazonMapping.js';
 import { mergeTemplateCoreFields, resolveTemplateCoreFieldDefaults } from '../utils/templateCoreFieldMerge.js';
 import { mergeDefaultCoreFieldDefaults } from '../constants/defaultDescriptionTemplate.js';
-import { generateSKUFromASIN, generateSKUWithCount } from '../utils/skuGenerator.js';
+import {
+  applyDescriptionTemplatePlaceholders,
+  hasUnsubstitutedPlaceholders,
+} from '../utils/descriptionTemplatePlaceholders.js';
+import { generateSKUFromASIN, generateSKUWithCount, allocateUniqueSKU } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStatus } from '../utils/apiUsageTracker.js';
 import { getAsinCacheStats, clearAsinCache, invalidateAsinCache, getCachedAsinData } from '../utils/asinCache.js';
@@ -40,6 +44,10 @@ import DirectListJob, {
 import { chunkDirectListAsins } from '../lib/directListJobRunner.js';
 import { enrichListingItemSpecifics, applyCustomColumnDefaults } from '../utils/ebayItemSpecificsEnrichment.js';
 import { joinItemPhotoUrls, mergeItemPhotoUrls, normalizeItemPhotoUrl } from '../utils/itemPhotoUrls.js';
+import {
+  DRAFT_LISTING_ACTION_HEADER,
+  buildDraftListingsCsv,
+} from '../utils/ebayDraftListingCsv.js';
 
 const router = express.Router();
 
@@ -136,11 +144,23 @@ async function runTemplateAutofill(template, amazonData, fieldConfigs, pricingCo
     { reuseMode: skipReuseDefaults }
   );
   const customFieldsMerged = mergeReviewIntoCustomFields(customFields, coreFields, customColumns);
-  if (!skipReuseDefaults) {
-    applyCustomColumnDefaults(customFieldsMerged, customColumns);
+  // Always fill empty custom columns / defaults — reuse may have sparse prior fields
+  applyCustomColumnDefaults(customFieldsMerged, customColumns);
+  if (amazonData?.images?.length) {
+    const existingPhotos = String(mergedCoreFields.itemPhotoUrl || '').trim();
+    if (!skipReuseDefaults || !existingPhotos) {
+      mergedCoreFields.itemPhotoUrl = mergeItemPhotoUrls(mergedCoreFields.itemPhotoUrl, amazonData.images);
+    }
   }
-  if (!skipReuseDefaults && amazonData?.images?.length) {
-    mergedCoreFields.itemPhotoUrl = mergeItemPhotoUrls(mergedCoreFields.itemPhotoUrl, amazonData.images);
+  // Substitute {{TITLE_CLEAN}} / {{MAIN_IMAGE}} etc. before streaming to bulk preview
+  if (hasUnsubstitutedPlaceholders(mergedCoreFields.description)) {
+    const safeAiDescription = getConfiguredAiDescription(fieldConfigs, coreFields, customFields);
+    mergedCoreFields.description = applyDescriptionTemplatePlaceholders(
+      mergedCoreFields.description,
+      { ...mergedCoreFields, description: safeAiDescription || '' },
+      amazonData,
+      safeAiDescription
+    );
   }
   return {
     coreFields,
@@ -188,7 +208,10 @@ async function resolveAmazonDataForPreview(asin, region, directoryDoc, fieldConf
       console.warn(`[preview] Live scrape failed for ${asin}, using directory data:`, error.message);
     }
   }
-  return buildAmazonDataFromDirectoryDoc(asin, region, directoryDoc);
+  return {
+    ...buildAmazonDataFromDirectoryDoc(asin, region, directoryDoc),
+    scrapeSource: 'directory',
+  };
 }
 
 async function buildDuplicateUpdateablePreviewItem({
@@ -202,7 +225,26 @@ async function buildDuplicateUpdateablePreviewItem({
   const amazonData = await fetchAmazonData(asin, region);
   const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
   const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
-  const futureSKU = generateSKUWithCount(asin, asinCountDoc?.listingCount || 0);
+  const takenSkus = await loadTakenSkus({
+    templateId: template._id || template.id,
+    sellerId: existingListing.sellerId,
+    asins: [asin],
+  });
+  // Allow keeping/reallocating around the current listing's own label
+  if (existingListing.customLabel) takenSkus.delete(existingListing.customLabel);
+  const futureSKU = allocateUniqueSKU(asin, takenSkus, asinCountDoc?.listingCount || 0);
+  const warnings = [
+    'This ASIN already exists in this template — fields refreshed from Amazon.',
+    existingListing.duplicateCount > 0
+      ? `Previously updated ${existingListing.duplicateCount} time(s).`
+      : 'First time editing this ASIN.',
+  ];
+  const { baseSku, skuReallocated, warnings: withSkuWarnings } = applySkuAllocationMeta(
+    asin,
+    futureSKU,
+    asinCountDoc?.listingCount || 0,
+    warnings
+  );
   const safeAiDescription = getConfiguredAiDescription(
     fieldConfigs,
     autofill.coreFields,
@@ -213,6 +255,9 @@ async function buildDuplicateUpdateablePreviewItem({
     id: `preview-${asin}`,
     asin,
     sku: futureSKU,
+    baseSku,
+    skuReallocated,
+    scrapeSource: amazonData?.scrapeSource || null,
     status: 'duplicate_updateable',
     aiDescription: safeAiDescription,
     sourceData: buildSourceDataFromAmazon(amazonData),
@@ -224,12 +269,7 @@ async function buildDuplicateUpdateablePreviewItem({
       _existingListingId: existingListing._id,
     }, amazonData),
     pricingCalculation: autofill.pricingCalculation,
-    warnings: [
-      'This ASIN already exists in this template — fields refreshed from Amazon.',
-      existingListing.duplicateCount > 0
-        ? `Previously updated ${existingListing.duplicateCount} time(s).`
-        : 'First time editing this ASIN.',
-    ],
+    warnings: withSkuWarnings,
     errors: [],
   };
 }
@@ -302,6 +342,40 @@ function shouldWarnMissingDescription(mergedCoreFields = {}, amazonData = {}) {
   const mergedDesc = String(mergedCoreFields?.description || '').trim();
   const sourceDesc = String(amazonData?.description || '').trim();
   return !mergedDesc && !sourceDesc;
+}
+
+/**
+ * Load customLabels already used for this template/seller that match the
+ * GRW25… / GRW25…-N pattern for the given ASINs (or all active/draft labels if asins omitted).
+ */
+async function loadTakenSkus({ templateId, sellerId, asins }) {
+  const filter = {
+    templateId,
+    sellerId,
+    status: { $in: ['active', 'draft'] },
+  };
+
+  if (Array.isArray(asins) && asins.length > 0) {
+    const bases = [...new Set(asins.map((a) => generateSKUFromASIN(a)).filter(Boolean))];
+    if (bases.length > 0) {
+      const escaped = bases.map((b) => b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      filter.customLabel = { $regex: new RegExp(`^(?:${escaped.join('|')})(?:-\\d+)?$`) };
+    }
+  }
+
+  const rows = await TemplateListing.find(filter).select('customLabel').lean();
+  return new Set(rows.map((r) => r.customLabel).filter(Boolean));
+}
+
+/** Attach counted-SKU metadata when base label was already taken. */
+function applySkuAllocationMeta(asin, allocatedSku, startCount, warnings = []) {
+  const preferred = generateSKUWithCount(asin, startCount);
+  const baseSku = generateSKUFromASIN(asin);
+  const skuReallocated = Boolean(allocatedSku && preferred && allocatedSku !== preferred);
+  if (skuReallocated) {
+    warnings.push(`SKU ${baseSku} was taken — using ${allocatedSku}`);
+  }
+  return { baseSku, skuReallocated, warnings };
 }
 
 function getImageCount(images) {
@@ -833,25 +907,8 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
       }
     });
     
-    // Pre-generate SKUs and check conflicts
-    const generatedSKUs = asins.map(asin => ({
-      asin,
-      sku: generateSKUFromASIN(asin)
-    }));
-    
-    const existingBySKU = await TemplateListing.find({
-      templateId,
-      sellerId,
-      customLabel: { $in: generatedSKUs.map(item => item.sku) },
-      status: { $in: ['active', 'draft'] }
-    }).select('customLabel _asinReference _id').lean();
-    
-    const existingSKUMap = new Map(
-      existingBySKU.map(listing => [listing.customLabel, {
-        id: listing._id,
-        asin: listing._asinReference
-      }])
-    );
+    // Pre-load taken SKUs (base + -N suffixes) so duplicates get GRW25…-1, -2, …
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins });
     
     // Process ASINs in parallel and stream results as they complete
     let completed = 0;
@@ -873,8 +930,8 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
         }
         
         // Check if ASIN exists in current template (duplicate_updateable case)
-        // This must be checked BEFORE SKU conflict check because duplicate ASINs
-        // will have the same SKU and should be updateable, not blocked
+        // This must be checked BEFORE SKU allocation because duplicate ASINs
+        // should be updateable, not create a new counted SKU row
         if (asinInCurrentTemplate.has(asin)) {
           const existingListing = asinInCurrentTemplate.get(asin);
           const item = await buildDuplicateUpdateablePreviewItem({
@@ -885,23 +942,6 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             fieldConfigs,
             pricingConfig,
           });
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
-          return;
-        }
-        
-        // Check for SKU conflicts (only for new ASINs, not duplicates)
-        const sku = generateSKUFromASIN(asin);
-        const existingSKU = existingSKUMap.get(sku);
-        
-        if (existingSKU) {
-          const item = {
-            id: `preview-${asin}`,
-            asin,
-            sku,
-            status: 'blocked',
-            blockedReason: 'sku_conflict',
-            errors: [`SKU ${sku} already exists`]
-          };
           res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
           return;
         }
@@ -926,9 +966,15 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           warnings.push('Missing description');
         }
 
-        // Compute count-based SKU for new listing preview
+        // Counted SKU: GRW25…, then GRW25…-1, GRW25…-2 when base is taken
         const countDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
-        const finalSKU = generateSKUWithCount(asin, countDoc?.listingCount || 0);
+        const finalSKU = allocateUniqueSKU(asin, takenSkus, countDoc?.listingCount || 0);
+        const { baseSku, skuReallocated, warnings: withSkuWarnings } = applySkuAllocationMeta(
+          asin,
+          finalSKU,
+          countDoc?.listingCount || 0,
+          warnings
+        );
 
         const safeAiDescription = getConfiguredAiDescription(fieldConfigs, coreFields, customFields);
 
@@ -936,6 +982,9 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           id: `preview-${asin}`,
           asin,
           sku: finalSKU,
+          baseSku,
+          skuReallocated,
+          scrapeSource: amazonData?.scrapeSource || null,
           aiDescription: safeAiDescription,
           sourceData: buildSourceDataFromAmazon(amazonData),
           generatedListing: attachAmazonScrapedPrice({
@@ -945,9 +994,9 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
             _asinReference: asin
           }, amazonData),
           pricingCalculation,
-          warnings,
+          warnings: withSkuWarnings,
           errors: validationErrors,
-          status: validationErrors.length > 0 ? 'error' : (warnings.length > 0 ? 'warning' : 'success')
+          status: validationErrors.length > 0 ? 'error' : (withSkuWarnings.length > 0 ? 'warning' : 'success')
         };
 
         console.log(
@@ -1057,17 +1106,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
       }
     });
 
-    const generatedSKUs = asins.map(asin => ({ asin, sku: generateSKUFromASIN(asin) }));
-    const existingBySKU = await TemplateListing.find({
-      templateId,
-      sellerId,
-      customLabel: { $in: generatedSKUs.map(item => item.sku) },
-      status: { $in: ['active', 'draft'] }
-    }).select('customLabel _asinReference _id').lean();
-
-    const existingSKUMap = new Map(
-      existingBySKU.map(listing => [listing.customLabel, { id: listing._id, asin: listing._asinReference }])
-    );
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins });
 
     let completed = 0;
 
@@ -1099,18 +1138,6 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           return;
         }
 
-        // SKU conflict
-        const sku = generateSKUFromASIN(asin);
-        if (existingSKUMap.has(sku)) {
-          const item = {
-            id: `preview-${asin}`, asin, sku,
-            status: 'blocked', blockedReason: 'sku_conflict',
-            errors: [`SKU ${sku} already exists`]
-          };
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
-          return;
-        }
-
         // Look up ASIN in the directory; live-scrape when PI catalog fields are configured
         const doc = await AsinDirectory.findOne({ asin }).lean();
         const amazonData = await resolveAmazonDataForPreview(asin, region, doc, fieldConfigs);
@@ -1135,8 +1162,14 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           warnings.push('Missing description');
         }
 
-        // Compute count-based SKU using the already-fetched directory doc
-        const finalSKU = generateSKUWithCount(asin, doc?.listingCount || 0);
+        // Counted SKU: GRW25…, then -1, -2 when taken
+        const finalSKU = allocateUniqueSKU(asin, takenSkus, doc?.listingCount || 0);
+        const { baseSku, skuReallocated, warnings: withSkuWarnings } = applySkuAllocationMeta(
+          asin,
+          finalSKU,
+          doc?.listingCount || 0,
+          warnings
+        );
 
         const safeAiDescription = getConfiguredAiDescription(fieldConfigs, coreFields, customFields);
 
@@ -1144,34 +1177,11 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           id: `preview-${asin}`,
           asin,
           sku: finalSKU,
+          baseSku,
+          skuReallocated,
+          scrapeSource: amazonData?.scrapeSource || null,
           aiDescription: safeAiDescription,
-          sourceData: {
-            title: amazonData.title,
-            brand: amazonData.brand,
-            price: amazonData.price,
-            description: amazonData.description,
-            images: amazonData.images,
-            color: amazonData.color,
-            compatibility: amazonData.compatibility,
-            model: amazonData.model,
-            material: amazonData.material,
-            specialFeatures: amazonData.specialFeatures,
-            size: amazonData.size,
-            formFactor: amazonData.formFactor,
-            screenSize: amazonData.screenSize,
-            bandMaterial: amazonData.bandMaterial,
-            bandWidth: amazonData.bandWidth,
-            bandColor: amazonData.bandColor,
-            includedComponents: amazonData.includedComponents,
-            productCategory: amazonData.productCategory,
-            itemDimensions: amazonData.itemDimensions,
-            waterResistanceLevel: amazonData.waterResistanceLevel,
-            availabilityStatus: amazonData.availabilityStatus,
-            soldBy: amazonData.soldBy,
-            bestSellersRank: amazonData.bestSellersRank,
-            review: amazonData.review || '',
-            productInformation: amazonData.productInformation || {}
-          },
+          sourceData: buildSourceDataFromAmazon(amazonData),
           generatedListing: attachAmazonScrapedPrice({
             ...mergedCoreFields,
             customLabel: finalSKU,
@@ -1179,9 +1189,9 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
             _asinReference: asin
           }, amazonData),
           pricingCalculation,
-          warnings,
+          warnings: withSkuWarnings,
           errors: validationErrors,
-          status: validationErrors.length > 0 ? 'error' : (warnings.length > 0 ? 'warning' : 'success')
+          status: validationErrors.length > 0 ? 'error' : (withSkuWarnings.length > 0 ? 'warning' : 'success')
         };
 
         res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
@@ -1264,19 +1274,53 @@ router.post('/', requireAuth, async (req, res) => {
     if (listingData.customFields && typeof listingData.customFields === 'object') {
       listingData.customFields = new Map(Object.entries(listingData.customFields));
     }
-    
-    // Check if SKU exists as active (block duplicate)
-    const activeExists = await TemplateListing.findOne({
-      templateId: listingData.templateId,
-      sellerId: listingData.sellerId,
-      customLabel: listingData.customLabel,
-      status: 'active'
-    });
-    
-    if (activeExists) {
-      return res.status(409).json({ 
-        error: 'An active listing with this SKU already exists' 
+
+    const requestedStatus = listingData.status === 'draft' ? 'draft' : 'active';
+    const defaultAction = requestedStatus === 'draft' ? 'Draft' : 'Add';
+
+    // Ensure unique Custom Label: base, then -1, -2, …
+    if (listingData._asinReference) {
+      const takenSkus = await loadTakenSkus({
+        templateId: listingData.templateId,
+        sellerId: listingData.sellerId,
+        asins: [listingData._asinReference],
       });
+      const countDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
+      listingData.customLabel = allocateUniqueSKU(
+        listingData._asinReference,
+        takenSkus,
+        countDoc?.listingCount || 0
+      );
+    } else if (listingData.customLabel) {
+      const takenSkus = await loadTakenSkus({
+        templateId: listingData.templateId,
+        sellerId: listingData.sellerId,
+      });
+      if (takenSkus.has(listingData.customLabel)) {
+        let n = 1;
+        const base = listingData.customLabel;
+        while (takenSkus.has(`${base}-${n}`)) n += 1;
+        listingData.customLabel = `${base}-${n}`;
+      }
+    }
+    
+    // Draft listings: create as draft (File Exchange Draft template); do not force active
+    if (requestedStatus === 'draft') {
+      const listing = new TemplateListing({
+        ...listingData,
+        status: 'draft',
+        action: 'Draft',
+        createdBy: req.user.userId
+      });
+      await listing.save();
+      await listing.populate([
+        { path: 'createdBy', select: 'name email' },
+        {
+          path: 'sellerId',
+          populate: { path: 'user', select: 'username email' }
+        }
+      ]);
+      return res.status(201).json({ listing, wasReactivated: false });
     }
     
     // Check if SKU exists as inactive (reactivate instead of creating new)
@@ -1296,6 +1340,7 @@ router.post('/', requireAuth, async (req, res) => {
         ...listingData,
         customFields: listingData.customFields,
         status: 'active',
+        action: listingData.action || defaultAction,
         updatedAt: Date.now()
       });
       
@@ -1309,6 +1354,7 @@ router.post('/', requireAuth, async (req, res) => {
       listing = new TemplateListing({
         ...listingData,
         status: 'active',
+        action: listingData.action || defaultAction,
         createdBy: req.user.userId
       });
       
@@ -1526,6 +1572,13 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (listingData.customFields && typeof listingData.customFields === 'object') {
       listingData.customFields = new Map(Object.entries(listingData.customFields));
     }
+
+    const existing = await TemplateListing.findById(req.params.id).select('status');
+    const effectiveStatus = listingData.status || existing?.status;
+    // Draft File Exchange rows must keep Action=Draft
+    if (effectiveStatus === 'draft') {
+      listingData.action = 'Draft';
+    }
     
     listingData.updatedAt = Date.now();
     
@@ -1718,28 +1771,9 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
     console.log(`Found ${existingInCurrentTemplate.size} ASINs in current template (will update)`);
     console.log(`Found ${existingInOtherTemplates.size} ASINs in other templates (will block)\n`);
     
-    // Pre-generate all SKUs and check for collisions with existing SKUs
-    const generatedSKUs = cleanedAsins.map(asin => ({
-      asin,
-      sku: generateSKUFromASIN(asin)
-    }));
-    
-    // Check if any generated SKUs already exist (from both ASIN imports and SKU imports)
-    const existingBySKU = await TemplateListing.find({
-      templateId,
-      sellerId,
-      customLabel: { $in: generatedSKUs.map(item => item.sku) },
-      status: { $in: ['active', 'draft'] }
-    }).select('customLabel _asinReference _id');
-    
-    const existingSKUMap = new Map(
-      existingBySKU.map(listing => [listing.customLabel, {
-        id: listing._id,
-        asin: listing._asinReference
-      }])
-    );
-    
-    console.log(`Found ${existingSKUMap.size} SKU conflicts (will block)\n`);
+    // Pre-load taken SKUs so duplicates get counted suffixes instead of blocking
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins: cleanedAsins });
+    console.log(`Found ${takenSkus.size} existing SKUs (will allocate -N suffixes when needed)\n`);
     
     const startTime = Date.now();
     const results = [];
@@ -1808,21 +1842,9 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
           };
         }
         
-        // Check if generated SKU already exists (from ASIN imports or SKU imports)
-        const generatedSKU = generateSKUFromASIN(asin);
-        const existingSKU = existingSKUMap.get(generatedSKU);
-        if (existingSKU) {
-          return {
-            asin,
-            sku: generatedSKU,
-            status: 'blocked',
-            blockedReason: 'sku_conflict',
-            existingListingId: existingSKU.id.toString(),
-            error: existingSKU.asin 
-              ? `SKU ${generatedSKU} already exists for ASIN ${existingSKU.asin} in this template`
-              : `SKU ${generatedSKU} already exists in this template (imported via SKU import)`
-          };
-        }
+        // Allocate counted SKU when base is already taken (do not block)
+        const countDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
+        const allocatedSKU = allocateUniqueSKU(asin, takenSkus, countDoc?.listingCount || 0);
         
         try {
           // Fetch Amazon data
@@ -1835,9 +1857,13 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
           return {
             asin,
             status: 'success',
+            sku: allocatedSKU,
             reusedFromDatabase: Boolean(autofill.reusedFromDatabase),
             autoFilledData: {
-              coreFields: mergedCoreFields,
+              coreFields: {
+                ...mergedCoreFields,
+                customLabel: allocatedSKU,
+              },
               customFields: customFieldsMerged,
               amazonScrapedPrice: parseAmazonPriceToNumber(amazonData.price),
             },
@@ -1989,6 +2015,8 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
     const results = [];
     const errors = [];
     let skippedCount = 0;
+    const listingStatus = options.status === 'draft' ? 'draft' : 'active';
+    const defaultAction = listingStatus === 'draft' ? 'Draft' : 'Add';
     
     // Get existing ACTIVE SKUs to avoid duplicates
     const existingActiveSKUs = await TemplateListing.find({ 
@@ -2014,26 +2042,13 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
     console.log(`📊 Pre-check: ${existingActiveSKUs.length} active SKUs, ${inactiveListings.length} inactive listings`);
     console.log(`📋 Inactive SKUs: ${Array.from(inactiveMap.keys()).join(', ')}`);
     
-    // Pre-check for SKU conflicts with existing listings (including drafts from SKU imports)
-    const potentialSKUs = listings
-      .map(l => l.customLabel || (l._asinReference ? generateSKUFromASIN(l._asinReference) : null))
-      .filter(sku => sku);
+    // Pre-load taken SKUs (including -N suffixes) — allocate instead of blocking
+    const asinRefs = listings.map((l) => l._asinReference).filter(Boolean);
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins: asinRefs });
+    // Also mark active SKUs already in skuSet
+    for (const s of skuSet) takenSkus.add(s);
     
-    const existingBySKU = await TemplateListing.find({
-      templateId,
-      sellerId,
-      customLabel: { $in: potentialSKUs },
-      status: { $in: ['active', 'draft'] }
-    }).select('customLabel _asinReference _id').lean();
-    
-    const existingSKUMap = new Map(
-      existingBySKU.map(listing => [listing.customLabel, {
-        id: listing._id,
-        asin: listing._asinReference
-      }])
-    );
-    
-    console.log(`🔍 SKU pre-check: ${existingSKUMap.size} SKU conflicts detected`);
+    console.log(`🔍 SKU pre-check: ${takenSkus.size} existing SKUs loaded (will allocate -N when needed)`);
     
     // Process each listing
     for (const listingData of listings) {
@@ -2071,44 +2086,42 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           continue;
         }
         
-        // Generate SKU if not provided
+        // Generate SKU if not provided — use counted suffixes when base is taken
         let sku = listingData.customLabel;
         if (!sku && autoGenerateSKU) {
-          // Generate SKU using GRW25 + last 5 chars of ASIN
           if (listingData._asinReference) {
-            sku = generateSKUFromASIN(listingData._asinReference);
+            const countDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
+            sku = allocateUniqueSKU(listingData._asinReference, takenSkus, countDoc?.listingCount || 0);
           } else {
             sku = `SKU-${skuCounter++}`;
+            while (takenSkus.has(sku) || skuSet.has(sku)) {
+              sku = `SKU-${skuCounter++}`;
+            }
+            takenSkus.add(sku);
           }
-          
-          // Check if generated SKU conflicts with existing (from ASIN or SKU imports)
-          const existingSKU = existingSKUMap.get(sku);
-          if (existingSKU) {
-            errors.push({
-              asin: listingData._asinReference,
-              sku,
-              error: existingSKU.asin 
-                ? `Generated SKU ${sku} already exists for ASIN ${existingSKU.asin}`
-                : `Generated SKU ${sku} already exists (imported via SKU import)`,
-              details: 'SKU conflict detected'
-            });
-            results.push({
-              status: 'blocked',
-              asin: listingData._asinReference,
-              sku,
-              blockedReason: 'sku_conflict',
-              error: existingSKU.asin 
-                ? `SKU already exists for ASIN ${existingSKU.asin}`
-                : `SKU already exists (imported via SKU import)`
-            });
-            console.log(`🚫 Blocked SKU conflict: ${sku}`);
-            continue;
+        } else if (sku && (takenSkus.has(sku) || skuSet.has(sku))) {
+          // Provided SKU taken — allocate next free counted variant from ASIN when possible
+          if (listingData._asinReference) {
+            const countDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
+            sku = allocateUniqueSKU(listingData._asinReference, takenSkus, countDoc?.listingCount || 0);
+          } else {
+            let n = 1;
+            const base = sku;
+            while (takenSkus.has(`${base}-${n}`) || skuSet.has(`${base}-${n}`)) n += 1;
+            sku = `${base}-${n}`;
+            takenSkus.add(sku);
           }
+        } else if (sku) {
+          takenSkus.add(sku);
+        }
           
-          // Ensure uniqueness within current batch
-          while (skuSet.has(sku)) {
-            // If collision within batch, append timestamp suffix
-            sku = `${generateSKUFromASIN(listingData._asinReference)}-${skuCounter++}`;
+        // Ensure uniqueness within current batch
+        while (skuSet.has(sku)) {
+          if (listingData._asinReference) {
+            sku = allocateUniqueSKU(listingData._asinReference, takenSkus, 1);
+          } else {
+            sku = `SKU-${skuCounter++}`;
+            takenSkus.add(sku);
           }
         }
         
@@ -2128,10 +2141,10 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
         
         console.log(`🔍 Processing SKU: ${sku}, inInactiveMap: ${inactiveMap.has(sku)}, inActiveSet: ${skuSet.has(sku)}`);
         
-        // Check if SKU exists as inactive - reactivate instead of create
+        // Check if SKU exists as inactive - reactivate instead of create (Active flow only)
         const inactiveListing = inactiveMap.get(sku);
         
-        if (inactiveListing) {
+        if (inactiveListing && listingStatus === 'active') {
           // Found an inactive listing with this SKU - reactivate it
           // Convert customFields object to Map
           const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
@@ -2146,6 +2159,7 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
             templateId,
             sellerId,
             status: 'active',
+            action: listingData.action || defaultAction,
             updatedAt: Date.now()
           });
           
@@ -2160,6 +2174,17 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           });
           
           console.log(`✅ Reactivated: ${sku}`);
+          continue;
+        }
+        
+        if (inactiveListing && listingStatus === 'draft') {
+          skippedCount++;
+          results.push({
+            status: 'skipped',
+            asin: listingData._asinReference,
+            sku,
+            error: 'SKU exists as inactive; cannot create draft with same SKU'
+          });
           continue;
         }
         
@@ -2200,7 +2225,8 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           customFields: customFieldsMap,
           templateId,
           sellerId,
-          status: 'active',
+          status: listingStatus,
+          action: listingStatus === 'draft' ? 'Draft' : (listingData.action || defaultAction),
           createdBy: req.user.userId
         });
         
@@ -2238,7 +2264,7 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           });
         }
       }
-    }
+    } // end for listings in bulk-create
     
     const created = results.filter(r => r.status === 'created').length;
     const reactivated = results.filter(r => r.status === 'reactivated').length;
@@ -2370,28 +2396,9 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
     
     console.log(`🔍 ASIN Check: ${asinInCurrentTemplate.size} in current template, ${asinInOtherTemplates.size} in other templates`);
     
-    // Pre-generate all SKUs and check for SKU collisions
-    const generatedSKUs = asins.map(asin => ({
-      asin,
-      sku: generateSKUFromASIN(asin)
-    }));
-    
-    // Check if any generated SKUs already exist (from both ASIN imports and SKU imports)
-    const existingBySKU = await TemplateListing.find({
-      templateId,
-      sellerId,
-      customLabel: { $in: generatedSKUs.map(item => item.sku) },
-      status: { $in: ['active', 'draft'] }
-    }).select('customLabel _asinReference _id').lean();
-    
-    const existingSKUMap = new Map(
-      existingBySKU.map(listing => [listing.customLabel, {
-        id: listing._id,
-        asin: listing._asinReference
-      }])
-    );
-    
-    console.log(`🔍 SKU Check: ${existingSKUMap.size} SKU conflicts detected`);
+    // Pre-load taken SKUs — allocate -N instead of blocking
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins });
+    console.log(`🔍 SKU Check: ${takenSkus.size} existing SKUs (will allocate -N when needed)`);
     
     console.log(`🚀 Processing ${asins.length} ASINs in parallel...`);
     
@@ -2424,35 +2431,9 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
           };
         }
         
-        // Generate SKU early for collision check
-        const sku = generateSKUFromASIN(asin);
-        
-        // Check if generated SKU already exists (from ASIN imports or SKU imports)
-        const existingSKU = existingSKUMap.get(sku);
-        if (existingSKU) {
-          const errorItem = {
-            id: `preview-${asin}`,
-            asin,
-            sku,
-            sourceData: null,
-            generatedListing: null,
-            pricingCalculation: null,
-            warnings: [],
-            errors: [existingSKU.asin 
-              ? `SKU ${sku} already exists for ASIN ${existingSKU.asin} in this template`
-              : `SKU ${sku} already exists in this template (imported via SKU import)`
-            ],
-            status: 'blocked',
-            blockedReason: 'sku_conflict',
-            existingListingId: existingSKU.id.toString()
-          };
-          
-          return {
-            success: false,
-            item: errorItem,
-            error: `SKU conflict`
-          };
-        }
+        // Allocate counted SKU (base, then -1, -2, …)
+        const countDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
+        const sku = allocateUniqueSKU(asin, takenSkus, countDoc?.listingCount || 0);
         
         // Fetch Amazon data
         const amazonData = await fetchAmazonData(asin, region);
@@ -2464,8 +2445,6 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         console.log(`✅ Generated fields for ${asin}:`);
         console.log(`   Core fields: ${Object.keys(mergedCoreFields).join(', ')}`);
         console.log(`   Custom fields: ${Object.keys(autofill.customFields).join(', ')}`);
-        
-        // SKU already generated earlier for collision check
         
         // Check for warnings
         const warnings = [];
@@ -2504,38 +2483,21 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
           warnings.push('Missing description');
         }
 
+        const { baseSku, skuReallocated, warnings: withSkuWarnings } = applySkuAllocationMeta(
+          asin,
+          sku,
+          countDoc?.listingCount || 0,
+          warnings
+        );
+
         previewItems.push({
           id: `preview-${asin}`,
           asin,
           sku,
-          sourceData: {
-            title: amazonData.title,
-            brand: amazonData.brand,
-            price: amazonData.price,
-            description: amazonData.description,
-            images: amazonData.images,
-            color: amazonData.color,
-            compatibility: amazonData.compatibility,
-            model: amazonData.model,
-            material: amazonData.material,
-            specialFeatures: amazonData.specialFeatures,
-            size: amazonData.size,
-            formFactor: amazonData.formFactor,
-            screenSize: amazonData.screenSize,
-            bandMaterial: amazonData.bandMaterial,
-            bandWidth: amazonData.bandWidth,
-            bandColor: amazonData.bandColor,
-            includedComponents: amazonData.includedComponents,
-            productCategory: amazonData.productCategory,
-            itemDimensions: amazonData.itemDimensions,
-            waterResistanceLevel: amazonData.waterResistanceLevel,
-            availabilityStatus: amazonData.availabilityStatus,
-            soldBy: amazonData.soldBy,
-            bestSellersRank: amazonData.bestSellersRank,
-            review: amazonData.review || '',
-            productInformation: amazonData.productInformation || {},
-            rawData: amazonData.rawData
-          },
+          baseSku,
+          skuReallocated,
+          scrapeSource: amazonData?.scrapeSource || null,
+          sourceData: buildSourceDataFromAmazon(amazonData),
           generatedListing: attachAmazonScrapedPrice({
             ...mergedCoreFields,
             customLabel: sku,
@@ -2543,9 +2505,9 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
             _asinReference: asin
           }, amazonData),
           pricingCalculation,
-          warnings,
+          warnings: withSkuWarnings,
           errors: validationErrors,
-          status: validationErrors.length > 0 ? 'error' : (warnings.length > 0 ? 'warning' : 'success')
+          status: validationErrors.length > 0 ? 'error' : (withSkuWarnings.length > 0 ? 'warning' : 'success')
         });
         
         return {
@@ -2665,6 +2627,8 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
     const results = [];
     const errors = [];
     let skippedCount = 0;
+    const listingStatus = options.status === 'draft' ? 'draft' : 'active';
+    const defaultAction = listingStatus === 'draft' ? 'Draft' : 'Add';
     
     // Get existing ACTIVE SKUs
     const existingActiveSKUs = await TemplateListing.find({ 
@@ -2706,26 +2670,10 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
     
     console.log(`🚫 Found ${crossTemplateAsinMap.size} ASINs already in other templates`);
     
-    // Pre-check all SKUs for collisions (including those from SKU imports)
-    const skusToSave = listings
-      .map(l => l.customLabel)
-      .filter(sku => sku && sku.trim());
-    
-    const existingBySKU = await TemplateListing.find({
-      templateId,
-      sellerId,
-      customLabel: { $in: skusToSave },
-      status: { $in: ['active', 'draft'] }
-    }).select('customLabel _asinReference _id').lean();
-    
-    const existingSKUMap = new Map(
-      existingBySKU.map(listing => [listing.customLabel, {
-        id: listing._id,
-        asin: listing._asinReference
-      }])
-    );
-    
-    console.log(`🔍 SKU pre-check: ${existingSKUMap.size} SKU conflicts detected`);
+    // Pre-load taken SKUs — allocate -N instead of blocking on conflict
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins: asinsToSave });
+    for (const s of skuSet) takenSkus.add(s);
+    console.log(`🔍 SKU pre-check: ${takenSkus.size} existing SKUs (will allocate -N when needed)`);
     
     // Process each listing
     for (const listingData of listings) {
@@ -2773,9 +2721,11 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             ? new Map(Object.entries(listingData.customFields))
             : new Map();
 
-          // Compute new count-based SKU fresh at save time
+          // Counted SKU — free next suffix if needed
           const dupAsinDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
-          const newSKU = generateSKUWithCount(listingData._asinReference, dupAsinDoc?.listingCount || 0);
+          // Release current label so allocate can reuse it if still free for this row
+          if (existingListing.customLabel) takenSkus.delete(existingListing.customLabel);
+          const newSKU = allocateUniqueSKU(listingData._asinReference, takenSkus, dupAsinDoc?.listingCount || 0);
 
           // Update existing listing with new data
           // Build update object - only overwrite fields that are explicitly provided
@@ -2841,11 +2791,19 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           continue;
         }
         
-        // Compute count-based SKU fresh at save time
+        // Allocate counted SKU fresh at save time (base, then -1, -2, …)
         let sku = listingData.customLabel;
         if (listingData._asinReference) {
           const newAsinDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
-          sku = generateSKUWithCount(listingData._asinReference, newAsinDoc?.listingCount || 0);
+          sku = allocateUniqueSKU(listingData._asinReference, takenSkus, newAsinDoc?.listingCount || 0);
+        } else if (sku && takenSkus.has(sku)) {
+          let n = 1;
+          const base = sku;
+          while (takenSkus.has(`${base}-${n}`)) n += 1;
+          sku = `${base}-${n}`;
+          takenSkus.add(sku);
+        } else if (sku) {
+          takenSkus.add(sku);
         }
 
         if (!sku) {
@@ -2863,34 +2821,10 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
 
         console.log(`🔍 Saving SKU: ${sku}`);
         
-        // Check if SKU already exists (from ASIN imports or SKU imports)
-        const existingSKU = existingSKUMap.get(sku);
-        if (existingSKU && existingSKU.id) {
-          errors.push({
-            asin: listingData._asinReference,
-            sku,
-            error: existingSKU.asin 
-              ? `SKU ${sku} already exists for ASIN ${existingSKU.asin}`
-              : `SKU ${sku} already exists (imported via SKU import)`
-          });
-          results.push({
-            status: 'blocked',
-            asin: listingData._asinReference,
-            sku,
-            blockedReason: 'sku_conflict',
-            existingListingId: existingSKU.id.toString(),
-            error: existingSKU.asin 
-              ? `SKU already exists for ASIN ${existingSKU.asin}`
-              : `SKU already exists (imported via SKU import)`
-          });
-          console.log(`🚫 Blocked SKU conflict: ${sku}`);
-          continue;
-        }
-        
-        // Check if SKU exists as inactive - reactivate
+        // Check if SKU exists as inactive - reactivate (Active flow only)
         const inactiveListing = inactiveMap.get(sku);
         
-        if (inactiveListing) {
+        if (inactiveListing && listingStatus === 'active') {
           const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
             ? new Map(Object.entries(listingData.customFields))
             : new Map();
@@ -2902,6 +2836,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             templateId,
             sellerId,
             status: 'active',
+            action: listingData.action || defaultAction,
             updatedAt: Date.now()
           });
           
@@ -2918,10 +2853,23 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           console.log(`✅ Reactivated: ${sku}`);
           continue;
         }
+
+        if (inactiveListing && listingStatus === 'draft') {
+          skippedCount++;
+          results.push({
+            status: 'skipped',
+            asin: listingData._asinReference,
+            sku,
+            error: 'SKU exists as inactive; cannot create draft with same SKU'
+          });
+          continue;
+        }
         
-        // Check for duplicate SKU
+        // Check for duplicate SKU within this save batch — bump to next free suffix
         if (skuSet.has(sku)) {
-          if (skipDuplicates) {
+          if (listingData._asinReference) {
+            sku = allocateUniqueSKU(listingData._asinReference, takenSkus, 1);
+          } else if (skipDuplicates) {
             skippedCount++;
             results.push({
               status: 'skipped',
@@ -2932,17 +2880,11 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             console.log(`⏭️ Skipped duplicate: ${sku}`);
             continue;
           } else {
-            errors.push({
-              asin: listingData._asinReference,
-              error: 'Duplicate SKU',
-              sku
-            });
-            results.push({
-              status: 'failed',
-              asin: listingData._asinReference,
-              error: 'Duplicate SKU'
-            });
-            continue;
+            let n = 1;
+            const base = sku;
+            while (skuSet.has(`${base}-${n}`) || takenSkus.has(`${base}-${n}`)) n += 1;
+            sku = `${base}-${n}`;
+            takenSkus.add(sku);
           }
         }
         
@@ -2958,7 +2900,8 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           customFields: customFieldsMap,
           templateId,
           sellerId,
-          status: 'active',
+          status: listingStatus,
+          action: listingStatus === 'draft' ? 'Draft' : (listingData.action || defaultAction),
           createdBy: req.user.userId
         });
         
@@ -3672,11 +3615,13 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
     const { sellerId, listingIds } = req.query;
+    const exportStatus = req.query.status === 'draft' ? 'draft' : 'active';
+    const defaultRowAction = exportStatus === 'draft' ? 'Draft' : 'Add';
     
     // When specific listingIds are provided, filter only by those IDs —
     // status, downloadBatchId, and sellerId filters are skipped since the
     // user has explicitly chosen which listings to export.
-    // Otherwise, filter for ACTIVE listings that haven't been downloaded yet.
+    // Otherwise, filter for listings by status that haven't been downloaded yet.
     let filter;
     if (listingIds) {
       const ids = listingIds.split(',').map(id => id.trim()).filter(Boolean);
@@ -3685,7 +3630,7 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
       filter = {
         templateId,
         $or: [{ downloadBatchId: null }, { pendingRedownload: true }], // not downloaded yet OR flagged for re-download
-        status: 'active',       // Only active listings (exclude inactive/draft/sold/ended)
+        status: exportStatus,
       };
       if (sellerId) {
         filter.sellerId = sellerId;
@@ -3701,14 +3646,14 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     
     console.log('📊 Export CSV - Seller info:', seller?.user?.username || seller?.user?.email || 'No seller');
     console.log('📊 Export CSV - Listings count:', listings.length);
-    console.log('📥 Exporting active listings only (excluded inactive/draft)');
+    console.log(`📥 Exporting ${exportStatus} listings`);
     
     if (!template) {
       return res.status(404).json({ error: 'Template not found' });
     }
     
     if (listings.length === 0) {
-      return res.status(400).json({ error: 'No active listings to download' });
+      return res.status(404).json({ error: `No ${exportStatus} listings found to export` });
     }
     
     // Generate batch ID and get next batch number
@@ -3727,8 +3672,10 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     console.log('🔢 Batch number:', batchNumber);
     console.log('🆔 Batch ID:', batchId);
     
-    // Get custom Action field from template
-    const actionField = template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
+    // Draft File Exchange uses eBay draft-listings template (4 #INFO rows + 11 columns)
+    const actionField = exportStatus === 'draft'
+      ? DRAFT_LISTING_ACTION_HEADER
+      : (template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)');
     
     // Mark listings as downloaded (also clears pendingRedownload flag)
     const updateResult = await TemplateListing.updateMany(
@@ -3744,8 +3691,24 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     
     console.log('✅ Updated listings:', updateResult.modifiedCount);
     console.log('📝 Using Action field:', actionField);
+
+    const dateStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const sellerName = seller?.user?.username || seller?.user?.email || 'seller';
+    const templateName = template.name.replace(/\s+/g, '_');
+
+    if (exportStatus === 'draft') {
+      // Official eBay draft template only (no C: columns) — required for Feed Upload / Seller Hub
+      const csvContent = buildDraftListingsCsv(listings, { joinItemPhotoUrls }, 'US');
+      const filename = `${templateName}_${sellerName}_draft_batch_${batchNumber}_${dateStr}.csv`;
+      console.log('📁 Generated draft filename:', filename);
+      console.log('📝 Draft CSV: official eBay draft columns only (Feed Upload compatible)');
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(csvContent);
+    }
     
-    // Build core headers (38 columns)
+    // Build core headers (38 columns) — Active File Exchange
     const coreHeaders = [
       actionField,
       'Custom label (SKU)',
@@ -3823,7 +3786,7 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
       }
       
       const coreValues = [
-        listing.action || 'Add',
+        listing.action || defaultRowAction,
         listing.customLabel || '',
         listing.categoryId || '',
         categoryName,
@@ -3886,9 +3849,6 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     ).join('\n');
     
     // Send as downloadable file with template, seller, batch number and date
-    const dateStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-    const sellerName = seller?.user?.username || seller?.user?.email || 'seller';
-    const templateName = template.name.replace(/\s+/g, '_');
     const filename = `${templateName}_${sellerName}_batch_${batchNumber}_${dateStr}.csv`;
     
     console.log('📁 Generated filename:', filename);
@@ -3910,7 +3870,7 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
               $set: {
                 templateId,
                 sellerId,
-                action: listing.action || 'Add',
+                action: listing.action || defaultRowAction,
                 customLabel: listing.customLabel,
                 categoryId: listing.categoryId,
                 categoryName: listing.categoryName,

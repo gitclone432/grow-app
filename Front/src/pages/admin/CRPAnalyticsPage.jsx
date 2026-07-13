@@ -47,6 +47,7 @@ import {
 } from 'recharts';
 import api from '../../lib/api';
 import CRPAnalyticsSkeleton from '../../components/skeletons/CRPAnalyticsSkeleton';
+import { sortSellersByName, sellerDisplayName } from '../../lib/sellersSort';
 
 const BAR_COLOR = '#1976d2';
 const VALUE_BANDS = [
@@ -85,27 +86,24 @@ function formatAmount(value) {
 
 function SectionHeader({ title, subtitle }) {
   return (
-    <Box sx={{ mb: 1.5 }}>
+    <Stack direction="row" alignItems="baseline" spacing={1} sx={{ mb: 1 }}>
       <Typography
         variant="caption"
         sx={{
-          display: 'block',
           fontWeight: 700,
-          letterSpacing: '0.08em',
+          letterSpacing: '0.06em',
           color: 'text.secondary',
           textTransform: 'uppercase',
-          mb: 0.75,
         }}
       >
         {title}
       </Typography>
       {subtitle ? (
-        <Typography variant="caption" color="text.disabled" sx={{ display: 'block', mb: 0.75 }}>
-          {subtitle}
+        <Typography variant="caption" color="text.disabled">
+          · {subtitle}
         </Typography>
       ) : null}
-      <Box sx={{ borderBottom: '1px solid', borderColor: 'divider' }} />
-    </Box>
+    </Stack>
   );
 }
 
@@ -115,23 +113,23 @@ function OverviewCard({ icon, label, value, sub, color, bg }) {
       elevation={0}
       sx={{
         flex: '1 1 0',
-        minWidth: 150,
-        p: 1.75,
+        minWidth: 130,
+        px: 1.5,
+        py: 1.25,
         borderRadius: 2,
         bgcolor: bg,
         border: '1px solid',
-        borderColor: 'rgba(0,0,0,0.06)',
+        borderColor: 'divider',
         display: 'flex',
-        alignItems: 'flex-start',
-        gap: 1.5,
+        alignItems: 'center',
+        gap: 1.25,
       }}
     >
       <Box
         sx={{
-          mt: 0.25,
-          width: 36,
-          height: 36,
-          borderRadius: '10px',
+          width: 32,
+          height: 32,
+          borderRadius: 1.5,
           bgcolor: color,
           display: 'flex',
           alignItems: 'center',
@@ -142,15 +140,15 @@ function OverviewCard({ icon, label, value, sub, color, bg }) {
       >
         {icon}
       </Box>
-      <Box>
-        <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.3, display: 'block' }}>
+      <Box sx={{ minWidth: 0 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.2, display: 'block' }}>
           {label}
         </Typography>
-        <Typography variant="h6" fontWeight={700} sx={{ lineHeight: 1.3, fontSize: '1.35rem' }}>
+        <Typography variant="subtitle1" fontWeight={700} sx={{ lineHeight: 1.2, fontSize: '1.1rem' }} noWrap>
           {value}
         </Typography>
         {sub ? (
-          <Typography variant="caption" color="text.disabled" sx={{ lineHeight: 1.2, display: 'block' }}>
+          <Typography variant="caption" color="text.disabled" sx={{ lineHeight: 1.2, display: 'block' }} noWrap>
             {sub}
           </Typography>
         ) : null}
@@ -165,22 +163,23 @@ function ValueBandCard({ band, count }) {
       elevation={0}
       sx={{
         flex: '1 1 0',
-        minWidth: 150,
-        p: 1.75,
+        minWidth: 130,
+        px: 1.5,
+        py: 1.25,
         borderRadius: 2,
         bgcolor: band.bg,
         border: '1px solid',
-        borderColor: 'rgba(0,0,0,0.06)',
+        borderColor: 'divider',
         display: 'flex',
-        alignItems: 'flex-start',
-        gap: 1.5,
+        alignItems: 'center',
+        gap: 1.25,
       }}
     >
       <Box
         sx={{
-          width: 40,
-          height: 40,
-          borderRadius: '10px',
+          width: 36,
+          height: 36,
+          borderRadius: 1.5,
           bgcolor: band.color,
           color: '#fff',
           display: 'flex',
@@ -191,17 +190,17 @@ function ValueBandCard({ band, count }) {
           lineHeight: 1,
         }}
       >
-        <Typography sx={{ fontSize: 10, fontWeight: 700 }}>{band.top}</Typography>
-        <Typography sx={{ fontSize: 10, fontWeight: 700 }}>{band.bottom}</Typography>
+        <Typography sx={{ fontSize: 9, fontWeight: 700 }}>{band.top}</Typography>
+        <Typography sx={{ fontSize: 9, fontWeight: 700 }}>{band.bottom}</Typography>
       </Box>
-      <Box>
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1.3 }}>
+      <Box sx={{ minWidth: 0 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1.2 }}>
           {band.label}
         </Typography>
-        <Typography variant="h6" fontWeight={700} sx={{ lineHeight: 1.3, fontSize: '1.35rem' }}>
+        <Typography variant="subtitle1" fontWeight={700} sx={{ lineHeight: 1.2, fontSize: '1.1rem' }}>
           {count.toLocaleString()}
         </Typography>
-        <Typography variant="caption" color="text.disabled" sx={{ display: 'block', lineHeight: 1.2 }}>
+        <Typography variant="caption" color="text.disabled" sx={{ display: 'block', lineHeight: 1.2 }} noWrap>
           {band.sub}
         </Typography>
       </Box>
@@ -232,7 +231,7 @@ export default function CRPAnalyticsPage() {
   const [selectedSeller, setSelectedSeller] = useState('');
   const [selectedMarketplace, setSelectedMarketplace] = useState('');
   const [excludeClient, setExcludeClient] = useState(true);
-  const [excludeLowValue, setExcludeLowValue] = useState(false);
+  const [excludeLowValue, setExcludeLowValue] = useState(true);
   const [dateFilter, setDateFilter] = useState(() => ({
     mode: 'single',
     single: getDefaultSingleDay(),
@@ -271,7 +270,7 @@ export default function CRPAnalyticsPage() {
   const fetchSellers = async () => {
     try {
       const res = await api.get('/sellers/all');
-      setSellers(res.data || []);
+      setSellers(sortSellersByName(res.data || []));
     } catch (e) {
       console.error('Error fetching sellers:', e);
     }
@@ -367,7 +366,7 @@ export default function CRPAnalyticsPage() {
   const unassignedPct = totalOrders > 0 ? ((unassignedCount / totalOrders) * 100).toFixed(1) : '0.0';
   const topAssigned = data.filter((d) => d.name !== 'Unassigned')[0];
   const groupByLabel = { category: 'Category', range: 'Range', product: 'Product' }[groupBy];
-  const barHeight = Math.max(220, data.length * 40);
+  const barHeight = Math.min(420, Math.max(180, data.length * 36));
 
   if (loading && data.length === 0) return <CRPAnalyticsSkeleton />;
 
@@ -375,129 +374,148 @@ export default function CRPAnalyticsPage() {
     <Fade in timeout={600}>
       <Box sx={{ p: 3 }}>
         <Stack
-          direction={{ xs: 'column', xl: 'row' }}
-          alignItems={{ xl: 'flex-start' }}
+          direction={{ xs: 'column', md: 'row' }}
           justifyContent="space-between"
-          spacing={2}
-          sx={{ mb: 3 }}
+          alignItems={{ xs: 'stretch', md: 'center' }}
+          gap={1.5}
+          sx={{ mb: 2 }}
         >
-          <Box sx={{ flexShrink: 0 }}>
+          <Box>
             <Typography variant="h5" fontWeight={700}>CRP Analytics</Typography>
             <Typography variant="body2" color="text.secondary">
-              Orders grouped by {groupByLabel.toLowerCase()} assignment · PST timezone
+              {groupByLabel} assignment · Pacific Time (PT)
             </Typography>
           </Box>
+        </Stack>
 
-          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-            <FormControl size="small" sx={{ minWidth: 130 }}>
-              <InputLabel>Date Mode</InputLabel>
-              <Select
-                value={dateFilter.mode}
-                label="Date Mode"
-                onChange={(e) => setDateFilter((prev) => ({
-                  ...prev,
-                  mode: e.target.value,
-                  single: e.target.value === 'single' && !prev.single ? getDefaultSingleDay() : prev.single,
-                }))}
-              >
-                <MenuItem value="none">None</MenuItem>
-                <MenuItem value="single">Single Day</MenuItem>
-                <MenuItem value="range">Date Range</MenuItem>
-              </Select>
-            </FormControl>
+        <Stack
+          direction="row"
+          spacing={1.25}
+          alignItems="center"
+          flexWrap="wrap"
+          useFlexGap
+          sx={{
+            mb: 2.5,
+            p: 1.5,
+            borderRadius: 2,
+            bgcolor: 'action.hover',
+            border: '1px solid',
+            borderColor: 'divider',
+          }}
+        >
+          <FormControl size="small" sx={{ minWidth: 120 }}>
+            <InputLabel>Date Mode</InputLabel>
+            <Select
+              value={dateFilter.mode}
+              label="Date Mode"
+              onChange={(e) => setDateFilter((prev) => ({
+                ...prev,
+                mode: e.target.value,
+                single: e.target.value === 'single' && !prev.single ? getDefaultSingleDay() : prev.single,
+              }))}
+            >
+              <MenuItem value="none">None</MenuItem>
+              <MenuItem value="single">Single Day</MenuItem>
+              <MenuItem value="range">Date Range</MenuItem>
+            </Select>
+          </FormControl>
 
-            {dateFilter.mode === 'single' && (
+          {dateFilter.mode === 'single' && (
+            <TextField
+              label="Date"
+              type="date"
+              size="small"
+              value={dateFilter.single}
+              onChange={(e) => setDateFilter((p) => ({ ...p, single: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
+              sx={{ width: 150 }}
+            />
+          )}
+          {dateFilter.mode === 'range' && (
+            <>
               <TextField
-                label="Date"
+                label="From"
                 type="date"
                 size="small"
-                value={dateFilter.single}
-                onChange={(e) => setDateFilter((p) => ({ ...p, single: e.target.value }))}
+                value={dateFilter.from}
+                onChange={(e) => setDateFilter((p) => ({ ...p, from: e.target.value }))}
                 InputLabelProps={{ shrink: true }}
-                sx={{ width: 158 }}
+                sx={{ width: 140 }}
               />
-            )}
-            {dateFilter.mode === 'range' && (
-              <>
-                <TextField
-                  label="From"
-                  type="date"
-                  size="small"
-                  value={dateFilter.from}
-                  onChange={(e) => setDateFilter((p) => ({ ...p, from: e.target.value }))}
-                  InputLabelProps={{ shrink: true }}
-                  sx={{ width: 152 }}
-                />
-                <TextField
-                  label="To"
-                  type="date"
-                  size="small"
-                  value={dateFilter.to}
-                  onChange={(e) => setDateFilter((p) => ({ ...p, to: e.target.value }))}
-                  InputLabelProps={{ shrink: true }}
-                  sx={{ width: 152 }}
-                />
-              </>
-            )}
+              <TextField
+                label="To"
+                type="date"
+                size="small"
+                value={dateFilter.to}
+                onChange={(e) => setDateFilter((p) => ({ ...p, to: e.target.value }))}
+                InputLabelProps={{ shrink: true }}
+                sx={{ width: 140 }}
+              />
+            </>
+          )}
 
-            <FormControl size="small" sx={{ minWidth: 170 }}>
-              <InputLabel>Seller</InputLabel>
-              <Select value={selectedSeller} onChange={(e) => setSelectedSeller(e.target.value)} label="Seller">
-                <MenuItem value="">All Sellers</MenuItem>
-                {sellers.map((s) => (
-                  <MenuItem key={s._id} value={s._id}>{s.user?.username || 'Unknown'}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+          <FormControl size="small" sx={{ minWidth: 150 }}>
+            <InputLabel>Seller</InputLabel>
+            <Select value={selectedSeller} onChange={(e) => setSelectedSeller(e.target.value)} label="Seller">
+              <MenuItem value="">All Sellers</MenuItem>
+              {sellers.map((s) => (
+                <MenuItem key={s._id} value={s._id}>{sellerDisplayName(s) || 'Unknown'}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
 
-            <FormControl size="small" sx={{ minWidth: 170 }}>
-              <InputLabel>Marketplace</InputLabel>
-              <Select value={selectedMarketplace} onChange={(e) => setSelectedMarketplace(e.target.value)} label="Marketplace">
-                <MenuItem value=""><em>All</em></MenuItem>
-                <MenuItem value="EBAY_US">EBAY_US</MenuItem>
-                <MenuItem value="EBAY_AU">EBAY_AU</MenuItem>
-                <MenuItem value="EBAY_ENCA">EBAY_CA</MenuItem>
-                <MenuItem value="EBAY_GB">EBAY_GB</MenuItem>
-              </Select>
-            </FormControl>
+          <FormControl size="small" sx={{ minWidth: 110 }}>
+            <InputLabel>Marketplace</InputLabel>
+            <Select value={selectedMarketplace} onChange={(e) => setSelectedMarketplace(e.target.value)} label="Marketplace">
+              <MenuItem value="">All</MenuItem>
+              <MenuItem value="EBAY_US">USA</MenuItem>
+              <MenuItem value="EBAY_CA">CA</MenuItem>
+              <MenuItem value="EBAY_AU">AUS</MenuItem>
+              <MenuItem value="EBAY_GB">UK</MenuItem>
+            </Select>
+          </FormControl>
 
-            <ToggleButtonGroup value={groupBy} exclusive size="small" onChange={(_, v) => { if (v) setGroupBy(v); }}>
-              <ToggleButton value="category">Category</ToggleButton>
-              <ToggleButton value="range">Range</ToggleButton>
-              <ToggleButton value="product">Product</ToggleButton>
-            </ToggleButtonGroup>
+          <ToggleButtonGroup
+            value={groupBy}
+            exclusive
+            size="small"
+            onChange={(_, v) => { if (v) setGroupBy(v); }}
+            sx={{ '& .MuiToggleButton-root': { px: 1.25, py: 0.5, textTransform: 'none' } }}
+          >
+            <ToggleButton value="category">Category</ToggleButton>
+            <ToggleButton value="range">Range</ToggleButton>
+            <ToggleButton value="product">Product</ToggleButton>
+          </ToggleButtonGroup>
 
-            <FormControlLabel
-              control={<Switch checked={excludeClient} color="primary" onChange={(e) => setExcludeClient(e.target.checked)} />}
-              label={<Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>Exclude Client</Typography>}
-              sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
-            />
+          <FormControlLabel
+            control={<Switch size="small" checked={excludeClient} color="primary" onChange={(e) => setExcludeClient(e.target.checked)} />}
+            label={<Typography variant="body2" sx={{ fontSize: '0.8125rem', whiteSpace: 'nowrap' }}>Exclude Client</Typography>}
+            sx={{ m: 0 }}
+          />
+          <FormControlLabel
+            control={<Switch size="small" checked={excludeLowValue} color="primary" onChange={(e) => setExcludeLowValue(e.target.checked)} />}
+            label={<Typography variant="body2" sx={{ fontSize: '0.8125rem', whiteSpace: 'nowrap' }}>Excl. &lt;$3</Typography>}
+            sx={{ m: 0 }}
+          />
 
-            <FormControlLabel
-              control={<Switch checked={excludeLowValue} color="primary" onChange={(e) => setExcludeLowValue(e.target.checked)} />}
-              label={<Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>Excl. &lt;$3</Typography>}
-              sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
-            />
-
-            <Button
-              variant="outlined"
-              color="primary"
-              size="small"
-              startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
-              onClick={fetchAnalytics}
-              disabled={loading}
-              sx={{ height: 40, boxSizing: 'border-box' }}
-            >
-              Refresh
-            </Button>
-          </Stack>
+          <Button
+            variant="outlined"
+            color="primary"
+            size="small"
+            startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <RefreshIcon />}
+            onClick={fetchAnalytics}
+            disabled={loading}
+            sx={{ ml: { md: 'auto' } }}
+          >
+            Refresh
+          </Button>
         </Stack>
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
         {loading && (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
-            <CircularProgress />
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
+            <CircularProgress size={28} />
           </Box>
         )}
 
@@ -506,156 +524,173 @@ export default function CRPAnalyticsPage() {
         )}
 
         {!loading && data.length > 0 && (
-          <>
-            <SectionHeader title="CRP Overview" />
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mb: 3 }}>
-              <OverviewCard
-                icon={<TrendingUpIcon sx={{ fontSize: 19 }} />}
-                label="Total Orders"
-                value={totalOrders.toLocaleString()}
-                sub={dateLabel}
-                color="#1976d2"
-                bg="rgba(25, 118, 210, 0.08)"
-              />
-              <OverviewCard
-                icon={<CheckCircleOutlineIcon sx={{ fontSize: 19 }} />}
-                label="Assigned"
-                value={`${assignedPct}%`}
-                sub={`${assignedCount.toLocaleString()} orders`}
-                color="#2e7d32"
-                bg="rgba(46, 125, 50, 0.08)"
-              />
-              <OverviewCard
-                icon={<HelpOutlineIcon sx={{ fontSize: 19 }} />}
-                label="Unassigned"
-                value={`${unassignedPct}%`}
-                sub={`${unassignedCount.toLocaleString()} orders`}
-                color="#d32f2f"
-                bg="rgba(211, 47, 47, 0.08)"
-              />
-              <OverviewCard
-                icon={<EmojiEventsOutlinedIcon sx={{ fontSize: 19 }} />}
-                label={`Top ${groupByLabel}`}
-                value={topAssigned?.name ?? '-'}
-                sub={topAssigned ? `${topAssigned.count.toLocaleString()} orders` : undefined}
-                color="#ed6c02"
-                bg="rgba(237, 108, 2, 0.08)"
-              />
-            </Stack>
+          <Stack spacing={2.5}>
+            <Box>
+              <SectionHeader title="CRP Overview" />
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                <OverviewCard
+                  icon={<TrendingUpIcon sx={{ fontSize: 18 }} />}
+                  label="Total Orders"
+                  value={totalOrders.toLocaleString()}
+                  sub={dateLabel}
+                  color="#1976d2"
+                  bg="rgba(25, 118, 210, 0.08)"
+                />
+                <OverviewCard
+                  icon={<CheckCircleOutlineIcon sx={{ fontSize: 18 }} />}
+                  label="Assigned"
+                  value={`${assignedPct}%`}
+                  sub={`${assignedCount.toLocaleString()} orders`}
+                  color="#2e7d32"
+                  bg="rgba(46, 125, 50, 0.08)"
+                />
+                <OverviewCard
+                  icon={<HelpOutlineIcon sx={{ fontSize: 18 }} />}
+                  label="Unassigned"
+                  value={`${unassignedPct}%`}
+                  sub={`${unassignedCount.toLocaleString()} orders`}
+                  color="#d32f2f"
+                  bg="rgba(211, 47, 47, 0.08)"
+                />
+                <OverviewCard
+                  icon={<EmojiEventsOutlinedIcon sx={{ fontSize: 18 }} />}
+                  label={`Top ${groupByLabel}`}
+                  value={topAssigned?.name ?? '-'}
+                  sub={topAssigned ? `${topAssigned.count.toLocaleString()} orders` : undefined}
+                  color="#ed6c02"
+                  bg="rgba(237, 108, 2, 0.08)"
+                />
+              </Stack>
+            </Box>
 
-            <SectionHeader title="Order Value Bands" />
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mb: 3 }}>
-              {VALUE_BANDS.map((band) => (
-                <ValueBandCard key={band.key} band={band} count={valueBands[band.key] ?? 0} />
-              ))}
-            </Stack>
+            <Box>
+              <SectionHeader title="Order Value Bands" />
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                {VALUE_BANDS.map((band) => (
+                  <ValueBandCard key={band.key} band={band} count={valueBands[band.key] ?? 0} />
+                ))}
+              </Stack>
+            </Box>
 
-            <SectionHeader title="Distribution by Category" subtitle="Click a bar or row to drill in" />
-            <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2}>
-              <Paper
-                elevation={0}
-                sx={{ flex: '3 1 0', minWidth: 0, border: '1px solid', borderColor: 'divider', borderRadius: 2, p: 2 }}
-              >
-                <Typography variant="subtitle1" fontWeight={700}>Orders by {groupByLabel}</Typography>
-                <Typography variant="caption" color="text.secondary">Sorted by volume</Typography>
-                <Box sx={{ mt: 2 }}>
-                  <ResponsiveContainer width="100%" height={barHeight}>
-                    <BarChart
-                      layout="vertical"
-                      data={data}
-                      margin={{ top: 2, right: 52, left: 8, bottom: 2 }}
-                      onClick={(state) => {
-                        if (state?.activePayload?.[0]?.payload) {
-                          openDetail(state.activePayload[0].payload);
-                        }
+            <Box>
+              <SectionHeader title={`Distribution by ${groupByLabel}`} subtitle="Click a bar or row to drill in" />
+              <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1.5} alignItems="stretch">
+                <Paper
+                  elevation={0}
+                  sx={{ flex: '3 1 0', minWidth: 0, border: '1px solid', borderColor: 'divider', borderRadius: 2, p: 1.5 }}
+                >
+                  <Typography variant="subtitle2" fontWeight={700}>Orders by {groupByLabel}</Typography>
+                  <Typography variant="caption" color="text.secondary">Sorted by volume</Typography>
+                  <Box sx={{ mt: 1 }}>
+                    <ResponsiveContainer width="100%" height={barHeight}>
+                      <BarChart
+                        layout="vertical"
+                        data={data}
+                        margin={{ top: 2, right: 48, left: 4, bottom: 2 }}
+                        onClick={(state) => {
+                          if (state?.activePayload?.[0]?.payload) {
+                            openDetail(state.activePayload[0].payload);
+                          }
+                        }}
+                      >
+                        <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: '#999' }} axisLine={false} tickLine={false} />
+                        <YAxis
+                          type="category"
+                          dataKey="name"
+                          width={140}
+                          tick={{ fontSize: 11, fill: '#555' }}
+                          axisLine={false}
+                          tickLine={false}
+                          tickFormatter={(v) => (v.length > 20 ? `${v.slice(0, 19)}…` : v)}
+                        />
+                        <Tooltip content={<BarTooltipContent />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
+                        <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={20} style={{ cursor: 'pointer' }}>
+                          {data.map((entry) => (
+                            <Cell key={entry.id ?? entry.name} fill={BAR_COLOR} />
+                          ))}
+                          <LabelList dataKey="count" position="right" style={{ fontSize: 11, fill: '#555', fontWeight: 600 }} />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Box>
+                </Paper>
+
+                <Paper
+                  elevation={0}
+                  sx={{
+                    flex: '2 1 0',
+                    minWidth: 260,
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    borderRadius: 2,
+                    p: 1.5,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    maxHeight: Math.max(barHeight + 56, 240),
+                  }}
+                >
+                  <Typography variant="subtitle2" fontWeight={700}>Ranking</Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ mb: 1 }}>
+                    {data.length} {groupByLabel.toLowerCase()}{data.length === 1 ? '' : 's'}
+                  </Typography>
+
+                  <TableContainer sx={{ flex: 1, overflow: 'auto' }}>
+                    <Table
+                      size="small"
+                      stickyHeader
+                      sx={{
+                        '& .MuiTableCell-root': {
+                          py: 0.75,
+                          px: 1,
+                          fontSize: '0.8125rem',
+                        },
                       }}
                     >
-                      <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: '#999' }} axisLine={false} tickLine={false} />
-                      <YAxis
-                        type="category"
-                        dataKey="name"
-                        width={155}
-                        tick={{ fontSize: 11, fill: '#555' }}
-                        axisLine={false}
-                        tickLine={false}
-                        tickFormatter={(v) => (v.length > 22 ? `${v.slice(0, 21)}…` : v)}
-                      />
-                      <Tooltip content={<BarTooltipContent />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
-                      <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={22} style={{ cursor: 'pointer' }}>
-                        {data.map((entry) => (
-                          <Cell key={entry.id ?? entry.name} fill={BAR_COLOR} />
-                        ))}
-                        <LabelList dataKey="count" position="right" style={{ fontSize: 11, fill: '#555', fontWeight: 600 }} />
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </Box>
-              </Paper>
-
-              <Paper
-                elevation={0}
-                sx={{
-                  flex: '2 1 0',
-                  minWidth: 280,
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  borderRadius: 2,
-                  p: 2,
-                  display: 'flex',
-                  flexDirection: 'column',
-                }}
-              >
-                <Typography variant="subtitle1" fontWeight={700}>Ranking</Typography>
-                <Typography variant="caption" color="text.secondary">
-                  {data.length} {groupByLabel.toLowerCase()}{data.length === 1 ? '' : 's'} · click to drill down
-                </Typography>
-
-                <TableContainer sx={{ mt: 1.5, flex: 1 }}>
-                  <Table size="small">
-                    <TableHead>
-                      <TableRow>
-                        <TableCell sx={{ fontWeight: 700, color: 'text.secondary', width: 36, py: 1 }}>#</TableCell>
-                        <TableCell sx={{ fontWeight: 700, color: 'text.secondary', py: 1 }}>Name</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, color: 'text.secondary', py: 1 }}>Orders</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, color: 'text.secondary', py: 1, minWidth: 72 }}>Share</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {data.map((entry, i) => (
-                        <TableRow
-                          key={entry.id ?? entry.name}
-                          hover
-                          onClick={() => openDetail(entry)}
-                          sx={{ cursor: 'pointer' }}
-                        >
-                          <TableCell sx={{ py: 1.25, color: '#ed6c02', fontWeight: 700 }}>{i + 1}</TableCell>
-                          <TableCell sx={{ py: 1.25 }}>
-                            <Stack direction="row" alignItems="center" spacing={0.75}>
-                              <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: BAR_COLOR, flexShrink: 0 }} />
-                              <Typography variant="body2" noWrap>{entry.name}</Typography>
-                            </Stack>
-                            <LinearProgress
-                              variant="determinate"
-                              value={Math.min(parseFloat(entry.percentage), 100)}
-                              sx={{
-                                mt: 0.75,
-                                height: 3,
-                                borderRadius: 2,
-                                bgcolor: 'grey.100',
-                                '& .MuiLinearProgress-bar': { bgcolor: BAR_COLOR, borderRadius: 2 },
-                              }}
-                            />
-                          </TableCell>
-                          <TableCell align="right" sx={{ py: 1.25, fontWeight: 600 }}>{entry.count.toLocaleString()}</TableCell>
-                          <TableCell align="right" sx={{ py: 1.25, color: 'text.secondary' }}>{entry.percentage}%</TableCell>
+                      <TableHead>
+                        <TableRow>
+                          <TableCell sx={{ fontWeight: 700, color: 'text.secondary', width: 32, bgcolor: 'background.paper' }}>#</TableCell>
+                          <TableCell sx={{ fontWeight: 700, color: 'text.secondary', bgcolor: 'background.paper' }}>Name</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 700, color: 'text.secondary', bgcolor: 'background.paper' }}>Orders</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 700, color: 'text.secondary', bgcolor: 'background.paper', width: 64 }}>Share</TableCell>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </TableContainer>
-              </Paper>
-            </Stack>
-          </>
+                      </TableHead>
+                      <TableBody>
+                        {data.map((entry, i) => (
+                          <TableRow
+                            key={entry.id ?? entry.name}
+                            hover
+                            onClick={() => openDetail(entry)}
+                            sx={{ cursor: 'pointer' }}
+                          >
+                            <TableCell sx={{ color: '#ed6c02', fontWeight: 700 }}>{i + 1}</TableCell>
+                            <TableCell>
+                              <Stack direction="row" alignItems="center" spacing={0.75}>
+                                <Box sx={{ width: 7, height: 7, borderRadius: '50%', bgcolor: BAR_COLOR, flexShrink: 0 }} />
+                                <Typography variant="body2" noWrap sx={{ fontSize: '0.8125rem' }}>{entry.name}</Typography>
+                              </Stack>
+                              <LinearProgress
+                                variant="determinate"
+                                value={Math.min(parseFloat(entry.percentage), 100)}
+                                sx={{
+                                  mt: 0.5,
+                                  height: 3,
+                                  borderRadius: 2,
+                                  bgcolor: 'grey.100',
+                                  '& .MuiLinearProgress-bar': { bgcolor: BAR_COLOR, borderRadius: 2 },
+                                }}
+                              />
+                            </TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 600 }}>{entry.count.toLocaleString()}</TableCell>
+                            <TableCell align="right" sx={{ color: 'text.secondary' }}>{entry.percentage}%</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                </Paper>
+              </Stack>
+            </Box>
+          </Stack>
         )}
 
         <Dialog
@@ -677,29 +712,31 @@ export default function CRPAnalyticsPage() {
             ) : detailDialog.items.length === 0 ? (
               <Alert severity="info">No orders found for this bucket.</Alert>
             ) : (
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell sx={{ fontWeight: 700 }}>Order ID</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Product</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Date Sold</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>Subtotal</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {detailDialog.items.map((item) => (
-                    <TableRow key={item._id || item.orderId}>
-                      <TableCell>{item.orderId || '—'}</TableCell>
-                      <TableCell>{item.productName || '—'}</TableCell>
-                      <TableCell>{formatDateTime(item.dateSold)}</TableCell>
-                      <TableCell align="right">{formatAmount(item.amount)}</TableCell>
+              <TableContainer sx={{ maxHeight: 420 }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 700, bgcolor: 'background.paper' }}>Order ID</TableCell>
+                      <TableCell sx={{ fontWeight: 700, bgcolor: 'background.paper' }}>Product</TableCell>
+                      <TableCell sx={{ fontWeight: 700, bgcolor: 'background.paper' }}>Date Sold</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 700, bgcolor: 'background.paper' }}>Subtotal</TableCell>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHead>
+                  <TableBody>
+                    {detailDialog.items.map((item) => (
+                      <TableRow key={item._id || item.orderId}>
+                        <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{item.orderId || '—'}</TableCell>
+                        <TableCell>{item.productName || '—'}</TableCell>
+                        <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDateTime(item.dateSold)}</TableCell>
+                        <TableCell align="right">{formatAmount(item.amount)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
             )}
           </DialogContent>
-          <DialogActions sx={{ justifyContent: 'space-between', px: 3, py: 2 }}>
+          <DialogActions sx={{ justifyContent: 'space-between', px: 3, py: 1.5 }}>
             <Typography variant="body2" color="text.secondary">
               {detailDialog.total > 0 ? `${detailDialog.total.toLocaleString()} orders` : ''}
             </Typography>

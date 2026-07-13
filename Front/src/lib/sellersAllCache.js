@@ -1,3 +1,5 @@
+import { sortSellersByName } from './sellersSort.js';
+
 const SELLERS_ALL_TTL_MS = 5 * 60_000;
 
 let sellersAllCache = null;
@@ -11,7 +13,7 @@ export function getCachedSellersAll() {
 }
 
 export function setCachedSellersAll(data) {
-  sellersAllCache = Array.isArray(data) ? data : [];
+  sellersAllCache = sortSellersByName(Array.isArray(data) ? data : []);
   sellersAllExpiresAt = Date.now() + SELLERS_ALL_TTL_MS;
   return sellersAllCache;
 }

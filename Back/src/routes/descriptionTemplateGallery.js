@@ -8,8 +8,9 @@ const DESCRIPTION_GALLERY_READ_PAGES = [
   'DescriptionTemplates',
   'StoresPage',
   'ManageStores',
-  'TemplateListings',
-  'SellerTemplates',
+  'TemplateListingsLab',
+  'SellerTemplatesLab',
+  'SelectSellerLab',
   'ListingDirectory',
   'TemplateDirectory',
 ];

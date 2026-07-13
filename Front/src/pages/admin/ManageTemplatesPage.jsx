@@ -752,8 +752,8 @@ export default function ManageTemplatesPage() {
   };
 
   const handleViewListings = (templateId) => {
-    // Navigate to seller selection page with returnTo parameter for direct template access
-    navigate(`/admin/select-seller?returnTo=/admin/template-listings?templateId=${templateId}`);
+    // Open Lab with template pre-selected; user picks seller
+    navigate(`/admin/select-seller-lab?templateId=${templateId}&status=active`);
   };
 
   const countCoreDefaults = () => {

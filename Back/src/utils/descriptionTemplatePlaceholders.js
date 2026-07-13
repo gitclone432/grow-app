@@ -177,6 +177,16 @@ function buildFallbackFeatureBullets(rawDescription = '') {
   return lines.slice(0, 8).map((line, idx, arr) => formatBulletLi(line, idx === arr.length - 1)).join('');
 }
 
+function resolveListingImageUrls(sourceData = {}, generatedListing = {}) {
+  if (Array.isArray(sourceData?.images) && sourceData.images.length) {
+    return sourceData.images.map((url) => String(url || '').trim()).filter(Boolean);
+  }
+  return String(generatedListing?.itemPhotoUrl || '')
+    .split(/\s*\|\s*|\s*,\s*|\n+/)
+    .map((url) => url.trim())
+    .filter(Boolean);
+}
+
 function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}, sourceData = {}, aiDescriptionRaw = '') {
   let composed = String(templateHtml || '');
   if (!composed.trim()) return '';
@@ -184,8 +194,13 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
   const explicitAiDescription = String(aiDescriptionRaw || '').trim();
   const generatedDescription = String(generatedListing?.description || '').trim();
   const scrapedDescription = String(sourceData?.description || '').trim();
-  const aiDescription =
-    explicitAiDescription || generatedDescription || '';
+  const usableGeneratedDescription =
+    generatedDescription
+    && !looksLikeListingShellEcho(generatedDescription)
+    && !hasUnsubstitutedPlaceholders(generatedDescription)
+      ? generatedDescription
+      : '';
+  const aiDescription = explicitAiDescription || usableGeneratedDescription || '';
   const resolvedBullets =
     normalizeAiFeatureBullets(aiDescription) ||
     buildFallbackFeatureBullets(scrapedDescription);
@@ -200,7 +215,7 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
   })();
 
   const titleClean = String(sourceData?.title || generatedListing?.title || '').trim();
-  const images = Array.isArray(sourceData?.images) ? sourceData.images.filter(Boolean) : [];
+  const images = resolveListingImageUrls(sourceData, generatedListing);
 
   const placeholderMap = {
     '{{AI_FEATURE_BULLETS}}': resolvedBullets,

@@ -13,6 +13,7 @@ import FeedUpload from '../models/FeedUpload.js';
 import CsvStorage from '../models/CsvStorage.js';
 
 import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
+import { prepareFxCsvBufferForUpload } from '../utils/ebayDraftListingCsv.js';
 
 async function ensureValidToken(seller) {
     const now = Date.now();
@@ -78,10 +79,19 @@ export async function performFeedUpload(sellerId, fileBuffer, fileName, feedType
     if (!locationHeader) throw new Error('Failed to get task location from eBay');
     const taskId = locationHeader.split('/').pop();
 
-    // 2. Upload file to task
+    // Keep CSV content intact (BOM/CRLF only) — same bytes Seller Hub accepts
+    const prepared = prepareFxCsvBufferForUpload(fileBuffer);
+    const uploadBuffer = prepared.buffer;
+    const safeName = String(fileName || 'listings.csv').replace(/\.csv\.csv$/i, '.csv');
+
     const formData = new FormData();
-    formData.append('file', fileBuffer, { filename: fileName, contentType: 'text/csv' });
-    formData.append('fileName', fileName);
+    const finalName = safeName.endsWith('.csv') ? safeName : `${safeName}.csv`;
+    formData.append('file', uploadBuffer, {
+      filename: finalName,
+      contentType: 'text/csv',
+      knownLength: uploadBuffer.length,
+    });
+    formData.append('fileName', finalName);
     formData.append('name', 'file');
     formData.append('type', 'form-data');
 
@@ -91,8 +101,11 @@ export async function performFeedUpload(sellerId, fileBuffer, fileName, feedType
         {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
+                'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
                 ...formData.getHeaders()
-            }
+            },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
         }
     );
 

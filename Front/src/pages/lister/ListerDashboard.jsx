@@ -511,7 +511,7 @@ export default function ListerDashboard({ user, onLogout }) {
             Lister Dashboard
           </Typography>
           {user && <Chip icon={<PersonIcon />} label={user.username} size="small" sx={{ mr: 1 }} />}
-          <Button component={Link} to="/admin/select-seller" size="small" sx={{ mr: 1 }} startIcon={<AddCircleOutlineIcon />} variant="contained" color="primary">Template Listings</Button>
+          <Button component={Link} to="/admin/select-seller-lab" size="small" sx={{ mr: 1 }} startIcon={<AddCircleOutlineIcon />} variant="contained" color="primary">Template Listings</Button>
           <Button component={Link} to="/ideas" size="small" sx={{ mr: 1 }} startIcon={<LightbulbIcon />}>Ideas & Issues</Button>
           <Button component={Link} to="/about-me" size="small" sx={{ mr: 1 }} startIcon={<ChatIcon />}>Team Chat</Button>
           <Button component={Link} to="/about-me" size="small" sx={{ mr: 1 }}>About</Button>
