@@ -96,7 +96,7 @@ import FeedUploadStatsPage from '../pages/admin/FeedUploadStatsPage.jsx';
 import SalaryPage from '../pages/admin/SalaryPage.jsx';
 import SellerFundsPage from '../pages/admin/SellerFundsPage.jsx';
 import FinanceCashflowPage from '../pages/admin/FinanceCashflowPage.jsx';
-import AffiliateBalancePage from '../pages/admin/AffiliateBalancePage.jsx';
+import StoreSubscriptionPage from '../pages/admin/StoreSubscriptionPage.jsx';
 
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
@@ -311,7 +311,7 @@ const COMPONENT_MAP = {
   'ExtraExpenses': ExtraExpensePage,
   'RevenueGrossNet': RevenueGrossNetPage,
   'Cashflow': FinanceCashflowPage,
-  'Affiliate': AffiliateBalancePage,
+  'Affiliate': StoreSubscriptionPage,
   'Salary': SalaryPage,
   'AllOrdersSheet': AllOrdersSheetPage,
   'PriceChangeHistory': PriceChangeHistoryPage,
@@ -939,6 +939,7 @@ export default function AdminLayout({ user, onLogout }) {
           <Route path="/user-performance" element={<UserPerformancePage />} />
 
           <Route path="/credit-card-names" element={<Navigate to="/admin/credit-cards" replace />} />
+          <Route path="/affiliate-balance" element={<Navigate to="/admin/store-subscriptions" replace />} />
 
           {/* Dynamic page routes based on access */}
           {PAGE_REGISTRY.map(page => {
