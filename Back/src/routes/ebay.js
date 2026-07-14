@@ -12937,6 +12937,230 @@ router.post('/analytics/seller-standards-profiles/refresh-all', requireAuth, req
   }
 });
 
+function unwrapStandardsMetricScalar(metric) {
+  const raw = metric?.value;
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    if (raw.value != null && raw.value !== '') {
+      const n = Number(raw.value);
+      return Number.isNaN(n) ? null : n;
+    }
+    if (raw.numerator != null && raw.denominator != null && Number(raw.denominator) !== 0) {
+      const pct = (Number(raw.numerator) / Number(raw.denominator)) * 100;
+      return Number.isNaN(pct) ? null : pct;
+    }
+    return null;
+  }
+  const n = Number(raw);
+  return Number.isNaN(n) ? null : n;
+}
+
+function unwrapStandardsMetricCount(metric) {
+  const raw = metric?.value;
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    if (raw.numerator != null && raw.numerator !== '') {
+      const n = Number(raw.numerator);
+      return Number.isNaN(n) ? null : n;
+    }
+  }
+  return null;
+}
+
+function pickStandardsProfileForSummary(report, evaluationType) {
+  const profiles = Array.isArray(report?.standardsProfiles) ? report.standardsProfiles : [];
+  if (!profiles.length) return null;
+  const cycle = String(evaluationType || 'PROJECTED').toUpperCase();
+  const usMatch = profiles.find(
+    (p) => p?.program === 'PROGRAM_US' && String(p?.cycle?.cycleType || '').toUpperCase() === cycle
+  );
+  if (usMatch) return usMatch;
+  return profiles.find((p) => String(p?.cycle?.cycleType || '').toUpperCase() === cycle) || null;
+}
+
+function buildSummaryMetricsForEvaluation(ssp, csmBySellerMetric, sellerId, evaluationType) {
+  const profile = pickStandardsProfileForSummary(ssp?.report, evaluationType);
+  const defect = metricFromStandardsProfile(profile, 'DEFECTIVE_TRANSACTION_RATE');
+  const lateShip = metricFromStandardsProfile(profile, 'SHIPPING_MISS_RATE');
+  const tracking = metricFromStandardsProfile(
+    profile,
+    'VALID_TRACKING_UPLOADED_WITHIN_HANDLING_RATE'
+  );
+
+  const inrSnap = csmBySellerMetric.get(`${sellerId}:${evaluationType}:ITEM_NOT_RECEIVED`);
+  const inadSnap = csmBySellerMetric.get(`${sellerId}:${evaluationType}:ITEM_NOT_AS_DESCRIBED`);
+  const inr = summarizeCsmReportForSummary(inrSnap?.report, 'ITEM_NOT_RECEIVED');
+  const inad = summarizeCsmReportForSummary(inadSnap?.report, 'ITEM_NOT_AS_DESCRIBED');
+  const csmFetchedAt = maxDate(inrSnap?.fetchedAt, inadSnap?.fetchedAt);
+
+  return {
+    standardsLevel: profile?.standardsLevel || null,
+    program: profile?.program || null,
+    cycle: profile?.cycle?.cycleType || evaluationType,
+    defectRate: defect.rate,
+    defectCount: defect.count,
+    defectLevel: defect.level,
+    lateShipRate: lateShip.rate,
+    lateShipLevel: lateShip.level,
+    trackingRate: tracking.rate,
+    trackingLevel: tracking.level,
+    inrRating: inr.rating,
+    inrRate: inr.rate,
+    inrPeerRate: inr.peerRate,
+    inrPeerRatio: inr.peerRatio,
+    inrCategoryId: inr.categoryId,
+    inrCategoryName: inr.categoryName,
+    inadRating: inad.rating,
+    inadRate: inad.rate,
+    inadPeerRate: inad.peerRate,
+    inadPeerRatio: inad.peerRatio,
+    inadCategoryId: inad.categoryId,
+    inadCategoryName: inad.categoryName,
+    standardsFetchedAt: ssp?.fetchedAt || null,
+    csmFetchedAt,
+    hasStandards: Boolean(profile),
+    hasCsm: Boolean(inrSnap?.report || inadSnap?.report),
+  };
+}
+
+function metricFromStandardsProfile(profile, metricKey) {
+  const key = String(metricKey || '').toUpperCase();
+  const metric = (profile?.metrics || []).find(
+    (m) => String(m?.metricKey || '').toUpperCase() === key
+  );
+  if (!metric) return { rate: null, count: null, level: null };
+  return {
+    rate: unwrapStandardsMetricScalar(metric),
+    count: unwrapStandardsMetricCount(metric),
+    level: metric.level || null,
+  };
+}
+
+function pickCsmBlockForSummary(report, metricType) {
+  const blocks = Array.isArray(report?.dimensionMetrics) ? report.dimensionMetrics : [];
+  if (!blocks.length) return null;
+
+  // Match Service metrics tab defaults:
+  // - INR: prefer DOMESTIC region
+  // - INAD: category with the highest transaction count (not API array order)
+  const enriched = blocks.map((block) => {
+    const byKey = Object.fromEntries((block.metrics || []).map((m) => [m.metricKey, m]));
+    const txnRaw = byKey.TRANSACTION_COUNT?.value;
+    const transactionCount = txnRaw != null ? Number(txnRaw) : 0;
+    return {
+      block,
+      categoryId: block?.dimension?.value,
+      transactionCount: Number.isNaN(transactionCount) ? 0 : transactionCount,
+    };
+  });
+
+  enriched.sort((a, b) => (b.transactionCount || 0) - (a.transactionCount || 0));
+
+  if (String(metricType || '').toUpperCase() === 'ITEM_NOT_RECEIVED') {
+    const domestic = enriched.find((e) => String(e.categoryId || '').toUpperCase() === 'DOMESTIC');
+    if (domestic) return domestic.block;
+  }
+
+  return enriched[0]?.block || blocks[0];
+}
+
+function summarizeCsmReportForSummary(report, metricType) {
+  const empty = { rate: null, peerRate: null, peerRatio: null, rating: null, categoryId: null, categoryName: null };
+  const preferred = pickCsmBlockForSummary(report, metricType);
+  if (!preferred) return empty;
+  const byKey = Object.fromEntries((preferred.metrics || []).map((m) => [m.metricKey, m]));
+  const rateMetric = byKey.RATE;
+  const benchmark = rateMetric?.benchmark || {};
+  const rate = rateMetric?.value != null ? Number(rateMetric.value) : null;
+  const peerRate =
+    benchmark.metadata?.average != null ? Number(benchmark.metadata.average) : null;
+  let peerRatio = null;
+  if (rate != null && !Number.isNaN(rate) && peerRate != null && !Number.isNaN(peerRate) && peerRate > 0) {
+    peerRatio = rate / peerRate;
+  }
+  return {
+    rate: rate != null && !Number.isNaN(rate) ? rate : null,
+    peerRate: peerRate != null && !Number.isNaN(peerRate) ? peerRate : null,
+    peerRatio,
+    rating: benchmark.rating || null,
+    categoryId: preferred?.dimension?.value || null,
+    categoryName: preferred?.dimension?.name || preferred?.dimension?.value || null,
+  };
+}
+
+function maxDate(...values) {
+  let best = null;
+  for (const value of values) {
+    if (!value) continue;
+    const d = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(d.getTime())) continue;
+    if (!best || d > best) best = d;
+  }
+  return best;
+}
+
+// Analytics Hub Summary — cross-seller rows from SSP + CSM snapshots (Current + Projected)
+router.get('/analytics/summary', requireAuth, requirePageAccess(['EbayAnalyticsHub', 'Analytics', 'AnalyticsSellerStandards']), async (req, res) => {
+  try {
+    const marketplace = String(req.query.marketplace || 'EBAY_US').trim();
+
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email')
+      : [];
+
+    const [sspSnapshots, csmSnapshots] = await Promise.all([
+      sellerIds.length
+        ? SellerStandardsProfileSnapshot.find({ seller: { $in: sellerIds } }).lean()
+        : Promise.resolve([]),
+      sellerIds.length
+        ? CustomerServiceMetricSnapshot.find({
+          seller: { $in: sellerIds },
+          marketplace,
+          evaluationType: { $in: ['CURRENT', 'PROJECTED'] },
+          metricType: { $in: ['ITEM_NOT_RECEIVED', 'ITEM_NOT_AS_DESCRIBED'] },
+        }).lean()
+        : Promise.resolve([]),
+    ]);
+
+    const sspBySeller = new Map(sspSnapshots.map((s) => [String(s.seller), s]));
+    const csmBySellerMetric = new Map(
+      csmSnapshots.map((s) => [`${String(s.seller)}:${s.evaluationType}:${s.metricType}`, s])
+    );
+
+    const rows = sellers.map((seller) => {
+      const sellerId = String(seller._id);
+      const sellerName =
+        seller.user?.username || seller.user?.email || seller.username || sellerId;
+      const connected = Boolean(seller.ebayTokens?.access_token);
+      const ssp = sspBySeller.get(sellerId);
+
+      return {
+        sellerId,
+        sellerName,
+        connected,
+        current: buildSummaryMetricsForEvaluation(ssp, csmBySellerMetric, sellerId, 'CURRENT'),
+        projected: buildSummaryMetricsForEvaluation(ssp, csmBySellerMetric, sellerId, 'PROJECTED'),
+      };
+    });
+
+    rows.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
+
+    return res.json({
+      success: true,
+      request: { marketplace },
+      rows,
+    });
+  } catch (err) {
+    console.error('[Analytics Summary] Error:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to load analytics summary',
+    });
+  }
+});
+
 function parseTradingAmount(amount) {
   if (amount == null || amount === '') return null;
   if (typeof amount === 'object') {

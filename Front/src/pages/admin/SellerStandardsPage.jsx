@@ -316,6 +316,8 @@ export default function SellerStandardsPage({
   sellers: sellersProp,
   hideSellerFilter = false,
   active = true,
+  focusCycle = null,
+  focusKey = 0,
 } = {}) {
   const [internalSellers, setInternalSellers] = useState([]);
   const [internalSellerId, setInternalSellerId] = useState('');
@@ -333,6 +335,13 @@ export default function SellerStandardsPage({
   const [fetchedAt, setFetchedAt] = useState(null);
   const [noSavedData, setNoSavedData] = useState(false);
   const [bulkRefreshMessage, setBulkRefreshMessage] = useState('');
+
+  useEffect(() => {
+    if (!focusKey) return;
+    if (focusCycle === 'CURRENT' || focusCycle === 'PROJECTED') {
+      setCycleFilter(focusCycle);
+    }
+  }, [focusKey, focusCycle]);
 
   useEffect(() => {
     if (sellersProp) return;

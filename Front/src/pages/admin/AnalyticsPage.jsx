@@ -402,6 +402,9 @@ export default function AnalyticsPage({
   sellers: sellersProp,
   hideSellerFilter = false,
   active = true,
+  focusEvaluationType = null,
+  focusMetricType = null,
+  focusKey = 0,
 } = {}) {
   const [internalSellers, setInternalSellers] = useState([]);
   const [internalSellerId, setInternalSellerId] = useState('');
@@ -423,6 +426,16 @@ export default function AnalyticsPage({
   const [metricCases, setMetricCases] = useState([]);
   const [metricCasesLoading, setMetricCasesLoading] = useState(false);
   const [metricCasesError, setMetricCasesError] = useState('');
+
+  useEffect(() => {
+    if (!focusKey) return;
+    if (focusEvaluationType === 'CURRENT' || focusEvaluationType === 'PROJECTED') {
+      setCsEvaluationType(focusEvaluationType);
+    }
+    if (focusMetricType === 'ITEM_NOT_RECEIVED' || focusMetricType === 'ITEM_NOT_AS_DESCRIBED') {
+      setCsMetricType(focusMetricType);
+    }
+  }, [focusKey, focusEvaluationType, focusMetricType]);
 
   useEffect(() => {
     if (sellersProp) return;
