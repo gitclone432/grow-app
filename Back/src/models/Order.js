@@ -201,6 +201,18 @@ const OrderSchema = new mongoose.Schema(
       enum: ['order_communication'],
       default: null
     },
+    outOfStockAssignedAt: {
+      type: Date,
+      default: null
+    },
+    cancellationAssignedAt: {
+      type: Date,
+      default: null
+    },
+    addressIssueAssignedAt: {
+      type: Date,
+      default: null
+    },
     returnCaseNotOpenedAssignedAt: {
       type: Date,
       default: null

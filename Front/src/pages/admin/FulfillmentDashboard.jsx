@@ -270,6 +270,74 @@ function ImageDialog({ open, onClose, images }) {
   );
 }
 
+function cleanChatMessageBodyForDisplay(body = '') {
+  let text = String(body)
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&copy;/g, '(c)');
+
+  const lower = text.toLowerCase();
+  const markerIndex = [
+    '@media only screen',
+    '@-moz-document',
+    'body[yahoo]',
+    'td.wraptext',
+    '.externalclass',
+    '.readmsgbody',
+    'mso-table-lspace'
+  ]
+    .map((marker) => lower.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  if (markerIndex !== undefined) text = text.slice(0, markerIndex);
+
+  const footerIndex = [
+    'Order status:',
+    'We scan messages to enforce policies.',
+    'Email reference id:',
+    "We don't check this mailbox",
+    'eBay sent this message to',
+    'eBay is committed to your privacy'
+  ]
+    .map((marker) => text.toLowerCase().indexOf(marker.toLowerCase()))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  if (footerIndex !== undefined) text = text.slice(0, footerIndex);
+
+  text = text.replace(/\bNew message:\s*New message\b/gi, '').replace(/\s+/g, ' ').trim();
+  const cssSignalCount = ['!important', '{', '}', 'padding:', 'width:', 'font-family:', 'word-wrap:']
+    .filter((token) => text.toLowerCase().includes(token)).length;
+
+  return cssSignalCount >= 3 ? '' : text;
+}
+
+function getChatDisplaySender(msg) {
+  const body = String(msg?.body || '').toLowerCase();
+  const sellerTemplateSignals = [
+    "we're pleased to inform you that your order has been processed",
+    'your package has been successfully delivered',
+    'tracking number will be updated on your ebay order page',
+    'thank you for choosing us',
+    'customer support team',
+    'if you have any questions or concerns, please contact us directly through ebay messages',
+    'before opening any cases such as inr',
+    'thank you for your recent purchase',
+    'orders are typically shipped within',
+    'your return request has been approved',
+    'we have approved your return request'
+  ];
+
+  return sellerTemplateSignals.some((signal) => body.includes(signal)) ? 'SELLER' : msg?.sender;
+}
+
 // --- NEW COMPONENT: Chat Dialog (Visual Match with BuyerChatPage) ---
 function ChatDialog({ open, onClose, order }) {
   const theme = useTheme();
@@ -285,7 +353,7 @@ function ChatDialog({ open, onClose, order }) {
   // Load messages when dialog opens
   useEffect(() => {
     if (open && order) {
-      loadMessages();
+      syncThreadAndLoad();
       startPolling();
     } else {
       stopPolling();
@@ -310,10 +378,15 @@ function ChatDialog({ open, onClose, order }) {
     pollingInterval.current = setInterval(() => {
       if (order) {
         const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
+        const sellerId = order.seller?._id || order.seller;
+        const buyerUsername = order.buyer?.username;
+        if (!sellerId || !buyerUsername) return;
         api.post('/ebay/sync-thread', {
-          sellerId: order.seller?._id || order.seller,
-          buyerUsername: order.buyer?.username,
-          itemId: itemId
+          sellerId,
+          buyerUsername,
+          itemId: itemId,
+          orderId: order.orderId || null,
+          lookbackDays: 365
         }).then(res => {
           if (res.data.newMessagesFound) {
             loadMessages(false);
@@ -323,13 +396,46 @@ function ChatDialog({ open, onClose, order }) {
     }, 10000);
   };
 
+  async function syncThreadAndLoad() {
+    const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
+    const sellerId = order.seller?._id || order.seller;
+    const buyerUsername = order.buyer?.username;
+
+    if (!sellerId || !buyerUsername) {
+      await loadMessages();
+      return;
+    }
+
+    try {
+      await api.post('/ebay/sync-thread', {
+        sellerId,
+        buyerUsername,
+        itemId,
+        orderId: order.orderId || null,
+        lookbackDays: 365
+      });
+    } catch (err) {
+      console.error('Initial thread sync failed', err);
+    }
+
+    await loadMessages();
+  }
+
   async function loadMessages(showLoading = true) {
     if (showLoading) setLoading(true);
     try {
-      const { data } = await api.get('/ebay/chat/messages', {
-        params: { orderId: order.orderId }
-      });
-      setMessages(data || []);
+      const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
+      const params = {
+        buyerUsername: order.buyer?.username,
+        sellerId: order.seller?._id || order.seller,
+      };
+      if (order.orderId) params.orderId = order.orderId;
+      if (itemId) params.itemId = itemId;
+
+      const { data } = await api.get('/ebay/chat/messages', { params });
+      setMessages((data || [])
+        .map((msg) => ({ ...msg, body: cleanChatMessageBodyForDisplay(msg.body) }))
+        .filter((msg) => msg.body));
     } catch (e) {
       console.error("Failed to load messages", e);
     } finally {
@@ -343,14 +449,14 @@ function ChatDialog({ open, onClose, order }) {
     try {
       const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
       const { data } = await api.post('/ebay/send-message', {
-        orderId: order.orderId,
+        orderId: order.orderId || null,
         buyerUsername: order.buyer?.username,
         itemId: itemId,
         body: newMessage,
-        subject: `Regarding Order #${order.orderId}`
+        subject: order.orderId ? `Regarding Order #${order.orderId}` : 'Regarding your inquiry'
       });
 
-      setMessages([...messages, data.message]);
+      setMessages((prev) => [...prev, data.message]);
       setNewMessage('');
     } catch (e) {
       alert('Failed to send: ' + (e.response?.data?.error || e.message));
@@ -561,11 +667,13 @@ function ChatDialog({ open, onClose, order }) {
                 </Alert>
               )}
 
-              {messages.map((msg) => (
+              {messages.map((msg) => {
+                const displaySender = getChatDisplaySender(msg);
+                return (
                 <Box
                   key={msg._id}
                   sx={{
-                    alignSelf: msg.sender === 'SELLER' ? 'flex-end' : 'flex-start',
+                    alignSelf: displaySender === 'SELLER' ? 'flex-end' : 'flex-start',
                     maxWidth: '70%' // Constrain width like Buyer Chat
                   }}
                 >
@@ -573,8 +681,8 @@ function ChatDialog({ open, onClose, order }) {
                     elevation={1}
                     sx={{
                       p: 1.5,
-                      bgcolor: msg.sender === 'SELLER' ? '#1976d2' : '#ffffff',
-                      color: msg.sender === 'SELLER' ? '#fff' : 'text.primary',
+                      bgcolor: displaySender === 'SELLER' ? '#1976d2' : '#ffffff',
+                      color: displaySender === 'SELLER' ? '#fff' : 'text.primary',
                       borderRadius: 2,
                       position: 'relative'
                     }}
@@ -604,12 +712,13 @@ function ChatDialog({ open, onClose, order }) {
                       </Box>
                     )}
                   </Paper>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, textAlign: msg.sender === 'SELLER' ? 'right' : 'left', fontSize: '0.7rem' }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, textAlign: displaySender === 'SELLER' ? 'right' : 'left', fontSize: '0.7rem' }}>
                     {new Date(msg.messageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} PT
-                    {msg.sender === 'SELLER' && (msg.read ? ' • Read' : ' • Sent')}
+                    {displaySender === 'SELLER' && (msg.read ? ' • Read' : ' • Sent')}
                   </Typography>
                 </Box>
-              ))}
+                );
+              })}
               <div ref={messagesEndRef} />
             </Stack>
           )}
