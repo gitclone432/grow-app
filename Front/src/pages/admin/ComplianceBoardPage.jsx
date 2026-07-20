@@ -115,6 +115,20 @@ const LOAD_MORE_STEP = 8;
 const MESSAGE_THREAD_LIMIT = 100;
 const MESSAGE_THREAD_MAX_AGE_DAYS = 30;
 
+const formatDateSoldPT = (dateValue) => {
+  if (!dateValue) return '';
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+    }).format(new Date(dateValue));
+  } catch {
+    return '';
+  }
+};
+
 function ComplianceBoardPage() {
   const [snackbar, setSnackbar] = useState({ open: false, message: '' });
   const [selectedCategory, setSelectedCategory] = useState('order_fulfillment');
@@ -581,10 +595,29 @@ function ComplianceBoardPage() {
         ...buildBoardFilterParams(),
       };
 
-      const { data } = await api.get('/ebay/chat/threads', { params });
+      const [threadsResponse, assignedResponse] = await Promise.all([
+        api.get('/ebay/chat/threads', { params }),
+        dateFilter.mode === 'none'
+          ? api.get('/ebay/conversation-meta/assigned-board', {
+              params: {
+                limit: 500,
+                ...buildBoardFilterParams(),
+              }
+            })
+          : Promise.resolve({ data: { threads: [] } })
+      ]);
 
-      // Fetch conversation metadata for all threads to get category assignments
-      const threads = data.threads || [];
+      // Fetch conversation metadata for all threads to get category assignments.
+      // In "None" mode, also include already-assigned board threads that may be
+      // outside the recent message window.
+      const threadMap = new Map();
+      [
+        ...(threadsResponse.data.threads || []),
+        ...(assignedResponse.data.threads || [])
+      ].forEach((thread) => {
+        threadMap.set(getMessageKey(thread), thread);
+      });
+      const threads = Array.from(threadMap.values());
       
       // Debug: Log sample thread data to verify structure
       if (threads.length > 0) {
@@ -628,6 +661,9 @@ function ComplianceBoardPage() {
 
       // Fetch meta for each thread to get category
       const metaPromises = threads.map(async (thread) => {
+        if (thread._conversationMeta) {
+          return { thread, meta: thread._conversationMeta };
+        }
         try {
           const params = {
             sellerId: thread.sellerId,
@@ -1025,6 +1061,21 @@ function ComplianceBoardPage() {
     });
   };
 
+  const clearPendingMessageMove = (message) => {
+    const key = getMessageKey(message);
+    setPendingMessageMoves((prev) => {
+      const next = {};
+      Object.entries(prev).forEach(([columnId, moves]) => {
+        const remaining = { ...moves };
+        delete remaining[key];
+        if (Object.keys(remaining).length > 0) {
+          next[columnId] = remaining;
+        }
+      });
+      return next;
+    });
+  };
+
   const mapMessageCategoryForApi = (destColumn) => {
     if (destColumn === MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE) return 'Return';
     if (destColumn === MESSAGE_CATEGORIES.ISSUE_WITH_DELIVERY) return 'Issue with Delivery';
@@ -1265,10 +1316,29 @@ function ComplianceBoardPage() {
         message: `Message staged in ${mapMessageCategoryForApi(destColumn)}. Click Apply in that box to save.`,
       });
     } else {
-      setSnackbar({
-        open: true,
-        message: 'Message moved back to All Messages',
-      });
+      clearPendingMessageMove(movedItem);
+      try {
+        await api.post('/ebay/conversation-meta', {
+          sellerId: movedItem.sellerId,
+          buyerUsername: movedItem.buyerUsername,
+          orderId: movedItem.orderId || null,
+          itemId: movedItem.itemId || 'DIRECT_MESSAGE',
+          category: '',
+          status: movedItem.status || 'Open',
+          caseStatus: movedItem.caseStatus || 'Case Not Opened',
+          pickedUpBy: movedItem.pickedUpBy || null
+        });
+        setSnackbar({
+          open: true,
+          message: 'Message moved back to All Messages',
+        });
+      } catch (err) {
+        console.error('Failed to clear message category:', err);
+        setSnackbar({
+          open: true,
+          message: `Failed: ${err.response?.data?.error || err.message}`,
+        });
+      }
     }
   };
 
@@ -2009,7 +2079,7 @@ function ComplianceBoardPage() {
                   )}
                   {order.dateSold && (
                     <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.8rem' }}>
-                      {format(new Date(order.dateSold), 'MMM dd, yyyy')}
+                      {formatDateSoldPT(order.dateSold)}
                     </Typography>
                   )}
                 </Stack>
@@ -2291,7 +2361,7 @@ function ComplianceBoardPage() {
               </Typography>
               {order.dateSold && (
                 <Typography variant="caption" color="text.secondary">
-                  {format(new Date(order.dateSold), 'MMM dd, yyyy')}
+                  {formatDateSoldPT(order.dateSold)}
                 </Typography>
               )}
             </Stack>
