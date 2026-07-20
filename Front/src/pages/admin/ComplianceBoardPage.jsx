@@ -31,7 +31,7 @@ import ChatIcon from '@mui/icons-material/Chat';
 import CloseIcon from '@mui/icons-material/Close';
 import { format } from 'date-fns';
 import api from '../../lib/api';
-import ChatDialog from '../../components/ChatDialog';
+import AllOrdersChatDialog from '../../components/ChatDialog';
 
 const BOARD_CATEGORIES = [
   { value: 'order_fulfillment', label: 'Order Fulfillment' },
@@ -88,6 +88,49 @@ const ISSUE_HUB_MESSAGE_COLUMNS = new Set([
   MESSAGE_CATEGORIES.INQUIRY,
 ]);
 
+const ORDER_COMMUNICATION_WORK_OPTIONS = [
+  { id: MESSAGE_CATEGORIES.INR, label: 'INR', color: '#ef4444' },
+  { id: MESSAGE_CATEGORIES.CANCELLATION, label: 'Cancellation', color: '#f97316' },
+  { id: MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE, label: 'Return / Refund / Replace', color: '#8b5cf6' },
+  { id: MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT, label: 'Issue with Product', color: '#ea580c' },
+  { id: MESSAGE_CATEGORIES.INQUIRY, label: 'Inquiry', color: '#10b981' },
+];
+
+const ORDER_FULFILLMENT_ISSUE_OPTIONS = [
+  { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', color: '#f97316' },
+  { id: COLUMN_STATUS.CANCELLATION, label: 'Cancellation', color: '#3b82f6' },
+  { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', color: '#a855f7' },
+];
+
+const ORDER_FULFILLMENT_PROGRESS_OPTIONS = [
+  { id: COLUMN_STATUS.NOT_FULFILLED, label: 'Not Fulfilled', color: '#f59e0b' },
+  { id: COLUMN_STATUS.FULFILLED, label: 'Fulfilled', color: '#10b981' },
+  { id: COLUMN_STATUS.BUYER_CONFIRMATION, label: 'Buyer Confirmation', color: '#0f766e' },
+];
+
+const RETURN_FLOW_OPTIONS = [
+  { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: '#3b82f6' },
+  { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7' },
+  { id: COLUMN_STATUS.ITEM_DELIVERED, label: 'Item Delivered', color: '#06b6d4' },
+];
+
+const RETURN_RESOLUTION_OPTIONS = [
+  { id: COLUMN_STATUS.PARTIAL_REFUND, label: 'Partial Refund', color: '#f59e0b' },
+  { id: COLUMN_STATUS.FULL_REFUND, label: 'Full Refund', color: '#10b981' },
+  { id: COLUMN_STATUS.REPLACEMENT, label: 'Replacement', color: '#0f766e' },
+];
+
+const CANCELLATION_DECISION_OPTIONS = [
+  { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: '#10b981' },
+  { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: '#f97316' },
+];
+
+const INR_REFUND_OPTIONS = [
+  { id: COLUMN_STATUS.INR_FULLY_REFUNDED, label: 'Fully Refunded', color: '#10b981' },
+  { id: COLUMN_STATUS.INR_PARTIAL_REFUND, label: 'Partial Refund', color: '#f59e0b' },
+  { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Not Refunded but Resolved', color: '#3b82f6' },
+];
+
 const BRAND_YELLOW = '#fbbf24';
 const BRAND_YELLOW_DARK = '#f59e0b';
 const BRAND_DARK = '#1e293b';
@@ -100,6 +143,13 @@ const ONE_DAY_MS = 24 * ONE_HOUR_MS;
 const RETURN_LABEL_SLA_MS = 48 * ONE_HOUR_MS;
 const RETURN_LABEL_OVERDUE_ALERT_ID = 'return_label_overdue';
 const PAYMENT_STATUS_OVERDUE_ALERT_ID = 'payment_status_overdue';
+const FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS = {
+  [COLUMN_STATUS.OUT_OF_STOCK]: 'fulfillment_out_of_stock_overdue',
+  [COLUMN_STATUS.CANCELLATION]: 'fulfillment_cancellation_overdue',
+  [COLUMN_STATUS.ADDRESS_ISSUE]: 'fulfillment_address_issue_overdue',
+};
+const FULFILLMENT_ISSUE_STATUS_BY_ALERT_ID = Object.entries(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS)
+  .reduce((acc, [status, alertId]) => ({ ...acc, [alertId]: status }), {});
 
 const ISSUE_HUB_OPTIONS = [
   { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', type: 'order', color: BRAND_ORANGE },
@@ -127,6 +177,55 @@ const formatDateSoldPT = (dateValue) => {
   } catch {
     return '';
   }
+};
+
+const cleanMessagePreviewText = (body = '') => {
+  let text = String(body)
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&copy;/g, '(c)');
+
+  const markers = [
+    '@media only screen',
+    '@-moz-document',
+    'body[yahoo]',
+    'td.wraptext',
+    '.externalclass',
+    '.readmsgbody',
+    'mso-table-lspace'
+  ];
+  const markerIndex = markers
+    .map((marker) => text.toLowerCase().indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  if (markerIndex !== undefined) text = text.slice(0, markerIndex);
+
+  const footerIndex = [
+    'Order status:',
+    'We scan messages to enforce policies.',
+    'Email reference id:',
+    "We don't check this mailbox",
+    'eBay sent this message to',
+    'eBay is committed to your privacy'
+  ]
+    .map((marker) => text.toLowerCase().indexOf(marker.toLowerCase()))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  if (footerIndex !== undefined) text = text.slice(0, footerIndex);
+
+  text = text.replace(/\bNew message:\s*New message\b/gi, '').replace(/\s+/g, ' ').trim();
+  const cssSignalCount = ['!important', '{', '}', 'padding:', 'width:', 'font-family:', 'word-wrap:']
+    .filter((token) => text.toLowerCase().includes(token)).length;
+
+  return cssSignalCount >= 3 ? '' : text;
 };
 
 function ComplianceBoardPage() {
@@ -211,6 +310,13 @@ function ComplianceBoardPage() {
   const [visibleMessageCounts, setVisibleMessageCounts] = useState({});
   const [issueHubSourceCategory, setIssueHubSourceCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
   const [issueHubWorkspaceCategory, setIssueHubWorkspaceCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
+  const [orderCommunicationWorkCategory, setOrderCommunicationWorkCategory] = useState(MESSAGE_CATEGORIES.INR);
+  const [fulfillmentIssueCategory, setFulfillmentIssueCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
+  const [fulfillmentProgressCategory, setFulfillmentProgressCategory] = useState(COLUMN_STATUS.NOT_FULFILLED);
+  const [returnFlowCategory, setReturnFlowCategory] = useState(COLUMN_STATUS.PROVIDE_RETURN_LABEL);
+  const [returnResolutionCategory, setReturnResolutionCategory] = useState(COLUMN_STATUS.PARTIAL_REFUND);
+  const [cancellationDecisionCategory, setCancellationDecisionCategory] = useState(COLUMN_STATUS.ACCEPTED);
+  const [inrRefundCategory, setInrRefundCategory] = useState(COLUMN_STATUS.INR_FULLY_REFUNDED);
   const [activeAlertPreviewId, setActiveAlertPreviewId] = useState(null);
 
   const buildDateParams = () => {
@@ -827,19 +933,25 @@ function ComplianceBoardPage() {
       ? `${days} day${days === 1 ? '' : 's'} ${remainderHours} hr${remainderHours === 1 ? '' : 's'}`
       : `${days} day${days === 1 ? '' : 's'}`;
   };
+  const isReturnOverdueAlert = (alertId) => [RETURN_LABEL_OVERDUE_ALERT_ID, PAYMENT_STATUS_OVERDUE_ALERT_ID].includes(alertId);
+  const isFulfillmentIssueOverdueAlert = (alertId) => Boolean(FULFILLMENT_ISSUE_STATUS_BY_ALERT_ID[alertId]);
+
   const getAlertPreviewItems = (boardCategory, alertId) => (
     boardCategory === 'order_communication'
       ? (messages[alertId] || [])
-      : boardCategory === 'return_refund' && alertId === RETURN_LABEL_OVERDUE_ALERT_ID
-        ? getOverdueReturnLabelOrders()
-        : boardCategory === 'return_refund' && alertId === PAYMENT_STATUS_OVERDUE_ALERT_ID
-          ? getOverduePaymentStatusOrders()
-        : (orders[alertId] || [])
+      : boardCategory === 'order_fulfillment' && isFulfillmentIssueOverdueAlert(alertId)
+        ? getOverdueFulfillmentIssueOrders(FULFILLMENT_ISSUE_STATUS_BY_ALERT_ID[alertId])
+        : boardCategory === 'return_refund' && alertId === RETURN_LABEL_OVERDUE_ALERT_ID
+          ? getOverdueReturnLabelOrders()
+          : boardCategory === 'return_refund' && alertId === PAYMENT_STATUS_OVERDUE_ALERT_ID
+            ? getOverduePaymentStatusOrders()
+            : (orders[alertId] || [])
   );
   const getAlertPreviewVisibleCount = (boardCategory, alertId) => (
     boardCategory === 'order_communication'
       ? getVisibleMessageCount(alertId)
-      : boardCategory === 'return_refund' && [RETURN_LABEL_OVERDUE_ALERT_ID, PAYMENT_STATUS_OVERDUE_ALERT_ID].includes(alertId)
+      : (boardCategory === 'return_refund' && isReturnOverdueAlert(alertId)) ||
+        (boardCategory === 'order_fulfillment' && isFulfillmentIssueOverdueAlert(alertId))
         ? (visibleOrderCounts[alertId] ?? LOAD_MORE_STEP)
         : getVisibleOrderCount(alertId)
   );
@@ -849,7 +961,10 @@ function ComplianceBoardPage() {
       return;
     }
 
-    if (boardCategory === 'return_refund' && [RETURN_LABEL_OVERDUE_ALERT_ID, PAYMENT_STATUS_OVERDUE_ALERT_ID].includes(alertId)) {
+    if (
+      (boardCategory === 'return_refund' && isReturnOverdueAlert(alertId)) ||
+      (boardCategory === 'order_fulfillment' && isFulfillmentIssueOverdueAlert(alertId))
+    ) {
       setVisibleOrderCounts((prev) => ({
         ...prev,
         [alertId]: Math.min(totalItems, (prev[alertId] ?? LOAD_MORE_STEP) + LOAD_MORE_STEP),
@@ -858,6 +973,39 @@ function ComplianceBoardPage() {
     }
 
     handleLoadMoreOrders(alertId);
+  };
+  const getFulfillmentIssueTimerStart = (order, status) => {
+    if (!order) return null;
+    if (status === COLUMN_STATUS.OUT_OF_STOCK) return order.outOfStockAssignedAt || order.updatedAt || null;
+    if (status === COLUMN_STATUS.CANCELLATION) return order.cancellationAssignedAt || order.updatedAt || null;
+    if (status === COLUMN_STATUS.ADDRESS_ISSUE) return order.addressIssueAssignedAt || order.updatedAt || null;
+    return null;
+  };
+  const getOverdueFulfillmentIssueOrders = (status) => {
+    const candidateOrders = orders[status] || [];
+    const nowMs = Date.now();
+
+    return candidateOrders.reduce((acc, order) => {
+      const startedAt = getFulfillmentIssueTimerStart(order, status);
+      const startedAtMs = parseTimeMs(startedAt);
+      if (!startedAtMs) return acc;
+
+      const elapsedMs = nowMs - startedAtMs;
+      if (elapsedMs <= RETURN_LABEL_SLA_MS) return acc;
+
+      acc.push({
+        ...order,
+        _overdueInfo: {
+          startedAt,
+          elapsedMs,
+          overdueMs: elapsedMs - RETURN_LABEL_SLA_MS,
+          sourceStatus: getColumnTitle(status),
+          alertType: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[status],
+          message: `Not moved to Not Fulfilled, Fulfilled, or Buyer Confirmation for ${formatElapsed(elapsedMs)}.`,
+        }
+      });
+      return acc;
+    }, []);
   };
   const getReturnBoardTimerStart = (order) => {
     if (!order) return null;
@@ -930,16 +1078,17 @@ function ComplianceBoardPage() {
         label: option.label,
         color: option.color,
         count: getIssueHubItems(option.id).length,
+        type: 'stat',
       }));
     }
 
     if (selectedCategory === 'order_communication') {
       return [
-        { id: MESSAGE_CATEGORIES.INR, label: 'INR', color: BRAND_RED, count: messages[MESSAGE_CATEGORIES.INR]?.length || 0 },
-        { id: MESSAGE_CATEGORIES.CANCELLATION, label: 'Cancellation', color: BRAND_ORANGE, count: messages[MESSAGE_CATEGORIES.CANCELLATION]?.length || 0 },
-        { id: MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE, label: 'Return / Refund / Replace', color: '#8b5cf6', count: messages[MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE]?.length || 0 },
-        { id: MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT, label: 'Issue with Product', color: '#ea580c', count: messages[MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT]?.length || 0 },
-        { id: MESSAGE_CATEGORIES.INQUIRY, label: 'Inquiry', color: BRAND_GREEN, count: messages[MESSAGE_CATEGORIES.INQUIRY]?.length || 0 },
+        { id: MESSAGE_CATEGORIES.INR, label: 'INR', color: BRAND_RED, count: messages[MESSAGE_CATEGORIES.INR]?.length || 0, type: 'stat' },
+        { id: MESSAGE_CATEGORIES.CANCELLATION, label: 'Cancellation', color: BRAND_ORANGE, count: messages[MESSAGE_CATEGORIES.CANCELLATION]?.length || 0, type: 'stat' },
+        { id: MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE, label: 'Return / Refund / Replace', color: '#8b5cf6', count: messages[MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE]?.length || 0, type: 'stat' },
+        { id: MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT, label: 'Issue with Product', color: '#ea580c', count: messages[MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT]?.length || 0, type: 'stat' },
+        { id: MESSAGE_CATEGORIES.INQUIRY, label: 'Inquiry', color: BRAND_GREEN, count: messages[MESSAGE_CATEGORIES.INQUIRY]?.length || 0, type: 'stat' },
       ];
     }
 
@@ -947,47 +1096,53 @@ function ComplianceBoardPage() {
       const overdueReturnLabelOrders = getOverdueReturnLabelOrders();
       const overduePaymentStatusOrders = getOverduePaymentStatusOrders();
       return [
-        { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.CASE_OPENED]?.length || 0 },
-        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0 },
-        { id: RETURN_LABEL_OVERDUE_ALERT_ID, label: '48h Not Moved', color: '#dc2626', count: overdueReturnLabelOrders.length },
-        { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: BRAND_BLUE, count: orders[COLUMN_STATUS.PROVIDE_RETURN_LABEL]?.length || 0 },
-        { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7', count: orders[COLUMN_STATUS.BUYER_DROP_OFF]?.length || 0 },
-        { id: COLUMN_STATUS.ITEM_DELIVERED, label: 'Item Delivered', color: '#06b6d4', count: orders[COLUMN_STATUS.ITEM_DELIVERED]?.length || 0 },
-        { id: PAYMENT_STATUS_OVERDUE_ALERT_ID, label: 'Payment Status', color: '#b91c1c', count: overduePaymentStatusOrders.length },
-        { id: COLUMN_STATUS.PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.PARTIAL_REFUND]?.length || 0 },
-        { id: COLUMN_STATUS.FULL_REFUND, label: 'Full Refund', color: BRAND_GREEN, count: orders[COLUMN_STATUS.FULL_REFUND]?.length || 0 },
-        { id: COLUMN_STATUS.REPLACEMENT, label: 'Replacement', color: '#0f766e', count: orders[COLUMN_STATUS.REPLACEMENT]?.length || 0 },
+        { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.CASE_OPENED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: BRAND_BLUE, count: orders[COLUMN_STATUS.PROVIDE_RETURN_LABEL]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7', count: orders[COLUMN_STATUS.BUYER_DROP_OFF]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.ITEM_DELIVERED, label: 'Item Delivered', color: '#06b6d4', count: orders[COLUMN_STATUS.ITEM_DELIVERED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.PARTIAL_REFUND]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.FULL_REFUND, label: 'Full Refund', color: BRAND_GREEN, count: orders[COLUMN_STATUS.FULL_REFUND]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.REPLACEMENT, label: 'Replacement', color: '#0f766e', count: orders[COLUMN_STATUS.REPLACEMENT]?.length || 0, type: 'stat' },
+        { id: RETURN_LABEL_OVERDUE_ALERT_ID, label: '48h Not Moved', color: '#dc2626', count: overdueReturnLabelOrders.length, type: 'alert' },
+        { id: PAYMENT_STATUS_OVERDUE_ALERT_ID, label: 'Payment Status', color: '#b91c1c', count: overduePaymentStatusOrders.length, type: 'alert' },
       ];
     }
 
     if (selectedCategory === 'cancellation') {
       return [
-        { id: COLUMN_STATUS.CANCELLATION_REQUEST, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.CANCELLATION_REQUEST]?.length || 0 },
-        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0 },
-        { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN, count: orders[COLUMN_STATUS.ACCEPTED]?.length || 0 },
-        { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.DECLINED]?.length || 0 },
+        { id: COLUMN_STATUS.CANCELLATION_REQUEST, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.CANCELLATION_REQUEST]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN, count: orders[COLUMN_STATUS.ACCEPTED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.DECLINED]?.length || 0, type: 'stat' },
       ];
     }
 
     if (selectedCategory === 'inr') {
       return [
-        { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.INR_CASE_OPENED]?.length || 0 },
-        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0 },
-        { id: COLUMN_STATUS.INR_FULLY_REFUNDED, label: 'Fully Refunded', color: BRAND_GREEN, count: orders[COLUMN_STATUS.INR_FULLY_REFUNDED]?.length || 0 },
-        { id: COLUMN_STATUS.INR_PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.INR_PARTIAL_REFUND]?.length || 0 },
-        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Resolved', color: BRAND_BLUE, count: orders[COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]?.length || 0 },
-        { id: COLUMN_STATUS.INR_CASE_CLOSED, label: 'Case Closed', color: '#10b981', count: orders[COLUMN_STATUS.INR_CASE_CLOSED]?.length || 0 },
+        { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.INR_CASE_OPENED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.INR_FULLY_REFUNDED, label: 'Fully Refunded', color: BRAND_GREEN, count: orders[COLUMN_STATUS.INR_FULLY_REFUNDED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.INR_PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.INR_PARTIAL_REFUND]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Resolved', color: BRAND_BLUE, count: orders[COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.INR_CASE_CLOSED, label: 'Case Closed', color: '#10b981', count: orders[COLUMN_STATUS.INR_CASE_CLOSED]?.length || 0, type: 'stat' },
       ];
     }
 
+    const overdueOutOfStockOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.OUT_OF_STOCK);
+    const overdueCancellationOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.CANCELLATION);
+    const overdueAddressIssueOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.ADDRESS_ISSUE);
     return [
-      { id: COLUMN_STATUS.TODO, label: 'To Do', color: BRAND_RED, count: orders[COLUMN_STATUS.TODO]?.length || 0 },
-      { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.OUT_OF_STOCK]?.length || 0 },
-      { id: COLUMN_STATUS.CANCELLATION, label: 'Cancellation', color: BRAND_BLUE, count: orders[COLUMN_STATUS.CANCELLATION]?.length || 0 },
-      { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', color: '#a855f7', count: orders[COLUMN_STATUS.ADDRESS_ISSUE]?.length || 0 },
-      { id: COLUMN_STATUS.NOT_FULFILLED, label: 'Not Fulfilled', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.NOT_FULFILLED]?.length || 0 },
-      { id: COLUMN_STATUS.FULFILLED, label: 'Fulfilled', color: BRAND_GREEN, count: orders[COLUMN_STATUS.FULFILLED]?.length || 0 },
-      { id: COLUMN_STATUS.BUYER_CONFIRMATION, label: 'Buyer Confirmation', color: '#0f766e', count: orders[COLUMN_STATUS.BUYER_CONFIRMATION]?.length || 0 },
+      { id: COLUMN_STATUS.TODO, label: 'To Do', color: BRAND_RED, count: orders[COLUMN_STATUS.TODO]?.length || 0, type: 'stat' },
+      { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.OUT_OF_STOCK]?.length || 0, type: 'stat' },
+      { id: COLUMN_STATUS.CANCELLATION, label: 'Cancellation', color: BRAND_BLUE, count: orders[COLUMN_STATUS.CANCELLATION]?.length || 0, type: 'stat' },
+      { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', color: '#a855f7', count: orders[COLUMN_STATUS.ADDRESS_ISSUE]?.length || 0, type: 'stat' },
+      { id: COLUMN_STATUS.NOT_FULFILLED, label: 'Not Fulfilled', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.NOT_FULFILLED]?.length || 0, type: 'stat' },
+      { id: COLUMN_STATUS.FULFILLED, label: 'Fulfilled', color: BRAND_GREEN, count: orders[COLUMN_STATUS.FULFILLED]?.length || 0, type: 'stat' },
+      { id: COLUMN_STATUS.BUYER_CONFIRMATION, label: 'Buyer Confirmation', color: '#0f766e', count: orders[COLUMN_STATUS.BUYER_CONFIRMATION]?.length || 0, type: 'stat' },
+      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.OUT_OF_STOCK], label: 'Out of Stock 48h+', color: '#dc2626', count: overdueOutOfStockOrders.length, type: 'alert' },
+      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.CANCELLATION], label: 'Cancellation 48h+', color: '#b91c1c', count: overdueCancellationOrders.length, type: 'alert' },
+      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.ADDRESS_ISSUE], label: 'Address Issue 48h+', color: '#7f1d1d', count: overdueAddressIssueOrders.length, type: 'alert' },
     ];
   };
 
@@ -1128,6 +1283,7 @@ function ComplianceBoardPage() {
 
       setOrders((prev) => {
         const appliedIds = new Set(moves.map((order) => order._id));
+        const appliedAt = new Date().toISOString();
         const next = { ...prev };
         Object.keys(next).forEach((columnId) => {
           next[columnId] = next[columnId].map((order) => {
@@ -1141,15 +1297,33 @@ function ComplianceBoardPage() {
               complianceBoardCategories: categories.includes(selectedCategory)
                 ? categories
                 : [...categories, selectedCategory],
+              outOfStockAssignedAt:
+                selectedCategory === 'order_fulfillment' && status === COLUMN_STATUS.OUT_OF_STOCK
+                  ? appliedAt
+                  : selectedCategory === 'order_fulfillment'
+                    ? null
+                    : order.outOfStockAssignedAt,
+              cancellationAssignedAt:
+                selectedCategory === 'order_fulfillment' && status === COLUMN_STATUS.CANCELLATION
+                  ? appliedAt
+                  : selectedCategory === 'order_fulfillment'
+                    ? null
+                    : order.cancellationAssignedAt,
+              addressIssueAssignedAt:
+                selectedCategory === 'order_fulfillment' && status === COLUMN_STATUS.ADDRESS_ISSUE
+                  ? appliedAt
+                  : selectedCategory === 'order_fulfillment'
+                    ? null
+                    : order.addressIssueAssignedAt,
               returnCaseNotOpenedAssignedAt:
                 selectedCategory === 'return_refund' && status === COLUMN_STATUS.CASE_NOT_OPENED
-                  ? new Date().toISOString()
+                  ? appliedAt
                   : selectedCategory === 'return_refund'
                     ? null
                     : order.returnCaseNotOpenedAssignedAt,
               returnItemDeliveredAssignedAt:
                 selectedCategory === 'return_refund' && status === COLUMN_STATUS.ITEM_DELIVERED
-                  ? new Date().toISOString()
+                  ? appliedAt
                   : selectedCategory === 'return_refund'
                     ? null
                     : order.returnItemDeliveredAssignedAt,
@@ -1553,7 +1727,7 @@ function ComplianceBoardPage() {
   const handleOpenMessageDialog = (orderOrThread) => {
     console.log('🔍 DIALOG OPEN - Raw thread data:', JSON.stringify(orderOrThread, null, 2));
     
-    // Normalize thread data to match Order structure expected by ChatDialog
+    // Normalize thread data to match the order-shaped object expected by the all-orders chat dialog.
     let normalizedData = orderOrThread;
     
     // Check if this is a thread (from Order Communication board) or an actual order
@@ -1646,7 +1820,7 @@ function ComplianceBoardPage() {
     const isInquiry = !item.orderId && (messageType === 'INQUIRY' || messageType === 'DIRECT' || item.itemId === 'DIRECT_MESSAGE');
     
     // Better display logic
-    const orderId = item.orderId || (isInquiry ? 'Inquiry' : '⚠️ Order ID Missing');
+    const orderId = item.orderId || (isInquiry ? 'Inquiry' : 'Order ID Missing');
     const itemTitle = item.itemTitle || item.productName || (messageType === 'INQUIRY' ? 'Inquiry Message' : (messageType === 'DIRECT' ? 'Direct Message' : 'No Item'));
     const lastMessageText = item.messageText || item.lastMessage || '';
     const unreadCount = item.unreadCount || 0;
@@ -1698,7 +1872,7 @@ function ComplianceBoardPage() {
             <Typography variant="caption" color="text.secondary" noWrap>
               {orderId}
             </Typography>
-            {orderId !== 'No Order ID' && (
+            {item.orderId && (
               <IconButton
                 size="small"
                 onClick={(e) => {
@@ -1765,7 +1939,7 @@ function ComplianceBoardPage() {
   };
 
   // Render message droppable column
-  const renderMessageColumn = (categoryId, title, color, height = 600) => {
+  const renderMessageColumn = (categoryId, title, color, height = 600, headerControl = null) => {
     const items = messages[categoryId] || [];
     const count = items.length;
     const visibleCount = getVisibleMessageCount(categoryId);
@@ -1800,9 +1974,11 @@ function ComplianceBoardPage() {
               borderBottom={`2px solid ${color}`}
               sx={{ flexShrink: 0 }}
             >
-              <Typography variant="h6" fontWeight={700} color={color}>
-                {title}
-              </Typography>
+              {headerControl || (
+                <Typography variant="h6" fontWeight={700} color={color}>
+                  {title}
+                </Typography>
+              )}
               <Stack direction="row" spacing={1} alignItems="center">
                 {categoryId !== MESSAGE_CATEGORIES.ALL_MESSAGES && (
                   <Button
@@ -1884,78 +2060,75 @@ function ComplianceBoardPage() {
   };
 
   // Render Order Communication Board
-  const renderOrderCommunicationBoard = (alerts) => (
-    <Box
-      sx={{
-        display: 'grid',
-        gridTemplateColumns: {
-          xs: '1fr',
-          md: 'repeat(2, minmax(0, 1fr))',
-          xl: 'minmax(0, 1.85fr) minmax(0, 0.9fr) minmax(0, 1.2fr) minmax(0, 0.95fr) minmax(260px, 0.9fr)'
-        },
-        gap: 2,
-        minWidth: 0,
-        alignItems: 'start'
-      }}
-    >
-      {/* COLUMN 1: All Messages */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-        {renderMessageColumn(
-          MESSAGE_CATEGORIES.ALL_MESSAGES,
-          'All Messages',
-          BRAND_BLUE,
-          740
-        )}
-      </Box>
+  const renderOrderCommunicationBoard = (alerts) => {
+    const workOption = ORDER_COMMUNICATION_WORK_OPTIONS.find((option) => option.id === orderCommunicationWorkCategory)
+      || ORDER_COMMUNICATION_WORK_OPTIONS[0];
+    const handleAlertSelect = (alertId) => {
+      setActiveAlertPreviewId(alertId);
+      if (ORDER_COMMUNICATION_WORK_OPTIONS.some((option) => option.id === alertId)) {
+        setOrderCommunicationWorkCategory(alertId);
+      }
+    };
+    const workHeader = (
+      <FormControl size="small" sx={{ minWidth: 220 }}>
+        <InputLabel>Box View</InputLabel>
+        <Select
+          label="Box View"
+          value={orderCommunicationWorkCategory}
+          onChange={(event) => setOrderCommunicationWorkCategory(event.target.value)}
+          sx={{
+            fontWeight: 800,
+            color: workOption.color,
+            '& .MuiSelect-select': { py: 0.6 }
+          }}
+        >
+          {ORDER_COMMUNICATION_WORK_OPTIONS.map((option) => (
+            <MenuItem key={option.id} value={option.id}>
+              {option.label}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+    );
 
-      {/* COLUMN 2: INR & Cancellation (Narrower) */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-        {renderMessageColumn(
-          MESSAGE_CATEGORIES.INR,
-          'INR',
-          BRAND_RED,
-          360
-        )}
-        {renderMessageColumn(
-          MESSAGE_CATEGORIES.CANCELLATION,
-          'Cancellation',
-          BRAND_ORANGE,
-          360
-        )}
-      </Box>
+    return (
+      <Box
+        sx={{
+          display: 'grid',
+          gridTemplateColumns: {
+            xs: '1fr',
+            lg: 'minmax(0, 1.15fr) minmax(0, 1.35fr) 280px'
+          },
+          gap: 2,
+          minWidth: 0,
+          alignItems: 'start'
+        }}
+      >
+        <Box sx={{ minWidth: 0 }}>
+          {renderMessageColumn(
+            MESSAGE_CATEGORIES.ALL_MESSAGES,
+            'All Messages',
+            BRAND_BLUE,
+            740
+          )}
+        </Box>
 
-      {/* COLUMN 3: Return/Refund (Wider & Stretched) */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-        {renderMessageColumn(
-          MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE,
-          'Return / Refund / Replace',
-          '#8b5cf6',
-          740
-        )}
-      </Box>
+        <Box sx={{ minWidth: 0 }}>
+          {renderMessageColumn(
+            workOption.id,
+            workOption.label,
+            workOption.color,
+            740,
+            workHeader
+          )}
+        </Box>
 
-      {/* COLUMN 4: Issue with Product & Inquiry */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-        {renderMessageColumn(
-          MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT,
-          'Issue with Product',
-          '#ea580c',
-          360
-        )}
-        {renderMessageColumn(
-          MESSAGE_CATEGORIES.INQUIRY,
-          'Inquiry',
-          BRAND_GREEN,
-          360
-        )}
+        <Box sx={{ minWidth: 0 }}>
+          {renderAlertsTile(alerts, activeAlertPreviewId, handleAlertSelect)}
+        </Box>
       </Box>
-
-      {/* COLUMN 5: Alerts */}
-      <Box sx={{ minWidth: 0 }}>
-        {renderAlertsTile(alerts, activeAlertPreviewId, setActiveAlertPreviewId)}
-      </Box>
-    </Box>
-  );
+    );
+  };
 
   const renderIssueHubBoard = () => {
     const sourceOption = getIssueHubOption(issueHubSourceCategory);
@@ -2024,6 +2197,7 @@ function ComplianceBoardPage() {
       (selectedCategory === 'cancellation' || selectedCategory === 'inr') &&
       order.complianceBoardSource === 'order_communication'
     );
+    const trackingNumber = order.manualTrackingNumber || order.trackingNumber || '';
 
     return (
       <Card
@@ -2101,6 +2275,30 @@ function ComplianceBoardPage() {
 
                 {/* Additional Info */}
                 <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                  {selectedCategory === 'inr' && trackingNumber && (
+                    <Chip
+                      label={`Tracking: ${trackingNumber}`}
+                      size="small"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCopy(trackingNumber);
+                      }}
+                      sx={{
+                        bgcolor: '#dcfce7',
+                        color: '#166534',
+                        fontSize: '0.75rem',
+                        height: 24,
+                        fontWeight: 700,
+                        maxWidth: '100%',
+                        cursor: 'copy',
+                        '& .MuiChip-label': {
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }
+                      }}
+                    />
+                  )}
                   {showOrderCommunicationBadge && (
                     <Chip
                       label="From Order Communication"
@@ -2135,7 +2333,7 @@ function ComplianceBoardPage() {
   };
 
   // Helper function to render a droppable column
-  const renderDroppableColumn = (status, title, color, height = '100%', minHeight = 500) => {
+  const renderDroppableColumn = (status, title, color, height = '100%', minHeight = 500, headerControl = null) => {
     const visibleCount = getVisibleOrderCount(status);
     const remainingCount = Math.max(0, (orders[status]?.length || 0) - visibleCount);
 
@@ -2167,9 +2365,11 @@ function ComplianceBoardPage() {
             borderBottom={`2px solid ${color}`}
             sx={{ flexShrink: 0 }}
           >
-            <Typography variant="h6" fontWeight={700} sx={{ color, fontSize: '1rem' }}>
-              {title}
-            </Typography>
+            {headerControl || (
+              <Typography variant="h6" fontWeight={700} sx={{ color, fontSize: '1rem' }}>
+                {title}
+              </Typography>
+            )}
             <Stack direction="row" spacing={1} alignItems="center">
               <Button
                 size="small"
@@ -2231,7 +2431,7 @@ function ComplianceBoardPage() {
     const isInquiry = !item.orderId && (messageType === 'INQUIRY' || messageType === 'DIRECT' || item.itemId === 'DIRECT_MESSAGE');
     const orderId = item.orderId || (isInquiry ? 'Inquiry' : 'Order ID Missing');
     const itemTitle = item.itemTitle || item.productName || (messageType === 'INQUIRY' ? 'Inquiry Message' : (messageType === 'DIRECT' ? 'Direct Message' : 'No Item'));
-    const lastMessageText = item.messageText || item.lastMessage || '';
+    const lastMessageText = cleanMessagePreviewText(item.messageText || item.lastMessage || '');
     const unreadCount = item.unreadCount || 0;
     const messageDate = item.lastDate || item.lastMessageDate || item.messageDate;
 
@@ -2389,7 +2589,9 @@ function ComplianceBoardPage() {
                   </Typography>
                 )}
                 <Typography variant="caption" sx={{ color: '#b91c1c', display: 'block' }}>
-                  {overdueInfo.alertType === PAYMENT_STATUS_OVERDUE_ALERT_ID
+                  {overdueInfo.message
+                    ? overdueInfo.message
+                    : overdueInfo.alertType === PAYMENT_STATUS_OVERDUE_ALERT_ID
                     ? `Still waiting for refund action for ${formatElapsed(overdueInfo.elapsedMs)}.`
                     : `Not moved to Provide Return Label for ${formatElapsed(overdueInfo.elapsedMs)}.`}
                 </Typography>
@@ -2399,6 +2601,27 @@ function ComplianceBoardPage() {
               </Box>
             )}
             <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+              {selectedCategory === 'inr' && trackingNumber && (
+                <Chip
+                  label={`Tracking: ${trackingNumber}`}
+                  size="small"
+                  onClick={() => handleCopy(trackingNumber)}
+                  sx={{
+                    bgcolor: '#dcfce7',
+                    color: '#166534',
+                    fontSize: '0.75rem',
+                    height: 24,
+                    fontWeight: 700,
+                    maxWidth: '100%',
+                    cursor: 'copy',
+                    '& .MuiChip-label': {
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }
+                  }}
+                />
+              )}
               {returnStatusChip && selectedCategory === 'return_refund' && (
                 <Chip label={returnStatusChip} size="small" sx={returnStatusChipSx} />
               )}
@@ -2510,44 +2733,40 @@ function ComplianceBoardPage() {
   );
 
   const renderAlertsTile = (alerts, activeId, onSelect) => {
-    const returnRefundStats = selectedCategory === 'return_refund'
-      ? alerts.filter((alert) => ![RETURN_LABEL_OVERDUE_ALERT_ID, PAYMENT_STATUS_OVERDUE_ALERT_ID].includes(alert.id))
-      : [];
-    const returnRefundAlerts = selectedCategory === 'return_refund'
-      ? alerts.filter((alert) => [RETURN_LABEL_OVERDUE_ALERT_ID, PAYMENT_STATUS_OVERDUE_ALERT_ID].includes(alert.id))
-      : [];
+    const statItems = alerts.filter((alert) => alert.type !== 'alert');
+    const alertItems = alerts.filter((alert) => alert.type === 'alert');
 
     return (
       <Paper sx={{ p: 2, height: '100%', minHeight: 740, borderRadius: 2, border: '2px solid #e2e8f0', display: 'flex', flexDirection: 'column' }}>
         <Typography variant="h6" fontWeight={700} sx={{ color: BRAND_DARK, mb: 1.5, pb: 1.5, borderBottom: '2px solid #e2e8f0' }}>
-          Alerts
+          Stats
         </Typography>
 
-        {selectedCategory === 'return_refund' ? (
-          <Stack spacing={2} sx={{ overflowY: 'auto' }}>
-            <Box>
-              <Typography variant="subtitle2" fontWeight={700} sx={{ color: BRAND_DARK, mb: 1 }}>
-                Statistics
-              </Typography>
-              <Stack spacing={1}>
-                {returnRefundStats.map((alert) => renderAlertButton(alert, activeId, onSelect))}
-              </Stack>
-            </Box>
+        <Stack spacing={2} sx={{ overflowY: 'auto' }}>
+          <Box>
+            <Typography variant="subtitle2" fontWeight={700} sx={{ color: BRAND_DARK, mb: 1 }}>
+              Stats
+            </Typography>
+            <Stack spacing={1}>
+              {statItems.map((alert) => renderAlertButton(alert, activeId, onSelect))}
+            </Stack>
+          </Box>
 
-            <Box>
-              <Typography variant="subtitle2" fontWeight={700} sx={{ color: '#b91c1c', mb: 1 }}>
-                Alerts
-              </Typography>
+          <Box>
+            <Typography variant="subtitle2" fontWeight={700} sx={{ color: '#b91c1c', mb: 1 }}>
+              Alerts
+            </Typography>
+            {alertItems.length > 0 ? (
               <Stack spacing={1}>
-                {returnRefundAlerts.map((alert) => renderAlertButton(alert, activeId, onSelect))}
+                {alertItems.map((alert) => renderAlertButton(alert, activeId, onSelect))}
               </Stack>
-            </Box>
-          </Stack>
-        ) : (
-          <Stack spacing={1} sx={{ overflowY: 'auto' }}>
-            {alerts.map((alert) => renderAlertButton(alert, activeId, onSelect))}
-          </Stack>
-        )}
+            ) : (
+              <Typography variant="caption" color="text.secondary">
+                No overdue alerts.
+              </Typography>
+            )}
+          </Box>
+        </Stack>
       </Paper>
     );
   };
@@ -2559,10 +2778,38 @@ function ComplianceBoardPage() {
     </Box>
   );
 
+  const renderColumnViewSelect = (label, value, options, onChange) => {
+    const selected = options.find((option) => option.id === value) || options[0];
+    return (
+      <FormControl size="small" sx={{ minWidth: 220 }}>
+        <InputLabel>{label}</InputLabel>
+        <Select
+          label={label}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          sx={{
+            fontWeight: 800,
+            color: selected.color,
+            '& .MuiSelect-select': { py: 0.6 }
+          }}
+        >
+          {options.map((option) => (
+            <MenuItem key={option.id} value={option.id}>
+              {option.label}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+    );
+  };
+
   // Render Return/Refund Board
-  const renderReturnRefundBoard = () => (
+  const renderReturnRefundBoard = () => {
+    const flowOption = RETURN_FLOW_OPTIONS.find((option) => option.id === returnFlowCategory) || RETURN_FLOW_OPTIONS[0];
+    const resolutionOption = RETURN_RESOLUTION_OPTIONS.find((option) => option.id === returnResolutionCategory) || RETURN_RESOLUTION_OPTIONS[0];
+
+    return (
     <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'repeat(3, 1fr)' }, gap: 3 }}>
-      {/* TILE 1: Case Opened & Case Not Opened */}
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {renderDroppableColumn(
           COLUMN_STATUS.CASE_OPENED,
@@ -2580,62 +2827,37 @@ function ComplianceBoardPage() {
         )}
       </Box>
 
-      {/* TILE 2: Provide Return Label, Buyer Drop Off, Item Delivered */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Box sx={{ minWidth: 0 }}>
         {renderDroppableColumn(
-          COLUMN_STATUS.PROVIDE_RETURN_LABEL,
-          getColumnTitle(COLUMN_STATUS.PROVIDE_RETURN_LABEL),
-          getColumnColor(COLUMN_STATUS.PROVIDE_RETURN_LABEL),
-          '240px',
-          0
-        )}
-        {renderDroppableColumn(
-          COLUMN_STATUS.BUYER_DROP_OFF,
-          getColumnTitle(COLUMN_STATUS.BUYER_DROP_OFF),
-          getColumnColor(COLUMN_STATUS.BUYER_DROP_OFF),
-          '240px',
-          0
-        )}
-        {renderDroppableColumn(
-          COLUMN_STATUS.ITEM_DELIVERED,
-          getColumnTitle(COLUMN_STATUS.ITEM_DELIVERED),
-          getColumnColor(COLUMN_STATUS.ITEM_DELIVERED),
-          '240px',
-          0
+          flowOption.id,
+          flowOption.label,
+          flowOption.color,
+          '740px',
+          0,
+          renderColumnViewSelect('Box View', returnFlowCategory, RETURN_FLOW_OPTIONS, setReturnFlowCategory)
         )}
       </Box>
 
-      {/* TILE 3: Partial Refund, Full Refund & Replacement */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Box sx={{ minWidth: 0 }}>
         {renderDroppableColumn(
-          COLUMN_STATUS.PARTIAL_REFUND,
-          getColumnTitle(COLUMN_STATUS.PARTIAL_REFUND),
-          getColumnColor(COLUMN_STATUS.PARTIAL_REFUND),
-          '240px',
-          0
-        )}
-        {renderDroppableColumn(
-          COLUMN_STATUS.FULL_REFUND,
-          getColumnTitle(COLUMN_STATUS.FULL_REFUND),
-          getColumnColor(COLUMN_STATUS.FULL_REFUND),
-          '240px',
-          0
-        )}
-        {renderDroppableColumn(
-          COLUMN_STATUS.REPLACEMENT,
-          getColumnTitle(COLUMN_STATUS.REPLACEMENT),
-          getColumnColor(COLUMN_STATUS.REPLACEMENT),
-          '240px',
-          0
+          resolutionOption.id,
+          resolutionOption.label,
+          resolutionOption.color,
+          '740px',
+          0,
+          renderColumnViewSelect('Box View', returnResolutionCategory, RETURN_RESOLUTION_OPTIONS, setReturnResolutionCategory)
         )}
       </Box>
     </Box>
-  );
+    );
+  };
 
   // Render Cancellation Board
-  const renderCancellationBoard = () => (
+  const renderCancellationBoard = () => {
+    const decisionOption = CANCELLATION_DECISION_OPTIONS.find((option) => option.id === cancellationDecisionCategory) || CANCELLATION_DECISION_OPTIONS[0];
+
+    return (
     <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'repeat(2, 1fr)' }, gap: 3 }}>
-      {/* TILE 1: Case Opened & Case Not Opened */}
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {renderDroppableColumn(
           COLUMN_STATUS.CANCELLATION_REQUEST,
@@ -2653,30 +2875,26 @@ function ComplianceBoardPage() {
         )}
       </Box>
 
-      {/* TILE 2: Accepted & Declined */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Box sx={{ minWidth: 0 }}>
         {renderDroppableColumn(
-          COLUMN_STATUS.ACCEPTED,
-          getColumnTitle(COLUMN_STATUS.ACCEPTED),
-          getColumnColor(COLUMN_STATUS.ACCEPTED),
-          '220px',
-          0
-        )}
-        {renderDroppableColumn(
-          COLUMN_STATUS.DECLINED,
-          getColumnTitle(COLUMN_STATUS.DECLINED),
-          getColumnColor(COLUMN_STATUS.DECLINED),
-          '220px',
-          0
+          decisionOption.id,
+          decisionOption.label,
+          decisionOption.color,
+          '580px',
+          0,
+          renderColumnViewSelect('Box View', cancellationDecisionCategory, CANCELLATION_DECISION_OPTIONS, setCancellationDecisionCategory)
         )}
       </Box>
     </Box>
-  );
+    );
+  };
 
   // Render INR Board
-  const renderINRBoard = () => (
+  const renderINRBoard = () => {
+    const refundOption = INR_REFUND_OPTIONS.find((option) => option.id === inrRefundCategory) || INR_REFUND_OPTIONS[0];
+
+    return (
     <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'repeat(3, 1fr)' }, gap: 3 }}>
-      {/* TILE 1: Case Opened & Case Not Opened */}
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {renderDroppableColumn(
           COLUMN_STATUS.INR_CASE_OPENED,
@@ -2694,32 +2912,17 @@ function ComplianceBoardPage() {
         )}
       </Box>
 
-      {/* TILE 2: Fully Refunded, Partial Refund, Not Refunded but Resolved */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Box sx={{ minWidth: 0 }}>
         {renderDroppableColumn(
-          COLUMN_STATUS.INR_FULLY_REFUNDED,
-          getColumnTitle(COLUMN_STATUS.INR_FULLY_REFUNDED),
-          getColumnColor(COLUMN_STATUS.INR_FULLY_REFUNDED),
-          '190px',
-          0
-        )}
-        {renderDroppableColumn(
-          COLUMN_STATUS.INR_PARTIAL_REFUND,
-          getColumnTitle(COLUMN_STATUS.INR_PARTIAL_REFUND),
-          getColumnColor(COLUMN_STATUS.INR_PARTIAL_REFUND),
-          '190px',
-          0
-        )}
-        {renderDroppableColumn(
-          COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED,
-          getColumnTitle(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED),
-          getColumnColor(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED),
-          '190px',
-          0
+          refundOption.id,
+          refundOption.label,
+          refundOption.color,
+          '580px',
+          0,
+          renderColumnViewSelect('Box View', inrRefundCategory, INR_REFUND_OPTIONS, setInrRefundCategory)
         )}
       </Box>
 
-      {/* TILE 3: Case Closed */}
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {renderDroppableColumn(
           COLUMN_STATUS.INR_CASE_CLOSED,
@@ -2730,7 +2933,8 @@ function ComplianceBoardPage() {
         )}
       </Box>
     </Box>
-  );
+    );
+  };
 
   return (
     <Box sx={{ p: 3, bgcolor: '#f8fafc', minHeight: '100vh' }}>
@@ -2909,6 +3113,8 @@ function ComplianceBoardPage() {
             /* Default Order Fulfillment Board */
           (() => {
             const fulfillmentAlerts = getAlertsForCurrentBoard();
+            const issueOption = ORDER_FULFILLMENT_ISSUE_OPTIONS.find((option) => option.id === fulfillmentIssueCategory) || ORDER_FULFILLMENT_ISSUE_OPTIONS[0];
+            const progressOption = ORDER_FULFILLMENT_PROGRESS_OPTIONS.find((option) => option.id === fulfillmentProgressCategory) || ORDER_FULFILLMENT_PROGRESS_OPTIONS[0];
             return (
               <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', xl: 'minmax(0, 1fr) 320px' }, gap: 3, alignItems: 'start' }}>
                 <Box sx={{ minWidth: 0 }}>
@@ -2924,53 +3130,25 @@ function ComplianceBoardPage() {
                       )}
                     </Box>
 
-                    {/* Section 2: Issue Categories (Out of Stock, Cancellation, Address Issue) */}
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <Box sx={{ minWidth: 0 }}>
                       {renderDroppableColumn(
-                        COLUMN_STATUS.OUT_OF_STOCK,
-                        getColumnTitle(COLUMN_STATUS.OUT_OF_STOCK),
-                        BRAND_ORANGE,
-                        '240px',
-                        0
-                      )}
-                      {renderDroppableColumn(
-                        COLUMN_STATUS.CANCELLATION,
-                        getColumnTitle(COLUMN_STATUS.CANCELLATION),
-                        BRAND_BLUE,
-                        '240px',
-                        0
-                      )}
-                      {renderDroppableColumn(
-                        COLUMN_STATUS.ADDRESS_ISSUE,
-                        getColumnTitle(COLUMN_STATUS.ADDRESS_ISSUE),
-                        '#a855f7',
-                        '240px',
-                        0
+                        issueOption.id,
+                        issueOption.label,
+                        issueOption.color,
+                        '740px',
+                        0,
+                        renderColumnViewSelect('Box View', fulfillmentIssueCategory, ORDER_FULFILLMENT_ISSUE_OPTIONS, setFulfillmentIssueCategory)
                       )}
                     </Box>
 
-                    {/* Section 3: Fulfillment Status */}
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <Box sx={{ minWidth: 0 }}>
                       {renderDroppableColumn(
-                        COLUMN_STATUS.NOT_FULFILLED,
-                        getColumnTitle(COLUMN_STATUS.NOT_FULFILLED),
-                        BRAND_YELLOW_DARK,
-                        '240px',
-                        0
-                      )}
-                      {renderDroppableColumn(
-                        COLUMN_STATUS.FULFILLED,
-                        getColumnTitle(COLUMN_STATUS.FULFILLED),
-                        BRAND_GREEN,
-                        '240px',
-                        0
-                      )}
-                      {renderDroppableColumn(
-                        COLUMN_STATUS.BUYER_CONFIRMATION,
-                        getColumnTitle(COLUMN_STATUS.BUYER_CONFIRMATION),
-                        '#0f766e',
-                        '240px',
-                        0
+                        progressOption.id,
+                        progressOption.label,
+                        progressOption.color,
+                        '740px',
+                        0,
+                        renderColumnViewSelect('Box View', fulfillmentProgressCategory, ORDER_FULFILLMENT_PROGRESS_OPTIONS, setFulfillmentProgressCategory)
                       )}
                     </Box>
                   </Box>
@@ -3019,7 +3197,7 @@ function ComplianceBoardPage() {
       )}
 
       {/* Chat Dialog for messaging */}
-      <ChatDialog
+      <AllOrdersChatDialog
         open={messageModalOpen}
         onClose={handleCloseMessageDialog}
         order={selectedOrderForMessage}

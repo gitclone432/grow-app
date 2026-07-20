@@ -7662,6 +7662,7 @@ router.post('/sync-inbox', requireAuth, requirePageAccess('BuyerMessages'), asyn
 // 2. LIGHT SYNC: Active Thread Poll
 router.post('/sync-thread', requireAuth, requirePageAccess('BuyerMessages'), async (req, res) => {
   const { sellerId, buyerUsername, itemId, orderId } = req.body;
+  const lookbackDays = Math.min(Math.max(parseInt(req.body.lookbackDays, 10) || 365, 1), 730);
 
   if (!sellerId || !buyerUsername) return res.status(400).json({ error: 'Missing identifiers' });
 
@@ -7672,7 +7673,7 @@ router.post('/sync-thread', requireAuth, requirePageAccess('BuyerMessages'), asy
     const token = await ensureValidToken(seller);
 
     const now = new Date();
-    const startTime = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const startTime = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
     const endTime = now.toISOString();
 
     const fetchThreadMessagesPage = async (pageNumber) => {
@@ -7737,10 +7738,27 @@ router.post('/sync-thread', requireAuth, requirePageAccess('BuyerMessages'), asy
       itemTitle = order?.productName || null;
       messageType = 'ORDER';
     } else if (itemId && itemId !== 'DIRECT_MESSAGE') {
-      const order = await Order.findOne({
+      let order = null;
+      const buyerUsernameRegex = new RegExp(`^${escapeRegexLiteral(buyerUsername)}$`, 'i');
+      const exactBuyerOrders = await Order.find({
+        seller: seller._id,
         'lineItems.legacyItemId': itemId,
-        'buyer.username': buyerUsername
-      }).select('orderId productName').lean();
+        'buyer.username': buyerUsernameRegex
+      }).select('orderId productName').sort({ dateSold: -1 }).limit(2).lean();
+      if (exactBuyerOrders.length === 1) {
+        order = exactBuyerOrders[0];
+      }
+
+      if (!order && exactBuyerOrders.length === 0) {
+        const fallbackOrders = await Order.find({
+          seller: seller._id,
+          'lineItems.legacyItemId': itemId
+        }).select('orderId productName').sort({ dateSold: -1 }).limit(2).lean();
+        if (fallbackOrders.length === 1) {
+          order = fallbackOrders[0];
+        }
+      }
+
       if (order) {
         threadOrderId = order.orderId;
         itemTitle = order.productName || null;
@@ -7772,7 +7790,8 @@ router.post('/sync-thread', requireAuth, requirePageAccess('BuyerMessages'), asy
       orderId: threadOrderId,
       itemId: finalItemId,
       itemTitle,
-      messageType
+      messageType,
+      lookbackDays
     });
     buyerNew += myMailResult.buyerNew;
     sellerNew += myMailResult.sellerNew;
@@ -8222,19 +8241,26 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       pipeline.push({ $match: initialMatch });
     }
 
-    // 2. Group by conversation (buyer + item, NOT orderId to consolidate threads).
+    // 2. Group by conversation. Keep orderId in the key when it exists so repeat
+    // purchases from the same buyer for the same item do not collapse together.
     // Avoid sorting the raw messages collection first; that can exceed MongoDB's
     // 32 MB in-memory sort limit on larger message histories.
     pipeline.push({
       $group: {
         _id: {
+          seller: "$seller",
           buyer: "$buyerUsername",
-          item: "$itemId"
+          item: "$itemId",
+          order: {
+            $cond: [
+              { $or: [{ $eq: ["$orderId", null] }, { $eq: ["$orderId", ""] }] },
+              null,
+              "$orderId"
+            ]
+          }
         },
         sellerId: { $first: "$seller" },
-        lastMessage: { $first: "$body" },
         lastDate: { $max: "$messageDate" },
-        sender: { $first: "$sender" },
         itemTitle: { $first: "$itemTitle" },
         messageType: { $first: "$messageType" },
         conversationIds: { $addToSet: "$conversationId" },
@@ -8246,26 +8272,40 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
     });
 
     pipeline.push({
-      $addFields: {
-        orderId: {
-          $let: {
-            vars: {
-              ids: {
-                $filter: {
-                  input: '$orderIds',
-                  as: 'oid',
-                  cond: {
-                    $and: [
-                      { $ne: ['$$oid', null] },
-                      { $ne: ['$$oid', ''] }
-                    ]
-                  }
-                }
+      $lookup: {
+        from: 'messages',
+        let: {
+          sellerId: '$sellerId',
+          buyerUsername: '$_id.buyer',
+          itemId: '$_id.item',
+          orderId: '$_id.order',
+          lastDate: '$lastDate'
+        },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$seller', '$$sellerId'] },
+                  { $eq: ['$buyerUsername', '$$buyerUsername'] },
+                  { $eq: ['$itemId', '$$itemId'] },
+                  { $eq: [{ $ifNull: ['$orderId', null] }, { $ifNull: ['$$orderId', null] }] },
+                  { $eq: ['$messageDate', '$$lastDate'] }
+                ]
               }
-            },
-            in: { $arrayElemAt: ['$$ids', 0] }
-          }
-        }
+            }
+          },
+          { $sort: { _id: -1 } },
+          { $limit: 1 },
+          { $project: { body: 1, sender: 1, subject: 1 } }
+        ],
+        as: 'latestMessageDoc'
+      }
+    });
+
+    pipeline.push({
+      $addFields: {
+        orderId: "$_id.order"
       }
     });
 
@@ -8286,9 +8326,9 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         buyerUsername: "$_id.buyer",
         itemId: "$_id.item",
         sellerId: 1,
-        lastMessage: 1,
+        lastMessage: { $ifNull: [{ $arrayElemAt: ['$latestMessageDoc.body', 0] }, ''] },
         lastDate: 1,
-        sender: 1,
+        sender: { $arrayElemAt: ['$latestMessageDoc.sender', 0] },
         itemTitle: 1,
         messageType: 1,
         conversationId: {
@@ -8590,6 +8630,76 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
     let threads = result[0].data;
     let total = result[0].metadata[0] ? result[0].metadata[0].total : 0;
 
+    const resolveOrderForThread = async (thread) => {
+      if (!thread?.itemId || thread.itemId === 'DIRECT_MESSAGE' || !thread.sellerId) return null;
+      const buyerUsername = String(thread.buyerUsername || '').trim();
+      const buyerUsernameRegex = buyerUsername ? new RegExp(`^${escapeRegex(buyerUsername)}$`, 'i') : null;
+      const baseQuery = {
+        seller: thread.sellerId,
+        'lineItems.legacyItemId': thread.itemId
+      };
+
+      if (buyerUsernameRegex) {
+        const exactBuyerOrders = await Order.find({
+          ...baseQuery,
+          'buyer.username': buyerUsernameRegex
+        }).select('orderId productName purchaseMarketplaceId lineItems').sort({ dateSold: -1 }).limit(2).lean();
+        if (exactBuyerOrders.length === 1) return exactBuyerOrders[0];
+        if (exactBuyerOrders.length > 1) return null;
+      }
+
+      const lastDate = thread.lastDate ? new Date(thread.lastDate) : null;
+      if (lastDate && !Number.isNaN(lastDate.getTime())) {
+        const from = new Date(lastDate.getTime() - 45 * 24 * 60 * 60 * 1000);
+        const to = new Date(lastDate.getTime() + 2 * 24 * 60 * 60 * 1000);
+        const dateWindowQuery = {
+          ...baseQuery,
+          dateSold: { $gte: from, $lte: to }
+        };
+        if (buyerUsernameRegex) {
+          dateWindowQuery.$or = [
+            { 'buyer.username': buyerUsernameRegex },
+            { 'buyer.buyerRegistrationAddress.fullName': buyerUsernameRegex }
+          ];
+        }
+        const dateWindowOrders = await Order.find(dateWindowQuery)
+          .select('orderId productName purchaseMarketplaceId lineItems')
+          .sort({ dateSold: -1 })
+          .limit(2)
+          .lean();
+        if (dateWindowOrders.length === 1) return dateWindowOrders[0];
+      }
+
+      const fallbackOrders = await Order.find(baseQuery)
+        .select('orderId productName purchaseMarketplaceId lineItems')
+        .sort({ dateSold: -1 })
+        .limit(2)
+        .lean();
+      return fallbackOrders.length === 1 ? fallbackOrders[0] : null;
+    };
+
+    const threadsMissingOrderId = threads.filter(
+      (thread) => !thread.orderId && thread.itemId && thread.itemId !== 'DIRECT_MESSAGE' && thread.sellerId
+    );
+    await Promise.all(threadsMissingOrderId.map(async (thread) => {
+      const order = await resolveOrderForThread(thread);
+
+      if (order) {
+        thread.orderId = order.orderId;
+        thread.itemTitle = thread.itemTitle || order.lineItems?.[0]?.title || order.productName || '';
+        thread.orderMarketplaceId = order.purchaseMarketplaceId || thread.orderMarketplaceId;
+        thread.computedMarketplaceId = order.purchaseMarketplaceId || thread.computedMarketplaceId;
+        thread.actualMessageType = 'ORDER';
+        await backfillThreadOrderId({
+          sellerId: thread.sellerId,
+          buyerUsername: thread.buyerUsername,
+          itemId: thread.itemId,
+          orderId: order.orderId,
+          messageType: 'ORDER'
+        });
+      }
+    }));
+
     // --- ORDER FALLBACK SEARCH ---
     // If a search term is provided, also look up matching Orders directly.
     // This handles the case where an order exists but has never had a message synced.
@@ -8774,17 +8884,18 @@ router.get('/chat/messages', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'buyerUsername is required' });
     }
 
-    const matchClauses = [];
-    if (orderId) matchClauses.push({ orderId });
-    if (itemId) matchClauses.push({ itemId });
-    if (matchClauses.length === 0) {
+    const query = {
+      buyerUsername
+    };
+
+    if (orderId) {
+      query.orderId = orderId;
+    } else if (itemId) {
+      query.itemId = itemId;
+      query.orderId = null;
+    } else {
       return res.status(400).json({ error: 'orderId or itemId is required' });
     }
-
-    const query = {
-      buyerUsername,
-      $or: matchClauses
-    };
 
     if (sellerId) {
       query.seller = new mongoose.Types.ObjectId(sellerId);

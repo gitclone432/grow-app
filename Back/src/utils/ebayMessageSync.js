@@ -9,46 +9,119 @@ const EBAY_XML_HEADERS = {
   'Content-Type': 'text/xml'
 };
 
-export function extractTextFromHtml(html) {
-  if (!html) return '';
-
-  if (!/<[^>]+>/.test(html)) {
-    return html.trim();
-  }
-
-  let cleanText = '';
-
-  const userInputMatch = html.match(/<div\s+id=["']UserInputtedText["'][^>]*>(.*?)<\/div>/is);
-  if (userInputMatch && userInputMatch[1]) {
-    cleanText = userInputMatch[1];
-  } else {
-    const v4Match = html.match(/<div\s+id=["']V4PrimaryMessage["'][^>]*>.*?<strong>Dear[^<]*<\/strong>\s*(?:<br\s*\/?>)*\s*(.*?)\s*(?:<br\s*\/?>)*\s*<\/font>/is);
-    if (v4Match && v4Match[1]) {
-      cleanText = v4Match[1];
-    } else {
-      cleanText = html;
-    }
-  }
-
-  cleanText = cleanText.replace(/<[^>]+>/g, ' ');
-  cleanText = cleanText
+function decodeHtmlEntities(text = '') {
+  return String(text)
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'");
+    .replace(/&apos;/g, "'")
+    .replace(/&copy;/g, '(c)');
+}
+
+function stripEbayNotificationNoise(text = '') {
+  let cleanText = decodeHtmlEntities(text).replace(/\r\n?/g, '\n');
+  const cssMarkers = [
+    '@media only screen',
+    '@-moz-document',
+    'body[yahoo]',
+    'td.wrapText',
+    '.ExternalClass',
+    '.ReadMsgBody',
+    'mso-table-lspace'
+  ];
+
+  const cssStart = cssMarkers
+    .map((marker) => cleanText.toLowerCase().indexOf(marker.toLowerCase()))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  if (cssStart !== undefined) {
+    cleanText = cleanText.slice(0, cssStart);
+  }
+
+  const footerMarkers = [
+    'Order status:',
+    'We scan messages to enforce policies.',
+    'Email reference id:',
+    "We don't check this mailbox",
+    'eBay sent this message to',
+    'eBay is committed to your privacy'
+  ];
+  const footerStart = footerMarkers
+    .map((marker) => cleanText.toLowerCase().indexOf(marker.toLowerCase()))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  if (footerStart !== undefined) {
+    cleanText = cleanText.slice(0, footerStart);
+  }
+
   cleanText = cleanText
+    .replace(/\bNew message:\s*New message\b/gi, '')
     .replace(/\s+/g, ' ')
-    .replace(/\n\s*\n/g, '\n')
     .trim();
+
+  const lower = cleanText.toLowerCase();
+  const cssSignalCount = ['!important', '{', '}', 'padding:', 'width:', 'font-family:', 'word-wrap:']
+    .filter((token) => lower.includes(token)).length;
+  if (cssSignalCount >= 3) return '';
 
   return cleanText;
 }
 
+export function extractTextFromHtml(html) {
+  if (!html) return '';
+
+  if (!/<[^>]+>/.test(html)) {
+    return stripEbayNotificationNoise(html);
+  }
+
+  let cleanText = '';
+  const htmlWithoutStyles = String(html)
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ');
+
+  const userInputMatch = htmlWithoutStyles.match(/<div\s+id=["']UserInputtedText["'][^>]*>(.*?)<\/div>/is);
+  if (userInputMatch && userInputMatch[1]) {
+    cleanText = userInputMatch[1];
+  } else {
+    const v4Match = htmlWithoutStyles.match(/<div\s+id=["']V4PrimaryMessage["'][^>]*>.*?<strong>Dear[^<]*<\/strong>\s*(?:<br\s*\/?>)*\s*(.*?)\s*(?:<br\s*\/?>)*\s*<\/font>/is);
+    if (v4Match && v4Match[1]) {
+      cleanText = v4Match[1];
+    } else {
+      cleanText = htmlWithoutStyles;
+    }
+  }
+
+  cleanText = cleanText.replace(/<[^>]+>/g, ' ');
+  return stripEbayNotificationNoise(cleanText);
+}
+
 function normalizeBody(body = '') {
   return extractTextFromHtml(body).replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function looksLikeSellerTemplate(body = '') {
+  const normalized = normalizeBody(body);
+  if (!normalized) return false;
+
+  const sellerTemplateSignals = [
+    "we're pleased to inform you that your order has been processed",
+    'your package has been successfully delivered',
+    'tracking number will be updated on your ebay order page',
+    'thank you for choosing us',
+    'customer support team',
+    'if you have any questions or concerns, please contact us directly through ebay messages',
+    'before opening any cases such as inr',
+    'thank you for your recent purchase',
+    'orders are typically shipped within',
+    'your return request has been approved',
+    'we have approved your return request',
+    'we will keep you updated'
+  ];
+
+  return sellerTemplateSignals.some((signal) => normalized.includes(signal));
 }
 
 function parseXmlDate(value) {
@@ -84,17 +157,57 @@ function getResponseBodies(msg) {
     .filter(Boolean);
 }
 
-async function resolveThreadContext({ itemID, senderID, itemTitle }) {
+function escapeRegex(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function resolveThreadContext({ itemID, senderID, itemTitle, sellerId, messageDate }) {
   let orderId = null;
   let messageType = 'INQUIRY';
   let finalItemId = itemID;
   let finalItemTitle = itemTitle;
 
   if (itemID && senderID) {
-    const order = await Order.findOne({
+    const buyerUsernameRegex = new RegExp(`^${escapeRegex(senderID)}$`, 'i');
+    let order = null;
+    const exactBuyerOrders = await Order.find({
+      ...(sellerId ? { seller: sellerId } : {}),
       'lineItems.legacyItemId': itemID,
-      'buyer.username': senderID
-    }).select('orderId').lean();
+      'buyer.username': buyerUsernameRegex
+    }).select('orderId').sort({ dateSold: -1 }).limit(2).lean();
+    if (exactBuyerOrders.length === 1) {
+      order = exactBuyerOrders[0];
+    }
+
+    if (!order && sellerId && messageDate) {
+      const center = new Date(messageDate);
+      if (!Number.isNaN(center.getTime())) {
+        const from = new Date(center.getTime() - 45 * 24 * 60 * 60 * 1000);
+        const to = new Date(center.getTime() + 2 * 24 * 60 * 60 * 1000);
+        const windowOrders = await Order.find({
+          seller: sellerId,
+          'lineItems.legacyItemId': itemID,
+          dateSold: { $gte: from, $lte: to },
+          $or: [
+            { 'buyer.username': buyerUsernameRegex },
+            { 'buyer.buyerRegistrationAddress.fullName': buyerUsernameRegex }
+          ]
+        }).select('orderId').sort({ dateSold: -1 }).limit(2).lean();
+        if (windowOrders.length === 1) {
+          order = windowOrders[0];
+        }
+      }
+    }
+
+    if (!order && sellerId) {
+      const fallbackOrders = await Order.find({
+        seller: sellerId,
+        'lineItems.legacyItemId': itemID
+      }).select('orderId').sort({ dateSold: -1 }).limit(2).lean();
+      if (fallbackOrders.length === 1) {
+        order = fallbackOrders[0];
+      }
+    }
 
     if (order) {
       orderId = order.orderId;
@@ -151,13 +264,60 @@ async function saveThreadMessage({
 }) {
   const normalized = normalizeBody(body);
   if (!normalized) return false;
+  const finalSender = looksLikeSellerTemplate(body) ? 'SELLER' : sender;
+  const finalRead = finalSender === 'SELLER' ? true : Boolean(read);
 
   if (externalMessageId) {
-    const byExternal = await Message.findOne({ externalMessageId }).select('_id').lean();
-    if (byExternal) return false;
+    const byExternal = await Message.findOne({ externalMessageId }).select('sender read subject orderId itemId itemTitle messageType conversationId').lean();
+    if (byExternal) {
+      const repairFields = {};
+      if (orderId && byExternal.orderId !== orderId) {
+        repairFields.orderId = orderId;
+        repairFields.messageType = messageType || 'ORDER';
+      }
+      if (itemId && byExternal.itemId !== itemId) repairFields.itemId = itemId;
+      if (itemTitle && !byExternal.itemTitle) repairFields.itemTitle = itemTitle;
+      if (conversationId && !byExternal.conversationId) repairFields.conversationId = conversationId;
+
+      if (byExternal.sender !== finalSender || Object.keys(repairFields).length > 0) {
+        await Message.updateOne(
+          { _id: byExternal._id },
+          {
+            $set: {
+              ...repairFields,
+              sender: finalSender,
+              subject: subject || (finalSender === 'SELLER' ? 'Reply' : 'Message'),
+              read: finalRead
+            }
+          }
+        );
+        return true;
+      }
+      return false;
+    }
   }
 
-  if (await threadHasBody({ sellerId, buyerUsername, orderId, itemId, sender, body })) {
+  const threadQuery = buildThreadQuery({ sellerId, buyerUsername, orderId, itemId });
+  const sameBodyRows = await Message.find(threadQuery).select('body sender read subject externalMessageId').lean();
+  const sameBody = sameBodyRows.find((row) => normalizeBody(row.body) === normalized);
+  if (sameBody) {
+    if (sameBody.sender === finalSender) return false;
+
+    await Message.updateOne(
+      { _id: sameBody._id },
+      {
+        $set: {
+          sender: finalSender,
+          subject: subject || (finalSender === 'SELLER' ? 'Reply' : 'Message'),
+          read: finalRead,
+          ...(externalMessageId && !sameBody.externalMessageId ? { externalMessageId } : {})
+        }
+      }
+    );
+    return true;
+  }
+
+  if (await threadHasBody({ sellerId, buyerUsername, orderId, itemId, sender: finalSender, body })) {
     return false;
   }
 
@@ -169,11 +329,11 @@ async function saveThreadMessage({
     buyerUsername,
     conversationId: conversationId || undefined,
     externalMessageId: externalMessageId || undefined,
-    sender,
-    subject: subject || (sender === 'SELLER' ? 'Reply' : 'Message'),
+    sender: finalSender,
+    subject: subject || (finalSender === 'SELLER' ? 'Reply' : 'Message'),
     body: extractTextFromHtml(body),
     mediaUrls,
-    read: sender === 'SELLER' ? true : Boolean(read),
+    read: finalRead,
     messageType,
     messageDate: messageDate || new Date()
   });
@@ -214,7 +374,7 @@ async function saveBuyerQuestionMessage(msg, seller, question) {
     || parseXmlDate(msg.CreationDate?.[0])
     || new Date();
 
-  const context = await resolveThreadContext({ itemID, senderID, itemTitle });
+  const context = await resolveThreadContext({ itemID, senderID, itemTitle, sellerId: seller._id, messageDate });
 
   return saveThreadMessage({
     sellerId: seller._id,
@@ -280,7 +440,8 @@ export async function processEbayMessage(msg, seller) {
     const itemID = msg.Item?.[0]?.ItemID?.[0];
     const itemTitle = msg.Item?.[0]?.Title?.[0];
     const senderID = question.SenderID?.[0];
-    const context = await resolveThreadContext({ itemID, senderID, itemTitle });
+    const messageDate = parseXmlDate(question.CreationDate?.[0]) || parseXmlDate(msg.CreationDate?.[0]) || new Date();
+    const context = await resolveThreadContext({ itemID, senderID, itemTitle, sellerId: seller._id, messageDate });
 
     const buyerNew = await saveBuyerQuestionMessage(msg, seller, question);
     const sellerNew = await saveSellerResponsesFromExchange(msg, seller, question, context);
@@ -311,11 +472,11 @@ function inferSenderFromSegment(segment, { sellerUsername, buyerUsername, envelo
   const buyer = String(buyerUsername || '').toLowerCase();
   const envelope = String(envelopeSender || '').toLowerCase();
 
-  if (seller && (lower.includes(seller) || lower.startsWith(`hi ${seller}`))) return 'SELLER';
-  if (buyer && (lower.includes(buyer) || lower.includes(`@${buyer}`))) return 'BUYER';
   if (envelope && envelope === seller) return 'SELLER';
   if (envelope && envelope === buyer) return 'BUYER';
-  return envelope === seller ? 'SELLER' : 'BUYER';
+  if (seller && (lower.includes(seller) || lower.startsWith(`hi ${seller}`))) return 'SELLER';
+  if (buyer && (lower.includes(buyer) || lower.includes(`@${buyer}`))) return 'BUYER';
+  return 'BUYER';
 }
 
 async function fetchMyMessagesByExternalIds(token, externalMessageIds) {
@@ -494,9 +655,10 @@ export async function syncMyMessagesForThread({
     const segments = splitThreadText(text);
     const senderLower = String(envelopeSender).toLowerCase();
     const buyerLower = String(buyerUsername).toLowerCase();
-    const envelopeIsSeller = senderLower !== buyerLower
+    const envelopeIsSeller = Boolean(senderLower)
+      && (senderLower !== buyerLower
       || messageTypeCode.toLowerCase().includes('response')
-      || messageTypeCode.toLowerCase().includes('contact');
+      || messageTypeCode.toLowerCase().includes('contact'));
 
     if (segments.length > 1) {
       for (let idx = 0; idx < segments.length; idx++) {
@@ -614,7 +776,7 @@ async function saveCommerceMessage(seller, msg, conversationSummary, sellerEbayU
   const body = extractTextFromHtml(msg?.messageBody || '');
   if (!buyerUsername || !body) return { buyerNew: false, sellerNew: false };
 
-  const context = await resolveThreadContext({ itemID: itemId, senderID: buyerUsername, itemTitle });
+  const context = await resolveThreadContext({ itemID: itemId, senderID: buyerUsername, itemTitle, sellerId: seller._id, messageDate: parseXmlDate(msg?.createdDate) || new Date() });
   const sender = resolveSenderFromCommerceMessage(msg, buyerUsername);
   const read = sender === 'SELLER' || String(msg?.readStatus || '').toUpperCase() === 'READ';
 

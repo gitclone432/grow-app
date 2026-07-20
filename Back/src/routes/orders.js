@@ -1914,7 +1914,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           ],
           ...dateFilter
         })
-          .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+          .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
           .sort({ dateSold: -1 })
           .lean()
@@ -1933,7 +1933,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           { 'lineItems.legacyItemId': { $in: sourceOrderIds } },
         ]
       })
-        .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+        .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
         .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
         .lean();
 
@@ -1979,8 +1979,12 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         remark: baseOrder?.remark || fallback.buyerComments || fallback.notes || '',
         complianceBoardStatus: status,
         complianceBoardCategories: normalizeCategories(baseOrder),
+        outOfStockAssignedAt: baseOrder?.outOfStockAssignedAt || null,
+        cancellationAssignedAt: baseOrder?.cancellationAssignedAt || null,
+        addressIssueAssignedAt: baseOrder?.addressIssueAssignedAt || null,
         returnCaseNotOpenedAssignedAt: baseOrder?.returnCaseNotOpenedAssignedAt || null,
         returnItemDeliveredAssignedAt: baseOrder?.returnItemDeliveredAssignedAt || null,
+        updatedAt: baseOrder?.updatedAt || null,
         returnBoardSource: sourceType,
         returnInfo: sourceType === 'return_request' ? {
           returnId: fallback.returnId,
@@ -2170,7 +2174,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     const skip = (pageNum - 1) * limitNum;
 
     const orders = await Order.find(query)
-      .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+      .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
       .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
       .sort({ dateSold: -1 })
       .skip(skip)
@@ -2273,6 +2277,19 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       updateOps.$set.complianceBoardSource = complianceBoardSource || null;
     }
 
+    const orderFulfillmentTimedFields = {
+      out_of_stock: 'outOfStockAssignedAt',
+      cancellation: 'cancellationAssignedAt',
+      address_issue: 'addressIssueAssignedAt'
+    };
+    Object.entries(orderFulfillmentTimedFields).forEach(([status, field]) => {
+      if (complianceBoardCategory === 'order_fulfillment' && complianceBoardStatus === status) {
+        updateOps.$set[field] = new Date();
+      } else if (complianceBoardCategory === 'order_fulfillment') {
+        updateOps.$set[field] = null;
+      }
+    });
+
     const isReturnCaseNotOpenedFromOrderCommunication = (
       complianceBoardCategory === 'return_refund' &&
       complianceBoardStatus === 'case_not_opened' &&
@@ -2298,7 +2315,7 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
     const order = await Order.findOneAndUpdate(
       orderQuery,
       updateOps,
-      { new: true, select: 'orderId complianceBoardStatus complianceBoardCategories complianceBoardSource returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt' }
+      { new: true, select: 'orderId complianceBoardStatus complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt' }
     );
 
     if (!order) {
