@@ -8139,11 +8139,17 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       page = 1,
       limit = 20,
       search = '',
+      searchOrderId = '',
+      searchBuyerName = '',
       filterType = 'ALL',
       filterMarketplace = '',
       showUnreadOnly = 'false',
       includeResolved = 'true',
-      maxAgeDays = '365'
+      maxAgeDays = '45',
+      dateFrom = '',
+      dateTo = '',
+      excludeClient = 'false',
+      complianceBoardMode = 'false'
     } = req.query;
 
     const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -8155,34 +8161,82 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
 
     // Build the aggregation pipeline
     const pipeline = [];
+    const initialMatch = {};
+
+    if (dateFrom || dateTo) {
+      initialMatch.messageDate = {};
+      if (dateFrom) initialMatch.messageDate.$gte = getPTDayBoundsUTC(dateFrom).start;
+      if (dateTo) initialMatch.messageDate.$lte = getPTDayBoundsUTC(dateTo).end;
+    } else if (!Number.isNaN(ageDays) && ageDays > 0) {
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - ageDays);
+      initialMatch.messageDate = { $gte: cutoffDate };
+    }
 
     // 1. FILTER BY SELLER (optional — applied before sort/group)
     if (sellerId) {
-      pipeline.push({
-        $match: { seller: new mongoose.Types.ObjectId(sellerId) }
-      });
+      initialMatch.seller = new mongoose.Types.ObjectId(sellerId);
     }
 
-    // 2. Sort by date (Process latest messages first)
-    pipeline.push({ $sort: { messageDate: -1 } });
+    if (excludeClient === 'true') {
+      const excludedSellerIds = await getExcludedClientSellerIds();
+      if (excludedSellerIds.length > 0) {
+        initialMatch.$and = initialMatch.$and || [];
+        if (initialMatch.seller) {
+          initialMatch.$and.push({ seller: initialMatch.seller });
+          delete initialMatch.seller;
+        }
+        initialMatch.$and.push({ seller: { $nin: excludedSellerIds } });
+      }
+    }
 
-    // 3. Group by conversation
+    if (Object.keys(initialMatch).length > 0) {
+      pipeline.push({ $match: initialMatch });
+    }
+
+    // 2. Group by conversation (buyer + item, NOT orderId to consolidate threads).
+    // Avoid sorting the raw messages collection first; that can exceed MongoDB's
+    // 32 MB in-memory sort limit on larger message histories.
     pipeline.push({
       $group: {
         _id: {
-          orderId: "$orderId",
           buyer: "$buyerUsername",
           item: "$itemId"
         },
         sellerId: { $first: "$seller" },
         lastMessage: { $first: "$body" },
-        lastDate: { $first: "$messageDate" },
+        lastDate: { $max: "$messageDate" },
         sender: { $first: "$sender" },
         itemTitle: { $first: "$itemTitle" },
         messageType: { $first: "$messageType" },
-        conversationIds: { $push: "$conversationId" },
+        conversationIds: { $addToSet: "$conversationId" },
+        orderIds: { $addToSet: "$orderId" },
         unreadCount: {
           $sum: { $cond: [{ $and: [{ $eq: ["$read", false] }, { $eq: ["$sender", "BUYER"] }] }, 1, 0] }
+        }
+      }
+    });
+
+    pipeline.push({
+      $addFields: {
+        orderId: {
+          $let: {
+            vars: {
+              ids: {
+                $filter: {
+                  input: '$orderIds',
+                  as: 'oid',
+                  cond: {
+                    $and: [
+                      { $ne: ['$$oid', null] },
+                      { $ne: ['$$oid', ''] }
+                    ]
+                  }
+                }
+              }
+            },
+            in: { $arrayElemAt: ['$$ids', 0] }
+          }
         }
       }
     });
@@ -8191,7 +8245,7 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
     pipeline.push({
       $lookup: {
         from: 'orders',
-        localField: '_id.orderId',
+        localField: 'orderId',
         foreignField: 'orderId',
         as: 'orderDetails'
       }
@@ -8200,7 +8254,7 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
     // 5. FLATTEN & FORMAT
     pipeline.push({
       $project: {
-        orderId: "$_id.orderId",
+        orderId: 1,
         buyerUsername: "$_id.buyer",
         itemId: "$_id.item",
         sellerId: 1,
@@ -8307,6 +8361,26 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
         }
       }
     });
+
+    if (searchOrderId && searchOrderId.trim()) {
+      pipeline.push({
+        $match: {
+          orderId: { $regex: searchOrderId.trim(), $options: 'i' }
+        }
+      });
+    }
+
+    if (searchBuyerName && searchBuyerName.trim()) {
+      const buyerRegex = new RegExp(searchBuyerName.trim(), 'i');
+      pipeline.push({
+        $match: {
+          $or: [
+            { buyerName: buyerRegex },
+            { buyerUsername: buyerRegex }
+          ]
+        }
+      });
+    }
 
     pipeline.push({
       $addFields: {
@@ -8458,14 +8532,18 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
     }
 
     // 6.5 Optional age filter on thread last activity (after grouping — keeps full threads)
-    if (!Number.isNaN(ageDays) && ageDays > 0) {
+    if (!dateFrom && !dateTo && !Number.isNaN(ageDays) && ageDays > 0) {
       const threadCutoff = new Date();
       threadCutoff.setDate(threadCutoff.getDate() - ageDays);
       pipeline.push({ $match: { lastDate: { $gte: threadCutoff } } });
     }
 
     // 7. FINAL SORT & PAGINATION
-    pipeline.push({ $sort: { lastDate: -1 } });
+    // Compliance Board only needs assignable thread buckets; skipping this sort avoids
+    // MongoDB's 32 MB aggregation sort limit on large message histories.
+    if (complianceBoardMode !== 'true') {
+      pipeline.push({ $sort: { lastDate: -1 } });
+    }
 
     // Get Total Count (for frontend to know when to stop loading)
     // We use $facet to get both data and count in one query
@@ -8479,7 +8557,7 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
       }
     ];
 
-    const result = await Message.aggregate(facetedPipeline).allowDiskUse(true);
+    const result = await Message.aggregate(facetedPipeline, { allowDiskUse: true });
 
     let threads = result[0].data;
     let total = result[0].metadata[0] ? result[0].metadata[0].total : 0;

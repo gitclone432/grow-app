@@ -9,6 +9,7 @@ import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import MarketMetric from '../models/MarketMetric.js';
 import TemplateListing from '../models/TemplateListing.js';
+import ConversationMeta from '../models/ConversationMeta.js';
 
 const router = Router();
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
@@ -1836,6 +1837,478 @@ router.get('/worksheet-summary', requireAuth, requirePageAccess('OrderAnalytics'
   } catch (error) {
     console.error('Error fetching worksheet summary:', error);
     res.status(500).json({ error: 'Failed to fetch worksheet summary' });
+  }
+});
+
+// COMPLIANCE BOARD ENDPOINTS
+
+/**
+ * GET /orders/compliance-board
+ * Fetch orders for the compliance board kanban view
+ * Query params: category, startDate, endDate, page, limit
+ */
+router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'), async (req, res) => {
+  try {
+    const {
+      category,
+      startDate,
+      endDate,
+      page = 1,
+      limit = 500,
+      excludeCancelled = true,
+      sellerId = '',
+      searchOrderId = '',
+      searchBuyerName = ''
+    } = req.query;
+
+    if (!category) {
+      return res.status(400).json({ error: 'Category is required' });
+    }
+
+    // Build date filter using timezone-aware PT logic (same as All Orders page)
+    const dateFilter = {};
+    if (startDate || endDate) {
+      dateFilter.dateSold = {};
+      if (startDate) {
+        const { start } = getPTDayBoundsUTC(startDate);
+        dateFilter.dateSold.$gte = start;
+      }
+      if (endDate) {
+        const { end } = getPTDayBoundsUTC(endDate);
+        dateFilter.dateSold.$lte = end;
+      }
+    }
+
+    const orderIdRegex = searchOrderId?.trim() ? new RegExp(searchOrderId.trim(), 'i') : null;
+    const buyerNameRegex = searchBuyerName?.trim() ? new RegExp(searchBuyerName.trim(), 'i') : null;
+    const sellerObjectId = sellerId && mongoose.Types.ObjectId.isValid(sellerId)
+      ? new mongoose.Types.ObjectId(sellerId)
+      : null;
+
+    if (category === 'return_refund') {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 500));
+      const skip = (pageNum - 1) * limitNum;
+
+      const returnQuery = {};
+      const conversationQuery = { category: { $in: ['Return', 'Refund', 'Replace'] } };
+      if (startDate || endDate) {
+        returnQuery.creationDate = {};
+        if (startDate) returnQuery.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
+        if (endDate) returnQuery.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
+      }
+
+      const [returnRequests, returnConversations, assignedOrders] = await Promise.all([
+        Return.find(returnQuery)
+          .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+          .sort({ creationDate: -1 })
+          .lean(),
+        ConversationMeta.find(conversationQuery)
+          .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+          .sort({ updatedAt: -1 })
+          .lean(),
+        Order.find({
+          $or: [
+            { complianceBoardCategories: category },
+            { complianceBoardCategory: category }
+          ],
+          ...dateFilter
+        })
+          .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+          .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+          .sort({ dateSold: -1 })
+          .lean()
+      ]);
+
+      const sourceOrderIds = [
+        ...returnRequests.map((ret) => ret.orderId),
+        ...returnConversations.map((meta) => meta.orderId),
+        ...returnConversations.map((meta) => meta.orderId ? null : meta.itemId),
+      ].filter(Boolean);
+
+      const sourceOrders = await Order.find({
+        $or: [
+          { orderId: { $in: sourceOrderIds } },
+          { itemNumber: { $in: sourceOrderIds } },
+          { 'lineItems.legacyItemId': { $in: sourceOrderIds } },
+        ]
+      })
+        .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+        .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+        .lean();
+
+      const orderByOrderId = new Map(sourceOrders.map((order) => [order.orderId, order]));
+      const orderByItemId = new Map();
+      sourceOrders.forEach((order) => {
+        if (order.itemNumber) orderByItemId.set(order.itemNumber, order);
+        (order.lineItems || []).forEach((item) => {
+          if (item.legacyItemId) orderByItemId.set(item.legacyItemId, order);
+        });
+      });
+
+      const normalizeCategories = (order) => {
+        if (Array.isArray(order?.complianceBoardCategories) && order.complianceBoardCategories.length > 0) {
+          return order.complianceBoardCategories;
+        }
+        if (order?.complianceBoardCategory) return [order.complianceBoardCategory];
+        return [category];
+      };
+
+      const makeOrderCard = (baseOrder, fallback, status, sourceType) => ({
+        ...(baseOrder || {}),
+        _id: sourceType === 'return_request'
+          ? `return:${fallback.returnId || fallback._id}`
+          : (baseOrder?._id || fallback._id),
+        orderObjectId: baseOrder?._id || null,
+        orderId: baseOrder?.orderId || fallback.orderId || fallback.returnId || fallback.itemId,
+        dateSold: baseOrder?.dateSold || baseOrder?.creationDate || fallback.creationDate || fallback.updatedAt,
+        buyer: baseOrder?.buyer || {
+          username: fallback.buyerUsername,
+          buyerRegistrationAddress: {
+            fullName: fallback.buyerName || fallback.buyerUsername
+          }
+        },
+        seller: baseOrder?.seller || fallback.seller,
+        itemNumber: baseOrder?.itemNumber || fallback.itemId,
+        lineItems: baseOrder?.lineItems?.length ? baseOrder.lineItems : [{
+          legacyItemId: fallback.itemId,
+          title: fallback.itemTitle || fallback.productName || 'Item'
+        }],
+        productName: baseOrder?.productName || fallback.itemTitle || fallback.productName || 'Item',
+        subtotal: baseOrder?.subtotal,
+        remark: baseOrder?.remark || fallback.buyerComments || fallback.notes || '',
+        complianceBoardStatus: status,
+        complianceBoardCategories: normalizeCategories(baseOrder),
+        returnCaseNotOpenedAssignedAt: baseOrder?.returnCaseNotOpenedAssignedAt || null,
+        returnItemDeliveredAssignedAt: baseOrder?.returnItemDeliveredAssignedAt || null,
+        returnBoardSource: sourceType,
+        returnInfo: sourceType === 'return_request' ? {
+          returnId: fallback.returnId,
+          returnStatus: fallback.returnStatus,
+          returnReason: fallback.returnReason,
+          createdDate: fallback.creationDate,
+          responseDate: fallback.responseDate,
+        } : undefined,
+        conversationInfo: sourceType === 'conversation' ? {
+          category: fallback.category,
+          caseStatus: fallback.caseStatus,
+          status: fallback.status,
+          pickedUpBy: fallback.pickedUpBy,
+          updatedAt: fallback.updatedAt,
+        } : undefined,
+      });
+
+      const returnRequestCards = [];
+      const cardsById = new Map();
+
+      const returnOrderIds = new Set();
+      returnRequests.forEach((ret) => {
+        if (ret.orderId) returnOrderIds.add(ret.orderId);
+        const order = orderByOrderId.get(ret.orderId);
+        const card = makeOrderCard(order, ret, 'case_opened', 'return_request');
+        returnRequestCards.push(card);
+      });
+
+      assignedOrders.forEach((order) => {
+        if (returnOrderIds.has(order.orderId)) return;
+
+        const status = order.complianceBoardStatus || 'case_not_opened';
+        if (status === 'case_opened') return;
+
+        cardsById.set(String(order._id), {
+          ...order,
+          complianceBoardCategories: normalizeCategories(order),
+          complianceBoardStatus: status
+        });
+      });
+
+      returnConversations.forEach((meta) => {
+        if (meta.orderId && returnOrderIds.has(meta.orderId)) return;
+        const order = meta.orderId ? orderByOrderId.get(meta.orderId) : orderByItemId.get(meta.itemId);
+        const key = order?._id ? `order:${order._id}:conversation:${meta._id}` : `conversation:${meta._id}`;
+        cardsById.set(key, makeOrderCard(order, meta, 'case_not_opened', 'conversation'));
+      });
+
+      let returnBoardOrders = [...returnRequestCards, ...Array.from(cardsById.values())];
+      if (dateFilter.dateSold) {
+        returnBoardOrders = returnBoardOrders.filter((order) => {
+          if (order.returnBoardSource === 'return_request') return true;
+          if (!order.dateSold) return true;
+          const sold = new Date(order.dateSold);
+          if (dateFilter.dateSold.$gte && sold < dateFilter.dateSold.$gte) return false;
+          if (dateFilter.dateSold.$lte && sold > dateFilter.dateSold.$lte) return false;
+          return true;
+        });
+      }
+
+      if (sellerObjectId) {
+        returnBoardOrders = returnBoardOrders.filter((order) => String(order.seller?._id || order.seller) === String(sellerObjectId));
+      }
+      if (orderIdRegex) {
+        returnBoardOrders = returnBoardOrders.filter((order) => orderIdRegex.test(order.orderId || ''));
+      }
+      if (buyerNameRegex) {
+        returnBoardOrders = returnBoardOrders.filter((order) => {
+          const buyerName = order.buyer?.buyerRegistrationAddress?.fullName || order.buyer?.username || '';
+          return buyerNameRegex.test(buyerName);
+        });
+      }
+
+      // Sort the mixed Return board feed by the freshest activity so recently
+      // dragged conversation items are visible on the first page as well.
+      returnBoardOrders.sort((a, b) => {
+        const getSortTime = (order) => {
+          const rawValue = order.returnBoardSource === 'conversation'
+            ? (order.conversationInfo?.updatedAt || order.dateSold)
+            : (order.returnInfo?.responseDate || order.dateSold);
+          const time = rawValue ? new Date(rawValue).getTime() : 0;
+          return Number.isFinite(time) ? time : 0;
+        };
+
+        return getSortTime(b) - getSortTime(a);
+      });
+
+      const total = returnBoardOrders.length;
+      const pagedOrders = returnBoardOrders.slice(skip, skip + limitNum);
+
+      return res.json({
+        orders: pagedOrders,
+        sourceCounts: {
+          caseOpenedReturnRequests: returnRequests.length
+        },
+        pagination: {
+          total,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: Math.max(1, Math.ceil(total / limitNum))
+        }
+      });
+    }
+
+    // Build the query
+    // For Order Fulfillment & Order Communication: show ALL orders (assigned or unassigned)
+    // For other categories: show unassigned + orders with that specific category
+    let query;
+    
+    if (category === 'order_fulfillment' || category === 'order_communication') {
+      // Order Fulfillment & Order Communication show all unassigned + all assigned orders
+      query = {
+        $or: [
+          // Unassigned orders (new format - empty array)
+          { complianceBoardCategories: [] },
+          // Unassigned orders (old format - null)
+          { complianceBoardCategory: null },
+          // Assigned orders (new format - array with elements)
+          { complianceBoardCategories: { $elemMatch: {} } },
+          // Assigned orders (old format - has a value)
+          { complianceBoardCategory: { $ne: null, $exists: true } }
+        ],
+        ...dateFilter
+      };
+    } else {
+      // Other categories: show unassigned + that specific category
+      query = {
+        $or: [
+          // Unassigned (new format - empty array)
+          { complianceBoardCategories: [] },
+          // Unassigned (old format - null)
+          { complianceBoardCategory: null },
+          // Has this category (new format)
+          { complianceBoardCategories: category },
+          // Has this category (old format)
+          { complianceBoardCategory: category }
+        ],
+        ...dateFilter
+      };
+    }
+
+    // Exclude cancelled orders if requested (same logic as All Orders)
+    if (excludeCancelled === 'true' || excludeCancelled === true) {
+      query.$and = query.$and || [];
+      query.$and.push(
+        {
+          $or: [
+            { cancelState: { $exists: false } },
+            { cancelState: null },
+            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        },
+        {
+          $or: [
+            { 'cancelStatus.cancelState': { $exists: false } },
+            { 'cancelStatus.cancelState': null },
+            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        }
+      );
+    }
+
+    if (sellerObjectId) {
+      query.seller = sellerObjectId;
+    }
+
+    if (orderIdRegex) {
+      query.orderId = orderIdRegex;
+    }
+
+    if (buyerNameRegex) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { 'buyer.buyerRegistrationAddress.fullName': buyerNameRegex },
+          { 'buyer.username': buyerNameRegex }
+        ]
+      });
+    }
+
+    // Count total for pagination
+    const total = await Order.countDocuments(query);
+
+    // Fetch orders with pagination
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 500));
+    const skip = (pageNum - 1) * limitNum;
+
+    const orders = await Order.find(query)
+      .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+      .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+      .sort({ dateSold: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .lean();
+
+    // Update orders without any category (both new and old formats) to add the current category
+    const orderIdsToUpdate = orders
+      .filter(o => {
+        // New format: empty array or doesn't exist
+        if (!o.complianceBoardCategories || o.complianceBoardCategories.length === 0) {
+          return true;
+        }
+        // Old format: null or doesn't exist
+        if (!o.complianceBoardCategory) {
+          return true;
+        }
+        return false;
+      })
+      .map(o => o._id);
+
+    if (orderIdsToUpdate.length > 0) {
+      await Order.updateMany(
+        { _id: { $in: orderIdsToUpdate } },
+        { $push: { complianceBoardCategories: category } }
+      );
+    }
+
+    // Return orders with updated categories (convert old format to new for consistency)
+    const updatedOrders = orders.map(o => {
+      let categories = [];
+      if (o.complianceBoardCategories && Array.isArray(o.complianceBoardCategories) && o.complianceBoardCategories.length > 0) {
+        categories = o.complianceBoardCategories;
+      } else if (o.complianceBoardCategory) {
+        categories = [o.complianceBoardCategory];
+      } else {
+        categories = [category]; // Newly assigned
+      }
+      return {
+        ...o,
+        complianceBoardCategories: categories,
+        complianceBoardStatus: o.complianceBoardStatus || 'todo'
+      };
+    });
+
+    res.json({
+      orders: updatedOrders,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching compliance board orders:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch compliance board orders' });
+  }
+});
+
+/**
+ * PATCH /orders/:orderId/compliance-status
+ * Update the compliance board status of an order
+ * Body: { complianceBoardStatus, complianceBoardCategory, complianceBoardSource }
+ */
+router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('ComplianceBoard'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { complianceBoardStatus, complianceBoardCategory, complianceBoardSource } = req.body;
+
+    if (!complianceBoardStatus) {
+      return res.status(400).json({ error: 'complianceBoardStatus is required' });
+    }
+
+    const validStatuses = [
+      'todo', 'out_of_stock', 'cancellation', 'address_issue', 'not_fulfilled', 'fulfilled', 'buyer_confirmation',
+      // Return/Refund statuses
+      'case_opened', 'case_not_opened', 'provide_return_label', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement',
+      // Cancellation statuses
+      'cancellation_request', 'accepted', 'declined',
+      // INR statuses
+      'inr_case_opened', 'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'
+    ];
+    if (!validStatuses.includes(complianceBoardStatus)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    // Build update query - always update status, add category to array if provided
+    const updateOps = { $set: { complianceBoardStatus } };
+    if (complianceBoardCategory) {
+      // Add to new array format and unset old format
+      updateOps.$addToSet = { complianceBoardCategories: complianceBoardCategory };
+      updateOps.$unset = { complianceBoardCategory: '' };
+    }
+
+    if (complianceBoardSource !== undefined) {
+      if (complianceBoardSource && complianceBoardSource !== 'order_communication') {
+        return res.status(400).json({ error: 'Invalid complianceBoardSource' });
+      }
+      updateOps.$set.complianceBoardSource = complianceBoardSource || null;
+    }
+
+    const isReturnCaseNotOpenedFromOrderCommunication = (
+      complianceBoardCategory === 'return_refund' &&
+      complianceBoardStatus === 'case_not_opened' &&
+      complianceBoardSource === 'order_communication'
+    );
+
+    if (isReturnCaseNotOpenedFromOrderCommunication) {
+      updateOps.$set.returnCaseNotOpenedAssignedAt = new Date();
+    } else if (complianceBoardCategory === 'return_refund' && complianceBoardStatus !== 'case_not_opened') {
+      updateOps.$set.returnCaseNotOpenedAssignedAt = null;
+    }
+
+    if (complianceBoardCategory === 'return_refund' && complianceBoardStatus === 'item_delivered') {
+      updateOps.$set.returnItemDeliveredAssignedAt = new Date();
+    } else if (complianceBoardCategory === 'return_refund') {
+      updateOps.$set.returnItemDeliveredAssignedAt = null;
+    }
+
+    const orderQuery = mongoose.Types.ObjectId.isValid(orderId)
+      ? { _id: orderId }
+      : { orderId };
+
+    const order = await Order.findOneAndUpdate(
+      orderQuery,
+      updateOps,
+      { new: true, select: 'orderId complianceBoardStatus complianceBoardCategories complianceBoardSource returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt' }
+    );
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    res.json(order);
+  } catch (error) {
+    console.error('Error updating compliance board status:', error);
+    res.status(500).json({ error: error.message || 'Failed to update compliance board status' });
   }
 });
 

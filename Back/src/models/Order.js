@@ -176,6 +176,39 @@ const OrderSchema = new mongoose.Schema(
     // Track if listing price was updated via All Orders Sheet
     priceUpdatedViaSheet: { type: Boolean, default: false },
     lastPriceUpdateDate: { type: Date, default: null },
+
+    // Compliance Board tracking (for Compliance & Support kanban board)
+    complianceBoardStatus: {
+      type: String,
+      enum: [
+        'todo', 'out_of_stock', 'cancellation', 'address_issue', 'not_fulfilled', 'fulfilled', 'buyer_confirmation',
+        // Return/Refund statuses
+        'case_opened', 'case_not_opened', 'provide_return_label', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement',
+        // Cancellation statuses
+        'cancellation_request', 'accepted', 'declined',
+        // INR statuses
+        'inr_case_opened', 'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'
+      ],
+      default: 'todo'
+    },
+    complianceBoardCategories: {
+      type: [String],
+      enum: ['order_fulfillment', 'order_communication', 'cancellation', 'inr', 'return_refund'],
+      default: []
+    },
+    complianceBoardSource: {
+      type: String,
+      enum: ['order_communication'],
+      default: null
+    },
+    returnCaseNotOpenedAssignedAt: {
+      type: Date,
+      default: null
+    },
+    returnItemDeliveredAssignedAt: {
+      type: Date,
+      default: null
+    },
   },
   { timestamps: true }
 );
