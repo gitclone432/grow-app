@@ -34,6 +34,9 @@ const FEED_TYPES = [
     { value: 'FX_LISTING', label: 'File Exchange Listing (CSV)' }
 ];
 
+const SELLER_HUB_UPLOADS_URL = 'https://www.ebay.com/sh/reports/uploads';
+const SELLER_HUB_DRAFTS_URL = 'https://www.ebay.com/sh/lst/drafts';
+
 const FeedUploadPage = () => {
     const location = useLocation();
     const [selectedFile, setSelectedFile] = useState(null);
@@ -151,11 +154,24 @@ const FeedUploadPage = () => {
         }
     };
 
+    const [draftCsvDetected, setDraftCsvDetected] = useState(false);
+
     const handleFileChange = (event) => {
         if (event.target.files && event.target.files[0]) {
-            setSelectedFile(event.target.files[0]);
+            const file = event.target.files[0];
+            setSelectedFile(file);
             setError(null);
             setResult(null);
+            setDraftCsvDetected(false);
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const text = String(e.target?.result || '').slice(0, 4000);
+                const isDraft =
+                  /eBay-draft-listings-template/i.test(text)
+                  || (/CC=UTF-8\)/.test(text) && /(^|,|\n)Draft(,|$)/m.test(text));
+                setDraftCsvDetected(isDraft);
+            };
+            reader.readAsText(file.slice(0, 8000));
         }
     };
 
@@ -200,6 +216,7 @@ const FeedUploadPage = () => {
                     storageForm.append('sellerId', selectedSeller);
                     storageForm.append('listingCount', String(listingCount));
                     storageForm.append('source', 'manual');
+                    storageForm.append('listingStatus', 'active');
                     const saveRes = await api.post('/csv-storage', storageForm, {
                         headers: { 'Content-Type': 'multipart/form-data' },
                     });
@@ -212,7 +229,19 @@ const FeedUploadPage = () => {
             fetchTasks(); // Refresh list
         } catch (err) {
             console.error('Upload failed', err);
-            setError(err.response?.data?.error || err.message || 'Upload failed');
+            const data = err.response?.data;
+            const detail =
+              typeof data?.details === 'string'
+                ? data.details
+                : data?.details
+                  ? JSON.stringify(data.details)
+                  : '';
+            const parts = [
+              data?.error || err.message || 'Upload failed',
+              detail,
+              data?.hint,
+            ].filter(Boolean);
+            setError(parts.join(' — '));
         } finally {
             setUploading(false);
         }
@@ -259,6 +288,7 @@ const FeedUploadPage = () => {
             storageForm.append('sellerId', selectedSeller);
             storageForm.append('listingCount', String(listingCount));
             storageForm.append('source', 'manual');
+            storageForm.append('listingStatus', 'active');
             const saveRes = await api.post('/csv-storage', storageForm, {
                 headers: { 'Content-Type': 'multipart/form-data' },
             });
@@ -281,9 +311,20 @@ const FeedUploadPage = () => {
             <Typography variant="h4" gutterBottom>
                 eBay Feed Upload
             </Typography>
-            <Typography variant="body1" color="textSecondary" paragraph>
-                Upload bulk listing files (XML/CSV) to eBay via the Feed API.
+            <Typography variant="body1" color="text.secondary" paragraph>
+                Use this page for <strong>Active</strong> File Exchange CSVs (<code>Action=Add</code>) via the Feed API.
             </Typography>
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              <strong>Draft listings:</strong> upload the Create new drafts CSV in{' '}
+              <a href={SELLER_HUB_UPLOADS_URL} target="_blank" rel="noopener noreferrer">
+                Seller Hub → Reports → Uploads
+              </a>
+              , then finish items in{' '}
+              <a href={SELLER_HUB_DRAFTS_URL} target="_blank" rel="noopener noreferrer">
+                Seller Hub → Drafts
+              </a>
+              . Draft (<code>Action=Draft</code>) is not reliable through this Feed API upload.
+            </Alert>
 
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} alignItems="flex-start">
                 {/* Left: Upload Feed */}
@@ -316,7 +357,9 @@ const FeedUploadPage = () => {
                             >
                                 <MenuItem value="FX_LISTING">File Exchange Listing (CSV)</MenuItem>
                             </Select>
-                            <FormHelperText>Currently only CSV uploads (FX_LISTING) are supported.</FormHelperText>
+                            <FormHelperText>
+                              FX_LISTING supports Active (Action=Add) and Draft (Action=Draft) Seller Hub CSVs.
+                            </FormHelperText>
                         </FormControl>
 
                         {/* Schema Version */}
@@ -340,8 +383,19 @@ const FeedUploadPage = () => {
                                 <MenuItem value="AU">Australia (AU)</MenuItem>
                                 <MenuItem value="Canada">Canada</MenuItem>
                             </Select>
-                            <FormHelperText>Tag this upload with a country for reporting purposes</FormHelperText>
+                            <FormHelperText>Used for eBay marketplace header and reporting</FormHelperText>
                         </FormControl>
+
+                        {draftCsvDetected && (
+                          <Alert severity="warning">
+                            This looks like a <strong>Draft</strong> CSV. Upload it in{' '}
+                            <a href={SELLER_HUB_UPLOADS_URL} target="_blank" rel="noopener noreferrer">
+                              Seller Hub → Uploads
+                            </a>{' '}
+                            instead — Feed API draft uploads fail with BAF.Error.5 even when Seller Hub succeeds.
+                            Use this page for Active (<code>Action=Add</code>) files only.
+                          </Alert>
+                        )}
 
                         {/* File Input */}
                         <Box

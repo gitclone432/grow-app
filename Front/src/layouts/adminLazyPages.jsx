@@ -83,10 +83,10 @@ export const SellerAnalyticsPage = lazy(() => import('../pages/admin/SellerAnaly
 export const OrdersDepartmentDashboardPage = lazy(() => import('../pages/admin/OrdersDepartmentDashboardPage.jsx'));
 export const ColumnCreatorPage = lazy(() => import('../pages/admin/ColumnCreatorPage.jsx'));
 export const ManageTemplatesPage = lazy(() => import('../pages/admin/ManageTemplatesPage.jsx'));
-export const TemplateListingsPage = lazy(() => import('../pages/admin/TemplateListingsPage.jsx'));
+export const TemplateListingsLabPage = lazy(() => import('../pages/admin/TemplateListingsLabPage.jsx'));
 export const TemplateListingAnalyticsPage = lazy(() => import('../pages/admin/TemplateListingAnalyticsPage.jsx'));
-export const SelectSellerPage = lazy(() => import('../pages/admin/SelectSellerPage.jsx'));
-export const SellerTemplatesPage = lazy(() => import('../pages/admin/SellerTemplatesPage.jsx'));
+export const SelectSellerLabPage = lazy(() => import('../pages/admin/SelectSellerLabPage.jsx'));
+export const SellerTemplatesLabPage = lazy(() => import('../pages/admin/SellerTemplatesLabPage.jsx'));
 export const ListingDirectoryPage = lazy(() => import('../pages/admin/ListingDirectoryPage.jsx'));
 export const TemplateDirectoryPage = lazy(() => import('../pages/admin/TemplateDirectoryPage.jsx'));
 export const TemplateDatabasePage = lazy(() => import('../pages/admin/TemplateDatabasePage.jsx'));

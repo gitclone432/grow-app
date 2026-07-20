@@ -634,7 +634,10 @@ const PayoneerSheetPage = () => {
         setAutoFillHint('Loading Seller Funds Overview data…');
         try {
             const { data: summary } = await api.get('/ebay/seller-funds-summary');
-            const summaryRow = (Array.isArray(summary) ? summary : []).find(
+            const summaryRows = Array.isArray(summary?.sellers)
+                ? summary.sellers
+                : (Array.isArray(summary) ? summary : []);
+            const summaryRow = summaryRows.find(
                 (s) => String(s.sellerId) === String(sellerId)
             );
             const mp = summaryRow?.financesMarketplaceId;

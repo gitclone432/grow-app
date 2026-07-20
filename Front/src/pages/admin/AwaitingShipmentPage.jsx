@@ -46,6 +46,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import api from '../../lib/api';
 import ColumnSelector from '../../components/ColumnSelector';
+import { sortSellersByName } from '../../lib/sellersSort';
 import ChatModal from '../../components/ChatModal';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
 import {
@@ -508,7 +509,7 @@ export default function AwaitingShipmentPage() {
     const loadSellers = async () => {
       try {
         const { data } = await api.get('/sellers/all');
-        setSellers(data || []);
+        setSellers(sortSellersByName(data || []));
       } catch (e) {
         console.error("Failed to load sellers", e);
       }

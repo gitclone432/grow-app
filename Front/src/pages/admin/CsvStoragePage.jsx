@@ -441,6 +441,7 @@ export default function CsvStoragePage() {
                             </TableCell>
                             <TableCell sx={{ width: 200, maxWidth: 200 }}>Name</TableCell>
                             <TableCell sx={{ width: 130, whiteSpace: 'nowrap' }}>Source</TableCell>
+                            <TableCell sx={{ width: 110, whiteSpace: 'nowrap' }}>Template</TableCell>
                             <TableCell sx={{ width: 120, whiteSpace: 'nowrap' }}>Store</TableCell>
                             <TableCell>Date</TableCell>
                             <TableCell align="center">Listings</TableCell>
@@ -453,13 +454,13 @@ export default function CsvStoragePage() {
                     <TableBody>
                         {loading ? (
                             <TableRow>
-                                <TableCell colSpan={10} align="center" sx={{ py: 4 }}>
+                                <TableCell colSpan={11} align="center" sx={{ py: 4 }}>
                                     <CircularProgress size={28} />
                                 </TableCell>
                             </TableRow>
                         ) : records.length === 0 ? (
                             <TableRow>
-                                <TableCell colSpan={10} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                                <TableCell colSpan={11} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                                     No CSV records found.
                                 </TableCell>
                             </TableRow>
@@ -493,6 +494,17 @@ export default function CsvStoragePage() {
                                                 <Chip label="Manual Upload" size="small" color="primary" variant="outlined" />
                                             ) : record.source === 'asin_list' ? (
                                                 <Chip label="ASIN List" size="small" color="secondary" variant="outlined" />
+                                            ) : record.source === 'download' ? (
+                                                <Chip label="Download" size="small" color="default" variant="outlined" />
+                                            ) : (
+                                                <Typography variant="caption" color="text.disabled">—</Typography>
+                                            )}
+                                        </TableCell>
+                                        <TableCell>
+                                            {record.listingStatus === 'draft' ? (
+                                                <Chip label="Draft" size="small" color="warning" variant="outlined" />
+                                            ) : record.listingStatus === 'active' ? (
+                                                <Chip label="Active" size="small" color="success" variant="outlined" />
                                             ) : (
                                                 <Typography variant="caption" color="text.disabled">—</Typography>
                                             )}

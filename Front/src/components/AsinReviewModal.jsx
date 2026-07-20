@@ -18,7 +18,8 @@ import {
   CircularProgress,
   ToggleButtonGroup,
   ToggleButton,
-  Tooltip
+  Tooltip,
+  Snackbar
 } from '@mui/material';
 import {
   Close as CloseIcon,
@@ -45,6 +46,17 @@ const MARKETPLACE_DOMAINS = {
   CA: 'www.amazon.ca',
   AU: 'www.amazon.com.au',
 };
+
+const SCRAPE_SOURCE_META = {
+  cache: { label: 'Cache', color: 'default', title: 'Served from in-memory ASIN cache' },
+  listings_db: { label: 'DB reuse', color: 'info', title: 'Reused Amazon snapshot from Listings Database' },
+  live_scrape: { label: 'Live scrape', color: 'warning', title: 'Fetched live via ScrapingDog / ScraperAPI' },
+  directory: { label: 'Directory', color: 'secondary', title: 'Loaded from ASIN Directory' },
+};
+
+function getScrapeSourceMeta(source) {
+  return SCRAPE_SOURCE_META[source] || null;
+}
 
 function formatBulletLi(text, isLast = false) {
   let cleaned = String(text || '').replace(/\s+/g, ' ').trim();
@@ -241,6 +253,16 @@ function withAmazonScrapedPrice(listingData, item) {
   return scrapedPrice != null ? { ...listingData, amazonScrapedPrice: scrapedPrice } : listingData;
 }
 
+function resolveListingImageUrls(sourceData = {}, generatedListing = {}) {
+  if (Array.isArray(sourceData?.images) && sourceData.images.length) {
+    return sourceData.images.map((url) => String(url || '').trim()).filter(Boolean);
+  }
+  return String(generatedListing?.itemPhotoUrl || '')
+    .split(/\s*\|\s*|\s*,\s*|\n+/)
+    .map((url) => url.trim())
+    .filter(Boolean);
+}
+
 function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}, sourceData = {}, aiDescriptionRaw = '') {
   let composed = String(templateHtml || '');
   if (!composed.trim()) return '';
@@ -248,11 +270,15 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
   const explicitAiDescription = String(aiDescriptionRaw || '').trim();
   const generatedDescription = String(generatedListing?.description || '').trim();
   const scrapedDescription = String(sourceData?.description || '').trim();
-  // Use whatever the pipeline put on the listing (AI, direct mapping, or backend fallback scrape).
-  // Never drop it just because it matches source text — after a failed AI run, merged description
-  // is often intentionally identical to scrape and must still fill the template Preview.
-  const aiDescription =
-    explicitAiDescription || generatedDescription || '';
+  // Prefer explicit AI text. Ignore listing-shell / unsubstituted HTML that was copied into
+  // description as the store template default — that must not block title/image substitution.
+  const usableGeneratedDescription =
+    generatedDescription
+    && !looksLikeListingShellEcho(generatedDescription)
+    && !hasUnsubstitutedPlaceholders(generatedDescription)
+      ? generatedDescription
+      : '';
+  const aiDescription = explicitAiDescription || usableGeneratedDescription || '';
   const resolvedBullets =
     normalizeAiFeatureBullets(aiDescription) ||
     buildFallbackFeatureBullets(scrapedDescription);
@@ -267,7 +293,7 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
   })();
 
   const titleClean = String(sourceData?.title || generatedListing?.title || '').trim();
-  const images = Array.isArray(sourceData?.images) ? sourceData.images.filter(Boolean) : [];
+  const images = resolveListingImageUrls(sourceData, generatedListing);
 
   const placeholderMap = {
     '{{AI_FEATURE_BULLETS}}': resolvedBullets,
@@ -366,6 +392,7 @@ export default function AsinReviewModal({
   const [showAmazonPreview, setShowAmazonPreview] = useState(false);
   const [rephrasing, setRephrasing] = useState({}); // { [itemId]: true|false }
   const [startPriceEditMode, setStartPriceEditMode] = useState({}); // { [itemId]: true|false }
+  const [skuToast, setSkuToast] = useState({ open: false, message: '' });
 
   // Filter out dismissed items
   const activeItems = previewItems.filter(item => !dismissedItems.has(item.id));
@@ -374,6 +401,7 @@ export default function AsinReviewModal({
   ).length;
   const listDirectlyButtonLabel = `${String(listDirectlyLabel || 'List Directly').replace(/\s*\(\d+\)\s*$/, '')} (${listableCount})`;
   const currentItem = activeItems[currentIndex];
+  const scrapeSourceMeta = getScrapeSourceMeta(currentItem?.scrapeSource);
   const itemData = editedItems[currentItem?.id] || currentItem?.generatedListing || {};
   const isStartPriceEditing = !!(currentItem?.id && startPriceEditMode[currentItem.id]);
   const startPriceValue = itemData.startPrice ?? '';
@@ -455,19 +483,24 @@ export default function AsinReviewModal({
         if (item.generatedListing) {
           const nextListing = { ...item.generatedListing };
           const isExistingListingEdit = Boolean(nextListing?._existingListingId);
-          if (!isExistingListingEdit && resolvedTemplateHtml) {
-            nextListing.description = applyStoreTemplatePlaceholders(
-              resolvedTemplateHtml,
-              item.generatedListing,
-              item.sourceData,
-              item.aiDescription
-            );
-          } else if (!isExistingListingEdit) {
-            // No Settings → Description Templates HTML for this store: show AI / auto-fill output as-is.
-            const mergedDesc = item.generatedListing?.description;
-            const mergedTrim = String(mergedDesc || '').trim();
-            const aiTrim = String(item.aiDescription || '').trim();
-            nextListing.description = mergedTrim ? mergedDesc : (aiTrim ? item.aiDescription : '');
+          if (!isExistingListingEdit) {
+            const mergedDesc = String(item.generatedListing?.description || '').trim();
+            // Always substitute {{TITLE_CLEAN}} / image tokens — including when the
+            // default description shell was used and no store template was assigned.
+            const templateHtml =
+              resolvedTemplateHtml
+              || (hasUnsubstitutedPlaceholders(mergedDesc) ? mergedDesc : '');
+            if (templateHtml) {
+              nextListing.description = applyStoreTemplatePlaceholders(
+                templateHtml,
+                item.generatedListing,
+                item.sourceData,
+                item.aiDescription
+              );
+            } else {
+              const aiTrim = String(item.aiDescription || '').trim();
+              nextListing.description = mergedDesc || aiTrim || '';
+            }
           }
           initial[item.id] = nextListing;
         }
@@ -596,30 +629,51 @@ export default function AsinReviewModal({
   };
 
 
+  const notifySkuReallocations = (items) => {
+    const reallocated = items.filter(
+      (item) =>
+        item.skuReallocated ||
+        (item.sku && item.baseSku && item.sku !== item.baseSku) ||
+        (Array.isArray(item.warnings) && item.warnings.some((w) => /was taken/i.test(String(w))))
+    );
+    if (reallocated.length === 0) return;
+    const sample = reallocated
+      .slice(0, 3)
+      .map((item) => `${item.baseSku || 'SKU'} → ${item.sku}`)
+      .join(', ');
+    const extra = reallocated.length > 3 ? ` (+${reallocated.length - 3} more)` : '';
+    setSkuToast({
+      open: true,
+      message: `Base SKU was taken for ${reallocated.length} listing(s). Using counted SKUs: ${sample}${extra}`,
+    });
+  };
+
   const handleSaveAll = async () => {
+    const savableItems = activeItems.filter(
+      (item) => !['error', 'loading', 'blocked'].includes(item.status)
+    );
+    const listingsToSave = savableItems.map(item => {
+        const listingData = withAmazonScrapedPrice(
+          editedItems[item.id] || item.generatedListing,
+          item
+        );
+        
+        // Mark duplicates for update
+        if (item.status === 'duplicate_updateable') {
+          return {
+            ...listingData,
+            _isDuplicateUpdate: true,
+            _existingListingId: item.generatedListing?._existingListingId || listingData._existingListingId
+          };
+        }
+        
+        return listingData;
+      });
+
+    notifySkuReallocations(savableItems);
+
     setSaving(true);
     try {
-      // Convert edited items to array format (exclude errors, loading, blocked, and dismissed items)
-      const listingsToSave = activeItems
-        .filter(item => !['error', 'loading', 'blocked'].includes(item.status))
-        .map(item => {
-          const listingData = withAmazonScrapedPrice(
-            editedItems[item.id] || item.generatedListing,
-            item
-          );
-          
-          // Mark duplicates for update
-          if (item.status === 'duplicate_updateable') {
-            return {
-              ...listingData,
-              _isDuplicateUpdate: true,
-              _existingListingId: item.generatedListing?._existingListingId || listingData._existingListingId
-            };
-          }
-          
-          return listingData;
-        });
-      
       await onSave(listingsToSave);
       setHasUnsavedChanges(false);
     } catch (error) {
@@ -916,6 +970,28 @@ export default function AsinReviewModal({
               color={getStatusColor(currentItem?.status)}
               size="small"
             />
+            {scrapeSourceMeta && (
+              <Tooltip title={scrapeSourceMeta.title}>
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  color={scrapeSourceMeta.color}
+                  label={scrapeSourceMeta.label}
+                />
+              </Tooltip>
+            )}
+            {(currentItem?.skuReallocated ||
+              (currentItem?.sku && currentItem?.baseSku && currentItem.sku !== currentItem.baseSku)) && (
+              <Tooltip title={`Base SKU ${currentItem.baseSku || ''} was taken — using ${currentItem.sku}`}>
+                <Chip
+                  size="small"
+                  color="warning"
+                  variant="outlined"
+                  icon={<WarningIcon />}
+                  label={`SKU ${currentItem.sku}`}
+                />
+              </Tooltip>
+            )}
           </Box>
           
           <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -971,9 +1047,10 @@ export default function AsinReviewModal({
                 color={hideSaveButton ? 'primary' : 'secondary'}
                 size="small"
                 onClick={() => {
-                  const listingsToSave = activeItems
-                    .filter(item => !['error', 'loading', 'blocked'].includes(item.status))
-                    .map(item => {
+                  const savableItems = activeItems.filter(
+                    (item) => !['error', 'loading', 'blocked'].includes(item.status)
+                  );
+                  const listingsToSave = savableItems.map(item => {
                       const listingData = withAmazonScrapedPrice(
                         editedItems[item.id] || item.generatedListing,
                         item
@@ -987,6 +1064,7 @@ export default function AsinReviewModal({
                       }
                       return listingData;
                     });
+                  notifySkuReallocations(savableItems);
                   onListDirectly(listingsToSave);
                 }}
                 disabled={saving || listableCount === 0}
@@ -1210,7 +1288,9 @@ export default function AsinReviewModal({
                       Specifications
                     </Typography>
                     <Stack spacing={0.75} sx={{ mt: 0.5 }}>
-                      {Object.entries(currentItem.sourceData.productInformation).map(([key, value]) => (
+                      {Object.entries(currentItem.sourceData.productInformation)
+                        .filter(([key]) => !/^best[_]?sellers?[_]?rank$/i.test(String(key || '').replace(/\s+/g, '_')))
+                        .map(([key, value]) => (
                         <Box key={key}>
                           <Typography variant="caption" color="text.secondary" display="block">
                             {key}
@@ -1635,6 +1715,21 @@ export default function AsinReviewModal({
           </Button>
         </Box>
       </DialogContent>
+      <Snackbar
+        open={skuToast.open}
+        autoHideDuration={8000}
+        onClose={() => setSkuToast((prev) => ({ ...prev, open: false }))}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          severity="warning"
+          variant="filled"
+          onClose={() => setSkuToast((prev) => ({ ...prev, open: false }))}
+          sx={{ maxWidth: 560 }}
+        >
+          {skuToast.message}
+        </Alert>
+      </Snackbar>
     </Dialog>
   );
 }

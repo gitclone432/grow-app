@@ -35,7 +35,7 @@ import BulkImportSKUsDialog from '../../components/BulkImportSKUsDialog.jsx';
 import BulkReactivateDialog from '../../components/BulkReactivateDialog.jsx';
 import BulkDeactivateDialog from '../../components/BulkDeactivateDialog.jsx';
 
-export default function SellerTemplatesPage() {
+export default function SellerTemplatesLabPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const sellerId = searchParams.get('sellerId');
@@ -58,7 +58,7 @@ export default function SellerTemplatesPage() {
 
   useEffect(() => {
     if (!sellerId) {
-      navigate('/admin/select-seller');
+      navigate('/admin/select-seller-lab');
       return;
     }
     fetchSellerAndTemplates();
@@ -131,7 +131,7 @@ export default function SellerTemplatesPage() {
   };
 
   const handleAddListings = (templateId) => {
-    navigate(`/admin/template-listings?templateId=${templateId}&sellerId=${sellerId}`);
+    navigate(`/admin/template-listings-lab?templateId=${templateId}&sellerId=${sellerId}`);
   };
 
   const getSellerDisplayName = () => {
@@ -177,7 +177,7 @@ export default function SellerTemplatesPage() {
       <Breadcrumbs sx={{ mb: 2 }}>
         <MuiLink
           component={Link}
-          to="/admin/select-seller"
+          to="/admin/select-seller-lab"
           underline="hover"
           color="inherit"
         >
@@ -189,12 +189,12 @@ export default function SellerTemplatesPage() {
       {/* Header */}
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
         <Typography variant="h5">
-          {getSellerDisplayName()}'s Templates
+          {getSellerDisplayName()}'s Templates (Lab)
         </Typography>
         <Button
           variant="outlined"
           startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/admin/select-seller')}
+          onClick={() => navigate('/admin/select-seller-lab')}
         >
           Back to Sellers
         </Button>

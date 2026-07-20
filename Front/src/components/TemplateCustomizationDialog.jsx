@@ -23,6 +23,7 @@ import CustomColumnsEditor from './override-editors/CustomColumnsEditor';
 import AsinAutomationEditor from './override-editors/AsinAutomationEditor';
 import PricingConfigEditor from './override-editors/PricingConfigEditor';
 import ActionFieldEditor from './override-editors/ActionFieldEditor';
+import CoreFieldDefaultsEditor from './override-editors/CoreFieldDefaultsEditor';
 
 export default function TemplateCustomizationDialog({ 
   open, 
@@ -30,7 +31,10 @@ export default function TemplateCustomizationDialog({
   templateId, 
   sellerId,
   templateName,
-  readOnly = false
+  readOnly = false,
+  showPricingConfig = true,
+  showActionField = true,
+  showCoreFieldDefaults = false,
 }) {
   const [currentTab, setCurrentTab] = useState(0);
   const [baseTemplate, setBaseTemplate] = useState(null);
@@ -38,6 +42,18 @@ export default function TemplateCustomizationDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+
+  const tabs = [
+    { id: 'customColumns', label: 'Custom Columns' },
+    { id: 'asinAutoFill', label: 'ASIN Auto-Fill' },
+    ...(showCoreFieldDefaults ? [{ id: 'coreFieldDefaults', label: 'Set Defaults' }] : []),
+    ...(showPricingConfig ? [{ id: 'pricingConfig', label: 'Pricing Config' }] : []),
+    ...(showActionField ? [{ id: 'actionField', label: 'Action Field' }] : []),
+  ];
+
+  useEffect(() => {
+    if (open) setCurrentTab(0);
+  }, [open, showPricingConfig, showActionField, showCoreFieldDefaults]);
   
   useEffect(() => {
     if (open && templateId && sellerId) {
@@ -166,14 +182,13 @@ export default function TemplateCustomizationDialog({
         ) : (
           <>
             <Tabs value={currentTab} onChange={(e, v) => setCurrentTab(v)} sx={{ borderBottom: 1, borderColor: 'divider' }}>
-              <Tab label="Custom Columns" />
-              <Tab label="ASIN Auto-Fill" />
-              <Tab label="Pricing Config" />
-              <Tab label="Action Field" />
+              {tabs.map((tab) => (
+                <Tab key={tab.id} label={tab.label} />
+              ))}
             </Tabs>
 
             <Box sx={{ mt: 2, minHeight: 400, pointerEvents: readOnly ? 'none' : 'auto', opacity: readOnly ? 0.85 : 1 }}>
-              {currentTab === 0 && (
+              {tabs[currentTab]?.id === 'customColumns' && (
                 <CustomColumnsEditor 
                   baseColumns={baseTemplate?.customColumns}
                   overrideColumns={override?.customColumns}
@@ -183,7 +198,7 @@ export default function TemplateCustomizationDialog({
                 />
               )}
               
-              {currentTab === 1 && (
+              {tabs[currentTab]?.id === 'asinAutoFill' && (
                 <AsinAutomationEditor 
                   baseConfig={baseTemplate?.asinAutomation}
                   overrideConfig={override?.asinAutomation}
@@ -193,8 +208,18 @@ export default function TemplateCustomizationDialog({
                   onReset={() => handleResetSection('asinAutomation')}
                 />
               )}
+
+              {tabs[currentTab]?.id === 'coreFieldDefaults' && (
+                <CoreFieldDefaultsEditor
+                  baseDefaults={baseTemplate?.coreFieldDefaults}
+                  overrideDefaults={override?.coreFieldDefaults}
+                  isOverridden={override?.overrides?.coreFieldDefaults}
+                  onSave={(data) => handleSaveSection('coreFieldDefaults', data)}
+                  onReset={() => handleResetSection('coreFieldDefaults')}
+                />
+              )}
               
-              {currentTab === 2 && (
+              {tabs[currentTab]?.id === 'pricingConfig' && (
                 <PricingConfigEditor 
                   baseConfig={baseTemplate?.pricingConfig}
                   overrideConfig={override?.pricingConfig}
@@ -204,7 +229,7 @@ export default function TemplateCustomizationDialog({
                 />
               )}
               
-              {currentTab === 3 && (
+              {tabs[currentTab]?.id === 'actionField' && (
                 <ActionFieldEditor 
                   baseActionField={baseTemplate?.customActionField}
                   overrideActionField={override?.customActionField}

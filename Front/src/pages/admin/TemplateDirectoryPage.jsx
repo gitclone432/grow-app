@@ -45,6 +45,7 @@ import api from '../../lib/api.js';
 import ListDirectlyDialog from '../../components/ListDirectlyDialog.jsx';
 import TemplateCustomizationDialog from '../../components/TemplateCustomizationDialog.jsx';
 import AsinReviewModal from '../../components/AsinReviewModal.jsx';
+import { saveCsvToStorage } from '../../utils/saveCsvToStorage.js';
 
 // Core columns to display (same as ListingDirectoryPage)
 const CORE_COLUMNS = [
@@ -349,6 +350,15 @@ export default function TemplateDirectoryPage() {
         const m = contentDisposition.match(/filename="?(.+)"?/i);
         if (m?.[1]) filename = m[1].replace(/"/g, '');
       }
+      await saveCsvToStorage({
+        blob: response.data,
+        filename,
+        sellerId: selectedSeller._id,
+        templateId: template._id,
+        listingCount: selectedListings.size > 0 ? selectedListings.size : (pagination.total || listings.length || 0),
+        listingStatus: 'active',
+        source: 'download',
+      });
       const downloadUrl = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = downloadUrl;

@@ -146,10 +146,10 @@ import {
   OrdersDepartmentDashboardPage,
   ColumnCreatorPage,
   ManageTemplatesPage,
-  TemplateListingsPage,
+  TemplateListingsLabPage,
   TemplateListingAnalyticsPage,
-  SelectSellerPage,
-  SellerTemplatesPage,
+  SelectSellerLabPage,
+  SellerTemplatesLabPage,
   ListingDirectoryPage,
   TemplateDirectoryPage,
   TemplateDatabasePage,
@@ -284,7 +284,7 @@ const COMPONENT_MAP = {
   'ManageTemplates': ManageTemplatesPage,
   'AmazonPiSourceColumns': AmazonPiSourceColumnsPage,
   'ListingsDatabase': TemplateDatabasePage,
-  'SelectSeller': SelectSellerPage,
+  'SelectSellerLab': SelectSellerLabPage,
   'ListingDirectory': ListingDirectoryPage,
   'TemplateDirectory': TemplateDirectoryPage,
   'AsinDirectory': AsinDirectoryPage,
@@ -963,10 +963,10 @@ export default function AdminLayout({ user, onLogout }) {
             </>
           )}
 
-          {hasAccess('SelectSeller') && (
+          {hasAccess('SelectSellerLab') && (
             <>
-              <Route path="/template-listings" element={<TemplateListingsPage />} />
-              <Route path="/seller-templates" element={<SellerTemplatesPage />} />
+              <Route path="/seller-templates-lab" element={<SellerTemplatesLabPage />} />
+              <Route path="/template-listings-lab" element={<TemplateListingsLabPage />} />
               <Route path="/template-listing-analytics" element={<TemplateListingAnalyticsPage />} />
             </>
           )}

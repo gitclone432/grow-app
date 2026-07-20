@@ -24,6 +24,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import FilterAltOffIcon from '@mui/icons-material/FilterAltOff';
 import SettingsIcon from '@mui/icons-material/Settings';
 import api from '../../lib/api';
+import { sortSellersByName } from '../../lib/sellersSort';
 import TemplateManagementModal from '../../components/TemplateManagementModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 
@@ -382,7 +383,7 @@ export default function BuyerChatPage() {
   async function fetchSellers() {
     try {
       const { data } = await api.get('/sellers/all');
-      setSellers(data || []);
+      setSellers(sortSellersByName(data || []));
     } catch (e) {
       // Don't log 401 errors - they're handled by the interceptor
       if (e.response?.status !== 401) {

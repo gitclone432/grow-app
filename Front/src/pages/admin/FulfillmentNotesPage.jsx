@@ -38,6 +38,7 @@ import PersonIcon from '@mui/icons-material/Person';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import api from '../../lib/api';
 import FulfillmentNotesSkeleton from '../../components/skeletons/FulfillmentNotesSkeleton';
+import { sortSellersByName } from '../../lib/sellersSort';
 
 // --- Chat Dialog Component ---
 function ChatDialog({ open, onClose, order }) {
@@ -511,7 +512,7 @@ export default function FulfillmentNotesPage() {
     const loadSellers = async () => {
       try {
         const { data } = await api.get('/sellers/all');
-        setSellers(data || []);
+        setSellers(sortSellersByName(data || []));
       } catch (e) {
         console.error("Failed to load sellers", e);
       }

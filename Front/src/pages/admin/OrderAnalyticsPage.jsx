@@ -29,6 +29,7 @@ import api from '../../lib/api';
 import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderSyncEvents';
 import OrderAnalyticsSkeleton from '../../components/skeletons/OrderAnalyticsSkeleton';
 import { dashboardSignatureTokens } from '../../theme/appTheme';
+import { sortSellersByName, sellerDisplayName } from '../../lib/sellersSort';
 
 /** Calendar "today" in Pacific (same as Orders Department Dashboard / backend PT helpers). */
 function getTodayPtDateString() {
@@ -63,37 +64,53 @@ function SummaryCard({ label, value, tone = 'neutral' }) {
     <Paper
       variant="outlined"
       sx={{
-        p: 2,
+        px: 1.5,
+        py: 1.25,
         borderRadius: `${dashboardSignatureTokens.radius.card}px`,
         borderColor: palette.border,
         background: dashboardSignatureTokens.surfaces.metricCard,
-        minHeight: 108,
         display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'space-between'
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 1,
+        minHeight: 56,
       }}
     >
-      <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 500 }}>
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, letterSpacing: 0.2 }}>
         {label}
       </Typography>
       <Box
         sx={{
-          mt: 1.5,
-          width: 'fit-content',
-          px: 1.25,
-          py: 0.5,
+          minWidth: 36,
+          px: 1,
+          py: 0.35,
           borderRadius: `${dashboardSignatureTokens.radius.pill}px`,
           backgroundColor: palette.background,
           border: '1px solid',
           borderColor: palette.border,
-          color: palette.color
+          color: palette.color,
+          textAlign: 'center',
         }}
       >
-        <Typography variant="h5" sx={{ fontWeight: 700, lineHeight: 1.1 }}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2, fontSize: '1rem' }}>
           {value}
         </Typography>
       </Box>
     </Paper>
+  );
+}
+
+function FilterToggle({ label, checked, onChange }) {
+  return (
+    <FormControlLabel
+      control={<Switch size="small" checked={checked} onChange={onChange} color="primary" />}
+      label={
+        <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.8125rem' }}>
+          {label}
+        </Typography>
+      }
+      sx={{ m: 0, mr: 0.5 }}
+    />
   );
 }
 
@@ -172,7 +189,7 @@ export default function OrderAnalyticsPage() {
   const fetchSellers = async () => {
     try {
       const response = await api.get('/sellers/all');
-      setSellers(response.data || []);
+      setSellers(sortSellersByName(response.data || []));
     } catch (err) {
       console.error('Error fetching sellers:', err);
     }
@@ -392,10 +409,10 @@ export default function OrderAnalyticsPage() {
     return [
       { label: 'Total Orders', value: totalOrders, tone: 'info' },
       { label: 'Sellers', value: sellersList.length, tone: 'neutral' },
-      { label: 'United States', value: marketplaceTotals.EBAY_US, tone: 'shipping' },
-      { label: 'Australia', value: marketplaceTotals.EBAY_AU, tone: 'success' },
-      { label: 'Canada', value: marketplaceTotals.EBAY_CA, tone: 'warning' },
-      { label: 'England', value: marketplaceTotals.EBAY_GB, tone: 'amazon' }
+      { label: 'USA', value: marketplaceTotals.EBAY_US, tone: 'shipping' },
+      { label: 'AUS', value: marketplaceTotals.EBAY_AU, tone: 'success' },
+      { label: 'CA', value: marketplaceTotals.EBAY_CA, tone: 'warning' },
+      { label: 'UK', value: marketplaceTotals.EBAY_GB, tone: 'amazon' }
     ];
   }, [statistics, totalOrders, sellersList.length]);
 
@@ -406,7 +423,7 @@ export default function OrderAnalyticsPage() {
       <Box sx={{ p: 3 }}>
         <Paper
           sx={{
-            p: { xs: 2, md: 3 },
+            p: { xs: 2, md: 2.5 },
             mb: 3,
             borderRadius: `${dashboardSignatureTokens.radius.card}px`,
             border: '1px solid',
@@ -415,213 +432,188 @@ export default function OrderAnalyticsPage() {
             boxShadow: dashboardSignatureTokens.shadows.card
           }}
         >
-          <Stack direction={{ xs: 'column', lg: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', lg: 'center' }} gap={2.5}>
+          <Stack
+            direction={{ xs: 'column', md: 'row' }}
+            justifyContent="space-between"
+            alignItems={{ xs: 'stretch', md: 'center' }}
+            gap={1.5}
+            sx={{ mb: 2 }}
+          >
             <Box>
-              <Typography variant="h4" sx={{ fontWeight: 700, fontSize: { xs: '1.6rem', md: '1.9rem' } }}>
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>
                 Order Analytics
               </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
-                Daily seller and marketplace order totals in Pacific Time (America/Los_Angeles), including cancelled orders for full visibility. Single-day default is today in PT.
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
+                Seller & marketplace order totals · Pacific Time (PT)
               </Typography>
             </Box>
 
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} useFlexGap flexWrap="wrap" sx={{ width: { xs: '100%', lg: 'auto' } }}>
-              <Button
-                variant="contained"
-                color="primary"
-                size="small"
-                startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <ShoppingCartIcon />}
-                onClick={pollNewOrders}
-                disabled={loading}
-                sx={{ minWidth: 170, height: 40, boxSizing: 'border-box' }}
-              >
-                {loading ? 'Polling...' : 'Poll New Orders'}
-              </Button>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
               <Chip
-                icon={<ShoppingCartIcon />}
-                label={`${totalOrders} Total Orders`}
+                size="small"
+                icon={<ShoppingCartIcon sx={{ fontSize: 16 }} />}
+                label={`${totalOrders} orders`}
                 sx={{
-                  height: 40,
-                  px: 1,
-                  borderRadius: `${dashboardSignatureTokens.radius.pill}px`,
+                  height: 32,
                   border: '1px solid',
                   borderColor: dashboardSignatureTokens.tones.info.border,
                   backgroundColor: dashboardSignatureTokens.tones.info.background,
                   color: dashboardSignatureTokens.tones.info.color,
-                  '& .MuiChip-icon': {
-                    color: dashboardSignatureTokens.tones.info.color
-                  }
+                  '& .MuiChip-icon': { color: dashboardSignatureTokens.tones.info.color },
                 }}
               />
+              <Button
+                variant="contained"
+                color="primary"
+                size="small"
+                startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <ShoppingCartIcon />}
+                onClick={pollNewOrders}
+                disabled={loading}
+              >
+                {loading ? 'Polling…' : 'Poll New Orders'}
+              </Button>
             </Stack>
           </Stack>
 
-          <Box
+          <Stack
+            direction="row"
+            spacing={1.25}
+            alignItems="center"
+            flexWrap="wrap"
+            useFlexGap
             sx={{
-              mt: 3,
-              pt: 2,
-              borderTop: '1px solid',
-              borderColor: 'divider'
+              p: 1.5,
+              borderRadius: 2,
+              bgcolor: 'action.hover',
+              border: '1px solid',
+              borderColor: 'divider',
             }}
           >
-            <Stack
-              direction={{ xs: 'column', md: 'row' }}
-              spacing={2}
-              alignItems="center"
-              flexWrap="wrap"
-            >
-              <FormControl size="small" sx={{ minWidth: 150 }}>
-                <InputLabel id="date-mode-label">Date Mode</InputLabel>
-                <Select
-                  labelId="date-mode-label"
-                  value={draftDateFilter.mode}
-                  label="Date Mode"
-                  onChange={(e) => setDraftDateFilter(prev => ({ ...prev, mode: e.target.value }))}
-                >
-                  <MenuItem value="none">None</MenuItem>
-                  <MenuItem value="single">Single Day</MenuItem>
-                  <MenuItem value="range">Date Range</MenuItem>
-                </Select>
-              </FormControl>
+            <FormControl size="small" sx={{ minWidth: 130 }}>
+              <InputLabel id="date-mode-label">Date Mode</InputLabel>
+              <Select
+                labelId="date-mode-label"
+                value={draftDateFilter.mode}
+                label="Date Mode"
+                onChange={(e) => setDraftDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+              >
+                <MenuItem value="none">None</MenuItem>
+                <MenuItem value="single">Single Day</MenuItem>
+                <MenuItem value="range">Date Range</MenuItem>
+              </Select>
+            </FormControl>
 
-              {/* Single Date Input */}
-              {draftDateFilter.mode === 'single' && (
+            {draftDateFilter.mode === 'single' && (
+              <TextField
+                label="Date"
+                type="date"
+                value={draftDateFilter.single}
+                onChange={(e) => setDraftDateFilter(prev => ({ ...prev, single: e.target.value }))}
+                InputLabelProps={{ shrink: true }}
+                size="small"
+                sx={{ width: 160 }}
+              />
+            )}
+
+            {draftDateFilter.mode === 'range' && (
+              <>
                 <TextField
-                  label="Date"
+                  label="From"
                   type="date"
-                  value={draftDateFilter.single}
-                  onChange={(e) => setDraftDateFilter(prev => ({ ...prev, single: e.target.value }))}
+                  value={draftDateFilter.from}
+                  onChange={(e) => setDraftDateFilter(prev => ({ ...prev, from: e.target.value }))}
                   InputLabelProps={{ shrink: true }}
                   size="small"
-                  sx={{ minWidth: 200 }}
+                  sx={{ width: 150 }}
                 />
-              )}
+                <TextField
+                  label="To"
+                  type="date"
+                  value={draftDateFilter.to}
+                  onChange={(e) => setDraftDateFilter(prev => ({ ...prev, to: e.target.value }))}
+                  InputLabelProps={{ shrink: true }}
+                  size="small"
+                  sx={{ width: 150 }}
+                />
+              </>
+            )}
 
-              {/* Date Range Inputs */}
-              {draftDateFilter.mode === 'range' && (
-                <>
-                  <TextField
-                    label="From"
-                    type="date"
-                    value={draftDateFilter.from}
-                    onChange={(e) => setDraftDateFilter(prev => ({ ...prev, from: e.target.value }))}
-                    InputLabelProps={{ shrink: true }}
-                    size="small"
-                    sx={{ minWidth: 200 }}
-                  />
-                  <TextField
-                    label="To"
-                    type="date"
-                    value={draftDateFilter.to}
-                    onChange={(e) => setDraftDateFilter(prev => ({ ...prev, to: e.target.value }))}
-                    InputLabelProps={{ shrink: true }}
-                    size="small"
-                    sx={{ minWidth: 200 }}
-                  />
-                </>
-              )}
+            <FormControl size="small" sx={{ minWidth: 160 }}>
+              <InputLabel>Seller</InputLabel>
+              <Select
+                value={selectedSeller}
+                onChange={(e) => setSelectedSeller(e.target.value)}
+                label="Seller"
+              >
+                <MenuItem value="">All Sellers</MenuItem>
+                {sellers.map((seller) => (
+                  <MenuItem key={seller._id} value={seller._id}>
+                    {sellerDisplayName(seller) || 'Unknown'}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
 
-              <FormControl size="small" sx={{ minWidth: 200 }}>
-                <InputLabel>Seller</InputLabel>
-                <Select
-                  value={selectedSeller}
-                  onChange={(e) => setSelectedSeller(e.target.value)}
-                  label="Seller"
-                >
-                  <MenuItem value="">All Sellers</MenuItem>
-                  {sellers.map((seller) => (
-                    <MenuItem key={seller._id} value={seller._id}>
-                      {seller.user?.username || 'Unknown'}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
+            <FormControl size="small" sx={{ minWidth: 120 }}>
+              <InputLabel>Marketplace</InputLabel>
+              <Select
+                value={draftMarketplace}
+                onChange={(e) => setDraftMarketplace(e.target.value)}
+                label="Marketplace"
+              >
+                <MenuItem value="">All</MenuItem>
+                <MenuItem value="EBAY_US">USA</MenuItem>
+                <MenuItem value="EBAY_CA">CA</MenuItem>
+                <MenuItem value="EBAY_AU">AUS</MenuItem>
+                <MenuItem value="EBAY_GB">UK</MenuItem>
+              </Select>
+            </FormControl>
 
-              <FormControl size="small" sx={{ minWidth: 180 }}>
-                <InputLabel>Marketplace</InputLabel>
-                <Select
-                  value={draftMarketplace}
-                  onChange={(e) => setDraftMarketplace(e.target.value)}
-                  label="Marketplace"
-                >
-                  <MenuItem value="">All Marketplaces</MenuItem>
-                  <MenuItem value="EBAY_US">United States</MenuItem>
-                  <MenuItem value="EBAY_AU">Australia</MenuItem>
-                  <MenuItem value="EBAY_CA">Canada</MenuItem>
-                  <MenuItem value="GB">England</MenuItem>
-                </Select>
-              </FormControl>
+            <FilterToggle
+              label="Exclude Client"
+              checked={excludeClient}
+              onChange={(e) => setExcludeClient(e.target.checked)}
+            />
+            <FilterToggle
+              label="Exclude &lt; $3"
+              checked={excludeLowValue}
+              onChange={(e) => setExcludeLowValue(e.target.checked)}
+            />
 
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={excludeClient}
-                    onChange={(e) => setExcludeClient(e.target.checked)}
-                    color="primary"
-                  />
-                }
-                label={
-                  <Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>
-                    Exclude Client
-                  </Typography>
-                }
-                sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
-              />
-
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={excludeLowValue}
-                    onChange={(e) => setExcludeLowValue(e.target.checked)}
-                    color="primary"
-                  />
-                }
-                label={
-                  <Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>
-                    Exclude &lt; $3 Orders
-                  </Typography>
-                }
-                sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
-              />
-            </Stack>
-
-            <Stack
-              direction={{ xs: 'column', sm: 'row' }}
-              spacing={1.5}
-              sx={{ mt: 2 }}
-            >
+            <Stack direction="row" spacing={1} sx={{ ml: { md: 'auto' } }}>
               <Button
                 variant="contained"
                 color="secondary"
                 size="small"
                 onClick={handleApplyFilters}
                 disabled={loading || !hasPendingFilterChanges}
-                sx={{ height: 40, boxSizing: 'border-box' }}
               >
-                Apply Filters
+                Apply
               </Button>
-
               <Button
                 variant="outlined"
                 color="primary"
                 size="small"
-                startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+                startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <RefreshIcon />}
                 onClick={handleRefresh}
                 disabled={loading}
-                sx={{ height: 40, boxSizing: 'border-box' }}
               >
                 Refresh
               </Button>
             </Stack>
-          </Box>
+          </Stack>
 
           {summaryCards.length > 0 && (
             <Box
               sx={{
-                mt: 3,
+                mt: 2,
                 display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-                gap: 1.5
+                gridTemplateColumns: {
+                  xs: 'repeat(2, 1fr)',
+                  sm: 'repeat(3, 1fr)',
+                  md: 'repeat(6, 1fr)',
+                },
+                gap: 1,
               }}
             >
               {summaryCards.map((card) => (
@@ -773,7 +765,7 @@ export default function OrderAnalyticsPage() {
                             zIndex: 2
                           }}
                         >
-                          GB
+                          UK
                         </TableCell>
                       </React.Fragment>
                     ))}

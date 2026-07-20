@@ -1,11 +1,12 @@
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, memo, lazy, Suspense } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { 
   Box, Button, Paper, Stack, Table, TableBody, TableCell, TableContainer, 
   TableHead, TableRow, Typography, IconButton, Dialog, DialogTitle, 
   DialogContent, DialogActions, Alert, Pagination, TextField, Tabs, Tab, MenuItem,
   Chip, CircularProgress, LinearProgress, FormControl,
-  InputLabel, Select, Breadcrumbs, Link, Checkbox, OutlinedInput, Tooltip
+  InputLabel, Select, Breadcrumbs, Link, Checkbox, OutlinedInput, Tooltip,
+  FormControlLabel, Switch, Collapse
 } from '@mui/material';
 import { 
   Delete as DeleteIcon, 
@@ -19,32 +20,174 @@ import {
   CalendarToday as CalendarIcon,
   PlayArrow as ApplyIcon,
   ClearAll as ClearAllIcon,
+  ViewColumn as ViewColumnIcon,
 } from '@mui/icons-material';
 import api from '../../lib/api.js';
 import { getAuthToken } from '../../lib/api.js';
 import BulkListingPreview from '../../components/BulkListingPreview.jsx';
-import CoreFieldDefaultsDialog from '../../components/CoreFieldDefaultsDialog.jsx';
 import PricingConfigSection from '../../components/PricingConfigSection.jsx';
-import BulkImportASINsDialog from '../../components/BulkImportASINsDialog.jsx';
-import BulkImportSKUsDialog from '../../components/BulkImportSKUsDialog.jsx';
-import BulkReactivateDialog from '../../components/BulkReactivateDialog.jsx';
-import BulkDeactivateDialog from '../../components/BulkDeactivateDialog.jsx';
 import TemplateListingStatsCard from '../../components/TemplateListingStatsCard.jsx';
 import ActionFieldEditor from '../../components/ActionFieldEditor.jsx';
-import TemplateCustomizationDialog from '../../components/TemplateCustomizationDialog.jsx';
-import AsinReviewModal from '../../components/AsinReviewModal.jsx';
-import ListDirectlyDialog from '../../components/ListDirectlyDialog.jsx';
 import { parseAsins, getParsingStats, getValidationError } from '../../utils/asinParser.js';
 import { generateSKUFromASIN } from '../../utils/skuGenerator.js';
 import { mergeDefaultCoreFieldDefaults } from '../../constants/defaultDescriptionTemplate.js';
 import { fetchDescriptionTemplateGallery } from '../../lib/descriptionTemplateGalleryApi.js';
+import { saveCsvToStorage } from '../../utils/saveCsvToStorage.js';
 
-export default function TemplateListingsPage() {
-  const [searchParams, setSearchParams] = useSearchParams();
+const TemplateCustomizationDialog = lazy(() => import('../../components/TemplateCustomizationDialog.jsx'));
+const AsinReviewModal = lazy(() => import('../../components/AsinReviewModal.jsx'));
+const ListDirectlyDialog = lazy(() => import('../../components/ListDirectlyDialog.jsx'));
+const BulkImportASINsDialog = lazy(() => import('../../components/BulkImportASINsDialog.jsx'));
+const BulkImportSKUsDialog = lazy(() => import('../../components/BulkImportSKUsDialog.jsx'));
+const BulkReactivateDialog = lazy(() => import('../../components/BulkReactivateDialog.jsx'));
+const BulkDeactivateDialog = lazy(() => import('../../components/BulkDeactivateDialog.jsx'));
+
+const MARKETPLACE_OPTIONS = [
+  { value: 'US', label: 'Amazon.com (US)' },
+  { value: 'UK', label: 'Amazon.co.uk (UK)' },
+  { value: 'CA', label: 'Amazon.ca (Canada)' },
+  { value: 'AU', label: 'Amazon.com.au (Australia)' },
+];
+
+const ALL_CORE_COLUMNS = [
+  { key: 'action', label: '*Action', width: 80 },
+  { key: 'customLabel', label: 'Custom label (SKU)', width: 150 },
+  { key: 'categoryId', label: 'Category ID', width: 100 },
+  { key: 'categoryName', label: 'Category name', width: 200 },
+  { key: 'title', label: 'Title', width: 300 },
+  { key: 'relationship', label: 'Relationship', width: 120 },
+  { key: 'relationshipDetails', label: 'Relationship details', width: 150 },
+  { key: 'scheduleTime', label: 'Schedule time', width: 120 },
+  { key: 'upc', label: 'UPC', width: 120 },
+  { key: 'epid', label: 'EPID', width: 100 },
+  { key: 'startPrice', label: 'Start price', width: 100 },
+  { key: 'quantity', label: 'Quantity', width: 80 },
+  { key: 'itemPhotoUrl', label: 'Item photo URL', width: 150 },
+  { key: 'videoId', label: 'Video ID', width: 120 },
+  { key: 'conditionId', label: 'Condition ID', width: 100 },
+  { key: 'description', label: 'Description', width: 200 },
+  { key: 'format', label: 'Format', width: 100 },
+  { key: 'duration', label: 'Duration', width: 100 },
+  { key: 'buyItNowPrice', label: 'Buy It Now price', width: 120 },
+  { key: 'bestOfferEnabled', label: 'Best Offer enabled', width: 120 },
+  { key: 'bestOfferAutoAcceptPrice', label: 'Best Offer auto accept price', width: 180 },
+  { key: 'minimumBestOfferPrice', label: 'Minimum best offer price', width: 180 },
+  { key: 'immediatePayRequired', label: 'Immediate pay required', width: 150 },
+  { key: 'location', label: 'Location', width: 120 },
+  { key: 'shippingService1Option', label: 'Shipping service-1 option', width: 180 },
+  { key: 'shippingService1Cost', label: 'Shipping service-1 cost', width: 150 },
+  { key: 'shippingService1Priority', label: 'Shipping service-1 priority', width: 180 },
+  { key: 'shippingService2Option', label: 'Shipping service-2 option', width: 180 },
+  { key: 'shippingService2Cost', label: 'Shipping service-2 cost', width: 150 },
+  { key: 'shippingService2Priority', label: 'Shipping service-2 priority', width: 180 },
+  { key: 'maxDispatchTime', label: 'Max dispatch time', width: 140 },
+  { key: 'returnsAcceptedOption', label: 'Returns accepted option', width: 170 },
+  { key: 'returnsWithinOption', label: 'Return period', width: 120 },
+  { key: 'refundOption', label: 'Refund option', width: 120 },
+  { key: 'returnShippingCostPaidBy', label: 'Domestic return shipping paid by', width: 220 },
+  { key: 'shippingProfileName', label: 'Shipping profile name', width: 180 },
+  { key: 'returnProfileName', label: 'Return profile name', width: 180 },
+  { key: 'paymentProfileName', label: 'Payment profile name', width: 180 },
+];
+
+const DRAFT_CORE_KEYS = [
+  'action', 'customLabel', 'categoryId', 'title', 'upc',
+  'startPrice', 'quantity', 'itemPhotoUrl', 'conditionId', 'description', 'format',
+];
+
+const ACTIVE_ESSENTIAL_KEYS = [
+  'action', 'customLabel', 'categoryId', 'title', 'scheduleTime',
+  'startPrice', 'quantity', 'itemPhotoUrl', 'conditionId', 'format',
+];
+
+function formatListingCell(listing, colKey) {
+  const value = listing[colKey];
+  if (colKey === 'startPrice' || colKey === 'buyItNowPrice' || colKey === 'bestOfferAutoAcceptPrice' || colKey === 'minimumBestOfferPrice') {
+    return value ? `$${value}` : '-';
+  }
+  if (colKey === 'bestOfferEnabled' || colKey === 'immediatePayRequired') {
+    return value ? 'Yes' : 'No';
+  }
+  if (colKey === 'itemPhotoUrl') {
+    if (!value) return '-';
+    const count = String(value).split('|').filter((u) => u.trim()).length;
+    return `${count} image${count === 1 ? '' : 's'}`;
+  }
+  if (colKey === 'description') {
+    if (!value) return '-';
+    const plain = String(value).replace(/<[^>]*>/g, '').trim();
+    return plain.length > 48 ? `${plain.slice(0, 48)}…` : plain;
+  }
+  if (colKey === 'title') {
+    if (!value) return '-';
+    const text = String(value);
+    return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+  }
+  return value || '-';
+}
+
+const LabListingRow = memo(function LabListingRow({
+  listing,
+  coreColumns,
+  customColumns,
+  selected,
+  onToggleSelect,
+  onDuplicate,
+  onEdit,
+  onDelete,
+}) {
+  return (
+    <TableRow hover selected={selected}>
+      <TableCell padding="checkbox" sx={{ position: 'sticky', left: 0, bgcolor: 'background.paper', zIndex: 1 }}>
+        <Checkbox size="small" checked={selected} onChange={() => onToggleSelect(listing._id)} />
+      </TableCell>
+      {coreColumns.map((col) => (
+        <TableCell
+          key={col.key}
+          sx={
+            col.key === 'customLabel'
+              ? { position: 'sticky', left: 48, bgcolor: 'background.paper', zIndex: 1, fontWeight: 600, maxWidth: col.width }
+              : { maxWidth: col.width, whiteSpace: 'nowrap' }
+          }
+        >
+          {col.key === 'itemPhotoUrl' || col.key === 'description' ? (
+            <Typography variant="caption" color={col.key === 'itemPhotoUrl' ? 'primary' : 'text.secondary'} noWrap component="span">
+              {formatListingCell(listing, col.key)}
+            </Typography>
+          ) : (
+            formatListingCell(listing, col.key)
+          )}
+        </TableCell>
+      ))}
+      {customColumns.map((col) => (
+        <TableCell key={col.name} sx={{ maxWidth: 140, whiteSpace: 'nowrap' }}>
+          {listing.customFields?.[col.name] || '-'}
+        </TableCell>
+      ))}
+      <TableCell align="right" sx={{ position: 'sticky', right: 0, bgcolor: 'background.paper', zIndex: 1, whiteSpace: 'nowrap' }}>
+        <IconButton size="small" onClick={() => onDuplicate(listing)} title="Duplicate">
+          <CopyIcon fontSize="small" />
+        </IconButton>
+        <IconButton size="small" onClick={() => onEdit(listing)} title="Edit">
+          <EditIcon fontSize="small" />
+        </IconButton>
+        <IconButton size="small" color="error" onClick={() => onDelete(listing._id, listing.customLabel)} title="Delete">
+          <DeleteIcon fontSize="small" />
+        </IconButton>
+      </TableCell>
+    </TableRow>
+  );
+});
+
+export default function TemplateListingsLabPage({ embedded = false }) {
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const templateId = searchParams.get('templateId');
   const sellerId = searchParams.get('sellerId');
   const fromAsinList = searchParams.get('fromAsinList') === 'true';
+  const listingStatusFilter = searchParams.get('status') === 'draft' ? 'draft' : 'active';
+  const defaultActionValue = listingStatusFilter === 'draft' ? 'Draft' : 'Add';
+  const isDraftMode = listingStatusFilter === 'draft';
 
   const [template, setTemplate] = useState(null);
   const [listings, setListings] = useState([]);
@@ -52,22 +195,14 @@ export default function TemplateListingsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [showAllColumns, setShowAllColumns] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   
   // Download batch filtering state
-  const [batchFilter, setBatchFilter] = useState('active'); // 'active', 'all', or specific batchId
+  const [batchFilter, setBatchFilter] = useState('active');
   const [downloadHistory, setDownloadHistory] = useState([]);
   const [historyDialog, setHistoryDialog] = useState(false);
   const [confirmDownloadDialog, setConfirmDownloadDialog] = useState(false);
-
-  // Bulk ASIN import state
-  const [bulkImportDialog, setBulkImportDialog] = useState(false);
-  
-  // Bulk SKU import state
-  const [bulkImportSKUsDialog, setBulkImportSKUsDialog] = useState(false);
-  
-  // SKU status management state
-  const [reactivateDialog, setReactivateDialog] = useState(false);
-  const [deactivateDialog, setDeactivateDialog] = useState(false);
 
   // Seller and pricing state
   const [seller, setSeller] = useState(null);
@@ -94,27 +229,12 @@ export default function TemplateListingsPage() {
   const [processingLog, setProcessingLog] = useState([]);
   const isAsinAutofillEnabled = true;
 
-  // Marketplace / region state (for ScraperAPI)
   const [region, setRegion] = useState('US');
 
-  const MARKETPLACE_OPTIONS = [
-    { value: 'US', label: '🇺🇸 Amazon.com (US)' },
-    { value: 'UK', label: '🇬🇧 Amazon.co.uk (UK)' },
-    { value: 'CA', label: '🇨🇦 Amazon.ca (Canada)' },
-    { value: 'AU', label: '🇦🇺 Amazon.com.au (Australia)' },
-  ];
-
-  // Core field defaults dialog state
-  const [defaultsDialog, setDefaultsDialog] = useState(false);
-  
-  // Template customization dialog state
   const [customizationDialog, setCustomizationDialog] = useState(false);
-  
-  // ASIN Review Modal state
   const [reviewModal, setReviewModal] = useState(false);
   const [previewItems, setPreviewItems] = useState([]);
 
-  // Schedule Time state
   const [scheduleDate, setScheduleDate] = useState('');
   const [scheduleTimeFrom, setScheduleTimeFrom] = useState('');
   const [scheduleStep, setScheduleStep] = useState(3);
@@ -122,29 +242,34 @@ export default function TemplateListingsPage() {
   const [scheduleToRow, setScheduleToRow] = useState('');
   const [scheduleConfirmOpen, setScheduleConfirmOpen] = useState(false);
 
-  // List Directly dialog state
   const [listDirectlyDialog, setListDirectlyDialog] = useState(false);
+  const [bulkImportDialog, setBulkImportDialog] = useState(false);
+  const [bulkImportSKUsDialog, setBulkImportSKUsDialog] = useState(false);
+  const [reactivateDialog, setReactivateDialog] = useState(false);
+  const [deactivateDialog, setDeactivateDialog] = useState(false);
 
-  /** Server-backed description HTML gallery + per-seller template selection */
   const [galleryTemplates, setGalleryTemplates] = useState([]);
   const [galleryStoreMap, setGalleryStoreMap] = useState({});
+  const [galleryLoaded, setGalleryLoaded] = useState(false);
+
+  const loadGallery = useCallback(async () => {
+    if (galleryLoaded) return;
+    try {
+      const g = await fetchDescriptionTemplateGallery();
+      setGalleryTemplates(Array.isArray(g.templates) ? g.templates : []);
+      setGalleryStoreMap(g.storeTemplateMap && typeof g.storeTemplateMap === 'object' ? g.storeTemplateMap : {});
+    } catch (err) {
+      console.warn('Could not load description template gallery:', err?.message || err);
+    } finally {
+      setGalleryLoaded(true);
+    }
+  }, [galleryLoaded]);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const g = await fetchDescriptionTemplateGallery();
-        if (cancelled) return;
-        setGalleryTemplates(Array.isArray(g.templates) ? g.templates : []);
-        setGalleryStoreMap(g.storeTemplateMap && typeof g.storeTemplateMap === 'object' ? g.storeTemplateMap : {});
-      } catch (err) {
-        console.warn('Could not load description template gallery:', err?.message || err);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (reviewModal || customizationDialog || addEditDialog) {
+      void loadGallery();
+    }
+  }, [reviewModal, customizationDialog, addEditDialog, loadGallery]);
 
   const selectedStoreTemplate = useMemo(() => {
     if (!sellerId) return null;
@@ -153,25 +278,44 @@ export default function TemplateListingsPage() {
     return galleryTemplates.find((t) => String(t?.id) === String(assignedId)) || null;
   }, [sellerId, galleryTemplates, galleryStoreMap]);
 
-  // Row selection state
+  const coreColumns = useMemo(() => {
+    if (isDraftMode) {
+      return ALL_CORE_COLUMNS.filter((c) => DRAFT_CORE_KEYS.includes(c.key)).map((c) =>
+        c.key === 'startPrice' ? { ...c, label: 'Price' } : c
+      );
+    }
+    if (showAllColumns) return ALL_CORE_COLUMNS;
+    return ALL_CORE_COLUMNS.filter((c) => ACTIVE_ESSENTIAL_KEYS.includes(c.key));
+  }, [isDraftMode, showAllColumns]);
+
+  const customColumns = useMemo(
+    () => (Array.isArray(template?.customColumns) ? template.customColumns : []),
+    [template?.customColumns]
+  );
+
+  useEffect(() => {
+    if (!success) return undefined;
+    const t = setTimeout(() => setSuccess(''), 4000);
+    return () => clearTimeout(t);
+  }, [success]);
+
   const [selectedListings, setSelectedListings] = useState(new Set());
-  const handleToggleSelect = (id) => {
-    setSelectedListings(prev => {
+  const handleToggleSelect = useCallback((id) => {
+    setSelectedListings((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
-  };
-  const handleToggleAll = () => {
-    if (selectedListings.size === listings.length) {
-      setSelectedListings(new Set());
-    } else {
-      setSelectedListings(new Set(listings.map(l => l._id)));
-    }
-  };
+  }, []);
+  const handleToggleAll = useCallback(() => {
+    setSelectedListings((prev) => {
+      if (prev.size === listings.length) return new Set();
+      return new Set(listings.map((l) => l._id));
+    });
+  }, [listings]);
 
   const [listingFormData, setListingFormData] = useState({
-    action: 'Add',
+    action: defaultActionValue,
     customLabel: '',
     categoryId: '',
     categoryName: '',
@@ -212,57 +356,18 @@ export default function TemplateListingsPage() {
     customFields: {}
   });
 
-  // All 38 core columns - user can scroll to see them all
-  const coreColumns = [
-    { key: 'action', label: '*Action', width: 80 },
-    { key: 'customLabel', label: 'Custom label (SKU)', width: 150 },
-    { key: 'categoryId', label: 'Category ID', width: 100 },
-    { key: 'categoryName', label: 'Category name', width: 200 },
-    { key: 'title', label: 'Title', width: 300 },
-    { key: 'relationship', label: 'Relationship', width: 120 },
-    { key: 'relationshipDetails', label: 'Relationship details', width: 150 },
-    { key: 'scheduleTime', label: 'Schedule time', width: 120 },
-    { key: 'upc', label: 'UPC', width: 120 },
-    { key: 'epid', label: 'EPID', width: 100 },
-    { key: 'startPrice', label: 'Start price', width: 100 },
-    { key: 'quantity', label: 'Quantity', width: 80 },
-    { key: 'itemPhotoUrl', label: 'Item photo URL', width: 150 },
-    { key: 'videoId', label: 'Video ID', width: 120 },
-    { key: 'conditionId', label: 'Condition ID', width: 100 },
-    { key: 'description', label: 'Description', width: 200 },
-    { key: 'format', label: 'Format', width: 100 },
-    { key: 'duration', label: 'Duration', width: 100 },
-    { key: 'buyItNowPrice', label: 'Buy It Now price', width: 120 },
-    { key: 'bestOfferEnabled', label: 'Best Offer enabled', width: 120 },
-    { key: 'bestOfferAutoAcceptPrice', label: 'Best Offer auto accept price', width: 180 },
-    { key: 'minimumBestOfferPrice', label: 'Minimum best offer price', width: 180 },
-    { key: 'immediatePayRequired', label: 'Immediate pay required', width: 150 },
-    { key: 'location', label: 'Location', width: 120 },
-    { key: 'shippingService1Option', label: 'Shipping service-1 option', width: 180 },
-    { key: 'shippingService1Cost', label: 'Shipping service-1 cost', width: 150 },
-    { key: 'shippingService1Priority', label: 'Shipping service-1 priority', width: 180 },
-    { key: 'shippingService2Option', label: 'Shipping service-2 option', width: 180 },
-    { key: 'shippingService2Cost', label: 'Shipping service-2 cost', width: 150 },
-    { key: 'shippingService2Priority', label: 'Shipping service-2 priority', width: 180 },
-    { key: 'maxDispatchTime', label: 'Max dispatch time', width: 140 },
-    { key: 'returnsAcceptedOption', label: 'Returns accepted option', width: 170 },
-    { key: 'returnsWithinOption', label: 'Return period', width: 120 },
-    { key: 'refundOption', label: 'Refund option', width: 120 },
-    { key: 'returnShippingCostPaidBy', label: 'Domestic return shipping paid by', width: 220 },
-    { key: 'shippingProfileName', label: 'Shipping profile name', width: 180 },
-    { key: 'returnProfileName', label: 'Return profile name', width: 180 },
-    { key: 'paymentProfileName', label: 'Payment profile name', width: 180 }
-  ];
-
   // Validate sellerId on mount
   useEffect(() => {
     if (!sellerId) {
+      if (embedded) return;
       setError('Seller ID is required. Redirecting to seller selection...');
-      setTimeout(() => navigate('/admin/select-seller'), 2000);
+      setTimeout(() => navigate('/admin/select-seller-lab'), 2000);
       return;
     }
+
+    // Parent SelectSellerLab already loaded sellers — skip redundant fetch when embedded
+    if (embedded) return;
     
-    // Fetch seller info for breadcrumb
     const fetchSellerInfo = async () => {
       try {
         const { data } = await api.get('/sellers/all');
@@ -274,7 +379,7 @@ export default function TemplateListingsPage() {
     };
     
     fetchSellerInfo();
-  }, [sellerId, navigate]);
+  }, [sellerId, navigate, embedded]);
 
   // Fetch pricing config for this seller + template
   useEffect(() => {
@@ -322,24 +427,18 @@ export default function TemplateListingsPage() {
 
   useEffect(() => {
     if (templateId && sellerId) {
-      fetchListings();
-      fetchDownloadHistory();
-    }
-  }, [templateId, pagination.page, sellerId, batchFilter]);
-
-  useEffect(() => {
-    if (templateId && sellerId) {
       void fetchTemplate();
     }
   }, [templateId, sellerId, fetchTemplate]);
 
-  const fetchListings = async () => {
+  const fetchListings = useCallback(async () => {
     try {
       setLoading(true);
       let url = `/template-listings?templateId=${templateId}&page=${pagination.page}&limit=${pagination.limit}`;
       if (sellerId) {
         url += `&sellerId=${sellerId}`;
       }
+      url += `&status=${encodeURIComponent(listingStatusFilter)}`;
       
       // Add batch filter parameter
       if (batchFilter && batchFilter !== 'all') {
@@ -355,49 +454,34 @@ export default function TemplateListingsPage() {
       const { data } = await api.get(url);
       setListings(data.listings || []);
       setPagination(data.pagination);
+      setSelectedListings(new Set());
     } catch (err) {
       setError('Failed to fetch listings');
       console.error(err);
     } finally {
       setLoading(false);
     }
-  };
+  }, [templateId, pagination.page, pagination.limit, sellerId, listingStatusFilter, batchFilter]);
   
-  const fetchDownloadHistory = async () => {
-    if (!templateId || !sellerId) {
-      console.log('⏭️ Skipping history fetch - missing templateId or sellerId');
-      return;
-    }
+  const fetchDownloadHistory = useCallback(async () => {
+    if (!templateId || !sellerId) return;
     
     try {
-      console.log('📜 Fetching download history for template:', templateId, 'seller:', sellerId);
       const { data } = await api.get(`/template-listings/download-history/${templateId}`, {
         params: { sellerId }
       });
-      console.log('✅ Download history received:', data);
       setDownloadHistory(data);
     } catch (err) {
-      console.error('❌ Failed to fetch download history:', err);
+      console.error('Failed to fetch download history:', err);
     }
-  };
+  }, [templateId, sellerId]);
 
-  const handleSaveDefaults = async (defaults) => {
-    console.log('🔄 handleSaveDefaults called with:', defaults);
-    console.log('📤 Sending to API - template:', template);
-    try {
-      const response = await api.put(`/listing-templates/${templateId}`, {
-        ...template,
-        coreFieldDefaults: defaults
-      });
-      console.log('✅ API response:', response.data);
-      setSuccess('Core field defaults saved successfully!');
-      // Refresh template to get updated defaults
-      await fetchTemplate();
-    } catch (err) {
-      console.error('❌ Save defaults error:', err);
-      throw new Error(err.response?.data?.error || 'Failed to save defaults');
+  useEffect(() => {
+    if (templateId && sellerId) {
+      fetchListings();
+      fetchDownloadHistory();
     }
-  };
+  }, [templateId, sellerId, fetchListings, fetchDownloadHistory]);
 
   const handleAddListing = () => {
     setEditingListing(null);
@@ -410,11 +494,9 @@ export default function TemplateListingsPage() {
     
     // Apply template's core field defaults (if any)
     const defaults = mergeDefaultCoreFieldDefaults(template?.coreFieldDefaults || {});
-    console.log('📋 Applying core field defaults:', defaults);
-    console.log('📄 Current template:', template);
     
     setListingFormData({
-      action: 'Add',
+      action: defaultActionValue,
       customLabel: defaults.customLabel || '',
       categoryId: defaults.categoryId || template?.ebayCategory?.id || '',
       categoryName: defaults.categoryName || template?.ebayCategory?.name || '',
@@ -458,11 +540,11 @@ export default function TemplateListingsPage() {
     setAddEditDialog(true);
   };
 
-  const handleEditListing = (listing) => {
+  const handleEditListing = useCallback((listing) => {
     setEditingListing(listing);
     setBulkMode(false);
     setListingFormData({
-      action: listing.action || 'Add',
+      action: listing.action || defaultActionValue,
       customLabel: listing.customLabel || '',
       categoryId: listing.categoryId || '',
       categoryName: listing.categoryName || '',
@@ -504,7 +586,7 @@ export default function TemplateListingsPage() {
     });
     setCurrentTab(0);
     setAddEditDialog(true);
-  };
+  }, [defaultActionValue]);
 
   const handleSaveListing = async () => {
     setError('');
@@ -535,7 +617,10 @@ export default function TemplateListingsPage() {
       const dataToSend = {
         ...listingFormData,
         templateId,
-        sellerId
+        sellerId,
+        status: listingStatusFilter,
+        // Draft File Exchange rows must use Action=Draft
+        action: listingStatusFilter === 'draft' ? 'Draft' : (listingFormData.action || 'Add'),
       };
 
       if (editingListing) {
@@ -560,7 +645,7 @@ export default function TemplateListingsPage() {
     }
   };
 
-  const handleDeleteListing = async (id, sku) => {
+  const handleDeleteListing = useCallback(async (id, sku) => {
     if (!window.confirm(`Are you sure you want to delete listing "${sku}"?`)) return;
 
     try {
@@ -574,9 +659,9 @@ export default function TemplateListingsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [fetchListings]);
 
-  const handleDuplicateListing = async (listing) => {
+  const handleDuplicateListing = useCallback((listing) => {
     setEditingListing(null);
     setListingFormData({
       ...listing,
@@ -585,7 +670,7 @@ export default function TemplateListingsPage() {
     });
     setCurrentTab(0);
     setAddEditDialog(true);
-  };
+  }, []);
 
   const handleAsinAutofill = async () => {
     if (!asinInput.trim()) {
@@ -851,12 +936,18 @@ export default function TemplateListingsPage() {
     setSuccess('');
 
     try {
+      const listingsToSave = listings.map((listing) => ({
+        ...listing,
+        action: listingStatusFilter === 'draft' ? 'Draft' : (listing.action || 'Add'),
+      }));
+
       const { data } = await api.post('/template-listings/bulk-save', {
         templateId,
         sellerId,
-        listings,
+        listings: listingsToSave,
         options: {
-          skipDuplicates: true
+          skipDuplicates: true,
+          status: listingStatusFilter,
         }
       });
 
@@ -917,7 +1008,6 @@ export default function TemplateListingsPage() {
     try {
       // Get template defaults
       const defaults = mergeDefaultCoreFieldDefaults(template?.coreFieldDefaults || {});
-      console.log('📋 Applying defaults to bulk listings:', defaults);
       
       // Prepare listings for bulk create - merge defaults with autofilled data
       const listings = validResults.map(result => {
@@ -936,7 +1026,6 @@ export default function TemplateListingsPage() {
             // If column has a defaultValue and the field is missing/empty, apply it
             if (col.defaultValue && !customFields[col.name]) {
               customFields[col.name] = col.defaultValue;
-              console.log(`✨ Applied column default for ${col.name}: ${col.defaultValue}`);
             }
           });
         }
@@ -945,6 +1034,8 @@ export default function TemplateListingsPage() {
           ...mergedCoreFields,
           customFields,
           customLabel: result.sku,
+          // Never let autofill/defaults keep Action=Add in Draft mode
+          action: listingStatusFilter === 'draft' ? 'Draft' : (mergedCoreFields.action || 'Add'),
           _asinReference: result.asin,
           ...(result.autoFilledData?.amazonScrapedPrice != null
             ? { amazonScrapedPrice: result.autoFilledData.amazonScrapedPrice }
@@ -952,15 +1043,14 @@ export default function TemplateListingsPage() {
         };
       });
 
-      console.log('📤 Sending bulk listings with defaults applied:', listings);
-
       const { data } = await api.post('/template-listings/bulk-create', {
         templateId,
         sellerId,
         listings,
         options: {
           autoGenerateSKU: true,
-          skipDuplicates: true
+          skipDuplicates: true,
+          status: listingStatusFilter,
         }
       });
 
@@ -1008,23 +1098,18 @@ export default function TemplateListingsPage() {
       setConfirmDownloadDialog(false);
       
       let url = `/template-listings/export-csv/${templateId}`;
-      if (sellerId) {
-        url += `?sellerId=${sellerId}`;
-      }
-      
-      console.log('📥 Downloading CSV from:', url);
+      const params = new URLSearchParams();
+      if (sellerId) params.set('sellerId', sellerId);
+      params.set('status', listingStatusFilter);
+      url += `?${params.toString()}`;
       
       const response = await api.get(url, {
         responseType: 'blob'
       });
       
-      console.log('📦 Response headers:', response.headers);
-      
       // Extract filename from Content-Disposition header
       const contentDisposition = response.headers['content-disposition'];
       let filename = `listings_${Date.now()}.csv`; // fallback
-      
-      console.log('📋 Content-Disposition:', contentDisposition);
       
       if (contentDisposition) {
         const filenameMatch = contentDisposition.match(/filename="?(.+)"?/i);
@@ -1033,8 +1118,18 @@ export default function TemplateListingsPage() {
         }
       }
       
-      console.log('📁 Final filename:', filename);
-      
+      if (sellerId) {
+        await saveCsvToStorage({
+          blob: response.data,
+          filename,
+          sellerId,
+          templateId,
+          listingCount: pagination.total || listings.length || 0,
+          listingStatus: listingStatusFilter,
+          source: 'download',
+        });
+      }
+
       const downloadUrl = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = downloadUrl;
@@ -1046,11 +1141,9 @@ export default function TemplateListingsPage() {
       setSuccess('CSV downloaded successfully! Your view has been cleared for new listings.');
       
       // Refresh listings (will now be empty) and history
-      console.log('🔄 Refreshing listings and history...');
       await fetchListings();
       await fetchDownloadHistory();
     } catch (err) {
-      console.error('❌ Download error:', err);
       setError(err.response?.data?.error || 'Failed to export CSV');
       console.error(err);
     } finally {
@@ -1082,6 +1175,18 @@ export default function TemplateListingsPage() {
         }
       }
       
+      if (sellerId) {
+        await saveCsvToStorage({
+          blob: response.data,
+          filename,
+          sellerId,
+          templateId,
+          listingCount: 0,
+          listingStatus: listingStatusFilter,
+          source: 'download',
+        });
+      }
+
       const downloadUrl = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = downloadUrl;
@@ -1177,13 +1282,14 @@ export default function TemplateListingsPage() {
   }
 
   return (
-    <Box>
+    <Box sx={embedded ? { pt: 0 } : undefined}>
       {/* Breadcrumb Navigation */}
+      {!embedded && (
       <Breadcrumbs sx={{ mb: 2 }}>
         <Link 
           component="button"
           variant="body2" 
-          onClick={() => navigate('/admin/select-seller')}
+          onClick={() => navigate('/admin/select-seller-lab')}
           sx={{ cursor: 'pointer', textDecoration: 'none' }}
         >
           Select Seller
@@ -1191,7 +1297,7 @@ export default function TemplateListingsPage() {
         <Link 
           component="button"
           variant="body2" 
-          onClick={() => navigate(`/admin/seller-templates?sellerId=${sellerId}`)}
+          onClick={() => navigate(`/admin/seller-templates-lab?sellerId=${sellerId}`)}
           sx={{ cursor: 'pointer', textDecoration: 'none' }}
         >
           {seller?.user?.username || seller?.user?.email || 'Seller'}
@@ -1200,9 +1306,10 @@ export default function TemplateListingsPage() {
           {template?.name || 'Template Listings'}
         </Typography>
       </Breadcrumbs>
+      )}
 
-      {/* Statistics Card */}
-      {templateId && sellerId && (
+      {/* Statistics Card — compact in Lab */}
+      {templateId && sellerId && !embedded && (
         <TemplateListingStatsCard
           templateId={templateId}
           sellerId={sellerId}
@@ -1210,36 +1317,37 @@ export default function TemplateListingsPage() {
         />
       )}
 
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-        <Stack direction="row" alignItems="center" spacing={2}>
-          <Typography variant="h6">
-            {template ? `${template.name} - Listings` : 'Template Listings'}
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap spacing={1}>
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <Typography variant="h6" sx={{ fontSize: '1.1rem' }}>
+            {template ? template.name : 'Template Listings'}
           </Typography>
+          <Chip
+            size="small"
+            label={isDraftMode ? 'Draft' : 'Active'}
+            color={isDraftMode ? 'warning' : 'success'}
+            variant="outlined"
+          />
           {template?._isOverridden && (
             <Chip label="Customized" color="primary" size="small" />
           )}
+          {loading && <CircularProgress size={18} />}
         </Stack>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
           {fromAsinList && (
-            <>
-              <Button variant="outlined" size="small" onClick={() => {}}>
-                Save As
-              </Button>
-              <Button
-                variant="contained"
-                size="small"
-                color="primary"
-                onClick={() => {
-                  if (selectedListings.size === 0) {
-                    setError('Please select at least one listing to proceed.');
-                    return;
-                  }
-                  setListDirectlyDialog(true);
-                }}
-              >
-                List Directly ({selectedListings.size})
-              </Button>
-            </>
+            <Button
+              variant="contained"
+              size="small"
+              onClick={() => {
+                if (selectedListings.size === 0) {
+                  setError('Please select at least one listing to proceed.');
+                  return;
+                }
+                setListDirectlyDialog(true);
+              }}
+            >
+              List Directly ({selectedListings.size})
+            </Button>
           )}
           {sellerId && templateId && (
             <Button
@@ -1249,97 +1357,143 @@ export default function TemplateListingsPage() {
               onClick={fromAsinList ? undefined : () => setCustomizationDialog(true)}
               disabled={fromAsinList}
             >
-              Customize Template
+              Customize
             </Button>
           )}
         </Stack>
       </Stack>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
-      {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
+      {error && <Alert severity="error" sx={{ mb: 1.5 }} onClose={() => setError('')}>{error}</Alert>}
+      {success && <Alert severity="success" sx={{ mb: 1.5 }} onClose={() => setSuccess('')}>{success}</Alert>}
 
-      <Stack direction="row" spacing={2} sx={{ mb: 2 }}>
+      <Stack direction="row" spacing={1} sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap alignItems="center">
         <Button 
           variant="contained" 
+          size="small"
           startIcon={<AddIcon />} 
           onClick={handleAddListing}
           disabled={!sellerId || batchFilter !== 'active' || fromAsinList || !isAsinAutofillEnabled}
         >
           Add Listing
         </Button>
-        <Button 
-          variant="outlined" 
-          startIcon={<UploadIcon />} 
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={<UploadIcon />}
           onClick={() => setBulkImportDialog(true)}
           disabled={!sellerId || !templateId || batchFilter !== 'active' || fromAsinList}
         >
           Bulk Import ASINs
         </Button>
-        <Button 
-          variant="outlined" 
-          startIcon={<UploadIcon />} 
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={<UploadIcon />}
           onClick={() => setBulkImportSKUsDialog(true)}
           disabled={!sellerId || !templateId || batchFilter !== 'active' || fromAsinList}
         >
           Bulk Import SKUs
         </Button>
-        <Button 
-          variant="outlined" 
+        <Button
+          variant="outlined"
+          size="small"
           color="success"
           onClick={() => setReactivateDialog(true)}
           disabled={!sellerId || !templateId || fromAsinList}
         >
           Relist by SKU
         </Button>
-        <Button 
-          variant="outlined" 
+        <Button
+          variant="outlined"
+          size="small"
           color="error"
           onClick={() => setDeactivateDialog(true)}
           disabled={!sellerId || !templateId || fromAsinList}
         >
           Deactivate by SKU
         </Button>
-        <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+        {!isDraftMode && (
           <ActionFieldEditor templateId={templateId} sellerId={sellerId} />
-          <Button variant="outlined" startIcon={<DownloadIcon />} onClick={handleExportCSV} disabled={loading || listings.length === 0}>
-            Download CSV
-          </Button>
-        </Box>
+        )}
+        <Button size="small" variant="outlined" startIcon={<DownloadIcon />} onClick={handleExportCSV} disabled={loading || listings.length === 0}>
+          {isDraftMode ? 'Download Draft CSV' : 'Download CSV'}
+        </Button>
+        {isDraftMode && (
+          <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
+            Upload drafts via{' '}
+            <Link href="https://www.ebay.com/sh/reports/uploads" target="_blank" rel="noopener noreferrer" underline="hover">
+              Seller Hub Uploads
+            </Link>
+            {' '}(not Feed Upload)
+          </Typography>
+        )}
         <Button
+          size="small"
           variant="outlined"
           onClick={() => setHistoryDialog(true)}
           disabled={downloadHistory.length === 0 || fromAsinList}
         >
-          Download History ({downloadHistory.length})
+          History ({downloadHistory.length})
         </Button>
         <Button
+          size="small"
           variant="outlined"
           startIcon={<CalculatorIcon />}
           onClick={fromAsinList ? undefined : () => setCalculatorDialog(true)}
           disabled={!pricingConfig || fromAsinList}
         >
-          Pricing Calculator {isCustomPricing && '(Custom)'}
+          Pricing{isCustomPricing ? ' ★' : ''}
         </Button>
-        <Button 
-          variant="outlined" 
-          startIcon={<SettingsIcon />} 
-          onClick={() => setDefaultsDialog(true)}
-          color="primary"
-          disabled={fromAsinList}
-        >
-          Set Defaults
-          {template?.coreFieldDefaults && Object.keys(template.coreFieldDefaults).filter(k => template.coreFieldDefaults[k]).length > 0 && (
-            <Chip 
-              label={Object.keys(template.coreFieldDefaults).filter(k => template.coreFieldDefaults[k]).length} 
-              size="small" 
-              color="primary"
-              sx={{ ml: 1, height: 20 }}
-            />
-          )}
-        </Button>
+        {!fromAsinList && (
+          <FormControl size="small" sx={{ minWidth: 160 }}>
+            <Select
+              value={batchFilter}
+              onChange={(e) => setBatchFilter(e.target.value)}
+              displayEmpty
+            >
+              <MenuItem value="active">Active batch ({pagination.total})</MenuItem>
+              <MenuItem value="all">All batches</MenuItem>
+              {downloadHistory.map((batch) => (
+                <MenuItem key={batch.batchId} value={batch.batchId}>
+                  Batch #{batch.batchNumber} ({batch.listingCount})
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        )}
+        {!isDraftMode && (
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={showAllColumns}
+                onChange={(e) => setShowAllColumns(e.target.checked)}
+              />
+            }
+            label={
+              <Stack direction="row" spacing={0.5} alignItems="center">
+                <ViewColumnIcon sx={{ fontSize: 16 }} />
+                <Typography variant="caption">All columns</Typography>
+              </Stack>
+            }
+            sx={{ ml: 0.5 }}
+          />
+        )}
+        {!isDraftMode && (
+          <Button
+            size="small"
+            variant={scheduleOpen ? 'contained' : 'outlined'}
+            startIcon={<CalendarIcon />}
+            onClick={() => setScheduleOpen((v) => !v)}
+          >
+            Schedule
+          </Button>
+        )}
       </Stack>
 
-      {/* Schedule block */}
+      {/* Schedule block — Active only, collapsed by default */}
+      {!isDraftMode && (
+      <Collapse in={scheduleOpen}>
       <Paper variant="outlined" sx={{ px: 2, py: 1, borderRadius: 2, mb: 2, display: 'inline-flex', flexDirection: 'column' }}>
           <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1 }}>
             <CalendarIcon sx={{ fontSize: 15, color: 'text.secondary' }} />
@@ -1480,45 +1634,14 @@ export default function TemplateListingsPage() {
             </Tooltip>
           </Stack>
         </Paper>
-
-      {/* Batch Filter */}
-      {!fromAsinList && (
-      <Paper sx={{ p: 2, mb: 2 }}>
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Typography variant="subtitle2">View:</Typography>
-          <FormControl size="small" sx={{ minWidth: 200 }}>
-            <Select
-              value={batchFilter}
-              onChange={(e) => setBatchFilter(e.target.value)}
-            >
-              <MenuItem value="active">
-                Active Batch ({pagination.total} items)
-              </MenuItem>
-              <MenuItem value="all">All Batches</MenuItem>
-              {downloadHistory.map((batch) => (
-                <MenuItem key={batch.batchId} value={batch.batchId}>
-                  Batch #{batch.batchNumber} - {new Date(batch.downloadedAt).toLocaleDateString()} ({batch.listingCount} items)
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          {batchFilter !== 'active' && (
-            <Chip
-              label={batchFilter === 'all' ? 'Viewing All Batches' : 'Viewing Historical Batch'}
-              color="info"
-              size="small"
-            />
-          )}
-        </Stack>
-      </Paper>
+      </Collapse>
       )}
 
-      <TableContainer component={Paper} sx={{ maxHeight: 600, maxWidth: '100%', overflowX: 'auto' }}>
+      <TableContainer component={Paper} sx={{ maxHeight: 'min(70vh, 720px)', maxWidth: '100%', overflow: 'auto' }}>
         <Table stickyHeader size="small">
           <TableHead>
             <TableRow>
-              {/* Checkbox column */}
-              <TableCell padding="checkbox" sx={{ fontWeight: 'bold', position: 'sticky', left: 0, backgroundColor: 'background.paper', zIndex: 2 }}>
+              <TableCell padding="checkbox" sx={{ fontWeight: 'bold', position: 'sticky', left: 0, backgroundColor: 'background.paper', zIndex: 3 }}>
                 <Checkbox
                   size="small"
                   indeterminate={selectedListings.size > 0 && selectedListings.size < listings.length}
@@ -1526,21 +1649,26 @@ export default function TemplateListingsPage() {
                   onChange={handleToggleAll}
                 />
               </TableCell>
-              {/* All 38 core columns */}
               {coreColumns.map(col => (
-                <TableCell key={col.key} sx={{ fontWeight: 'bold', minWidth: col.width }}>
+                <TableCell
+                  key={col.key}
+                  sx={{
+                    fontWeight: 'bold',
+                    minWidth: col.width,
+                    ...(col.key === 'customLabel'
+                      ? { position: 'sticky', left: 48, backgroundColor: 'background.paper', zIndex: 3 }
+                      : {}),
+                  }}
+                >
                   {col.label}
                 </TableCell>
               ))}
-              
-              {/* Custom columns from template */}
-              {template?.customColumns?.map(col => (
-                <TableCell key={col.name} sx={{ fontWeight: 'bold', minWidth: 150 }}>
-                  {col.displayName}
+              {customColumns.map(col => (
+                <TableCell key={col.name} sx={{ fontWeight: 'bold', minWidth: 120 }}>
+                  {col.displayName || col.name}
                 </TableCell>
               ))}
-              
-              <TableCell align="right" sx={{ fontWeight: 'bold', minWidth: 150, position: 'sticky', right: 0, backgroundColor: 'background.paper', zIndex: 1 }}>
+              <TableCell align="right" sx={{ fontWeight: 'bold', minWidth: 120, position: 'sticky', right: 0, backgroundColor: 'background.paper', zIndex: 3 }}>
                 Actions
               </TableCell>
             </TableRow>
@@ -1548,65 +1676,23 @@ export default function TemplateListingsPage() {
           <TableBody>
             {listings.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={coreColumns.length + (template?.customColumns?.length || 0) + 2} align="center" sx={{ py: 3, color: 'text.secondary' }}>
-                  No listings found. Add one above!
+                <TableCell colSpan={coreColumns.length + customColumns.length + 2} align="center" sx={{ py: 3, color: 'text.secondary' }}>
+                  {loading ? 'Loading…' : 'No listings yet — add one above.'}
                 </TableCell>
               </TableRow>
             ) : (
               listings.map((listing) => (
-                <TableRow key={listing._id} hover selected={selectedListings.has(listing._id)}>
-                  {/* Checkbox cell */}
-                  <TableCell padding="checkbox" sx={{ position: 'sticky', left: 0, backgroundColor: 'background.paper' }}>
-                    <Checkbox
-                      size="small"
-                      checked={selectedListings.has(listing._id)}
-                      onChange={() => handleToggleSelect(listing._id)}
-                    />
-                  </TableCell>
-                  {/* All 38 core column values */}
-                  {coreColumns.map(col => (
-                    <TableCell key={col.key}>
-                      {col.key === 'startPrice' || col.key === 'buyItNowPrice' || col.key === 'bestOfferAutoAcceptPrice' || col.key === 'minimumBestOfferPrice' ? (
-                        listing[col.key] ? `$${listing[col.key]}` : '-'
-                      ) : col.key === 'bestOfferEnabled' || col.key === 'immediatePayRequired' ? (
-                        listing[col.key] ? 'Yes' : 'No'
-                      ) : col.key === 'itemPhotoUrl' ? (
-                        listing[col.key] ? (
-                          <Typography variant="caption" color="primary">
-                            {listing[col.key].split('|').filter(u => u.trim()).length} images
-                          </Typography>
-                        ) : '-'
-                      ) : col.key === 'description' ? (
-                        listing[col.key] ? (
-                          <Typography variant="caption" noWrap sx={{ maxWidth: 200, display: 'block' }}>
-                            {listing[col.key].replace(/<[^>]*>/g, '').substring(0, 50)}...
-                          </Typography>
-                        ) : '-'
-                      ) : (
-                        listing[col.key] || '-'
-                      )}
-                    </TableCell>
-                  ))}
-                  
-                  {/* Custom field values */}
-                  {template?.customColumns?.map(col => (
-                    <TableCell key={col.name}>
-                      {listing.customFields?.[col.name] || '-'}
-                    </TableCell>
-                  ))}
-                  
-                  <TableCell align="right" sx={{ position: 'sticky', right: 0, backgroundColor: 'background.paper' }}>
-                    <IconButton size="small" onClick={() => handleDuplicateListing(listing)} title="Duplicate">
-                      <CopyIcon fontSize="small" />
-                    </IconButton>
-                    <IconButton size="small" onClick={() => handleEditListing(listing)}>
-                      <EditIcon fontSize="small" />
-                    </IconButton>
-                    <IconButton size="small" color="error" onClick={() => handleDeleteListing(listing._id, listing.customLabel)}>
-                      <DeleteIcon fontSize="small" />
-                    </IconButton>
-                  </TableCell>
-                </TableRow>
+                <LabListingRow
+                  key={listing._id}
+                  listing={listing}
+                  coreColumns={coreColumns}
+                  customColumns={customColumns}
+                  selected={selectedListings.has(listing._id)}
+                  onToggleSelect={handleToggleSelect}
+                  onDuplicate={handleDuplicateListing}
+                  onEdit={handleEditListing}
+                  onDelete={handleDeleteListing}
+                />
               ))
             )}
           </TableBody>
@@ -1803,10 +1889,13 @@ export default function TemplateListingsPage() {
                   label="*Action"
                   select
                   fullWidth
-                  value={listingFormData.action}
+                  value={listingStatusFilter === 'draft' ? 'Draft' : (listingFormData.action || 'Add')}
                   onChange={(e) => setListingFormData({ ...listingFormData, action: e.target.value })}
+                  disabled={listingStatusFilter === 'draft'}
+                  helperText={listingStatusFilter === 'draft' ? 'Draft status uses Action = Draft (eBay File Exchange draft CSV)' : undefined}
                 >
                   <MenuItem value="Add">Add</MenuItem>
+                  <MenuItem value="Draft">Draft</MenuItem>
                   <MenuItem value="Revise">Revise</MenuItem>
                   <MenuItem value="End">End</MenuItem>
                 </TextField>
@@ -2245,15 +2334,6 @@ export default function TemplateListingsPage() {
         </DialogActions>
       </Dialog>
 
-      {/* Core Field Defaults Dialog */}
-      <CoreFieldDefaultsDialog
-        open={defaultsDialog}
-        onClose={() => setDefaultsDialog(false)}
-        templateId={templateId}
-        currentDefaults={template?.coreFieldDefaults || {}}
-        onSave={handleSaveDefaults}
-      />
-
       {/* Pricing Calculator Dialog */}
       <Dialog 
         open={calculatorDialog} 
@@ -2395,108 +2475,133 @@ export default function TemplateListingsPage() {
         </DialogActions>
       </Dialog>
 
-      {/* Bulk Import ASINs Dialog */}
-      <BulkImportASINsDialog
-        open={bulkImportDialog}
-        onClose={() => setBulkImportDialog(false)}
-        templateId={templateId}
-        sellerId={sellerId}
-        onImportComplete={() => {
-          fetchListings();
-          setSuccess('ASINs imported successfully');
-        }}
-      />
-      
-      {/* Bulk Import SKUs Dialog */}
-      <BulkImportSKUsDialog
-        open={bulkImportSKUsDialog}
-        onClose={() => setBulkImportSKUsDialog(false)}
-        templateId={templateId}
-        sellerId={sellerId}
-        onImportComplete={() => {
-          fetchListings();
-          setSuccess('SKUs imported successfully');
-        }}
-      />
-      
-      {/* Bulk Reactivate Dialog */}
-      <BulkReactivateDialog
-        open={reactivateDialog}
-        onClose={() => setReactivateDialog(false)}
-        templateId={templateId}
-        sellerId={sellerId}
-        onSuccess={() => {
-          fetchListings();
-          setSuccess('Listings reactivated successfully');
-        }}
-      />
-      
-      {/* Bulk Deactivate Dialog */}
-      <BulkDeactivateDialog
-        open={deactivateDialog}
-        onClose={() => setDeactivateDialog(false)}
-        templateId={templateId}
-        sellerId={sellerId}
-        onSuccess={() => {
-          fetchListings();
-          setSuccess('Listings deactivated successfully');
-        }}
-      />
-      
       {/* Template Customization Dialog */}
-      <TemplateCustomizationDialog
-        open={customizationDialog}
-        onClose={() => {
-          setCustomizationDialog(false);
-          // Refresh template to show updated override status
-          fetchTemplate();
-        }}
-        templateId={templateId}
-        sellerId={sellerId}
-        templateName={template?.name}
-      />
+      <Suspense fallback={null}>
+        {customizationDialog && (
+          <TemplateCustomizationDialog
+            open={customizationDialog}
+            onClose={() => {
+              setCustomizationDialog(false);
+              fetchTemplate();
+            }}
+            templateId={templateId}
+            sellerId={sellerId}
+            templateName={template?.name}
+            showPricingConfig={false}
+            showActionField={false}
+            showCoreFieldDefaults
+          />
+        )}
+      </Suspense>
       
-      {/* ASIN Review Modal */}
-      <ListDirectlyDialog
-        open={listDirectlyDialog}
-        onClose={() => setListDirectlyDialog(false)}
-        selectedListings={selectedListings}
-        templateId={templateId}
-        sellerId={sellerId}
-      />
+      <Suspense fallback={null}>
+        {listDirectlyDialog && (
+          <ListDirectlyDialog
+            open={listDirectlyDialog}
+            onClose={() => setListDirectlyDialog(false)}
+            selectedListings={selectedListings}
+            templateId={templateId}
+            sellerId={sellerId}
+            listingStatus={listingStatusFilter}
+          />
+        )}
+      </Suspense>
 
-      <AsinReviewModal
-        open={reviewModal}
-        marketplace={region}
-        sellerId={sellerId}
-        storeTemplateHtml={selectedStoreTemplate?.html || ''}
-        pricingConfig={pricingConfig}
-        onClose={() => {
-          // Clean up EventSource if still active
-          if (window._currentEventSource) {
-            window._currentEventSource.close();
-            window._currentEventSource = null;
-          }
-          setReviewModal(false);
-          setPreviewItems([]);
-          setLoadingBulk(false);
-        }}
-        previewItems={previewItems}
-        onSave={handleSaveFromReview}
-        templateColumns={[
-          ...(template?.customColumns?.map(col => ({ ...col, type: 'custom' })) || []),
-          { name: 'title', label: 'Title', type: 'core' },
-          { name: 'description', label: 'Description', type: 'core' },
-          { name: 'startPrice', label: 'Start Price', type: 'core' },
-          { name: 'quantity', label: 'Quantity', type: 'core' },
-          { name: 'upc', label: 'UPC', type: 'core' },
-          { name: 'format', label: 'Format', type: 'core' },
-          { name: 'duration', label: 'Duration', type: 'core' },
-          { name: 'shippingProfileName', label: 'Shipping Profile Name', type: 'core' },
-          { name: 'returnProfileName', label: 'Return Profile Name', type: 'core' },
-          { name: 'paymentProfileName', label: 'Payment Profile Name', type: 'core' }
-        ]}
-      />
+      <Suspense fallback={null}>
+        {bulkImportDialog && (
+          <BulkImportASINsDialog
+            open={bulkImportDialog}
+            onClose={() => setBulkImportDialog(false)}
+            templateId={templateId}
+            sellerId={sellerId}
+            onImportComplete={() => {
+              fetchListings();
+              setSuccess('ASINs imported successfully');
+            }}
+          />
+        )}
+      </Suspense>
+
+      <Suspense fallback={null}>
+        {bulkImportSKUsDialog && (
+          <BulkImportSKUsDialog
+            open={bulkImportSKUsDialog}
+            onClose={() => setBulkImportSKUsDialog(false)}
+            templateId={templateId}
+            sellerId={sellerId}
+            onImportComplete={() => {
+              fetchListings();
+              setSuccess('SKUs imported successfully');
+            }}
+          />
+        )}
+      </Suspense>
+
+      <Suspense fallback={null}>
+        {reactivateDialog && (
+          <BulkReactivateDialog
+            open={reactivateDialog}
+            onClose={() => setReactivateDialog(false)}
+            templateId={templateId}
+            sellerId={sellerId}
+            onSuccess={() => {
+              fetchListings();
+              setSuccess('Listings reactivated successfully');
+            }}
+          />
+        )}
+      </Suspense>
+
+      <Suspense fallback={null}>
+        {deactivateDialog && (
+          <BulkDeactivateDialog
+            open={deactivateDialog}
+            onClose={() => setDeactivateDialog(false)}
+            templateId={templateId}
+            sellerId={sellerId}
+            onSuccess={() => {
+              fetchListings();
+              setSuccess('Listings deactivated successfully');
+            }}
+          />
+        )}
+      </Suspense>
+
+      <Suspense fallback={null}>
+        {reviewModal && (
+          <AsinReviewModal
+            open={reviewModal}
+            marketplace={region}
+            sellerId={sellerId}
+            storeTemplateHtml={selectedStoreTemplate?.html || ''}
+            pricingConfig={pricingConfig}
+            onClose={() => {
+              if (window._currentEventSource) {
+                window._currentEventSource.close();
+                window._currentEventSource = null;
+              }
+              setReviewModal(false);
+              setPreviewItems([]);
+              setLoadingBulk(false);
+            }}
+            previewItems={previewItems}
+            onSave={handleSaveFromReview}
+            templateColumns={[
+              ...(template?.customColumns?.map(col => ({ ...col, type: 'custom' })) || []),
+              { name: 'title', label: 'Title', type: 'core' },
+              { name: 'description', label: 'Description', type: 'core' },
+              { name: 'startPrice', label: 'Start Price', type: 'core' },
+              { name: 'quantity', label: 'Quantity', type: 'core' },
+              { name: 'upc', label: 'UPC', type: 'core' },
+              { name: 'format', label: 'Format', type: 'core' },
+              { name: 'duration', label: 'Duration', type: 'core' },
+              { name: 'shippingProfileName', label: 'Shipping Profile Name', type: 'core' },
+              { name: 'returnProfileName', label: 'Return Profile Name', type: 'core' },
+              { name: 'paymentProfileName', label: 'Payment Profile Name', type: 'core' }
+            ]}
+          />
+        )}
+      </Suspense>
 
       {/* Schedule confirmation dialog */}
       <Dialog open={scheduleConfirmOpen} onClose={() => setScheduleConfirmOpen(false)} maxWidth="xs" fullWidth>

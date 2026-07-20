@@ -17,6 +17,41 @@ export const generateSKUFromASIN = (asin) => {
 };
 
 /**
+ * Generates SKU with count suffix for repeat listings of the same ASIN.
+ * count = 0 → first listing  → no suffix   (GRW25XXXXX)
+ * count = 1 → second listing → GRW25XXXXX-1
+ * count = N →                → GRW25XXXXX-N
+ */
+export const generateSKUWithCount = (asin, currentCount) => {
+  const base = generateSKUFromASIN(asin);
+  if (!currentCount || currentCount === 0) return base;
+  return `${base}-${currentCount}`;
+};
+
+/**
+ * Pick the next free SKU for an ASIN: base, then base-1, base-2, ...
+ * Mutates `takenSkus` by adding the allocated value.
+ */
+export const allocateUniqueSKU = (asin, takenSkus, startCount = 0) => {
+  const base = generateSKUFromASIN(asin);
+  if (!base) return '';
+
+  let n = Math.max(0, Number(startCount) || 0);
+  for (let guard = 0; guard < 10000; guard++) {
+    const candidate = n === 0 ? base : `${base}-${n}`;
+    if (!takenSkus.has(candidate)) {
+      takenSkus.add(candidate);
+      return candidate;
+    }
+    n += 1;
+  }
+
+  const fallback = `${base}-${Date.now()}`;
+  takenSkus.add(fallback);
+  return fallback;
+};
+
+/**
  * Validates if a string is a valid ASIN format
  * @param {string} asin - String to validate
  * @returns {boolean} True if valid ASIN format

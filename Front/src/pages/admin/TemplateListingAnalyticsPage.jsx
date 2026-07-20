@@ -224,7 +224,7 @@ export default function TemplateListingAnalyticsPage() {
         <Link
           component="button"
           variant="body2"
-          onClick={() => navigate('/admin/select-seller')}
+          onClick={() => navigate('/admin/select-seller-lab')}
           sx={{ cursor: 'pointer', textDecoration: 'none' }}
         >
           Select Seller
@@ -232,7 +232,7 @@ export default function TemplateListingAnalyticsPage() {
         <Link
           component="button"
           variant="body2"
-          onClick={() => navigate(`/admin/seller-templates?sellerId=${sellerId}`)}
+          onClick={() => navigate(`/admin/seller-templates-lab?sellerId=${sellerId}`)}
           sx={{ cursor: 'pointer', textDecoration: 'none' }}
         >
           {seller?.user?.username || seller?.user?.email || 'Seller'}
@@ -240,7 +240,7 @@ export default function TemplateListingAnalyticsPage() {
         <Link
           component="button"
           variant="body2"
-          onClick={() => navigate(`/admin/template-listings?templateId=${templateId}&sellerId=${sellerId}`)}
+          onClick={() => navigate(`/admin/select-seller-lab?templateId=${templateId}&sellerId=${sellerId}&status=active`)}
           sx={{ cursor: 'pointer', textDecoration: 'none' }}
         >
           {template?.name || 'Template Listings'}

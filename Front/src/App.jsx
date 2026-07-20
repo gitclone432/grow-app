@@ -36,8 +36,9 @@ const ADMIN_ROUTE_TITLE_OVERRIDES = {
   '/admin/cancelled-status': 'Issues and Resolutions',
   '/admin/return-requested': 'Issues and Resolutions',
   '/admin/worksheet': 'Issues and Resolutions',
-  '/admin/template-listings': 'Template Listings',
-  '/admin/seller-templates': 'Seller Templates',
+  '/admin/template-listings-lab': 'Template Listings',
+  '/admin/select-seller-lab': 'Template listing',
+  '/admin/seller-templates-lab': 'Seller Templates',
   '/admin/template-listing-analytics': 'Template Listing Analytics',
 };
 

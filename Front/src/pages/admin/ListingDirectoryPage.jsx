@@ -45,8 +45,9 @@ import api from '../../lib/api.js';
 import ListDirectlyDialog from '../../components/ListDirectlyDialog.jsx';
 import TemplateCustomizationDialog from '../../components/TemplateCustomizationDialog.jsx';
 import AsinReviewModal from '../../components/AsinReviewModal.jsx';
+import { saveCsvToStorage } from '../../utils/saveCsvToStorage.js';
 
-// Core columns to display in the directory table (same as TemplateListingsPage)
+// Core columns to display in the directory table (same as Template Listings Lab)
 const CORE_COLUMNS = [
   { key: 'action',              label: '*Action',            width: 80  },
   { key: 'customLabel',         label: 'Custom Label (SKU)', width: 150 },
@@ -353,6 +354,15 @@ export default function ListingDirectoryPage() {
         const m = contentDisposition.match(/filename="?(.+)"?/i);
         if (m?.[1]) filename = m[1].replace(/"/g, '');
       }
+      await saveCsvToStorage({
+        blob: response.data,
+        filename,
+        sellerId: seller._id,
+        templateId: template._id,
+        listingCount: selectedListings.size > 0 ? selectedListings.size : (pagination.total || listings.length || 0),
+        listingStatus: 'active',
+        source: 'download',
+      });
       const downloadUrl = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = downloadUrl;

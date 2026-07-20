@@ -14,6 +14,7 @@ import Seller from '../models/Seller.js';
 import BankAccount from '../models/BankAccount.js';
 import PayoneerFeedCache from '../models/PayoneerFeedCache.js';
 import FinancesPayoutGroupsCache from '../models/FinancesPayoutGroupsCache.js';
+import SellerFundsSummaryCache from '../models/SellerFundsSummaryCache.js';
 import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.js';
 import { applyActiveSellerScope } from '../utils/activeSellerScope.js';
 import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
@@ -943,9 +944,19 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
 
     const accessToken = await ensureValidToken(seller);
 
+    const marketplaceByCountry = {
+      US: 'EBAY_US',
+      UK: 'EBAY_GB',
+      AU: 'EBAY_AU',
+      Canada: 'EBAY_CA',
+      CA: 'EBAY_CA',
+    };
+    const marketplaceId = marketplaceByCountry[country] || 'EBAY_US';
+
     // 2. Create Task
     // POST https://api.ebay.com/sell/feed/v1/task
-    console.log(`[Feed Upload] Creating task...`);
+    // FX_LISTING supports both Active (Action=Add) and Draft (Action=Draft) CSV templates
+    console.log(`[Feed Upload] Creating task... feedType=${feedType} marketplace=${marketplaceId}`);
     const createTaskRes = await axios.post(
       'https://api.ebay.com/sell/feed/v1/task',
       {
@@ -956,7 +967,7 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
         headers: {
           'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' // Default to US, make configurable if needed
+          'X-EBAY-C-MARKETPLACE-ID': marketplaceId
         }
       }
     );
@@ -972,25 +983,34 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
     const taskId = locationHeader.split('/').pop();
     console.log(`[Feed Upload] Task created with ID: ${taskId}`);
 
-    // 3. Upload File
-    // POST https://api.ebay.com/sell/feed/v1/task/{task_id}/upload_file
+    // 3. Prepare CSV for upload — keep Seller Hub–valid files intact (no column rebuild).
+    // Rebuild was breaking Draft uploads that already work on ebay.com/sh/reports/uploads.
+    const { prepareFxCsvBufferForUpload } = await import('../utils/ebayDraftListingCsv.js');
+    const prepared = prepareFxCsvBufferForUpload(file.buffer);
+    const uploadBuffer = prepared.buffer;
+    const uploadName = String(file.originalname || 'listings.csv')
+      .replace(/\.csv\.csv$/i, '.csv')
+      .replace(/[^\w.\-()+ ]+/g, '_');
+    console.log(
+      `[Feed Upload] CSV prepare kind=${prepared.kind} changed=${prepared.changed} bytes=${uploadBuffer.length}`
+    );
+    console.log(`[Feed Upload] CSV head: ${JSON.stringify(uploadBuffer.toString('utf8').slice(0, 180))}`);
+
+    // 4. Upload File — multipart field name MUST be "file" (eBay Feed API).
+    // Keep only the file part; extra name/type fields have caused Draft processing quirks.
     console.log(`[Feed Upload] Uploading file to task ${taskId}...`);
 
     const formData = new FormData();
-    // 'file' is the required key name for the file content
-    formData.append('file', file.buffer, {
-      filename: file.originalname,
-      contentType: file.mimetype,
+    const finalName = uploadName.endsWith('.csv') ? uploadName : `${uploadName}.csv`;
+    formData.append('file', uploadBuffer, {
+      filename: finalName,
+      contentType: 'text/csv',
+      knownLength: uploadBuffer.length,
     });
-    // 'fileName', 'name', 'type' might be required as extra fields based on some examples,
-    // but the official docs say: "This call does not have a JSON Request payload but uploads the file as form-data."
-    // and "key-value pair name: 'file'".
-    // The user's example showed payload = {"fileName": ..., "name": "file", "type": "form-data"}
-    // valid form-data keys: fileName, name, type.
-    formData.append('fileName', file.originalname);
+    // eBay uploadFile examples also send these companion fields (needed for some FX tasks)
+    formData.append('fileName', finalName);
     formData.append('name', 'file');
     formData.append('type', 'form-data');
-
 
     const uploadRes = await axios.post(
       `https://api.ebay.com/sell/feed/v1/task/${taskId}/upload_file`,
@@ -998,8 +1018,12 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
       {
         headers: {
           'Authorization': `Bearer ${accessToken}`,
-          ...formData.getHeaders()
-        }
+          'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+          ...formData.getHeaders(),
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        validateStatus: (s) => s >= 200 && s < 300,
       }
     );
 
@@ -1020,7 +1044,9 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
       success: true,
       taskId: taskId,
       message: 'File uploaded and processing started',
-      uploadStatus: uploadRes.status
+      uploadStatus: uploadRes.status,
+      csvKind: prepared.kind,
+      csvNormalized: prepared.changed,
     });
 
   } catch (error) {
@@ -1031,7 +1057,9 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
     }
     res.status(500).json({
       error: 'Failed to upload feed',
-      details: error.response?.data || error.message
+      details: error.response?.data || error.message,
+      ebayStatus: error.response?.status || null,
+      hint: 'If this Draft CSV works on ebay.com/sh/reports/uploads but fails here, compare task result files. Active (Action=Add) FX uploads use the same Feed API path; Draft is processed as VerifyAddItem after upload.',
     });
   }
 });
@@ -12987,6 +13015,230 @@ router.post('/analytics/seller-standards-profiles/refresh-all', requireAuth, req
   }
 });
 
+function unwrapStandardsMetricScalar(metric) {
+  const raw = metric?.value;
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    if (raw.value != null && raw.value !== '') {
+      const n = Number(raw.value);
+      return Number.isNaN(n) ? null : n;
+    }
+    if (raw.numerator != null && raw.denominator != null && Number(raw.denominator) !== 0) {
+      const pct = (Number(raw.numerator) / Number(raw.denominator)) * 100;
+      return Number.isNaN(pct) ? null : pct;
+    }
+    return null;
+  }
+  const n = Number(raw);
+  return Number.isNaN(n) ? null : n;
+}
+
+function unwrapStandardsMetricCount(metric) {
+  const raw = metric?.value;
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    if (raw.numerator != null && raw.numerator !== '') {
+      const n = Number(raw.numerator);
+      return Number.isNaN(n) ? null : n;
+    }
+  }
+  return null;
+}
+
+function pickStandardsProfileForSummary(report, evaluationType) {
+  const profiles = Array.isArray(report?.standardsProfiles) ? report.standardsProfiles : [];
+  if (!profiles.length) return null;
+  const cycle = String(evaluationType || 'PROJECTED').toUpperCase();
+  const usMatch = profiles.find(
+    (p) => p?.program === 'PROGRAM_US' && String(p?.cycle?.cycleType || '').toUpperCase() === cycle
+  );
+  if (usMatch) return usMatch;
+  return profiles.find((p) => String(p?.cycle?.cycleType || '').toUpperCase() === cycle) || null;
+}
+
+function buildSummaryMetricsForEvaluation(ssp, csmBySellerMetric, sellerId, evaluationType) {
+  const profile = pickStandardsProfileForSummary(ssp?.report, evaluationType);
+  const defect = metricFromStandardsProfile(profile, 'DEFECTIVE_TRANSACTION_RATE');
+  const lateShip = metricFromStandardsProfile(profile, 'SHIPPING_MISS_RATE');
+  const tracking = metricFromStandardsProfile(
+    profile,
+    'VALID_TRACKING_UPLOADED_WITHIN_HANDLING_RATE'
+  );
+
+  const inrSnap = csmBySellerMetric.get(`${sellerId}:${evaluationType}:ITEM_NOT_RECEIVED`);
+  const inadSnap = csmBySellerMetric.get(`${sellerId}:${evaluationType}:ITEM_NOT_AS_DESCRIBED`);
+  const inr = summarizeCsmReportForSummary(inrSnap?.report, 'ITEM_NOT_RECEIVED');
+  const inad = summarizeCsmReportForSummary(inadSnap?.report, 'ITEM_NOT_AS_DESCRIBED');
+  const csmFetchedAt = maxDate(inrSnap?.fetchedAt, inadSnap?.fetchedAt);
+
+  return {
+    standardsLevel: profile?.standardsLevel || null,
+    program: profile?.program || null,
+    cycle: profile?.cycle?.cycleType || evaluationType,
+    defectRate: defect.rate,
+    defectCount: defect.count,
+    defectLevel: defect.level,
+    lateShipRate: lateShip.rate,
+    lateShipLevel: lateShip.level,
+    trackingRate: tracking.rate,
+    trackingLevel: tracking.level,
+    inrRating: inr.rating,
+    inrRate: inr.rate,
+    inrPeerRate: inr.peerRate,
+    inrPeerRatio: inr.peerRatio,
+    inrCategoryId: inr.categoryId,
+    inrCategoryName: inr.categoryName,
+    inadRating: inad.rating,
+    inadRate: inad.rate,
+    inadPeerRate: inad.peerRate,
+    inadPeerRatio: inad.peerRatio,
+    inadCategoryId: inad.categoryId,
+    inadCategoryName: inad.categoryName,
+    standardsFetchedAt: ssp?.fetchedAt || null,
+    csmFetchedAt,
+    hasStandards: Boolean(profile),
+    hasCsm: Boolean(inrSnap?.report || inadSnap?.report),
+  };
+}
+
+function metricFromStandardsProfile(profile, metricKey) {
+  const key = String(metricKey || '').toUpperCase();
+  const metric = (profile?.metrics || []).find(
+    (m) => String(m?.metricKey || '').toUpperCase() === key
+  );
+  if (!metric) return { rate: null, count: null, level: null };
+  return {
+    rate: unwrapStandardsMetricScalar(metric),
+    count: unwrapStandardsMetricCount(metric),
+    level: metric.level || null,
+  };
+}
+
+function pickCsmBlockForSummary(report, metricType) {
+  const blocks = Array.isArray(report?.dimensionMetrics) ? report.dimensionMetrics : [];
+  if (!blocks.length) return null;
+
+  // Match Service metrics tab defaults:
+  // - INR: prefer DOMESTIC region
+  // - INAD: category with the highest transaction count (not API array order)
+  const enriched = blocks.map((block) => {
+    const byKey = Object.fromEntries((block.metrics || []).map((m) => [m.metricKey, m]));
+    const txnRaw = byKey.TRANSACTION_COUNT?.value;
+    const transactionCount = txnRaw != null ? Number(txnRaw) : 0;
+    return {
+      block,
+      categoryId: block?.dimension?.value,
+      transactionCount: Number.isNaN(transactionCount) ? 0 : transactionCount,
+    };
+  });
+
+  enriched.sort((a, b) => (b.transactionCount || 0) - (a.transactionCount || 0));
+
+  if (String(metricType || '').toUpperCase() === 'ITEM_NOT_RECEIVED') {
+    const domestic = enriched.find((e) => String(e.categoryId || '').toUpperCase() === 'DOMESTIC');
+    if (domestic) return domestic.block;
+  }
+
+  return enriched[0]?.block || blocks[0];
+}
+
+function summarizeCsmReportForSummary(report, metricType) {
+  const empty = { rate: null, peerRate: null, peerRatio: null, rating: null, categoryId: null, categoryName: null };
+  const preferred = pickCsmBlockForSummary(report, metricType);
+  if (!preferred) return empty;
+  const byKey = Object.fromEntries((preferred.metrics || []).map((m) => [m.metricKey, m]));
+  const rateMetric = byKey.RATE;
+  const benchmark = rateMetric?.benchmark || {};
+  const rate = rateMetric?.value != null ? Number(rateMetric.value) : null;
+  const peerRate =
+    benchmark.metadata?.average != null ? Number(benchmark.metadata.average) : null;
+  let peerRatio = null;
+  if (rate != null && !Number.isNaN(rate) && peerRate != null && !Number.isNaN(peerRate) && peerRate > 0) {
+    peerRatio = rate / peerRate;
+  }
+  return {
+    rate: rate != null && !Number.isNaN(rate) ? rate : null,
+    peerRate: peerRate != null && !Number.isNaN(peerRate) ? peerRate : null,
+    peerRatio,
+    rating: benchmark.rating || null,
+    categoryId: preferred?.dimension?.value || null,
+    categoryName: preferred?.dimension?.name || preferred?.dimension?.value || null,
+  };
+}
+
+function maxDate(...values) {
+  let best = null;
+  for (const value of values) {
+    if (!value) continue;
+    const d = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(d.getTime())) continue;
+    if (!best || d > best) best = d;
+  }
+  return best;
+}
+
+// Analytics Hub Summary — cross-seller rows from SSP + CSM snapshots (Current + Projected)
+router.get('/analytics/summary', requireAuth, requirePageAccess(['EbayAnalyticsHub', 'Analytics', 'AnalyticsSellerStandards']), async (req, res) => {
+  try {
+    const marketplace = String(req.query.marketplace || 'EBAY_US').trim();
+
+    const scoped = await getSellersMatchingAllRoute(req);
+    const sellerIds = scoped.map((s) => s._id);
+    const sellers = sellerIds.length
+      ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email')
+      : [];
+
+    const [sspSnapshots, csmSnapshots] = await Promise.all([
+      sellerIds.length
+        ? SellerStandardsProfileSnapshot.find({ seller: { $in: sellerIds } }).lean()
+        : Promise.resolve([]),
+      sellerIds.length
+        ? CustomerServiceMetricSnapshot.find({
+          seller: { $in: sellerIds },
+          marketplace,
+          evaluationType: { $in: ['CURRENT', 'PROJECTED'] },
+          metricType: { $in: ['ITEM_NOT_RECEIVED', 'ITEM_NOT_AS_DESCRIBED'] },
+        }).lean()
+        : Promise.resolve([]),
+    ]);
+
+    const sspBySeller = new Map(sspSnapshots.map((s) => [String(s.seller), s]));
+    const csmBySellerMetric = new Map(
+      csmSnapshots.map((s) => [`${String(s.seller)}:${s.evaluationType}:${s.metricType}`, s])
+    );
+
+    const rows = sellers.map((seller) => {
+      const sellerId = String(seller._id);
+      const sellerName =
+        seller.user?.username || seller.user?.email || seller.username || sellerId;
+      const connected = Boolean(seller.ebayTokens?.access_token);
+      const ssp = sspBySeller.get(sellerId);
+
+      return {
+        sellerId,
+        sellerName,
+        connected,
+        current: buildSummaryMetricsForEvaluation(ssp, csmBySellerMetric, sellerId, 'CURRENT'),
+        projected: buildSummaryMetricsForEvaluation(ssp, csmBySellerMetric, sellerId, 'PROJECTED'),
+      };
+    });
+
+    rows.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
+
+    return res.json({
+      success: true,
+      request: { marketplace },
+      rows,
+    });
+  } catch (err) {
+    console.error('[Analytics Summary] Error:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to load analytics summary',
+    });
+  }
+});
+
 function parseTradingAmount(amount) {
   if (amount == null || amount === '') return null;
   if (typeof amount === 'object') {
@@ -15372,7 +15624,11 @@ async function getEbayClientCredentialsToken(scope = 'https://api.ebay.com/oauth
 
 function pathRequiresMarketplaceHeader(path) {
   // Analytics + commerce APIs encode marketplace in query params — do not send conflicting header.
-  return /^\/sell\/(negotiation|inventory|account|fulfillment|marketing|finances|recommendation)\//i.test(path);
+  // Post-Order APIs expect X-EBAY-C-MARKETPLACE-ID (same as fetch-returns).
+  return (
+    /^\/sell\/(negotiation|inventory|account|fulfillment|marketing|finances|recommendation)\//i.test(path) ||
+    /^\/post-order\//i.test(path)
+  );
 }
 
 function resolveRawCallMarketplace(seller, path, explicitMarketplace) {
@@ -19938,63 +20194,135 @@ router.delete('/marketing/promotions/delete', requireAuth, requirePageAccess(['M
 // ============================================
 // SELLER FUNDS SUMMARY (All connected sellers)
 // ============================================
-router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+const SELLER_FUNDS_SUMMARY_CACHE_ID = 'all';
+const SELLER_FUNDS_REFRESH_CONCURRENCY = 6;
+let sellerFundsSummaryRefreshInFlight = null;
+
+function emptySellerFundsAmounts() {
+  return {
+    totalFunds: { value: '0.00', currency: 'USD' },
+    availableFunds: { value: '0.00', currency: 'USD' },
+    processingFunds: { value: '0.00', currency: 'USD' },
+    fundsOnHold: { value: '0.00', currency: 'USD' },
+  };
+}
+
+async function fetchSellerFundsSummaryRow(seller) {
+  const sellerName = seller.user?.username || seller._id.toString();
   try {
+    const accessToken = await ensureValidToken(seller);
+    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/seller_funds_summary', {
+      headers: financesApiHeaders(accessToken, 'EBAY_US'),
+      timeout: 30000,
+    });
+    return {
+      sellerId: seller._id,
+      sellerName,
+      totalFunds: response.data.totalFunds || { value: '0.00', currency: 'USD' },
+      availableFunds: response.data.availableFunds || { value: '0.00', currency: 'USD' },
+      processingFunds: response.data.processingFunds || { value: '0.00', currency: 'USD' },
+      fundsOnHold: response.data.fundsOnHold || { value: '0.00', currency: 'USD' },
+      error: null,
+    };
+  } catch (err) {
+    if (err.response?.status === 204) {
+      return {
+        sellerId: seller._id,
+        sellerName,
+        ...emptySellerFundsAmounts(),
+        error: null,
+      };
+    }
+    console.error(`[Seller Funds] Error for ${sellerName}:`, err.response?.data || err.message);
+    return {
+      sellerId: seller._id,
+      sellerName,
+      totalFunds: null,
+      availableFunds: null,
+      processingFunds: null,
+      fundsOnHold: null,
+      error: err.response?.data?.errors?.[0]?.message || err.message,
+    };
+  }
+}
+
+async function refreshSellerFundsSummaryFromEbay() {
+  if (sellerFundsSummaryRefreshInFlight) {
+    return sellerFundsSummaryRefreshInFlight;
+  }
+
+  sellerFundsSummaryRefreshInFlight = (async () => {
     const sellers = await Seller.find({
       'ebayTokens.access_token': { $exists: true, $ne: null },
-      'ebayTokens.refresh_token': { $exists: true, $ne: null }
+      'ebayTokens.refresh_token': { $exists: true, $ne: null },
     }).populate('user', 'username email');
 
-    const results = [];
+    const runLimited = pLimit(SELLER_FUNDS_REFRESH_CONCURRENCY);
+    const results = await Promise.all(
+      sellers.map((seller) => runLimited(() => fetchSellerFundsSummaryRow(seller))),
+    );
 
-    for (const seller of sellers) {
-      const sellerName = seller.user?.username || seller._id.toString();
-      try {
-        const accessToken = await ensureValidToken(seller);
+    results.sort((a, b) => String(a.sellerName || '').localeCompare(String(b.sellerName || ''), undefined, { sensitivity: 'base' }));
 
-        const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/seller_funds_summary', {
-          headers: financesApiHeaders(accessToken, 'EBAY_US')
-        });
+    const cachedAt = new Date();
+    await SellerFundsSummaryCache.findByIdAndUpdate(
+      SELLER_FUNDS_SUMMARY_CACHE_ID,
+      { $set: { sellers: results, cachedAt } },
+      { upsert: true },
+    );
 
-        results.push({
-          sellerId: seller._id,
-          sellerName,
-          totalFunds: response.data.totalFunds || { value: '0.00', currency: 'USD' },
-          availableFunds: response.data.availableFunds || { value: '0.00', currency: 'USD' },
-          processingFunds: response.data.processingFunds || { value: '0.00', currency: 'USD' },
-          fundsOnHold: response.data.fundsOnHold || { value: '0.00', currency: 'USD' },
-          error: null
-        });
-      } catch (err) {
-        if (err.response?.status === 204) {
-          results.push({
-            sellerId: seller._id,
-            sellerName,
-            totalFunds: { value: '0.00', currency: 'USD' },
-            availableFunds: { value: '0.00', currency: 'USD' },
-            processingFunds: { value: '0.00', currency: 'USD' },
-            fundsOnHold: { value: '0.00', currency: 'USD' },
-            error: null
-          });
-        } else {
-          console.error(`[Seller Funds] Error for ${sellerName}:`, err.response?.data || err.message);
-          results.push({
-            sellerId: seller._id,
-            sellerName,
-            totalFunds: null,
-            availableFunds: null,
-            processingFunds: null,
-            fundsOnHold: null,
-            error: err.response?.data?.errors?.[0]?.message || err.message
-          });
-        }
-      }
+    return { sellers: results, cachedAt };
+  })();
+
+  try {
+    return await sellerFundsSummaryRefreshInFlight;
+  } finally {
+    sellerFundsSummaryRefreshInFlight = null;
+  }
+}
+
+router.get('/seller-funds-summary', requireAuth, requirePageAccess('SellerFunds'), async (req, res) => {
+  try {
+    const forceRefresh = ['1', 'true', 'yes'].includes(String(req.query.refresh || req.query.forceRefresh || '').toLowerCase());
+
+    if (forceRefresh) {
+      const { sellers, cachedAt } = await refreshSellerFundsSummaryFromEbay();
+      return res.json({
+        success: true,
+        sellers,
+        cache: {
+          hit: true,
+          source: 'ebay',
+          cachedAt: cachedAt?.toISOString?.() || cachedAt,
+        },
+      });
     }
 
-    res.json(results);
+    const doc = await SellerFundsSummaryCache.findById(SELLER_FUNDS_SUMMARY_CACHE_ID).lean();
+    if (doc?.cachedAt) {
+      return res.json({
+        success: true,
+        sellers: Array.isArray(doc.sellers) ? doc.sellers : [],
+        cache: {
+          hit: true,
+          source: 'mongodb',
+          cachedAt: new Date(doc.cachedAt).toISOString(),
+        },
+      });
+    }
+
+    return res.json({
+      success: true,
+      sellers: [],
+      cache: {
+        hit: false,
+        source: 'none',
+        cachedAt: null,
+      },
+    });
   } catch (err) {
     console.error('[Seller Funds Summary] Error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch seller funds summary' });
+    res.status(500).json({ success: false, error: 'Failed to fetch seller funds summary' });
   }
 });
 

@@ -88,7 +88,12 @@ const csvStorageSchema = new mongoose.Schema({
     },
     source: {
         type: String,
-        enum: ['manual', 'asin_list', null],
+        enum: ['manual', 'asin_list', 'download', null],
+        default: null
+    },
+    listingStatus: {
+        type: String,
+        enum: ['active', 'draft', null],
         default: null
     }
 });

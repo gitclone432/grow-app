@@ -86,12 +86,16 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
             rangeName,
             productId,
             productName,
-            source
+            source,
+            listingStatus
         } = req.body;
 
         if (!sellerId) {
             return res.status(400).json({ error: 'Missing sellerId' });
         }
+
+        const normalizedListingStatus =
+            listingStatus === 'draft' || listingStatus === 'active' ? listingStatus : null;
 
         const name = file.originalname.replace(/\.csv$/i, '');
 
@@ -110,6 +114,7 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
             productId: productId || null,
             productName: productName || '',
             source: source || null,
+            listingStatus: normalizedListingStatus,
             createdBy: req.user?._id || null
         });
 

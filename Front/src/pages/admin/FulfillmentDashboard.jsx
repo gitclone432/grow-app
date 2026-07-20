@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, memo, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useRef, memo, useCallback, useMemo, useSyncExternalStore } from 'react';
 import Snackbar from '@mui/material/Snackbar';
 import MuiAlert from '@mui/material/Alert';
 import {
@@ -58,7 +58,6 @@ import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
-import ViewColumnIcon from '@mui/icons-material/ViewColumn';
 import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
 import NavigateNextIcon from '@mui/icons-material/NavigateNext';
 
@@ -69,6 +68,7 @@ import SaveIcon from '@mui/icons-material/Save';
 import InfoIcon from '@mui/icons-material/Info';
 import SettingsIcon from '@mui/icons-material/Settings';
 import SyncIcon from '@mui/icons-material/Sync';
+import MoreVertIcon from '@mui/icons-material/MoreVert';
 
 
 import SearchIcon from '@mui/icons-material/Search';
@@ -83,6 +83,7 @@ import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import api from '../../lib/api';
 import { fetchAllPages } from '../../lib/fetchAllPages';
 import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderSyncEvents';
+import { sortSellersByName } from '../../lib/sellersSort';
 import TemplateManagementModal from '../../components/TemplateManagementModal';
 import { CHAT_TEMPLATES, personalizeTemplate } from '../../constants/chatTemplates';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
@@ -803,8 +804,9 @@ function formatFullShippingAddress(order, options = {}) {
 }
 
 // --- MOBILE ORDER CARD COMPONENT ---
-function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages, thumbnailImages }) {
+const MobileOrderCard = memo(function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages }) {
   const [expanded, setExpanded] = useState(false);
+  const thumbnailUrl = useOrderThumbnail(order._id);
 
   const productTitle = order.lineItems?.[0]?.title || order.productName || 'Unknown Product';
   const itemId = order.lineItems?.[0]?.legacyItemId || order.itemNumber;
@@ -856,7 +858,7 @@ function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages, thumbn
 
         {/* Product with thumbnail */}
         <Stack direction="row" spacing={1.5} alignItems="flex-start">
-          {thumbnailImages[order._id] && (
+          {thumbnailUrl && (
             <Box
               onClick={() => onViewImages(order)}
               sx={{
@@ -871,8 +873,10 @@ function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages, thumbn
               }}
             >
               <img
-                src={thumbnailImages[order._id]}
+                src={thumbnailUrl}
                 alt="Product"
+                loading="lazy"
+                decoding="async"
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
             </Box>
@@ -1057,7 +1061,7 @@ function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages, thumbn
       </Stack>
     </Paper>
   );
-}
+});
 
 const NotesCell = memo(function NotesCell({ order, onSave, onNotify }) {
   const [isEditing, setIsEditing] = React.useState(false);
@@ -1195,6 +1199,201 @@ const EditableCell = memo(function EditableCell({ value, type = 'text', onSave }
 // Sticky header cell style — extracted to avoid re-creating per render
 const HEADER_CELL_SX = { backgroundColor: 'primary.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 100 };
 const HEADER_CELL_RIGHT_SX = { ...HEADER_CELL_SX, textAlign: 'right' };
+const BODY_CELL_SX = { py: 0.5, fontSize: '0.8125rem' };
+const FILTER_SWITCH_SX = {
+  m: 0,
+  px: 1,
+  minHeight: 32,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 0.5,
+  border: '1px solid',
+  borderColor: 'divider',
+  borderRadius: 1.5,
+  boxSizing: 'border-box',
+  '& .MuiFormControlLabel-label': { fontSize: '0.75rem' },
+  '& .MuiSwitch-root': { transform: 'scale(0.85)' },
+};
+
+// Thumbnail URLs live outside React state so arrivals don't re-render the whole dashboard
+const thumbnailUrlMap = new Map();
+const thumbnailListeners = new Map();
+function subscribeThumbnail(orderId, onStoreChange) {
+  if (!thumbnailListeners.has(orderId)) thumbnailListeners.set(orderId, new Set());
+  thumbnailListeners.get(orderId).add(onStoreChange);
+  return () => thumbnailListeners.get(orderId)?.delete(onStoreChange);
+}
+function getThumbnailUrl(orderId) {
+  return thumbnailUrlMap.get(orderId) || null;
+}
+function setThumbnailUrl(orderId, url) {
+  if (thumbnailUrlMap.get(orderId) === url) return;
+  thumbnailUrlMap.set(orderId, url);
+  thumbnailListeners.get(orderId)?.forEach((listener) => listener());
+}
+function useOrderThumbnail(orderId) {
+  return useSyncExternalStore(
+    (onStoreChange) => subscribeThumbnail(orderId, onStoreChange),
+    () => getThumbnailUrl(orderId),
+    () => null
+  );
+}
+
+/** Memoized product column (row hot-path) — thumbnail store updates only re-render this cell */
+const FulfillmentOrderRow = memo(function FulfillmentOrderRow({
+  order,
+  imageCount,
+  loadingImages,
+  onViewImages,
+  onCopy,
+}) {
+  const thumbnailUrl = useOrderThumbnail(order._id);
+
+  return (
+    <TableCell sx={{ ...BODY_CELL_SX, minWidth: 280, maxWidth: 400, pr: 1 }}>
+      <Stack spacing={0.5} sx={{ py: 0.35 }}>
+        {order.lineItems && order.lineItems.length > 0 ? (
+          order.lineItems.map((item, i) => (
+            <Box
+              key={i}
+              sx={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 0.75,
+                borderBottom: i < order.lineItems.length - 1 ? '1px dashed rgba(0,0,0,0.1)' : 'none',
+                pb: i < order.lineItems.length - 1 ? 0.5 : 0,
+              }}
+            >
+              <Chip
+                label={`x${item.quantity}`}
+                size="small"
+                color={item.quantity > 1 ? 'warning' : 'default'}
+                sx={{
+                  height: 20,
+                  minWidth: 30,
+                  fontWeight: 'bold',
+                  fontSize: '0.7rem',
+                  borderRadius: 1,
+                  backgroundColor: item.quantity > 1 ? '#ed6c02' : '#e0e0e0',
+                  color: item.quantity > 1 ? '#fff' : 'rgba(0,0,0,0.87)',
+                }}
+              />
+
+              {i === 0 && thumbnailUrl && (
+                <Box
+                  onClick={() => onViewImages(order)}
+                  sx={{
+                    width: 34,
+                    height: 34,
+                    cursor: 'pointer',
+                    border: '1px solid',
+                    borderColor: 'grey.300',
+                    borderRadius: 1,
+                    overflow: 'hidden',
+                    flexShrink: 0,
+                    position: 'relative',
+                    '&:hover': {
+                      borderColor: 'primary.main',
+                      boxShadow: 1,
+                    },
+                  }}
+                >
+                  <img
+                    src={thumbnailUrl}
+                    alt="Product"
+                    loading="lazy"
+                    decoding="async"
+                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  />
+                  {imageCount > 1 && (
+                    <Chip
+                      label={`+${imageCount - 1}`}
+                      size="small"
+                      sx={{
+                        position: 'absolute',
+                        bottom: 1,
+                        right: 1,
+                        height: 14,
+                        fontSize: '0.55rem',
+                        bgcolor: 'rgba(0,0,0,0.7)',
+                        color: 'white',
+                        '& .MuiChip-label': { px: 0.35 },
+                      }}
+                    />
+                  )}
+                  {loadingImages && (
+                    <Box
+                      sx={{
+                        position: 'absolute',
+                        inset: 0,
+                        bgcolor: 'rgba(255,255,255,0.8)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <CircularProgress size={16} />
+                    </Box>
+                  )}
+                </Box>
+              )}
+
+              <Box sx={{ flex: 1, overflow: 'hidden' }}>
+                <Tooltip title={item.title} arrow placement="top">
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      lineHeight: 1.2,
+                      fontSize: '0.8125rem',
+                      fontWeight: item.quantity > 1 ? 500 : 400,
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    {item.title}
+                  </Typography>
+                </Tooltip>
+                <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.25 }}>
+                  <Link
+                    href={`https://www.ebay.com/itm/${item.legacyItemId}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    underline="hover"
+                    sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}
+                  >
+                    <Typography variant="caption" color="primary.main" sx={{ fontSize: '0.65rem', fontWeight: 500 }}>
+                      ID: {item.legacyItemId}
+                    </Typography>
+                    <OpenInNewIcon sx={{ fontSize: 11, color: 'primary.main' }} />
+                  </Link>
+                </Stack>
+              </Box>
+
+              <IconButton
+                size="small"
+                onClick={() => onCopy(item.title)}
+                aria-label="copy product name"
+                sx={{ mt: -0.5, p: 0.35 }}
+              >
+                <ContentCopyIcon sx={{ fontSize: '0.9rem' }} />
+              </IconButton>
+            </Box>
+          ))
+        ) : (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Chip label="x1" size="small" sx={{ height: 20 }} />
+            <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>
+              {order.productName || '-'}
+            </Typography>
+          </Box>
+        )}
+      </Stack>
+    </TableCell>
+  );
+});
+
 const getOrderSku = (order) => {
   if (!order) return '';
   if (order.sku) return String(order.sku);
@@ -1458,8 +1657,6 @@ function FulfillmentDashboard() {
 
   // Image viewer state
   const [itemImages, setItemImages] = useState({}); // { orderId: [imageUrls] }
-  const [thumbnailImages, setThumbnailImages] = useState({}); // { orderId: imageUrl }
-  const [loadingThumbnails, setLoadingThumbnails] = useState({}); // { orderId: boolean }
   const [loadingImages, setLoadingImages] = useState({}); // { orderId: boolean }
   const [imageDialogOpen, setImageDialogOpen] = useState(false);
   const [selectedImages, setSelectedImages] = useState([]);
@@ -1539,6 +1736,7 @@ function FulfillmentDashboard() {
 
   // Resync window state
   const [resyncDays, setResyncDays] = useState(10);
+  const [moreActionsAnchor, setMoreActionsAnchor] = useState(null);
 
   // Editing item status
   const [editingItemStatus, setEditingItemStatus] = useState({});
@@ -2089,7 +2287,7 @@ function FulfillmentDashboard() {
     setError('');
     try {
       const { data } = await api.get('/sellers/all-unfiltered');
-      setSellers(data || []);
+      setSellers(sortSellersByName(data || []));
     } catch (e) {
       setError('Failed to load sellers');
     }
@@ -2196,6 +2394,8 @@ function FulfillmentDashboard() {
 
 
   const thumbnailFetchStarted = useRef(new Set());
+  const itemImagesRef = useRef(itemImages);
+  itemImagesRef.current = itemImages;
 
   // Function to fetch ONLY thumbnail (first image) for display
   const fetchThumbnail = useCallback(async (order) => {
@@ -2208,32 +2408,28 @@ function FulfillmentDashboard() {
     }
     thumbnailFetchStarted.current.add(orderId);
 
-    setLoadingThumbnails(prev => ({ ...prev, [orderId]: true }));
-
     try {
       const { data } = await api.get(`/ebay/item-images/${itemId}?sellerId=${sellerId}&thumbnail=true`);
       if (data.images && data.images.length > 0) {
-        setThumbnailImages(prev => ({ ...prev, [orderId]: data.images[0] }));
+        setThumbnailUrl(orderId, data.images[0]);
         if (data.total > 1) {
           setItemImages(prev => ({ ...prev, [orderId]: { count: data.total } }));
         }
       }
     } catch (error) {
       console.error('Error fetching thumbnail:', error);
-    } finally {
-      setLoadingThumbnails(prev => ({ ...prev, [orderId]: false }));
     }
   }, []);
 
   // Function to fetch ALL images when user clicks (only called on demand)
-  const fetchAllImages = async (order) => {
+  const fetchAllImages = useCallback(async (order) => {
     const orderId = order._id;
     const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
     const sellerId = order.seller?._id || order.seller;
 
     // If we already have all images, just use them
-    if (itemImages[orderId]?.images) {
-      return itemImages[orderId].images;
+    if (itemImagesRef.current[orderId]?.images) {
+      return itemImagesRef.current[orderId].images;
     }
 
     setLoadingImages(prev => ({ ...prev, [orderId]: true }));
@@ -2249,32 +2445,49 @@ function FulfillmentDashboard() {
     } finally {
       setLoadingImages(prev => ({ ...prev, [orderId]: false }));
     }
-  };
+  }, []);
 
-  // Fetch thumbnails in small batches so we don't hammer the API with 50 parallel calls
+  // Fetch thumbnails in small batches after paint so order rows render first
   useEffect(() => {
     if (!orders.length) return;
 
     let cancelled = false;
-    const queue = orders.filter((order) => {
-      const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
-      const sellerId = order.seller?._id || order.seller;
-      return itemId && sellerId && !thumbnailFetchStarted.current.has(order._id);
-    });
+    let idleId;
+    let timeoutId;
 
-    const concurrency = 6;
-    (async () => {
-      while (!cancelled && queue.length) {
-        const batch = queue.splice(0, concurrency);
-        await Promise.all(batch.map((order) => fetchThumbnail(order)));
+    const run = () => {
+      const queue = orders.filter((order) => {
+        const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
+        const sellerId = order.seller?._id || order.seller;
+        return itemId && sellerId && !thumbnailFetchStarted.current.has(order._id);
+      });
+
+      const concurrency = 3;
+      (async () => {
+        while (!cancelled && queue.length) {
+          const batch = queue.splice(0, concurrency);
+          await Promise.all(batch.map((order) => fetchThumbnail(order)));
+        }
+      })();
+    };
+
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(run, { timeout: 400 });
+    } else {
+      timeoutId = setTimeout(run, 120);
+    }
+
+    return () => {
+      cancelled = true;
+      if (idleId != null && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
       }
-    })();
-
-    return () => { cancelled = true; };
+      if (timeoutId != null) clearTimeout(timeoutId);
+    };
   }, [orders, fetchThumbnail]);
 
   // Function to open image viewer (fetches all images on demand)
-  const handleViewImages = async (order) => {
+  const handleViewImages = useCallback(async (order) => {
     const allImages = await fetchAllImages(order);
 
     if (allImages.length > 0) {
@@ -2282,7 +2495,7 @@ function FulfillmentDashboard() {
       setImageCount(allImages.length);
       setImageDialogOpen(true);
     }
-  };
+  }, [fetchAllImages]);
 
   const handleOpenMessageDialog = useCallback((order) => {
     setSelectedOrderForMessage(order);
@@ -2800,12 +3013,12 @@ function FulfillmentDashboard() {
       });
 
       return (
-        <Stack spacing={0}>
-          <Typography variant="body2">{formattedDate}</Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
+        <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.8125rem', lineHeight: 1.25 }}>
+          {formattedDate}{' '}
+          <Box component="span" sx={{ color: 'text.secondary', fontSize: '0.7rem' }}>
             {formattedTime} ({timeZoneLabel})
-          </Typography>
-        </Stack>
+          </Box>
+        </Typography>
       );
     } catch {
       return '-';
@@ -3341,7 +3554,7 @@ function FulfillmentDashboard() {
               <Stack direction="row" spacing={1} alignItems="center">
                 <Button
                   variant="outlined"
-                  color="primary"
+                  color="inherit"
                   size="small"
                   startIcon={<UploadIcon />}
                   onClick={() => setImportDialogOpen(true)}
@@ -3352,7 +3565,7 @@ function FulfillmentDashboard() {
                 {orders.length > 0 && (
                   <Button
                     variant="outlined"
-                    color="success"
+                    color="inherit"
                     size="small"
                     startIcon={<DownloadIcon />}
                     onClick={handleOpenExportDialog}
@@ -3362,8 +3575,8 @@ function FulfillmentDashboard() {
                   </Button>
                 )}
                 <Button
-                  variant="contained"
-                  color="info"
+                  variant="outlined"
+                  color="primary"
                   size="small"
                   startIcon={autoMessageLoading ? <CircularProgress size={16} color="inherit" /> : <SendIcon />}
                   onClick={handleSendAutoMessages}
@@ -3402,7 +3615,7 @@ function FulfillmentDashboard() {
                 </Select>
               </FormControl>
 
-              {/* Row 2: Poll Buttons (side by side) */}
+              {/* Row 2: Poll Buttons + More actions */}
               <Stack direction="row" spacing={1}>
                 <Button
                   variant="contained"
@@ -3436,40 +3649,67 @@ function FulfillmentDashboard() {
                   {loading ? 'Updating...' : isSmallMobile ? 'Poll Updates' : 'Poll Order Updates'}
                 </Button>
 
-                <Select
-                  value={resyncDays}
-                  onChange={(e) => setResyncDays(e.target.value)}
-                  size="small"
-                  sx={{
-                    height: 30,
-                    fontSize: '0.75rem',
-                    bgcolor: 'background.paper',
-                    '& .MuiSelect-select': { py: 0.5, px: 1 }
-                  }}
-                >
-                  <MenuItem value={3}>3 Days</MenuItem>
-                  <MenuItem value={7}>7 Days</MenuItem>
-                  <MenuItem value={10}>10 Days</MenuItem>
-                  <MenuItem value={15}>15 Days</MenuItem>
-                  <MenuItem value={30}>30 Days</MenuItem>
-                </Select>
-
                 {isSuperAdmin && (
-                  <Button
-                    variant="outlined"
-                    color="warning"
-                    startIcon={!isSmallMobile && (loading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />)}
-                    onClick={resyncRecent}
-                    disabled={loading}
-                    size="small"
-                    fullWidth
-                    sx={{
-                      fontSize: { xs: '0.7rem', sm: '0.8rem' },
-                      px: { xs: 0.5, sm: 1 }
-                    }}
-                  >
-                    {loading ? 'Syncing...' : isSmallMobile ? 'Resync' : `Resync ${resyncDays}D`}
-                  </Button>
+                  <>
+                    <Button
+                      variant="outlined"
+                      color="inherit"
+                      size="small"
+                      endIcon={<MoreVertIcon />}
+                      onClick={(e) => setMoreActionsAnchor(e.currentTarget)}
+                      sx={{ fontSize: '0.7rem', minWidth: 'auto', whiteSpace: 'nowrap' }}
+                    >
+                      More
+                    </Button>
+                    <Menu
+                      anchorEl={moreActionsAnchor}
+                      open={Boolean(moreActionsAnchor)}
+                      onClose={() => setMoreActionsAnchor(null)}
+                      anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+                      transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+                    >
+                      <ListSubheader sx={{ lineHeight: 2, fontSize: '0.7rem' }}>Resync window</ListSubheader>
+                      <Box sx={{ px: 2, pb: 1 }}>
+                        <Select
+                          value={resyncDays}
+                          onChange={(e) => setResyncDays(e.target.value)}
+                          size="small"
+                          fullWidth
+                          sx={{ height: 32, fontSize: '0.75rem' }}
+                        >
+                          <MenuItem value={3}>3 Days</MenuItem>
+                          <MenuItem value={7}>7 Days</MenuItem>
+                          <MenuItem value={10}>10 Days</MenuItem>
+                          <MenuItem value={15}>15 Days</MenuItem>
+                          <MenuItem value={30}>30 Days</MenuItem>
+                        </Select>
+                      </Box>
+                      <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); resyncRecent(); }}
+                        disabled={loading}
+                      >
+                        {loading ? 'Syncing...' : `Resync ${resyncDays} Days`}
+                      </MenuItem>
+                      <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); recalculateEarnings(); }}
+                        disabled={recalcEarningsLoading}
+                      >
+                        {recalcEarningsLoading ? 'Recalculating...' : 'Recalc Earnings'}
+                      </MenuItem>
+                      <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); recalculateAmazonFinancials(); }}
+                        disabled={recalcAmazonLoading}
+                      >
+                        {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
+                      </MenuItem>
+                      <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); backfillEverythingAllStores(); }}
+                        disabled={backfillEverythingLoading}
+                      >
+                        {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
+                      </MenuItem>
+                    </Menu>
+                  </>
                 )}
               </Stack>
 
@@ -3486,10 +3726,10 @@ function FulfillmentDashboard() {
                     <MenuItem value="">
                       <em>All</em>
                     </MenuItem>
-                    <MenuItem value="EBAY_US">EBAY_US</MenuItem>
-                    <MenuItem value="EBAY_AU">EBAY_AU</MenuItem>
-                    <MenuItem value="EBAY_ENCA">EBAY_CA</MenuItem>
-                    <MenuItem value="EBAY_GB">EBAY_GB</MenuItem>
+                    <MenuItem value="EBAY_US">USA</MenuItem>
+                    <MenuItem value="EBAY_ENCA">CA</MenuItem>
+                    <MenuItem value="EBAY_AU">AUS</MenuItem>
+                    <MenuItem value="EBAY_GB">UK</MenuItem>
                   </Select>
                 </FormControl>
 
@@ -3518,14 +3758,11 @@ function FulfillmentDashboard() {
                       checked={excludeClient}
                       onChange={(e) => setExcludeClient(e.target.checked)}
                       color="primary"
+                      size="small"
                     />
                   }
-                  label={
-                    <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
-                      Exclude Client
-                    </Typography>
-                  }
-                  sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
+                  label="Exclude Client"
+                  sx={FILTER_SWITCH_SX}
                 />
 
                 <FormControlLabel
@@ -3534,14 +3771,11 @@ function FulfillmentDashboard() {
                       checked={excludeLowValue}
                       onChange={(e) => setExcludeLowValue(e.target.checked)}
                       color="primary"
+                      size="small"
                     />
                   }
-                  label={
-                    <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
-                      Exclude &lt; $3 Orders
-                    </Typography>
-                  }
-                  sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
+                  label="Exclude <$3"
+                  sx={FILTER_SWITCH_SX}
                 />
 
                 <FormControlLabel
@@ -3550,80 +3784,23 @@ function FulfillmentDashboard() {
                       checked={missingAmazonAccount}
                       onChange={(e) => setMissingAmazonAccount(e.target.checked)}
                       color="primary"
+                      size="small"
                     />
                   }
-                  label={
-                    <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
-                      Missing Amazon Acc
-                    </Typography>
-                  }
-                  sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
+                  label="Missing Amazon Acc"
+                  sx={FILTER_SWITCH_SX}
                 />
               </Stack>
 
-              {/* Row 4: Recalc & Column Selector */}
-              <Stack direction="row" spacing={1} alignItems="center">
-                {isSuperAdmin && (
-                  <>
-                    <Tooltip title={selectedSeller ? "Recalculate orderEarnings since Feb 28 2026 (selected seller)" : "Recalculate orderEarnings since Feb 28 2026 (ALL sellers)"}>
-                      <span style={{ flex: 1 }}>
-                        <Button
-                          variant="outlined"
-                          color="info"
-                          size="small"
-                          fullWidth
-                          startIcon={recalcEarningsLoading ? <CircularProgress size={14} color="inherit" /> : <SyncIcon />}
-                          onClick={recalculateEarnings}
-                          disabled={recalcEarningsLoading}
-                          sx={{ fontSize: '0.7rem' }}
-                        >
-                          {recalcEarningsLoading ? 'Recalculating...' : 'Recalc Earnings'}
-                        </Button>
-                      </span>
-                    </Tooltip>
-                    <Tooltip title={selectedSeller ? "Recalculate Amazon financials since Feb 28 2026 (selected seller)" : "Recalculate Amazon financials since Feb 28 2026 (ALL sellers)"}>
-                      <span style={{ flex: 1 }}>
-                        <Button
-                          variant="outlined"
-                          color="warning"
-                          size="small"
-                          fullWidth
-                          startIcon={recalcAmazonLoading ? <CircularProgress size={14} color="inherit" /> : <SyncIcon />}
-                          onClick={recalculateAmazonFinancials}
-                          disabled={recalcAmazonLoading}
-                          sx={{ fontSize: '0.7rem' }}
-                        >
-                          {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
-                        </Button>
-                      </span>
-                    </Tooltip>
-                    <Tooltip title="Run full historical backfill for all stores (orders/messages/listings/returns/cases/disputes)">
-                      <span style={{ flex: 1 }}>
-                        <Button
-                          variant="outlined"
-                          color="error"
-                          size="small"
-                          fullWidth
-                          startIcon={backfillEverythingLoading ? <CircularProgress size={14} color="inherit" /> : <SyncIcon />}
-                          onClick={backfillEverythingAllStores}
-                          disabled={backfillEverythingLoading}
-                          sx={{ fontSize: '0.7rem' }}
-                        >
-                          {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
-                        </Button>
-                      </span>
-                    </Tooltip>
-                  </>
-                )}
-                <Tooltip title="Select Columns">
-                  <IconButton
-                    color="primary"
-                    onClick={(e) => setColumnSelectorOpen(e.currentTarget)}
-                    size="small"
-                  >
-                    <ViewColumnIcon />
-                  </IconButton>
-                </Tooltip>
+              {/* Row 4: Column Selector */}
+              <Stack direction="row" spacing={1} alignItems="center" justifyContent="flex-end">
+                <ColumnSelector
+                  allColumns={ALL_COLUMNS}
+                  visibleColumns={visibleColumns}
+                  onColumnChange={setVisibleColumns}
+                  onReset={() => setVisibleColumns(DEFAULT_VISIBLE_COLUMNS)}
+                  page="dashboard"
+                />
               </Stack>
             </Stack>
           ) : (
@@ -3675,98 +3852,86 @@ function FulfillmentDashboard() {
 
                 {isSuperAdmin && (
                   <>
-                    <FormControl size="small" sx={{ minWidth: 90 }}>
-                      <Select
-                        value={resyncDays}
-                        onChange={(e) => setResyncDays(e.target.value)}
-                        sx={{ height: 36, fontSize: '0.85rem' }}
-                      >
-                        <MenuItem value={3}>3 Days</MenuItem>
-                        <MenuItem value={7}>7 Days</MenuItem>
-                        <MenuItem value={10}>10 Days</MenuItem>
-                        <MenuItem value={15}>15 Days</MenuItem>
-                        <MenuItem value={30}>30 Days</MenuItem>
-                      </Select>
-                    </FormControl>
-
                     <Button
                       variant="outlined"
-                      color="warning"
+                      color="inherit"
                       size="small"
-                      startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
-                      onClick={resyncRecent}
-                      disabled={loading}
-                      sx={{ minWidth: 120 }}
+                      endIcon={<MoreVertIcon />}
+                      onClick={(e) => setMoreActionsAnchor(e.currentTarget)}
                     >
-                      {loading ? 'Syncing...' : `Resync ${resyncDays} Days`}
+                      More actions
                     </Button>
-
-                    <Tooltip title={selectedSeller ? "Recalculate orderEarnings since Feb 28 2026 (selected seller)" : "Recalculate orderEarnings since Feb 28 2026 (ALL sellers)"}>
-                      <span>
-                        <Button
-                          variant="outlined"
-                          color="info"
+                    <Menu
+                      anchorEl={moreActionsAnchor}
+                      open={Boolean(moreActionsAnchor)}
+                      onClose={() => setMoreActionsAnchor(null)}
+                      anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+                      transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                    >
+                      <ListSubheader sx={{ lineHeight: 2, fontSize: '0.75rem' }}>Resync window</ListSubheader>
+                      <Box sx={{ px: 2, pb: 1 }}>
+                        <Select
+                          value={resyncDays}
+                          onChange={(e) => setResyncDays(e.target.value)}
                           size="small"
-                          startIcon={recalcEarningsLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
-                          onClick={recalculateEarnings}
-                          disabled={recalcEarningsLoading}
-                          sx={{ minWidth: 130 }}
+                          fullWidth
+                          sx={{ height: 36, fontSize: '0.85rem' }}
                         >
-                          {recalcEarningsLoading ? 'Recalculating...' : 'Recalc Earnings'}
-                        </Button>
-                      </span>
-                    </Tooltip>
-
-                    <Tooltip title={selectedSeller ? "Recalculate Amazon financials since Feb 28 2026 (selected seller)" : "Recalculate Amazon financials since Feb 28 2026 (ALL sellers)"}>
-                      <span>
-                        <Button
-                          variant="outlined"
-                          color="warning"
-                          size="small"
-                          startIcon={recalcAmazonLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
-                          onClick={recalculateAmazonFinancials}
-                          disabled={recalcAmazonLoading}
-                          sx={{ minWidth: 130 }}
-                        >
-                          {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
-                        </Button>
-                      </span>
-                    </Tooltip>
-
-                    <Tooltip title="Run full historical backfill for all stores (orders/messages/listings/returns/cases/disputes)">
-                      <span>
-                        <Button
-                          variant="outlined"
-                          color="error"
-                          size="small"
-                          startIcon={backfillEverythingLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
-                          onClick={backfillEverythingAllStores}
-                          disabled={backfillEverythingLoading}
-                          sx={{ minWidth: 130 }}
-                        >
-                          {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
-                        </Button>
-                      </span>
-                    </Tooltip>
+                          <MenuItem value={3}>3 Days</MenuItem>
+                          <MenuItem value={7}>7 Days</MenuItem>
+                          <MenuItem value={10}>10 Days</MenuItem>
+                          <MenuItem value={15}>15 Days</MenuItem>
+                          <MenuItem value={30}>30 Days</MenuItem>
+                        </Select>
+                      </Box>
+                      <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); resyncRecent(); }}
+                        disabled={loading}
+                      >
+                        {loading ? 'Syncing...' : `Resync ${resyncDays} Days`}
+                      </MenuItem>
+                      <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); recalculateEarnings(); }}
+                        disabled={recalcEarningsLoading}
+                      >
+                        {recalcEarningsLoading ? 'Recalculating...' : 'Recalc Earnings'}
+                      </MenuItem>
+                      <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); recalculateAmazonFinancials(); }}
+                        disabled={recalcAmazonLoading}
+                      >
+                        {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
+                      </MenuItem>
+                      <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); backfillEverythingAllStores(); }}
+                        disabled={backfillEverythingLoading}
+                      >
+                        {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
+                      </MenuItem>
+                    </Menu>
                   </>
                 )}
               </Stack>
 
               {/* Row 2: Filters, Toggles, Column Selector */}
-              <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+              <Stack direction="row" spacing={1.5} alignItems="center" sx={{ flexWrap: 'wrap' }}>
                 <Select
                   value={searchMarketplace}
                   onChange={(e) => setSearchMarketplace(e.target.value)}
                   displayEmpty
                   size="small"
-                  renderValue={(val) => val ? val : 'Marketplace'}
-                  sx={{ minWidth: 145, fontSize: '0.85rem', color: searchMarketplace ? 'inherit' : 'text.secondary' }}
+                  renderValue={(val) => {
+                    if (!val) return 'Marketplace';
+                    const labels = { EBAY_US: 'USA', EBAY_ENCA: 'CA', EBAY_AU: 'AUS', EBAY_GB: 'UK' };
+                    return labels[val] || val;
+                  }}
+                  sx={{ minWidth: 120, fontSize: '0.8rem', color: searchMarketplace ? 'inherit' : 'text.secondary' }}
                 >
                   <MenuItem value=""><em>All</em></MenuItem>
-                  <MenuItem value="EBAY_US">EBAY_US</MenuItem>
-                  <MenuItem value="EBAY_AU">EBAY_AU</MenuItem>
-                  <MenuItem value="EBAY_ENCA">EBAY_CA</MenuItem>
-                  <MenuItem value="EBAY_GB">EBAY_GB</MenuItem>
+                  <MenuItem value="EBAY_US">USA</MenuItem>
+                  <MenuItem value="EBAY_ENCA">CA</MenuItem>
+                  <MenuItem value="EBAY_AU">AUS</MenuItem>
+                  <MenuItem value="EBAY_GB">UK</MenuItem>
                 </Select>
 
                 <Select
@@ -3775,7 +3940,7 @@ function FulfillmentDashboard() {
                   displayEmpty
                   size="small"
                   renderValue={(val) => val ? val : 'Payment Status'}
-                  sx={{ minWidth: 165, fontSize: '0.85rem', color: searchPaymentStatus ? 'inherit' : 'text.secondary' }}
+                  sx={{ minWidth: 150, fontSize: '0.8rem', color: searchPaymentStatus ? 'inherit' : 'text.secondary' }}
                 >
                   <MenuItem value=""><em>All</em></MenuItem>
                   <MenuItem value="FULLY_REFUNDED">FULLY_REFUNDED</MenuItem>
@@ -3788,14 +3953,11 @@ function FulfillmentDashboard() {
                       checked={excludeClient}
                       onChange={(e) => setExcludeClient(e.target.checked)}
                       color="primary"
+                      size="small"
                     />
                   }
-                  label={
-                    <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
-                      Exclude Client
-                    </Typography>
-                  }
-                  sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
+                  label="Exclude Client"
+                  sx={FILTER_SWITCH_SX}
                 />
 
                 <FormControlLabel
@@ -3804,14 +3966,11 @@ function FulfillmentDashboard() {
                       checked={excludeLowValue}
                       onChange={(e) => setExcludeLowValue(e.target.checked)}
                       color="primary"
+                      size="small"
                     />
                   }
-                  label={
-                    <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
-                      Exclude &lt; $3 Orders
-                    </Typography>
-                  }
-                  sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
+                  label="Exclude <$3"
+                  sx={FILTER_SWITCH_SX}
                 />
 
                 <FormControlLabel
@@ -3820,14 +3979,11 @@ function FulfillmentDashboard() {
                       checked={missingAmazonAccount}
                       onChange={(e) => setMissingAmazonAccount(e.target.checked)}
                       color="primary"
+                      size="small"
                     />
                   }
-                  label={
-                    <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.85rem' }}>
-                      Missing Amazon Acc
-                    </Typography>
-                  }
-                  sx={{ m: 0, px: 1.5, minHeight: 40, display: 'inline-flex', alignItems: 'center', gap: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2, boxSizing: 'border-box' }}
+                  label="Missing Amazon Acc"
+                  sx={FILTER_SWITCH_SX}
                 />
 
                 {/* Column Selector Button */}
@@ -3907,7 +4063,6 @@ function FulfillmentDashboard() {
                       onCopy={handleCopy}
                       onMessage={handleOpenMessageDialog}
                       onViewImages={handleViewImages}
-                      thumbnailImages={thumbnailImages}
                     />
                   ))}
                 </Stack>
@@ -3992,20 +4147,19 @@ function FulfillmentDashboard() {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {orders.map((order, idx) => {
-                      const isSelected = selectedRowId === order._id;
-                      return (
+                    {orders.map((order, idx) => (
                         <TableRow
-                          key={order._id || idx}
+                          key={order._id}
                           sx={{
                             '&:nth-of-type(odd)': { backgroundColor: 'action.hover' },
                             '&:hover': { backgroundColor: 'action.selected' },
+                            '& > .MuiTableCell-root': BODY_CELL_SX,
                           }}
                         >
                           <TableCell>{(currentPage - 1) * ordersPerPage + idx + 1}</TableCell>
                           {visibleColumnsSet.has('seller') && (
                             <TableCell>
-                              <Typography variant="body2" fontWeight="medium">
+                              <Typography variant="body2" fontWeight="medium" sx={{ fontSize: '0.8125rem' }}>
                                 {order.seller?.user?.username ||
                                   order.seller?.user?.email ||
                                   order.sellerId ||
@@ -4016,7 +4170,7 @@ function FulfillmentDashboard() {
                           {visibleColumnsSet.has('orderId') && (
                             <TableCell>
                               <Stack direction="row" alignItems="center" spacing={1}>
-                                <Typography variant="body2" fontWeight="medium" sx={{ color: 'primary.main' }}>
+                                <Typography variant="body2" fontWeight="medium" sx={{ color: 'primary.main', fontSize: '0.8125rem' }}>
                                   {order.orderId || order.legacyOrderId || '-'}
                                 </Typography>
 
@@ -4050,157 +4204,13 @@ function FulfillmentDashboard() {
                           {visibleColumnsSet.has('shipBy') && <TableCell>{formatDate(order.shipByDate, order.purchaseMarketplaceId)}</TableCell>}
                           {visibleColumnsSet.has('deliveryDate') && <TableCell>{formatDeliveryDate(order)}</TableCell>}
                           {visibleColumnsSet.has('productName') && (
-                            <TableCell sx={{ minWidth: 300, maxWidth: 400, pr: 1 }}>
-                              <Stack spacing={1} sx={{ py: 1 }}>
-                                {order.lineItems && order.lineItems.length > 0 ? (
-                                  order.lineItems.map((item, i) => (
-                                    <Box
-                                      key={i}
-                                      sx={{
-                                        display: 'flex',
-                                        alignItems: 'flex-start',
-                                        gap: 1,
-                                        borderBottom: i < order.lineItems.length - 1 ? '1px dashed rgba(0,0,0,0.1)' : 'none',
-                                        pb: i < order.lineItems.length - 1 ? 1 : 0
-                                      }}
-                                    >
-                                      {/* 1. QUANTITY BADGE */}
-                                      <Chip
-                                        label={`x${item.quantity}`}
-                                        size="small"
-                                        color={item.quantity > 1 ? "warning" : "default"}
-                                        sx={{
-                                          height: 24,
-                                          minWidth: 35,
-                                          fontWeight: 'bold',
-                                          borderRadius: 1,
-                                          backgroundColor: item.quantity > 1 ? '#ed6c02' : '#e0e0e0',
-                                          color: item.quantity > 1 ? '#fff' : 'rgba(0,0,0,0.87)'
-                                        }}
-                                      />
-
-                                      {/* 1.5 THUMBNAIL IMAGE (if available, only for first item) */}
-                                      {i === 0 && thumbnailImages[order._id] && (
-                                        <Box
-                                          onClick={() => handleViewImages(order)}
-                                          sx={{
-                                            width: 50,
-                                            height: 50,
-                                            cursor: 'pointer',
-                                            border: '1px solid',
-                                            borderColor: 'grey.300',
-                                            borderRadius: 1,
-                                            overflow: 'hidden',
-                                            flexShrink: 0,
-                                            position: 'relative',
-                                            '&:hover': {
-                                              borderColor: 'primary.main',
-                                              boxShadow: 2
-                                            }
-                                          }}
-                                        >
-                                          <img
-                                            src={thumbnailImages[order._id]}
-                                            alt="Product"
-                                            style={{
-                                              width: '100%',
-                                              height: '100%',
-                                              objectFit: 'cover'
-                                            }}
-                                          />
-                                          {/* Show badge if there are more images */}
-                                          {itemImages[order._id]?.count > 1 && (
-                                            <Chip
-                                              label={`+${itemImages[order._id].count - 1}`}
-                                              size="small"
-                                              sx={{
-                                                position: 'absolute',
-                                                bottom: 2,
-                                                right: 2,
-                                                height: 18,
-                                                fontSize: '0.65rem',
-                                                bgcolor: 'rgba(0,0,0,0.7)',
-                                                color: 'white',
-                                                '& .MuiChip-label': { px: 0.5 }
-                                              }}
-                                            />
-                                          )}
-                                          {/* Loading overlay */}
-                                          {loadingImages[order._id] && (
-                                            <Box
-                                              sx={{
-                                                position: 'absolute',
-                                                top: 0,
-                                                left: 0,
-                                                right: 0,
-                                                bottom: 0,
-                                                bgcolor: 'rgba(255,255,255,0.8)',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center'
-                                              }}
-                                            >
-                                              <CircularProgress size={20} />
-                                            </Box>
-                                          )}
-                                        </Box>
-                                      )}
-
-                                      {/* 2. PRODUCT TITLE & ID */}
-                                      <Box sx={{ flex: 1, overflow: 'hidden' }}>
-                                        <Tooltip title={item.title} arrow placement="top">
-                                          <Typography
-                                            variant="body2"
-                                            sx={{
-                                              lineHeight: 1.2,
-                                              fontWeight: item.quantity > 1 ? '500' : '400',
-                                              display: '-webkit-box',
-                                              WebkitLineClamp: 2,
-                                              WebkitBoxOrient: 'vertical',
-                                              overflow: 'hidden'
-                                            }}
-                                          >
-                                            {item.title}
-                                          </Typography>
-                                        </Tooltip>
-                                        <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.5 }}>
-                                          <Link
-                                            href={`https://www.ebay.com/itm/${item.legacyItemId}`}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            underline="hover"
-                                            sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}
-                                          >
-                                            <Typography variant="caption" color="primary.main" sx={{ fontSize: '0.7rem', fontWeight: 500 }}>
-                                              ID: {item.legacyItemId}
-                                            </Typography>
-                                            <OpenInNewIcon sx={{ fontSize: 12, color: 'primary.main' }} />
-                                          </Link>
-                                        </Stack>
-                                      </Box>
-
-                                      {/* 3. COPY BUTTON */}
-                                      <IconButton
-                                        size="small"
-                                        onClick={() => handleCopy(item.title)}
-                                        aria-label="copy product name"
-                                        sx={{ mt: -0.5 }}
-                                      >
-                                        <ContentCopyIcon fontSize="small" sx={{ fontSize: '1rem' }} />
-                                      </IconButton>
-                                    </Box>
-                                  ))
-                                ) : (
-                                  /* Fallback for old orders */
-                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                    <Chip label="x1" size="small" />
-                                    <Typography variant="body2">
-                                      {order.productName || '-'}
-                                    </Typography>
-                                  </Box>
-                                )}
-                              </Stack>
-                            </TableCell>
+                            <FulfillmentOrderRow
+                              order={order}
+                              imageCount={itemImages[order._id]?.count || 0}
+                              loadingImages={!!loadingImages[order._id]}
+                              onViewImages={handleViewImages}
+                              onCopy={handleCopy}
+                            />
                           )}
                           {visibleColumnsSet.has('sku') && (
                             <TableCell sx={{ maxWidth: 220, pr: 1 }}>
@@ -4956,8 +4966,7 @@ function FulfillmentDashboard() {
 
 
                         </TableRow>
-                      );
-                    })}
+                    ))}
                   </TableBody>
                 </Table>
               </TableContainer>
