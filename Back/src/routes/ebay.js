@@ -11194,6 +11194,90 @@ router.get('/conversation-meta/single', requireAuth, async (req, res) => {
   }
 });
 
+router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) => {
+  const {
+    sellerId,
+    searchOrderId = '',
+    searchBuyerName = '',
+    limit = '500'
+  } = req.query;
+
+  try {
+    const boardCategories = ['INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Inquiry'];
+    const query = { category: { $in: boardCategories } };
+    if (sellerId) query.seller = new mongoose.Types.ObjectId(sellerId);
+    if (searchOrderId.trim()) query.orderId = { $regex: searchOrderId.trim(), $options: 'i' };
+
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 500, 1), 1000);
+    const metas = await ConversationMeta.find(query)
+      .sort({ updatedAt: -1 })
+      .limit(limitNum)
+      .lean();
+
+    const buyerSearch = searchBuyerName.trim().toLowerCase();
+    const threads = (await Promise.all(metas.map(async (meta) => {
+      const messageQuery = { seller: meta.seller };
+      if (meta.orderId) {
+        messageQuery.orderId = meta.orderId;
+      } else {
+        messageQuery.buyerUsername = meta.buyerUsername;
+        messageQuery.itemId = meta.itemId;
+        messageQuery.orderId = null;
+      }
+
+      const [latestMessage, order] = await Promise.all([
+        Message.findOne(messageQuery).sort({ messageDate: -1 }).lean(),
+        meta.orderId
+          ? Order.findOne({ orderId: meta.orderId })
+              .select('orderId buyer purchaseMarketplaceId lineItems productName seller')
+              .lean()
+          : Promise.resolve(null)
+      ]);
+
+      const buyerName = order?.buyer?.buyerRegistrationAddress?.fullName || latestMessage?.buyerName || '';
+      const buyerUsername = meta.buyerUsername || latestMessage?.buyerUsername || order?.buyer?.username || '';
+      if (buyerSearch) {
+        const haystack = `${buyerName} ${buyerUsername}`.toLowerCase();
+        if (!haystack.includes(buyerSearch)) return null;
+      }
+
+      const orderLineItem = order?.lineItems?.[0];
+      const itemId = meta.itemId || latestMessage?.itemId || orderLineItem?.legacyItemId || null;
+      const itemTitle = latestMessage?.itemTitle || orderLineItem?.title || order?.productName || '';
+
+      return {
+        orderId: meta.orderId || latestMessage?.orderId || null,
+        buyerUsername,
+        buyerName,
+        itemId,
+        itemTitle,
+        lastMessage: latestMessage?.body || '',
+        lastDate: latestMessage?.messageDate || meta.updatedAt,
+        sender: latestMessage?.sender || null,
+        unreadCount: latestMessage?.read === false && latestMessage?.sender === 'BUYER' ? 1 : 0,
+        sellerId: String(meta.seller),
+        orderMarketplaceId: order?.purchaseMarketplaceId || null,
+        computedMarketplaceId: order?.purchaseMarketplaceId || 'Unknown',
+        productImageUrl: orderLineItem?.imageUrl || null,
+        actualMessageType: meta.orderId ? 'ORDER' : (itemId ? 'INQUIRY' : 'DIRECT'),
+        messageType: latestMessage?.messageType || (meta.orderId ? 'ORDER' : 'INQUIRY'),
+        conversationId: latestMessage?.conversationId || null,
+        _conversationMeta: {
+          category: meta.category,
+          caseStatus: meta.caseStatus,
+          status: meta.status
+        },
+        _assignedFromMeta: true
+      };
+    }))).filter(Boolean);
+
+    res.json({ threads });
+  } catch (err) {
+    console.error('Assigned Board Meta Fetch Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- NEW ROUTE 3: GET MANAGEMENT LIST (Called from ConversationManagementPage) ---
 // 
 router.get('/conversation-management/list', requireAuth, async (req, res) => {
