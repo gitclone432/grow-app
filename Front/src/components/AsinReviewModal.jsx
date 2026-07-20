@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -56,6 +56,77 @@ const SCRAPE_SOURCE_META = {
 
 function getScrapeSourceMeta(source) {
   return SCRAPE_SOURCE_META[source] || null;
+}
+
+function normalizeComparableTitle(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function getComparablePrice(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(String(value).replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(parsed) ? Number(parsed.toFixed(2)) : null;
+}
+
+function getComparablePriceCents(value) {
+  const price = getComparablePrice(value);
+  return price === null ? null : Math.round(price * 100);
+}
+
+function getNextNonMatchingPrice(value, records = [], stepCents = 2) {
+  const startCents = getComparablePriceCents(value);
+  if (startCents === null) return null;
+
+  const matchedPriceCents = new Set(
+    records
+      .map(record => getComparablePriceCents(record.price))
+      .filter(price => price !== null)
+  );
+
+  if (!matchedPriceCents.has(startCents)) return null;
+
+  let nextCents = startCents;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    nextCents += stepCents;
+    if (!matchedPriceCents.has(nextCents)) {
+      return (nextCents / 100).toFixed(2);
+    }
+  }
+
+  return null;
+}
+
+function getCrossSellerMatchSummary(skuState, itemData = {}) {
+  const currentSellerRecords = Array.isArray(skuState?.currentSellerMatches) ? skuState.currentSellerMatches : [];
+  const otherSellerRecords = Array.isArray(skuState?.otherSellerMatches) ? skuState.otherSellerMatches : [];
+  const records = [...currentSellerRecords, ...otherSellerRecords];
+  const currentTitle = normalizeComparableTitle(itemData.title);
+  const currentPrice = getComparablePrice(itemData.startPrice);
+
+  const titleMatches = records.filter(record => currentTitle && normalizeComparableTitle(record.title) === currentTitle);
+  const priceMatches = records.filter(record => {
+    const otherPrice = getComparablePrice(record.price);
+    return currentPrice !== null && otherPrice !== null && otherPrice === currentPrice;
+  });
+
+  const sellerNames = [...new Set([...titleMatches, ...priceMatches].map(record => record.sellerName).filter(Boolean))];
+
+  return {
+    records,
+    currentSellerRecords,
+    otherSellerRecords,
+    titleMatches,
+    priceMatches,
+    sellerNames,
+    hasTitleMatch: titleMatches.length > 0,
+    hasPriceMatch: priceMatches.length > 0
+  };
+}
+
+function formatSellerSkuPrice(record = {}) {
+  if (record.price === null || record.price === undefined || record.price === '') return 'Price unavailable';
+  const prefix = record.currency ? `${record.currency} ` : '';
+  return `${prefix}${Number(record.price).toFixed(2)}`;
 }
 
 function formatBulletLi(text, isLast = false) {
@@ -382,6 +453,7 @@ export default function AsinReviewModal({
   const DESCRIPTION_TEMPLATE_STORAGE_KEY = 'description-templates.gallery.v1';
   const STORE_TEMPLATE_MAP_KEY = 'store-description-template-map.v1';
   const amazonDomain = MARKETPLACE_DOMAINS[marketplace] || MARKETPLACE_DOMAINS.US;
+  const checkedSkuIdsRef = useRef(new Set()); // tracks item IDs whose SKU check has already been initiated
   const [currentIndex, setCurrentIndex] = useState(0);
   const [editedItems, setEditedItems] = useState({});
   const [dismissedItems, setDismissedItems] = useState(new Set());
@@ -393,6 +465,8 @@ export default function AsinReviewModal({
   const [rephrasing, setRephrasing] = useState({}); // { [itemId]: true|false }
   const [startPriceEditMode, setStartPriceEditMode] = useState({}); // { [itemId]: true|false }
   const [skuToast, setSkuToast] = useState({ open: false, message: '' });
+  const [skuStatus, setSkuStatus] = useState({}); // { [itemId]: { status: 'loading'|'active'|'inactive'|null, count: number } }
+  const [autoPriceAdjustments, setAutoPriceAdjustments] = useState({}); // { [itemId]: { from, to } }
 
   // Filter out dismissed items
   const activeItems = previewItems.filter(item => !dismissedItems.has(item.id));
@@ -403,6 +477,9 @@ export default function AsinReviewModal({
   const currentItem = activeItems[currentIndex];
   const scrapeSourceMeta = getScrapeSourceMeta(currentItem?.scrapeSource);
   const itemData = editedItems[currentItem?.id] || currentItem?.generatedListing || {};
+  const currentSkuStatus = currentItem?.id ? skuStatus[currentItem.id] : null;
+  const crossSellerSummary = getCrossSellerMatchSummary(currentSkuStatus, itemData);
+  const currentAutoPriceAdjustment = currentItem?.id ? autoPriceAdjustments[currentItem.id] : null;
   const isStartPriceEditing = !!(currentItem?.id && startPriceEditMode[currentItem.id]);
   const startPriceValue = itemData.startPrice ?? '';
   const soldPriceUsd = parseFloat(startPriceValue);
@@ -517,7 +594,90 @@ export default function AsinReviewModal({
     setDismissedItems(new Set());
     setCurrentIndex(0);
     setHasUnsavedChanges(false);
+    setSkuStatus({});
+    setAutoPriceAdjustments({});
+    checkedSkuIdsRef.current = new Set();
   }, [open, previewItems]);
+
+  // Check each SKU as soon as its customLabel becomes available (items generate via SSE stream).
+  // Uses a ref to ensure each item is only checked once even as editedItems keeps changing.
+  useEffect(() => {
+    if (!open || !sellerId) return;
+    previewItems.forEach(item => {
+      if (checkedSkuIdsRef.current.has(item.id)) return; // already initiated for this item
+      const sku = (editedItems[item.id] || item.generatedListing || {}).customLabel;
+      if (!sku) return; // not generated yet — will re-run when editedItems updates
+      checkedSkuIdsRef.current.add(item.id);
+      const baseSku = sku.includes('-') ? sku.split('-')[0] : sku;
+      setSkuStatus(prev => ({ ...prev, [item.id]: { status: 'loading', count: 0 } }));
+      api.get(`/ebay/check-sku-active?sku=${encodeURIComponent(baseSku)}&sellerId=${encodeURIComponent(sellerId)}`)
+        .then(({ data }) => {
+          setSkuStatus(prev => ({
+            ...prev,
+            [item.id]: {
+              status: data.active ? 'active' : 'inactive',
+              count: data._debug?.count ?? data._debug?.itemCount ?? 0,
+              currentSellerMatches: data.currentSellerMatches || [],
+              currentSellerCount: data.currentSellerCount || 0,
+              otherSellerMatches: data.otherSellerMatches || [],
+              otherSellerCount: data.otherSellerCount || 0
+            }
+          }));
+        })
+        .catch(() => {
+          setSkuStatus(prev => ({ ...prev, [item.id]: { status: null, count: 0 } }));
+        });
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, sellerId, editedItems]);
+
+  // Auto-bump startPrice by $0.20 when it matches another seller's price for the same SKU
+  useEffect(() => {
+    if (!open) return;
+
+    const adjustments = {};
+    let hasAdjustments = false;
+
+    setEditedItems(prev => {
+      let changed = false;
+      const next = { ...prev };
+
+      previewItems.forEach(item => {
+        const records = [
+          ...(skuStatus[item.id]?.currentSellerMatches || []),
+          ...(skuStatus[item.id]?.otherSellerMatches || [])
+        ];
+        if (records.length === 0) return;
+
+        const listingData = next[item.id] || item.generatedListing;
+        if (!listingData?.startPrice) return;
+
+        const adjustedPrice = getNextNonMatchingPrice(listingData.startPrice, records, 20);
+        if (!adjustedPrice) return;
+
+        next[item.id] = {
+          ...listingData,
+          startPrice: adjustedPrice
+        };
+        adjustments[item.id] = {
+          from: getComparablePrice(listingData.startPrice).toFixed(2),
+          to: adjustedPrice
+        };
+        changed = true;
+        hasAdjustments = true;
+      });
+
+      return changed ? next : prev;
+    });
+
+    if (hasAdjustments) {
+      setAutoPriceAdjustments(prev => ({
+        ...prev,
+        ...adjustments
+      }));
+      setHasUnsavedChanges(true);
+    }
+  }, [open, previewItems, skuStatus, editedItems]);
 
   // Sync Amazon preview window when navigating
   useEffect(() => {
@@ -1430,14 +1590,161 @@ export default function AsinReviewModal({
             ) : currentItem.generatedListing ? (
               <Stack spacing={2}>
                 {/* SKU */}
-                <TextField
-                  label="SKU (Custom Label)"
-                  value={itemData.customLabel || ''}
-                  size="small"
-                  fullWidth
-                  disabled
-                  helperText="Auto-generated from ASIN"
-                />
+                <Box>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <TextField
+                      label="SKU (Custom Label)"
+                      value={itemData.customLabel || ''}
+                      size="small"
+                      fullWidth
+                      disabled
+                      helperText="Auto-generated from ASIN"
+                    />
+                    {sellerId && itemData.customLabel && (() => {
+                      const s = skuStatus[currentItem?.id];
+                      if (!s || s.status === 'loading') return <CircularProgress size={18} sx={{ flexShrink: 0 }} />;
+                      if (s.status === 'active') return <Chip label={`Active${s.count > 0 ? ` (${s.count})` : ''}`} color="error" size="small" sx={{ flexShrink: 0 }} />;
+                      if (s.status === 'inactive') return <Chip label="Not Active" color="success" size="small" sx={{ flexShrink: 0 }} />;
+                      return null;
+                    })()}
+                    {currentSkuStatus?.status !== 'loading' && itemData.customLabel && crossSellerSummary.records.length === 0 && (
+                      <Chip
+                        label="No SKU match"
+                        color="success"
+                        size="small"
+                        sx={{ flexShrink: 0, fontWeight: 800 }}
+                      />
+                    )}
+                    {crossSellerSummary.records.length > 0 && (
+                      <Tooltip
+                        arrow
+                        placement="bottom-end"
+                        title={
+                          <Stack spacing={1} sx={{ maxWidth: 560 }}>
+                            <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
+                              Same SKU found in synced listings
+                            </Typography>
+                            {crossSellerSummary.records.slice(0, 10).map((record, index) => (
+                              <Box
+                                key={`${record.sellerId || 'seller'}-${record.itemId || index}`}
+                                sx={{
+                                  pb: 0.75,
+                                  borderBottom: index < Math.min(crossSellerSummary.records.length, 10) - 1 ? '1px solid rgba(255,255,255,0.18)' : 'none'
+                                }}
+                              >
+                                <Typography variant="caption" sx={{ display: 'block', fontWeight: 800, color: '#fff' }}>
+                                  {record.sellerName || 'Unknown Seller'} {record.itemId ? `• ${record.itemId}` : ''}
+                                </Typography>
+                                <Typography variant="caption" sx={{ display: 'block', color: '#ffd166' }}>
+                                  Price: {formatSellerSkuPrice(record)}
+                                </Typography>
+                                <Typography variant="caption" sx={{ display: 'block', color: 'rgba(255,255,255,0.86)' }}>
+                                  {record.title || 'Title unavailable'}
+                                </Typography>
+                              </Box>
+                            ))}
+                            {crossSellerSummary.records.length > 10 && (
+                              <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.75)' }}>
+                                +{crossSellerSummary.records.length - 10} more
+                              </Typography>
+                            )}
+                          </Stack>
+                        }
+                      >
+                        <Chip
+                          label={`SKU matches: ${crossSellerSummary.records.length}`}
+                          color="info"
+                          variant="outlined"
+                          size="small"
+                          sx={{
+                            flexShrink: 0,
+                            fontWeight: 800,
+                            borderWidth: 2,
+                            bgcolor: '#e8f4fd',
+                            '&:hover': {
+                              bgcolor: '#d8ecfb'
+                            }
+                          }}
+                        />
+                      </Tooltip>
+                    )}
+                  </Stack>
+                  {crossSellerSummary.records.length > 0 && (
+                    <Alert
+                      severity={crossSellerSummary.hasTitleMatch || crossSellerSummary.hasPriceMatch ? 'warning' : 'info'}
+                      icon={<WarningIcon fontSize="small" />}
+                      sx={{
+                        mt: 1,
+                        alignItems: 'center',
+                        border: '1px solid',
+                        borderColor: crossSellerSummary.hasTitleMatch || crossSellerSummary.hasPriceMatch ? 'warning.main' : 'info.main',
+                        bgcolor: crossSellerSummary.hasTitleMatch || crossSellerSummary.hasPriceMatch ? '#fff4de' : '#e8f4fd',
+                        '& .MuiAlert-message': { width: '100%' }
+                      }}
+                    >
+                      <Stack spacing={0.75}>
+                        <Typography variant="body2" sx={{ fontWeight: 900, color: crossSellerSummary.hasTitleMatch || crossSellerSummary.hasPriceMatch ? 'warning.dark' : 'info.dark' }}>
+                          Same SKU exists in {crossSellerSummary.records.length} synced listing{crossSellerSummary.records.length === 1 ? '' : 's'}
+                        </Typography>
+                        <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+                          <Chip
+                            label={`Current seller: ${crossSellerSummary.currentSellerRecords.length}`}
+                            size="small"
+                            sx={{ fontWeight: 800, bgcolor: '#e8f4fd', color: '#0b5f8f', border: '1px solid #64b5f6' }}
+                          />
+                          <Chip
+                            label={`Other sellers: ${crossSellerSummary.otherSellerRecords.length}`}
+                            size="small"
+                            sx={{ fontWeight: 800, bgcolor: '#f5f7fa', color: '#455a64', border: '1px solid #b0bec5' }}
+                          />
+                        </Stack>
+                        {crossSellerSummary.sellerNames.length > 0 && (
+                          <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
+                            <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.secondary' }}>
+                              Sellers:
+                            </Typography>
+                            {crossSellerSummary.sellerNames.slice(0, 5).map(name => (
+                              <Chip
+                                key={name}
+                                label={name}
+                                size="small"
+                                sx={{ height: 22, fontWeight: 800, bgcolor: '#f5f7fa', color: '#455a64', border: '1px solid #b0bec5' }}
+                              />
+                            ))}
+                          </Stack>
+                        )}
+                        <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+                          <Chip
+                            label={crossSellerSummary.hasTitleMatch
+                              ? `Title matches: ${crossSellerSummary.titleMatches.length}`
+                              : 'Title different'}
+                            size="small"
+                            sx={{
+                              fontWeight: 900,
+                              bgcolor: crossSellerSummary.hasTitleMatch ? '#ffecb3' : '#e8f4fd',
+                              color: crossSellerSummary.hasTitleMatch ? '#8a5300' : '#0b5f8f',
+                              border: '1px solid',
+                              borderColor: crossSellerSummary.hasTitleMatch ? '#f0a500' : '#64b5f6'
+                            }}
+                          />
+                          <Chip
+                            label={crossSellerSummary.hasPriceMatch
+                              ? `Price matches: ${crossSellerSummary.priceMatches.length}`
+                              : 'Price different'}
+                            size="small"
+                            sx={{
+                              fontWeight: 900,
+                              bgcolor: crossSellerSummary.hasPriceMatch ? '#ffe0e0' : '#e8f4fd',
+                              color: crossSellerSummary.hasPriceMatch ? '#a11111' : '#0b5f8f',
+                              border: '1px solid',
+                              borderColor: crossSellerSummary.hasPriceMatch ? '#e57373' : '#64b5f6'
+                            }}
+                          />
+                        </Stack>
+                      </Stack>
+                    </Alert>
+                  )}
+                </Box>
 
                 {/* Core Fields */}
                 {coreFieldColumns.map(col => {
@@ -1593,6 +1900,26 @@ export default function AsinReviewModal({
                           >
                             {isStartPriceEditing ? 'Save' : 'Edit'}
                           </Button>
+                          {currentAutoPriceAdjustment && (
+                            <Tooltip
+                              title={`Start price auto-increased from ${currentAutoPriceAdjustment.from} to ${currentAutoPriceAdjustment.to} because the original price matched another seller with this SKU.`}
+                              placement="bottom"
+                              arrow
+                            >
+                              <Chip
+                                label={`Auto +${(Number(currentAutoPriceAdjustment.to) - Number(currentAutoPriceAdjustment.from)).toFixed(2)}`}
+                                size="small"
+                                sx={{
+                                  height: 26,
+                                  fontWeight: 900,
+                                  bgcolor: '#e8f4fd',
+                                  color: '#0b5f8f',
+                                  border: '1px solid #64b5f6',
+                                  flexShrink: 0
+                                }}
+                              />
+                            </Tooltip>
+                          )}
                         </Stack>
                       </Box>
                     );

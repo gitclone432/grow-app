@@ -25,6 +25,15 @@ import PriceChangeLog from '../models/PriceChangeLog.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import PayoneerRecord from '../models/PayoneerRecord.js';
 import EmployeeProfile from '../models/EmployeeProfile.js';
+import SellerSkuIndex from '../models/SellerSkuIndex.js';
+import SellerUploadLimit from '../models/SellerUploadLimit.js';
+import EndListingLog from '../models/EndListingLog.js';
+import ManualEndListingAdjustment from '../models/ManualEndListingAdjustment.js';
+import AsinPrecheckLog from '../models/AsinPrecheckLog.js';
+import AmazonStockCheckRun from '../models/AmazonStockCheckRun.js';
+import AmazonStockCheckItem from '../models/AmazonStockCheckItem.js';
+import AmazonStockActionLog from '../models/AmazonStockActionLog.js';
+import UserCategoryTarget from '../models/UserCategoryTarget.js';
 import Seller from '../models/Seller.js';
 import User from '../models/User.js';
 
@@ -56,6 +65,17 @@ export function isSellerArchived(seller, user) {
 }
 
 async function deleteSellerScopedData(sellerId) {
+  // Seller-scoped stock-check runs: cascade items + action logs for those runs
+  const sellerStockRuns = await AmazonStockCheckRun.find({ seller: sellerId }).select('_id').lean();
+  const sellerStockRunIds = sellerStockRuns.map((r) => r._id);
+  if (sellerStockRunIds.length > 0) {
+    await Promise.all([
+      AmazonStockCheckItem.deleteMany({ run: { $in: sellerStockRunIds } }),
+      AmazonStockActionLog.deleteMany({ run: { $in: sellerStockRunIds } }),
+      AmazonStockCheckRun.deleteMany({ _id: { $in: sellerStockRunIds } }),
+    ]);
+  }
+
   await Promise.all([
     UserSellerAssignment.deleteMany({ seller: sellerId }),
     SellerPricingConfig.deleteMany({ sellerId }),
@@ -74,6 +94,14 @@ async function deleteSellerScopedData(sellerId) {
     PriceChangeLog.deleteMany({ seller: sellerId }),
     ConversationMeta.deleteMany({ seller: sellerId }),
     PayoneerRecord.deleteMany({ store: sellerId }),
+    SellerSkuIndex.deleteMany({ seller: sellerId }),
+    SellerUploadLimit.deleteMany({ seller: sellerId }),
+    EndListingLog.deleteMany({ seller: sellerId }),
+    ManualEndListingAdjustment.deleteMany({ seller: sellerId }),
+    AsinPrecheckLog.deleteMany({ seller: sellerId }),
+    UserCategoryTarget.deleteMany({ seller: sellerId }),
+    // Any remaining action logs tagged to this seller (e.g. from multi-seller runs)
+    AmazonStockActionLog.deleteMany({ seller: sellerId }),
   ]);
 }
 

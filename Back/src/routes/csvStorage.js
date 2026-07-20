@@ -87,7 +87,8 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
             productId,
             productName,
             source,
-            listingStatus
+            listingStatus,
+            country
         } = req.body;
 
         if (!sellerId) {
@@ -96,6 +97,8 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
 
         const normalizedListingStatus =
             listingStatus === 'draft' || listingStatus === 'active' ? listingStatus : null;
+        const normalizedCountry =
+            ['US', 'UK', 'AU', 'Canada'].includes(country) ? country : null;
 
         const name = file.originalname.replace(/\.csv$/i, '');
 
@@ -115,6 +118,7 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
             productName: productName || '',
             source: source || null,
             listingStatus: normalizedListingStatus,
+            country: normalizedCountry,
             createdBy: req.user?._id || null
         });
 
@@ -181,7 +185,7 @@ router.get('/:id/download', requireAuth, async (req, res) => {
 // ============================================
 router.post('/:id/schedule-upload', requireAuth, async (req, res) => {
     try {
-        const { scheduledAt, sellerId } = req.body;
+        const { scheduledAt, sellerId, country, categoryId, rangeId, productId } = req.body;
         if (!scheduledAt) return res.status(400).json({ error: 'Missing scheduledAt' });
         if (!sellerId) return res.status(400).json({ error: 'Missing sellerId' });
 
@@ -189,9 +193,20 @@ router.post('/:id/schedule-upload', requireAuth, async (req, res) => {
         if (isNaN(scheduledDate.getTime())) return res.status(400).json({ error: 'Invalid scheduledAt date' });
         if (scheduledDate <= new Date()) return res.status(400).json({ error: 'Scheduled time must be in the future' });
 
+        const updateFields = {
+            scheduledUploadAt: scheduledDate,
+            scheduledSellerId: sellerId,
+            scheduledUploadStatus: 'pending'
+        };
+        // Persist optional metadata so the cron job can forward them to FeedUpload
+        if (country) updateFields.country = country;
+        if (categoryId) updateFields.categoryId = categoryId;
+        if (rangeId) updateFields.rangeId = rangeId;
+        if (productId) updateFields.productId = productId;
+
         const record = await CsvStorage.findByIdAndUpdate(
             req.params.id,
-            { scheduledUploadAt: scheduledDate, scheduledSellerId: sellerId, scheduledUploadStatus: 'pending' },
+            updateFields,
             { new: true }
         ).select('-csvData').populate('seller', 'storeName').populate('feedUploadId', 'status uploadSummary taskId');
 

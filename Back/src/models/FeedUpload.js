@@ -37,6 +37,18 @@ const feedUploadSchema = new mongoose.Schema({
         successCount: Number,
         failureCount: Number
     },
+    categoryId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'AsinListCategory'
+    },
+    rangeId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'AsinListRange'
+    },
+    productId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'AsinListProduct'
+    },
     creationDate: {
         type: Date,
         default: Date.now

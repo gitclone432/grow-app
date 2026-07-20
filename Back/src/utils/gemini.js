@@ -1,7 +1,9 @@
 import OpenAI from 'openai';
 import pLimit from 'p-limit';
+import { trackApiUsage } from './apiUsageTracker.js';
 
-let openaiClient = null;
+// One client per API key (default key + any dedicated keys like the precheck key)
+const openaiClients = new Map();
 
 // Concurrency limiter for AI requests - OpenAI Tier 2 can handle high concurrency
 const AI_CONCURRENT_REQUESTS = parseInt(process.env.OPENAI_CONCURRENT_REQUESTS) || 30;
@@ -9,11 +11,12 @@ const aiLimit = pLimit(AI_CONCURRENT_REQUESTS);
 
 console.log(`[OpenAI] 🤖 Initialized with ${AI_CONCURRENT_REQUESTS} concurrent request limit`);
 
-function getOpenAIClient() {
-  if (!openaiClient) {
-    openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+function getOpenAIClient(apiKey) {
+  const key = apiKey || process.env.OPENAI_API_KEY;
+  if (!openaiClients.has(key)) {
+    openaiClients.set(key, new OpenAI({ apiKey: key }));
   }
-  return openaiClient;
+  return openaiClients.get(key);
 }
 
 /**
@@ -21,14 +24,32 @@ function getOpenAIClient() {
  * @param {string} prompt - The prompt to send to OpenAI
  * @param {Object} options - Generation options
  * @param {number} options.maxTokens - Maximum tokens to generate (default: 150)
+ * @param {string} [options.apiKey] - Optional one-off API key (e.g. OPENAI_PRECHECK_API_KEY)
  * @returns {Promise<string>} - Generated text
  */
 export async function generateWithGemini(prompt, options = {}) {
   return aiLimit(async () => {
+    const startTime = Date.now();
+    const {
+      maxTokens = 150,
+      asin,
+      fieldName,
+      fieldType,
+      aiRunId,
+      aiRunStartedAt,
+      templateId,
+      sellerId,
+      userId,
+      ipAddress,
+      ipSource,
+      forwardedFor,
+      userAgent,
+      model = 'gpt-4o-mini',
+      apiKey
+    } = options;
+
     try {
-      const { maxTokens = 150 } = options;
-      
-      const openai = getOpenAIClient();
+      const openai = getOpenAIClient(apiKey);
       const completion = await openai.chat.completions.create({
         messages: [
           {
@@ -36,7 +57,7 @@ export async function generateWithGemini(prompt, options = {}) {
             content: prompt
           }
         ],
-        model: 'gpt-4o-mini',
+        model,
         temperature: 0.3,
         max_tokens: maxTokens,
       });
@@ -46,10 +67,59 @@ export async function generateWithGemini(prompt, options = {}) {
       // Strip markdown code blocks (```html ... ```, ```javascript ... ```, etc.)
       // This prevents AI from wrapping HTML/code responses in markdown fences
       content = content.replace(/```(?:html|javascript|python|css|json|[a-z]*)?\n?([\s\S]*?)```/g, '$1').trim();
+
+      const usage = completion.usage || {};
+      trackApiUsage({
+        service: 'OpenAI',
+        asin,
+        creditsUsed: usage.total_tokens || 1,
+        success: true,
+        responseTime: Date.now() - startTime,
+        extractedFields: fieldName ? [fieldName] : [],
+        model,
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
+        totalTokens: usage.total_tokens,
+        fieldName,
+        fieldType,
+        aiRunId,
+        aiRunStartedAt,
+        templateId,
+        sellerId,
+        userId,
+        ipAddress,
+        ipSource,
+        forwardedFor,
+        userAgent,
+        promptChars: prompt.length,
+        completionChars: content.length
+      }).catch(err => console.error('[OpenAI Usage Tracker] Failed to track:', err.message));
       
       return content;
     } catch (error) {
       console.error('OpenAI API error:', error);
+      trackApiUsage({
+        service: 'OpenAI',
+        asin,
+        creditsUsed: 1,
+        success: false,
+        errorMessage: error.message,
+        responseTime: Date.now() - startTime,
+        extractedFields: fieldName ? [fieldName] : [],
+        model,
+        fieldName,
+        fieldType,
+        aiRunId,
+        aiRunStartedAt,
+        templateId,
+        sellerId,
+        userId,
+        ipAddress,
+        ipSource,
+        forwardedFor,
+        userAgent,
+        promptChars: prompt.length
+      }).catch(err => console.error('[OpenAI Usage Tracker] Failed to track error:', err.message));
       throw new Error('Failed to generate content with OpenAI');
     }
   });

@@ -93,7 +93,7 @@ export default function SelectSellerLabPage() {
   return (
     <Box sx={{ p: { xs: 1.5, sm: 2 } }}>
       <Typography variant="h5" sx={{ mb: 1.5, fontSize: { xs: '1.25rem', sm: '1.5rem' } }}>
-        Template listing
+        CSV Listings
       </Typography>
 
       {error && (

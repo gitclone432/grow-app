@@ -439,6 +439,8 @@ export default function TemplateListingsLabPage({ embedded = false }) {
         url += `&sellerId=${sellerId}`;
       }
       url += `&status=${encodeURIComponent(listingStatusFilter)}`;
+      // Direct List → eBay rows stay in Listings Database; hide them from CSV Listings
+      url += `&excludeDirectList=1`;
       
       // Add batch filter parameter
       if (batchFilter && batchFilter !== 'all') {
@@ -734,8 +736,11 @@ export default function TemplateListingsLabPage({ embedded = false }) {
     }
   };
 
-  const handleBulkAutofill = async () => {
-    if (!asinInput.trim()) {
+  const handleBulkAutofill = async (overrideAsins = null, overrideRegion = null) => {
+    const sourceText = Array.isArray(overrideAsins)
+      ? overrideAsins.join('\n')
+      : asinInput;
+    if (!String(sourceText || '').trim()) {
       setAsinError('Please enter at least one ASIN');
       return;
     }
@@ -753,8 +758,13 @@ export default function TemplateListingsLabPage({ embedded = false }) {
 
     try {
       // Parse ASINs using flexible parser (supports commas, newlines, spaces, tabs, etc.)
-      const asins = parseAsins(asinInput);
-      const stats = getParsingStats(asinInput);
+      const asins = Array.isArray(overrideAsins) && overrideAsins.length > 0
+        ? [...new Set(overrideAsins.map((a) => String(a).trim().toUpperCase()).filter(Boolean))]
+        : parseAsins(asinInput);
+      const stats = Array.isArray(overrideAsins)
+        ? { invalid: 0 }
+        : getParsingStats(asinInput);
+      const regionToUse = overrideRegion || region;
 
       if (asins.length === 0) {
         setAsinError('Please enter valid ASINs');
@@ -803,7 +813,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
       // Build SSE URL with auth token
       const asinParam = asins.join(',');
       const authToken = getAuthToken();
-      const sseUrl = `/template-listings/bulk-preview-stream?templateId=${templateId}&sellerId=${sellerId}&asins=${encodeURIComponent(asinParam)}&region=${encodeURIComponent(region)}&token=${encodeURIComponent(authToken)}`;
+      const sseUrl = `/template-listings/bulk-preview-stream?templateId=${templateId}&sellerId=${sellerId}&asins=${encodeURIComponent(asinParam)}&region=${encodeURIComponent(regionToUse)}&token=${encodeURIComponent(authToken)}`;
       
       // Create EventSource for SSE
       const eventSource = new EventSource(api.defaults.baseURL + sseUrl);
@@ -898,6 +908,34 @@ export default function TemplateListingsLabPage({ embedded = false }) {
       // Note: setLoadingBulk(false) is handled by SSE events
     }
   };
+
+  // Handoff from ASIN Precheck → fill ASIN box and start bulk autofill
+  useEffect(() => {
+    const handoffNonce = searchParams.get('fromAsinPrecheck');
+    if (!handoffNonce || !sellerId || !templateId) return;
+
+    const rawHandoff = sessionStorage.getItem('asinPrecheckHandoff');
+    if (!rawHandoff) return;
+
+    try {
+      const handoff = JSON.parse(rawHandoff);
+      const handoffAsins = Array.isArray(handoff.asins) ? handoff.asins : [];
+      const isCurrentHandoff = handoff.nonce === handoffNonce
+        && handoff.sellerId === sellerId
+        && handoff.templateId === templateId;
+
+      if (!isCurrentHandoff || handoffAsins.length === 0) return;
+
+      sessionStorage.removeItem('asinPrecheckHandoff');
+      setAsinInput(handoffAsins.join('\n'));
+      if (handoff.region) setRegion(handoff.region);
+      handleBulkAutofill(handoffAsins, handoff.region || null);
+    } catch (handoffError) {
+      console.error('Failed to read ASIN precheck handoff:', handoffError);
+      sessionStorage.removeItem('asinPrecheckHandoff');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, sellerId, templateId]);
 
   const handleRemoveBulkResult = (asin) => {
     setBulkResults(bulkResults.filter(r => r.asin !== asin));

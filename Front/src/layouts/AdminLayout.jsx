@@ -22,6 +22,7 @@ import {
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import { fetchSellersAll } from '../lib/sellersAllCache.js';
+import DiscountAlertsBell from '../components/DiscountAlertsBell.jsx';
 import MenuIcon from '@mui/icons-material/Menu';
 import Inventory2Icon from '@mui/icons-material/Inventory2';
 import AddCircleIcon from '@mui/icons-material/AddCircle';
@@ -64,9 +65,9 @@ import QueryStatsIcon from '@mui/icons-material/QueryStats';
 import SecurityIcon from '@mui/icons-material/Security';
 import CircularProgress from '@mui/material/CircularProgress';
 import {
-  ProductResearchPage,
   AddListerPage,
   AddSellerPage,
+  AddUserPage,
   ListingManagementPage,
   ManagePlatformsPage,
   ManageStoresPage,
@@ -97,6 +98,7 @@ import {
   ExtraExpensePage,
   RevenueGrossNetPage,
   AboutMePage,
+  WelcomePage,
   EmployeeManagementPage,
   BuyerChatPage,
   FeedUploadPage,
@@ -106,9 +108,25 @@ import {
   EbayAnalyticsHubPage,
   EbayFeedbackPage,
   EbayApiTesterPage,
+  SkuIndexSyncPage,
+  DuplicateSkusPage,
+  SkuIndexDashboardPage,
+  AmazonStockCheckPage,
+  SellerSkuStockCheckPage,
+  ExpiringListingsPage,
+  EndListingStatsPage,
+  EndListingByDatePage,
+  PrecheckAiUsagePage,
+  AiListingUsagePage,
+  DailyListingComparisonPage,
+  ManualEndListingPage,
+  SkuSellerProfitPage,
+  ActiveListingTiersPage,
+  DiscountsPage,
   StoreListingsPage,
   SendOfferEligiblePage,
   FeedUploadStatsPage,
+  SellerUploadLimitsPage,
   SalaryPage,
   SellerFundsPage,
   TransactionSummaryPage,
@@ -141,6 +159,7 @@ import {
   IdeasPage,
   OrderAnalyticsPage,
   MicroOrdersPage,
+  LegacyItemAnalyticsPage,
   CRPAnalyticsPage,
   SellerAnalyticsPage,
   OrdersDepartmentDashboardPage,
@@ -150,6 +169,8 @@ import {
   TemplateListingAnalyticsPage,
   SelectSellerLabPage,
   SellerTemplatesLabPage,
+  AsinPrecheckPage,
+  AsinPrecheckStatsPage,
   ListingDirectoryPage,
   TemplateDirectoryPage,
   TemplateDatabasePage,
@@ -170,6 +191,9 @@ import {
   StoresPage,
   EtsyStoresPage,
   DescriptionTemplatesPage,
+  UserCategoryTargetsPage,
+  UserListingPerformancePage,
+  MeetingsPage,
 } from './adminLazyPages.jsx';
 import SettingsIcon from '@mui/icons-material/Settings';
 
@@ -262,6 +286,7 @@ const COMPONENT_MAP = {
   'OrdersDashboard': OrdersDepartmentDashboardPage,
   'OrderAnalytics': OrderAnalyticsPage,
   'MicroOrders': MicroOrdersPage,
+  'LegacyItemAnalytics': LegacyItemAnalyticsPage,
   'CRPAnalytics': CRPAnalyticsPage,
   'CRPComparison': CRPComparisonPage,
   'Fulfillment': FulfillmentDashboard,
@@ -285,6 +310,8 @@ const COMPONENT_MAP = {
   'AmazonPiSourceColumns': AmazonPiSourceColumnsPage,
   'ListingsDatabase': TemplateDatabasePage,
   'SelectSellerLab': SelectSellerLabPage,
+  'AsinPrecheck': AsinPrecheckPage,
+  'AsinPrecheckStats': AsinPrecheckStatsPage,
   'ListingDirectory': ListingDirectoryPage,
   'TemplateDirectory': TemplateDirectoryPage,
   'AsinDirectory': AsinDirectoryPage,
@@ -292,8 +319,10 @@ const COMPONENT_MAP = {
   'FeedUpload': FeedUploadPage,
   'DirectList': DirectListPage,
   'FeedUploadStats': FeedUploadStatsPage,
+  'SellerUploadLimits': SellerUploadLimitsPage,
   'CsvStorage': CsvStoragePage,
-  'ProductResearch': ProductResearchPage,
+  'UserCategoryTargets': UserCategoryTargetsPage,
+  'UserListingPerformance': UserListingPerformancePage,
   'Payoneer': PayoneerSheetPage,
   'BankAccounts': BankAccountsPage,
   'Transactions': TransactionPage,
@@ -323,6 +352,21 @@ const COMPONENT_MAP = {
   'EbayAnalyticsHub': EbayAnalyticsHubPage,
   'EbayFeedback': EbayFeedbackPage,
   'EbayApiTester': EbayApiTesterPage,
+  'SkuIndexSync': SkuIndexSyncPage,
+  'DuplicateSkus': DuplicateSkusPage,
+  'SkuIndexDashboard': SkuIndexDashboardPage,
+  'AmazonStockCheck': AmazonStockCheckPage,
+  'SellerSkuStockCheck': SellerSkuStockCheckPage,
+  'ExpiringListings': ExpiringListingsPage,
+  'EndListingStats': EndListingStatsPage,
+  'EndListingByDate': EndListingByDatePage,
+  'PrecheckAiUsage': PrecheckAiUsagePage,
+  'AiListingUsage': AiListingUsagePage,
+  'DailyListingComparison': DailyListingComparisonPage,
+  'ManualEndListing': ManualEndListingPage,
+  'SkuSellerOrderProfit': SkuSellerProfitPage,
+  'ActiveListingTiers': ActiveListingTiersPage,
+  'Discounts': DiscountsPage,
   'AdsAndMarketing': AdsAndMarketingPage,
   'MarketingCampaigns': MarketingCampaignsPage,
   'MarketingPromotions': MarketingPromotionsPage,
@@ -334,8 +378,10 @@ const COMPONENT_MAP = {
   'TeamChat': InternalMessagesPage,
   'LeaveAdmin': LeaveAdminPage,
   'EmployeeManagement': EmployeeManagementPage,
+  'AddUser': AddUserPage,
   'AddSeller': AddSellerPage,
   'UserSellerAssignments': UserSellerAssignmentPage,
+  'Meetings': MeetingsPage,
   'ViewAllMessages': InternalMessagesAdminPage,
   'Attendance': AttendanceAdminPage,
   'PageAccessManagement': PageAccessManagementPage,
@@ -627,6 +673,25 @@ export default function AdminLayout({ user, onLogout }) {
         {/* Divider after lister dashboard link */}
         {isAnyLister && <Divider sx={{ my: 1.5, mx: 2, borderColor: 'rgba(0, 0, 0, 0.08)' }} />}
 
+        {/* Home / Welcome - visible to all users */}
+        <ListItem disablePadding>
+          <ListItemButton
+            component={Link}
+            to="/admin/welcome"
+            onClick={() => setMobileOpen(false)}
+            selected={location.pathname === '/admin/welcome'}
+            sx={{
+              ...selectedMenuItemStyle,
+              minHeight: 44,
+            }}
+          >
+            <ListItemIcon sx={{ minWidth: 40 }}>
+              <NavIcon icon={HomeIcon} label="Home" sidebarOpen={sidebarOpen} />
+            </ListItemIcon>
+            {sidebarOpen && <ListItemText primary="Home" primaryTypographyProps={{ fontSize: '0.9rem', fontWeight: 500 }} />}
+          </ListItemButton>
+        </ListItem>
+
         {/* About Me - visible to all users except superadmin */}
         {!isSuper && (
           <ListItem disablePadding>
@@ -723,21 +788,7 @@ export default function AdminLayout({ user, onLogout }) {
   );
 
   // Determine default redirect page
-  const getDefaultRedirect = () => {
-    if (isSuper) return '/admin/crp-analytics';
-    // Check categories in priority order
-    const priorityPages = [
-      'ProductResearch', 'ProductTable', 'CompatibilityTasks', 'CompatibilityEditor',
-      'Fulfillment', 'EmployeeManagement', 'OrdersDashboard'
-    ];
-    for (const pageId of priorityPages) {
-      if (hasAccess(pageId)) {
-        const page = PAGE_REGISTRY.find(p => p.id === pageId);
-        if (page) return `/admin${page.path}`;
-      }
-    }
-    return '/admin/about-me';
-  };
+  const getDefaultRedirect = () => '/admin/welcome';
 
   return (
     <Box sx={{ display: 'flex' }}>
@@ -794,6 +845,7 @@ export default function AdminLayout({ user, onLogout }) {
               Grow Mentality Operations Hub
             </Typography>
           </Box>
+          <DiscountAlertsBell />
           <Button
             startIcon={<ChatIcon />}
             onClick={() => navigate('/admin/internal-messages')}
@@ -910,6 +962,9 @@ export default function AdminLayout({ user, onLogout }) {
           )}
         >
         <Routes>
+          {/* Welcome / Home page */}
+          <Route path="/welcome" element={<WelcomePage user={user} />} />
+
           {/* Ideas & Issues - accessible to ALL roles */}
           <Route path="/ideas" element={<IdeasPage />} />
 
@@ -927,7 +982,6 @@ export default function AdminLayout({ user, onLogout }) {
 
           <Route path="/credit-card-names" element={<Navigate to="/admin/credit-cards" replace />} />
           <Route path="/affiliate-balance" element={<Navigate to="/admin/store-subscriptions" replace />} />
-          <Route path="/add-user" element={<Navigate to="/employee-management" replace />} />
           <Route path="/employee-details" element={<Navigate to="/employee-management" replace />} />
 
           {hasAccess('EbayAnalyticsHub') && (

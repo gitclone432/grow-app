@@ -923,7 +923,7 @@ export async function resumeRunningAutoCompatibilityBatches() {
 // ============================================
 router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res) => {
   try {
-    const { sellerId, feedType = 'FX_LISTING', schemaVersion = '1.0', country = 'US' } = req.body;
+    const { sellerId, feedType = 'FX_LISTING', schemaVersion = '1.0', country = 'US', categoryId, rangeId, productId } = req.body;
     const file = req.file;
 
     if (!file) {
@@ -932,6 +932,17 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
 
     if (!sellerId) {
       return res.status(400).json({ error: 'Missing sellerId' });
+    }
+
+    const { checkUploadLimit } = await import('../lib/ebayFeedUpload.js');
+    const limitCheck = await checkUploadLimit(sellerId, country);
+    if (limitCheck.isBlocked) {
+      return res.status(429).json({
+        error: `Daily upload limit reached for this seller in ${country}: ${limitCheck.currentCount}/${limitCheck.limit} successful uploads since 12:00 AM IST. Try again after midnight IST.`,
+        isBlocked: true,
+        currentCount: limitCheck.currentCount,
+        limit: limitCheck.limit,
+      });
     }
 
     console.log(`[Feed Upload] Starting upload for seller ${sellerId}, feedType=${feedType}`);
@@ -1030,7 +1041,7 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
     console.log(`[Feed Upload] File uploaded successfully. Status: ${uploadRes.status}`);
 
     // Create local record
-    await FeedUpload.create({
+    const feedUploadData = {
       seller: seller._id,
       taskId: taskId,
       fileName: file.originalname,
@@ -1038,7 +1049,11 @@ router.post('/feed/upload', requireAuth, upload.single('file'), async (req, res)
       country: country,
       schemaVersion: schemaVersion,
       status: 'CREATED' // Initial status
-    });
+    };
+    if (categoryId) feedUploadData.categoryId = categoryId;
+    if (rangeId) feedUploadData.rangeId = rangeId;
+    if (productId) feedUploadData.productId = productId;
+    await FeedUpload.create(feedUploadData);
 
     res.json({
       success: true,
@@ -16458,7 +16473,16 @@ router.get('/selling/summary', requireAuth, async (req, res) => {
 // ============================================
 router.post('/end-item', requireAuth, async (req, res) => {
   try {
-    const { sellerId, itemId, endingReason = 'NotAvailable' } = req.body;
+    const {
+      sellerId,
+      itemId,
+      endingReason = 'NotAvailable',
+      source,
+      country,
+      marketplaceId,
+      sku,
+      run,
+    } = req.body;
 
     if (!sellerId || !itemId) {
       return res.status(400).json({ error: 'Missing sellerId or itemId' });
@@ -16507,6 +16531,25 @@ router.post('/end-item', requireAuth, async (req, res) => {
       throw new Error(`eBay API Error: ${errorMsg}`);
     }
 
+    // Log successful end-listing action if a valid source is provided
+    if (source && ['duplicate_sku', 'expiry_listing', 'amazon_stock_check'].includes(source)) {
+      try {
+        const { default: EndListingLog } = await import('../models/EndListingLog.js');
+        await EndListingLog.create({
+          seller: sellerId,
+          itemId,
+          sku: typeof sku === 'string' && sku.trim() ? sku.trim() : null,
+          source,
+          endedBy: req.user?.userId || null,
+          country: typeof country === 'string' && country.trim() ? country.trim() : null,
+          marketplaceId: typeof marketplaceId === 'string' && marketplaceId.trim() ? marketplaceId.trim() : null,
+          run: mongoose.Types.ObjectId.isValid(String(run || '')) ? run : null,
+        });
+      } catch (logErr) {
+        console.error('[End Item] Failed to write EndListingLog:', logErr.message);
+      }
+    }
+
     res.json({
       success: true,
       endTime: result.EndItemResponse.EndTime
@@ -16533,14 +16576,16 @@ export { sendPolicyMessage, processPendingPolicyMessages, getPolicyEligibilityDa
 // ============================================
 router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, country } = req.query;
+    const { startDate, endDate, sellerId, country, categoryId, rangeId } = req.query;
 
     const matchStage = {
       status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
       'uploadSummary.successCount': { $gt: 0 }
     };
     if (sellerId) matchStage.seller = new mongoose.Types.ObjectId(sellerId);
-    
+    if (categoryId) matchStage.categoryId = new mongoose.Types.ObjectId(categoryId);
+    if (rangeId) matchStage.rangeId = new mongoose.Types.ObjectId(rangeId);
+
     // Handle country filtering: if US, include records without country field (old data)
     if (country) {
       if (country === 'US') {
@@ -16557,15 +16602,10 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
     if (startDate || endDate) {
       matchStage.creationDate = {};
       if (startDate) {
-        // Convert IST date to UTC: subtract 5 hours 30 minutes (19800000 ms)
-        // Parse as UTC to avoid local timezone interpretation
-        const start = new Date(startDate + 'T00:00:00Z');
-        matchStage.creationDate.$gte = new Date(start.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
       }
       if (endDate) {
-        // Convert IST date to UTC: subtract 5 hours 30 minutes from end of day
-        const end = new Date(endDate + 'T23:59:59.999Z');
-        matchStage.creationDate.$lte = new Date(end.getTime() - (5.5 * 60 * 60 * 1000));
+        matchStage.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
       }
     }
 
@@ -16600,8 +16640,10 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
         $group: {
           _id: {
             sellerName: '$userDoc.username',
-            date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate', timezone: 'Asia/Kolkata' } },
-            country: '$normalizedCountry'
+            date: { $dateToString: { format: '%Y-%m-%d', date: '$creationDate', timezone: 'America/Los_Angeles' } },
+            country: '$normalizedCountry',
+            categoryId: { $ifNull: ['$categoryId', null] },
+            rangeId: { $ifNull: ['$rangeId', null] }
           },
           sellerId: { $first: '$seller' },
           totalSuccess: { $sum: '$uploadSummary.successCount' },
@@ -16609,6 +16651,25 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
           taskCount: { $sum: 1 }
         }
       },
+      // Lookup category/range names (additive fields, only populated when set)
+      {
+        $lookup: {
+          from: 'asinlistcategories',
+          localField: '_id.categoryId',
+          foreignField: '_id',
+          as: 'categoryDoc'
+        }
+      },
+      { $unwind: { path: '$categoryDoc', preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: 'asinlistranges',
+          localField: '_id.rangeId',
+          foreignField: '_id',
+          as: 'rangeDoc'
+        }
+      },
+      { $unwind: { path: '$rangeDoc', preserveNullAndEmptyArrays: true } },
       { $sort: { '_id.date': -1, '_id.sellerName': 1 } }
     ]);
 
@@ -16617,6 +16678,10 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
       sellerName: r._id.sellerName,
       date: r._id.date,
       country: r._id.country || 'US',
+      categoryId: r._id.categoryId || null,
+      categoryName: r.categoryDoc?.name || '',
+      rangeId: r._id.rangeId || null,
+      rangeName: r.rangeDoc?.name || '',
       totalSuccess: r.totalSuccess,
       totalFailure: r.totalFailure,
       taskCount: r.taskCount
@@ -16628,6 +16693,124 @@ router.get('/feed/upload-stats', requireAuth, requirePageAccess('FeedUploadStats
     res.status(500).json({ error: 'Failed to fetch feed upload stats' });
   }
 });
+
+// ============================================
+// GET FEED CATEGORY/RANGE STATS
+// ============================================
+// GET /api/ebay/feed/category-stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&country=X
+router.get('/feed/category-stats', requireAuth, requirePageAccess('FeedUploadStats'), async (req, res) => {
+  try {
+    const { startDate, endDate, country, sellerId: catSellerId, categoryId: catFilterId } = req.query;
+
+    const matchStage = {
+      status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
+      'uploadSummary.successCount': { $gt: 0 }
+    };
+    if (catSellerId) matchStage.seller = new mongoose.Types.ObjectId(catSellerId);
+    if (catFilterId) matchStage.categoryId = new mongoose.Types.ObjectId(catFilterId);
+
+    if (country) {
+      if (country === 'US') {
+        matchStage.$or = [
+          { country: 'US' },
+          { country: null },
+          { country: { $exists: false } }
+        ];
+      } else {
+        matchStage.country = country;
+      }
+    }
+
+    if (startDate || endDate) {
+      matchStage.creationDate = {};
+      if (startDate) {
+        matchStage.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
+      }
+      if (endDate) {
+        matchStage.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
+      }
+    }
+
+    // Aggregate by category. Keep uploads that have not been assigned a
+    // category yet so the breakdown total still matches the successful count.
+    const categoryRows = await FeedUpload.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: { $ifNull: ['$categoryId', null] },
+          totalSuccess: { $sum: '$uploadSummary.successCount' },
+          taskCount: { $sum: 1 }
+        }
+      },
+      {
+        $lookup: {
+          from: 'asinlistcategories',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'categoryDoc'
+        }
+      },
+      { $unwind: { path: '$categoryDoc', preserveNullAndEmptyArrays: true } },
+      { $sort: { totalSuccess: -1 } }
+    ]);
+
+    // Aggregate by range. Missing ranges are also kept as "Unassigned" so a
+    // selected seller/marketplace/date can still show a meaningful aggregate.
+    const rangeRows = await FeedUpload.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: {
+            rangeId: { $ifNull: ['$rangeId', null] },
+            categoryId: { $ifNull: ['$categoryId', null] }
+          },
+          totalSuccess: { $sum: '$uploadSummary.successCount' },
+          taskCount: { $sum: 1 }
+        }
+      },
+      {
+        $lookup: {
+          from: 'asinlistranges',
+          localField: '_id.rangeId',
+          foreignField: '_id',
+          as: 'rangeDoc'
+        }
+      },
+      { $unwind: { path: '$rangeDoc', preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: 'asinlistcategories',
+          localField: '_id.categoryId',
+          foreignField: '_id',
+          as: 'categoryDoc'
+        }
+      },
+      { $unwind: { path: '$categoryDoc', preserveNullAndEmptyArrays: true } },
+      { $sort: { totalSuccess: -1 } }
+    ]);
+
+    res.json({
+      categories: categoryRows.map(r => ({
+        categoryId: r._id,
+        name: r.categoryDoc?.name || 'Unassigned',
+        totalSuccess: r.totalSuccess,
+        taskCount: r.taskCount
+      })),
+      ranges: rangeRows.map(r => ({
+        rangeId: r._id.rangeId,
+        categoryId: r._id.categoryId,
+        name: r.rangeDoc?.name || 'Unassigned',
+        categoryName: r.categoryDoc?.name || 'Unassigned',
+        totalSuccess: r.totalSuccess,
+        taskCount: r.taskCount
+      }))
+    });
+  } catch (err) {
+    console.error('[Feed Category Stats] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch feed category stats' });
+  }
+});
+
 // ============================================
 // FINANCES TRANSACTION FILTERS (shared by summary + getTransactions)
 // ============================================

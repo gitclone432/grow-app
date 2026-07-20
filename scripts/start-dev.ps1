@@ -10,6 +10,9 @@ function Ensure-NpmInstall {
         Push-Location $Dir
         try {
             npm install
+            if ($LASTEXITCODE -ne 0) {
+                throw "npm install failed in $Dir (exit $LASTEXITCODE)"
+            }
         } finally {
             Pop-Location
         }
@@ -31,6 +34,47 @@ function Ensure-EnvFile {
     Write-Warning "Created $Target from template. $Hint"
 }
 
+function Get-ListenerPids {
+    param([int[]]$Ports)
+    $pids = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($port in $Ports) {
+        try {
+            Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+                ForEach-Object { [void]$pids.Add([int]$_.OwningProcess) }
+        } catch {
+            # Fallback when Get-NetTCPConnection is unavailable
+            $lines = netstat -ano | Select-String ":$port\s+.*LISTENING"
+            foreach ($line in $lines) {
+                if ($line.Line -match '\s(\d+)\s*$') {
+                    [void]$pids.Add([int]$Matches[1])
+                }
+            }
+        }
+    }
+    return @($pids | Where-Object { $_ -gt 0 })
+}
+
+function Stop-DevPorts {
+    param([int[]]$Ports = @(5000, 5173))
+    $pids = Get-ListenerPids -Ports $Ports
+    if (-not $pids -or $pids.Count -eq 0) { return }
+
+    Write-Host ""
+    Write-Host "Port(s) $($Ports -join ', ') already in use by PID(s): $($pids -join ', ')" -ForegroundColor Yellow
+    Write-Host "Stopping old listener(s) so start-dev can bind cleanly..." -ForegroundColor Yellow
+    foreach ($procId in $pids) {
+        try {
+            $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            $name = if ($proc) { $proc.ProcessName } else { 'unknown' }
+            Stop-Process -Id $procId -Force -ErrorAction Stop
+            Write-Host "  Stopped PID $procId ($name)"
+        } catch {
+            Write-Warning ("  Could not stop PID {0}: {1}" -f $procId, $_.Exception.Message)
+        }
+    }
+    Start-Sleep -Seconds 1
+}
+
 Ensure-NpmInstall -Dir $Root -Label "root (concurrently)"
 Ensure-NpmInstall -Dir (Join-Path $Root "Back") -Label "Back"
 Ensure-NpmInstall -Dir (Join-Path $Root "Front") -Label "Front"
@@ -44,6 +88,7 @@ if (-not (Test-Path (Join-Path $Root "Front\.env"))) {
     @"
 # Local dev: use Vite proxy (see Front/vite.config.js)
 VITE_API_URL=/api
+VITE_SERVER_URL=http://127.0.0.1:5000
 "@ | Set-Content -Path (Join-Path $Root "Front\.env") -Encoding utf8
     Write-Host "Created Front\.env with VITE_API_URL=/api"
 }
@@ -64,6 +109,8 @@ if ($backEnvText -match '<cluster>|<user>|<password>|<dbname>') {
     exit 1
 }
 
+Stop-DevPorts -Ports @(5000, 5173)
+
 Write-Host ""
 Write-Host "Starting local dev servers..."
 Write-Host "  Front: http://127.0.0.1:5173"
@@ -72,3 +119,4 @@ Write-Host "Press Ctrl+C to stop both."
 Write-Host ""
 
 npm run dev
+exit $LASTEXITCODE

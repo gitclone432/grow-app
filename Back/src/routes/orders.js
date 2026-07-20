@@ -13,6 +13,7 @@ import ConversationMeta from '../models/ConversationMeta.js';
 
 const router = Router();
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
+const FINAL_CANCELLED_STATES = ['CANCELED', 'CANCELLED'];
 
 const PT_TIMEZONE = 'America/Los_Angeles';
 const SNAD_RETURN_REASONS = [
@@ -2309,6 +2310,467 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
   } catch (error) {
     console.error('Error updating compliance board status:', error);
     res.status(500).json({ error: error.message || 'Failed to update compliance board status' });
+  }
+});
+
+
+/**
+ * @swagger
+ * /orders/legacy-item-seller-summary:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Per-seller summary for legacy item orders
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Aggregates order counts and issue flags per seller for the LegacyItemAnalytics page.
+ *       **Requires LegacyItemAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Array of per-seller summary objects
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
+router.get('/legacy-item-seller-summary', requireAuth, requirePageAccess('LegacyItemAnalytics'), async (req, res) => {
+  try {
+    const {
+      legacyItemId,
+      startDate,
+      endDate,
+      sellerId,
+      paymentStatus,
+      cancelledFilter,
+      ebayMotors = 'false',
+      excludeClient = 'true',
+      excludeLowValue = 'false'
+    } = req.query;
+
+    if (!startDate && !endDate) {
+      return res.status(400).json({ error: 'Select a single date or a date range first' });
+    }
+
+    const normalizedLegacyItemId = String(legacyItemId || '').trim();
+    const match = await buildOrdersCrpMatch({
+      startDate,
+      endDate,
+      sellerId,
+      excludeClient,
+      excludeLowValue
+    });
+
+    if (paymentStatus) {
+      match.orderPaymentStatus = paymentStatus;
+    }
+
+    if (cancelledFilter === 'cancelled') {
+      match.$and = match.$and || [];
+      match.$and.push({
+        $or: [
+          { cancelState: { $in: FINAL_CANCELLED_STATES } },
+          { 'cancelStatus.cancelState': { $in: FINAL_CANCELLED_STATES } }
+        ]
+      });
+    } else if (cancelledFilter === 'not_cancelled') {
+      match.$and = match.$and || [];
+      match.$and.push(
+        {
+          $or: [
+            { cancelState: { $exists: false } },
+            { cancelState: null },
+            { cancelState: { $nin: FINAL_CANCELLED_STATES } }
+          ]
+        },
+        {
+          $or: [
+            { 'cancelStatus.cancelState': { $exists: false } },
+            { 'cancelStatus.cancelState': null },
+            { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
+          ]
+        }
+      );
+    }
+
+    const itemMatch = {
+      'lineItems.legacyItemId': { $nin: [null, ''] }
+    };
+
+    if (normalizedLegacyItemId) {
+      itemMatch['lineItems.legacyItemId'] = normalizedLegacyItemId;
+    }
+
+    if (ebayMotors === 'true') {
+      itemMatch['lineItems.listingMarketplaceId'] = 'EBAY_MOTORS_US';
+    }
+
+    const [groupedRows, overallOrderCounts] = await Promise.all([
+      Order.aggregate([
+        { $match: match },
+        { $unwind: '$lineItems' },
+        { $match: itemMatch },
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: 'seller',
+            foreignField: '_id',
+            as: 'sellerInfo'
+          }
+        },
+        {
+          $unwind: {
+            path: '$sellerInfo',
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'sellerInfo.user',
+            foreignField: '_id',
+            as: 'userInfo'
+          }
+        },
+        {
+          $unwind: {
+            path: '$userInfo',
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $project: {
+            orderId: '$orderId',
+            legacyItemId: '$lineItems.legacyItemId',
+            productTitle: { $ifNull: ['$lineItems.title', '$productName'] },
+            sellerId: '$seller',
+            sellerUsername: { $ifNull: ['$userInfo.username', 'Unknown Seller'] },
+            isCancelled: {
+              $or: [
+                { $in: ['$cancelState', FINAL_CANCELLED_STATES] },
+                { $in: ['$cancelStatus.cancelState', FINAL_CANCELLED_STATES] }
+              ]
+            },
+            isPartiallyRefunded: { $eq: ['$orderPaymentStatus', 'PARTIALLY_REFUNDED'] },
+            isFullyRefunded: { $eq: ['$orderPaymentStatus', 'FULLY_REFUNDED'] }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              orderId: '$orderId',
+              legacyItemId: '$legacyItemId',
+              sellerId: '$sellerId',
+              sellerUsername: '$sellerUsername'
+            },
+            productTitle: {
+              $first: '$productTitle'
+            },
+            isCancelled: {
+              $max: { $cond: ['$isCancelled', 1, 0] }
+            },
+            isPartiallyRefunded: {
+              $max: { $cond: ['$isPartiallyRefunded', 1, 0] }
+            },
+            isFullyRefunded: {
+              $max: { $cond: ['$isFullyRefunded', 1, 0] }
+            }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              legacyItemId: '$_id.legacyItemId',
+              sellerId: '$_id.sellerId',
+              sellerUsername: '$_id.sellerUsername'
+            },
+            totalOrders: { $sum: 1 },
+            cancelledOrders: { $sum: '$isCancelled' },
+            partiallyRefundedOrders: { $sum: '$isPartiallyRefunded' },
+            fullyRefundedOrders: { $sum: '$isFullyRefunded' },
+            productTitles: { $push: '$productTitle' }
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            legacyItemId: '$_id.legacyItemId',
+            sellerId: '$_id.sellerId',
+            sellerUsername: '$_id.sellerUsername',
+            totalOrders: 1,
+            cancelledOrders: 1,
+            partiallyRefundedOrders: 1,
+            fullyRefundedOrders: 1,
+            productTitle: {
+              $let: {
+                vars: {
+                  titles: {
+                    $filter: {
+                      input: '$productTitles',
+                      as: 'title',
+                      cond: {
+                        $and: [
+                          { $ne: ['$$title', null] },
+                          { $ne: ['$$title', ''] }
+                        ]
+                      }
+                    }
+                  }
+                },
+                in: {
+                  $ifNull: [
+                    { $arrayElemAt: ['$$titles', 0] },
+                    ''
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          $sort: {
+            legacyItemId: 1,
+            totalOrders: -1,
+            sellerUsername: 1
+          }
+        }
+      ]),
+      Order.aggregate([
+        { $match: match },
+        { $unwind: '$lineItems' },
+        { $match: itemMatch },
+        {
+          $group: {
+            _id: '$orderId'
+          }
+        },
+        {
+          $count: 'totalOrders'
+        }
+      ])
+    ]);
+
+    const itemMap = new Map();
+    const overallTotals = {
+      totalOrders: overallOrderCounts[0]?.totalOrders || 0,
+      cancelledOrders: 0,
+      partiallyRefundedOrders: 0,
+      fullyRefundedOrders: 0,
+    };
+
+    groupedRows.forEach((row) => {
+      overallTotals.cancelledOrders += row.cancelledOrders || 0;
+      overallTotals.partiallyRefundedOrders += row.partiallyRefundedOrders || 0;
+      overallTotals.fullyRefundedOrders += row.fullyRefundedOrders || 0;
+
+      const existingItem = itemMap.get(row.legacyItemId) || {
+        legacyItemId: row.legacyItemId,
+        productTitle: row.productTitle || '',
+        totalOrders: 0,
+        cancelledOrders: 0,
+        partiallyRefundedOrders: 0,
+        fullyRefundedOrders: 0,
+        sellerCount: 0,
+        sellers: []
+      };
+
+      existingItem.totalOrders += row.totalOrders || 0;
+      existingItem.cancelledOrders += row.cancelledOrders || 0;
+      existingItem.partiallyRefundedOrders += row.partiallyRefundedOrders || 0;
+      existingItem.fullyRefundedOrders += row.fullyRefundedOrders || 0;
+      if (!existingItem.productTitle && row.productTitle) {
+        existingItem.productTitle = row.productTitle;
+      }
+      existingItem.sellers.push(row);
+      existingItem.sellerCount = existingItem.sellers.length;
+
+      itemMap.set(row.legacyItemId, existingItem);
+    });
+
+    const items = Array.from(itemMap.values()).sort((left, right) => {
+      if (right.totalOrders !== left.totalOrders) {
+        return right.totalOrders - left.totalOrders;
+      }
+
+      return left.legacyItemId.localeCompare(right.legacyItemId);
+    });
+
+    res.json({
+      filters: {
+        startDate: startDate || null,
+        endDate: endDate || null,
+        sellerId: sellerId || null,
+        legacyItemId: normalizedLegacyItemId || null,
+        paymentStatus: paymentStatus || null,
+        cancelledFilter: cancelledFilter || null,
+        ebayMotors: ebayMotors === 'true',
+      },
+      itemCount: items.length,
+      ...overallTotals,
+      items
+    });
+  } catch (error) {
+    console.error('Error fetching legacy item seller summary:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Failed to fetch legacy item seller summary' });
+  }
+});
+
+/**
+ * @swagger
+ * /orders/legacy-item-orders:
+ *   get:
+ *     tags: [Orders]
+ *     summary: Legacy item order drill-down
+ *     security:
+ *       - bearerAuth: []
+ *     description: >
+ *       Returns individual orders for a specific `legacyItemId`, enriched with
+ *       conversation category, case status, and issue flags (cancelled, refunded, etc.).
+ *       **Requires LegacyItemAnalytics page access.**
+ *     parameters:
+ *       - { in: query, name: legacyItemId, required: true, schema: { type: string } }
+ *       - { in: query, name: sellerId, schema: { type: string } }
+ *       - { in: query, name: type, schema: { type: string, enum: [all, cancelled, partiallyRefunded, fullyRefunded], default: all } }
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *     responses:
+ *       200:
+ *         description: Array of enriched order records
+ *       401: { description: Unauthorized }
+ *       403: { description: Forbidden }
+ */
+router.get('/legacy-item-orders', requireAuth, requirePageAccess('LegacyItemAnalytics'), async (req, res) => {
+  try {
+    const {
+      legacyItemId,
+      sellerId,
+      type = 'all',
+      startDate,
+      endDate,
+      ebayMotors = 'false',
+      excludeClient = 'true',
+      excludeLowValue = 'false',
+    } = req.query;
+
+    if (!legacyItemId) {
+      return res.status(400).json({ error: 'legacyItemId is required' });
+    }
+
+    const match = await buildOrdersCrpMatch({ startDate, endDate, sellerId, excludeClient, excludeLowValue });
+
+    if (type === 'cancelled') {
+      match.$and = match.$and || [];
+      match.$and.push({
+        $or: [
+          { cancelState: { $in: FINAL_CANCELLED_STATES } },
+          { 'cancelStatus.cancelState': { $in: FINAL_CANCELLED_STATES } },
+        ],
+      });
+    } else if (type === 'partiallyRefunded') {
+      match.orderPaymentStatus = 'PARTIALLY_REFUNDED';
+    } else if (type === 'fullyRefunded') {
+      match.orderPaymentStatus = 'FULLY_REFUNDED';
+    }
+
+    const itemMatch = { 'lineItems.legacyItemId': legacyItemId };
+    if (ebayMotors === 'true') {
+      itemMatch['lineItems.listingMarketplaceId'] = 'EBAY_MOTORS_US';
+    }
+
+    const orders = await Order.aggregate([
+      { $match: match },
+      { $unwind: '$lineItems' },
+      { $match: itemMatch },
+      {
+        $group: {
+          _id: '$orderId',
+          buyerUsername: { $first: '$buyer.username' },
+          buyerName: { $first: '$buyer.buyerRegistrationAddress.fullName' },
+          shippingFullName: { $first: '$shippingFullName' },
+          legacyItemId: { $first: '$lineItems.legacyItemId' },
+          fulfillmentNotes: { $first: '$fulfillmentNotes' },
+          remark: { $first: '$remark' },
+          isCancelled: {
+            $max: {
+              $cond: [
+                {
+                  $or: [
+                    { $in: ['$cancelState', FINAL_CANCELLED_STATES] },
+                    { $in: ['$cancelStatus.cancelState', FINAL_CANCELLED_STATES] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          isPartiallyRefunded: { $max: { $cond: [{ $eq: ['$orderPaymentStatus', 'PARTIALLY_REFUNDED'] }, 1, 0] } },
+          isFullyRefunded: { $max: { $cond: [{ $eq: ['$orderPaymentStatus', 'FULLY_REFUNDED'] }, 1, 0] } },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          orderId: '$_id',
+          buyerUsername: 1,
+          buyerName: 1,
+          shippingFullName: 1,
+          legacyItemId: 1,
+          fulfillmentNotes: 1,
+          remark: 1,
+          isCancelled: 1,
+          isPartiallyRefunded: 1,
+          isFullyRefunded: 1,
+        },
+      },
+      { $sort: { orderId: 1 } },
+    ]);
+
+    const orderIds = orders.map((o) => o.orderId).filter(Boolean);
+
+    const [convMetas, cases, returns, disputes] = await Promise.all([
+      ConversationMeta.find({ orderId: { $in: orderIds } }, { orderId: 1, category: 1, caseStatus: 1, _id: 0 }).lean(),
+      Case.find({ orderId: { $in: orderIds } }, { orderId: 1, caseType: 1, status: 1, _id: 0 }).lean(),
+      Return.find({ orderId: { $in: orderIds } }, { orderId: 1, returnStatus: 1, _id: 0 }).lean(),
+      PaymentDispute.find({ orderId: { $in: orderIds } }, { orderId: 1, paymentDisputeStatus: 1, reason: 1, _id: 0 }).lean(),
+    ]);
+
+    const convoMetaMap = new Map(convMetas.map((m) => [m.orderId, m]));
+
+    const issuesMap = {};
+    cases.forEach((c) => {
+      if (!c.orderId) return;
+      issuesMap[c.orderId] = issuesMap[c.orderId] || [];
+      issuesMap[c.orderId].push({ type: c.caseType || 'INR', status: c.status });
+    });
+    returns.forEach((r) => {
+      if (!r.orderId) return;
+      issuesMap[r.orderId] = issuesMap[r.orderId] || [];
+      issuesMap[r.orderId].push({ type: 'Return', status: r.returnStatus });
+    });
+    disputes.forEach((d) => {
+      if (!d.orderId) return;
+      issuesMap[d.orderId] = issuesMap[d.orderId] || [];
+      issuesMap[d.orderId].push({ type: 'Dispute', status: d.paymentDisputeStatus, reason: d.reason });
+    });
+
+    const enriched = orders.map((order) => {
+      const convoMeta = convoMetaMap.get(order.orderId);
+      const rawIssues = issuesMap[order.orderId] || [];
+      const convoCaseStatus = convoMeta?.caseStatus || null;
+      return {
+        ...order,
+        convoCategory: convoMeta?.category || null,
+        convoCaseStatus,
+        issues: rawIssues.map((i) => ({ ...i, caseStatus: convoCaseStatus || 'Case Not Opened' })),
+      };
+    });
+
+    res.json({ orders: enriched, total: enriched.length });
+  } catch (error) {
+    console.error('Error fetching legacy item orders:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch legacy item orders' });
   }
 });
 

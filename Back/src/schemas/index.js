@@ -166,6 +166,31 @@ export const createAssignmentSchema = z.object({
   scheduledDate: z.string().optional(),
 });
 
+// ── Meetings ──────────────────────────────────────────────────────────────────
+
+const meetingActionItemSchema = z.object({
+  text: z.string().trim().min(1, 'Action item text is required'),
+  assigneeId: z.string().optional(),
+  dueDate: z.string().optional(),
+  status: z.enum(['pending', 'in-progress', 'done']).optional(),
+});
+
+export const createMeetingSchema = z.object({
+  title: z.string().trim().min(1, 'Title is required'),
+  scheduledFor: z.string().min(1, 'Meeting date is required'),
+  organizerId: z.string().min(1, 'Organizer is required'),
+  attendeeIds: z.array(z.string().min(1)).min(1, 'At least one attendee is required'),
+  status: z.enum(['planned', 'in-progress', 'completed', 'cancelled']).optional(),
+  location: z.string().optional(),
+  agenda: z.string().optional(),
+  discussionSummary: z.string().optional(),
+  decisions: z.string().optional(),
+  futureScope: z.string().optional(),
+  actionItems: z.array(meetingActionItemSchema).optional(),
+});
+
+export const updateMeetingSchema = createMeetingSchema.partial();
+
 // ── Internal messages ─────────────────────────────────────────────────────────
 
 export const sendMessageSchema = z.object({
@@ -255,4 +280,79 @@ const remarkTemplateItemSchema = z.object({
 
 export const updateRemarkTemplatesSchema = z.object({
   templates: z.array(remarkTemplateItemSchema).min(1, 'templates must be a non-empty array'),
+});
+
+// ── Seller upload limits ──────────────────────────────────────────────────────
+
+const UPLOAD_LIMIT_COUNTRIES = ['US', 'UK', 'AU', 'Canada'];
+
+export const sellerUploadLimitSchema = z.object({
+  sellerId: z.string().min(1, 'sellerId is required'),
+  country: z.enum(UPLOAD_LIMIT_COUNTRIES, {
+    errorMap: () => ({ message: 'country must be one of: US, UK, AU, Canada' }),
+  }),
+  limit: z.coerce.number().int().min(1, 'limit must be a positive integer'),
+});
+
+export const sellerUploadLimitCheckQuerySchema = z.object({
+  sellerId: z.string().min(1, 'sellerId is required'),
+  country: z.enum(UPLOAD_LIMIT_COUNTRIES, {
+    errorMap: () => ({ message: 'country must be one of: US, UK, AU, Canada' }),
+  }),
+});
+
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+const objectIdSchema = z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid ObjectId');
+const optionalObjectIdSchema = z.union([objectIdSchema, z.literal('')]).optional();
+const optionalDateStringSchema = z.string().optional();
+
+export const idParamsSchema = z.object({
+  id: objectIdSchema,
+});
+
+// ── End listing logs ─────────────────────────────────────────────────────────
+
+export const endListingStatsQuerySchema = z.object({
+  sellerId: optionalObjectIdSchema,
+  startDate: optionalDateStringSchema,
+  endDate: optionalDateStringSchema,
+  country: z.string().trim().min(1).optional(),
+});
+
+// ── Feature permissions ──────────────────────────────────────────────────────
+
+export const featurePermissionParamsSchema = z.object({
+  featureId: z.string().min(1, 'Feature ID is required'),
+});
+
+export const updateFeaturePermissionSchema = z.object({
+  allowedUserIds: z.array(objectIdSchema),
+});
+
+// ── User category targets ────────────────────────────────────────────────────
+
+const USER_CATEGORY_TARGET_MARKETPLACES = ['US', 'UK', 'AU', 'Canada'];
+
+export const userCategoryTargetsPerformanceQuerySchema = z.object({
+  startDate: optionalDateStringSchema,
+  endDate: optionalDateStringSchema,
+  userId: optionalObjectIdSchema,
+  sellerId: optionalObjectIdSchema,
+  marketplace: z.string().trim().optional(),
+  categoryId: optionalObjectIdSchema,
+  rangeId: optionalObjectIdSchema,
+});
+
+export const createUserCategoryTargetSchema = z.object({
+  userId: objectIdSchema,
+  sellerId: objectIdSchema,
+  marketplace: z.enum(USER_CATEGORY_TARGET_MARKETPLACES, {
+    errorMap: () => ({ message: 'marketplace must be one of: US, UK, AU, Canada' }),
+  }),
+  categoryId: objectIdSchema,
+  rangeId: optionalObjectIdSchema,
+  dailyDesiredQuantity: z.coerce.number({
+    invalid_type_error: 'Daily desired quantity must be a number greater than or equal to 0',
+  }).min(0, 'Daily desired quantity must be a number greater than or equal to 0'),
 });
