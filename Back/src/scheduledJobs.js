@@ -6,6 +6,7 @@ import {
   scheduledSyncAllSellers,
   scheduledRunAutoCompatForDate,
   scheduledPollNewOrders,
+  scheduledSyncBuyerInbox,
   refreshPayoneerFeedCache,
   processPendingPolicyMessages,
   processPendingListingQtyUpdates,
@@ -116,6 +117,14 @@ export const CRON_JOB_DEFINITIONS = [
     timezone: '',
     enabled: true,
   },
+  {
+    jobKey: 'buyerMessagesAutoSync',
+    label: 'Buyer Messages auto-sync',
+    description: 'Same as Check New on Buyer Messages: pull latest eBay conversations for all connected sellers into Mongo (Commerce summary + background Trading crawl). Replaces the old per-browser Auto-sync timer. When disabled, only Sync Today+ / Check New buttons fetch from eBay.',
+    cronExpr: '*/5 * * * *',
+    timezone: 'America/Los_Angeles',
+    enabled: true,
+  },
 ];
 
 function stopAllScheduledTasks() {
@@ -220,6 +229,22 @@ async function runDiscountAlertsCacheRefresh() {
   await refreshDiscountAlertsCache();
 }
 
+async function runBuyerMessagesAutoSync() {
+  console.log('[CRON] Buyer Messages auto-sync starting…');
+  const result = await scheduledSyncBuyerInbox({ mode: 'full', waitForTrading: false });
+  if (result?.skipped) {
+    console.log('[CRON] Buyer Messages auto-sync skipped (already running)');
+    return;
+  }
+  const commerce = (result?.syncResults || []).reduce(
+    (sum, r) => sum + (r.commerceConversations || 0),
+    0
+  );
+  console.log(
+    `[CRON] Buyer Messages auto-sync done: new=${result?.totalNewMessages || 0}, commerceThreads=${commerce}, sellers=${(result?.syncResults || []).length}`
+  );
+}
+
 const CRON_JOB_HANDLERS = {
   dailyTimerAutoStop: runDailyTimerAutoStop,
   csvAutoUpload: runCsvAutoUpload,
@@ -233,6 +258,7 @@ const CRON_JOB_HANDLERS = {
   payoneerFeedRefresh: runPayoneerFeedRefresh,
   skuIndexSyncAllSellers: runSkuIndexSyncAllSellers,
   discountAlertsCacheRefresh: runDiscountAlertsCacheRefresh,
+  buyerMessagesAutoSync: runBuyerMessagesAutoSync,
 };
 
 function scheduleJob(config) {

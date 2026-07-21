@@ -1,14 +1,13 @@
-import React, { useEffect, useState, useRef, useMemo, memo } from 'react';
+import React, { useCallback, useEffect, useState, useRef, useMemo, memo } from 'react';
 import {
   Avatar, TextField, Button, Divider, Badge, Stack, CircularProgress,
-  IconButton, Chip, Alert,   FormControl, Select, MenuItem, InputLabel, Link,
+  IconButton, Chip, Alert, FormControl, Select, MenuItem, InputLabel, Link,
   Snackbar, ListItemButton, Box, Paper, Typography, List, ListItem, ListItemText, ListItemAvatar,
-  useTheme, useMediaQuery, Menu, ListSubheader, Tooltip, Card, CardContent, FormControlLabel, Checkbox
+  useTheme, useMediaQuery, Menu, ListSubheader, Tooltip, Popover
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import PersonIcon from '@mui/icons-material/Person';
 import RefreshIcon from '@mui/icons-material/Refresh';
-import SearchIcon from '@mui/icons-material/Search';
 import ShoppingBagIcon from '@mui/icons-material/ShoppingBag';
 import QuestionAnswerIcon from '@mui/icons-material/QuestionAnswer';
 import EmailIcon from '@mui/icons-material/Email';
@@ -16,24 +15,59 @@ import CloseIcon from '@mui/icons-material/Close';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import SaveIcon from '@mui/icons-material/Save';
-import CheckCircleIcon from '@mui/icons-material/CheckCircle'
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import MarkAsUnreadIcon from '@mui/icons-material/MarkAsUnread';
+import MarkEmailReadIcon from '@mui/icons-material/MarkEmailRead';
 import MenuIcon from '@mui/icons-material/Menu';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import FilterAltOffIcon from '@mui/icons-material/FilterAltOff';
 import SettingsIcon from '@mui/icons-material/Settings';
+import HistoryIcon from '@mui/icons-material/History';
 import api from '../../lib/api';
 import { sortSellersByName } from '../../lib/sellersSort';
 import TemplateManagementModal from '../../components/TemplateManagementModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 
-// Session storage key for persisting state (v2: only restore selected thread, not filters)
-const CHAT_STORAGE_KEY = 'buyer_chat_page_state_v2';
+// Session storage key (v3: do not restore selected thread — empty chat until user picks one)
+const CHAT_STORAGE_KEY = 'buyer_chat_page_state_v3';
+const EMPTY_SELLER_KEYS = Object.freeze([]);
+const THREAD_POLL_MS = 15000;
 
-// Keys restored from session — filters are intentionally excluded so stale searches don't hide threads
-const SESSION_RESTORE_KEYS = new Set(['selectedThread']);
+// Filters are not restored from session (stale searches hide threads)
+const SESSION_RESTORE_KEYS = new Set([]);
 
+// The whole app treats Pacific Time as the eBay business day (chat bubbles show
+// "... PT"). Render the inbox list date in PT too so it matches the conversation
+// instead of rolling forward a day in the viewer's local timezone.
+const PT_TZ = 'America/Los_Angeles';
+function ptDateKey(d) {
+  // "M/D/YYYY" in PT — safe to compare for same-day
+  return d.toLocaleDateString('en-US', { timeZone: PT_TZ });
+}
+/** Inbox list timestamp: time if today (PT), otherwise month/day (PT). */
+function formatThreadListTime(value) {
+  const d = value ? new Date(value) : null;
+  if (!d || Number.isNaN(d.getTime())) return '';
+  if (ptDateKey(d) === ptDateKey(new Date())) {
+    return d.toLocaleTimeString('en-US', { timeZone: PT_TZ, hour: 'numeric', minute: '2-digit' });
+  }
+  return d.toLocaleDateString('en-US', { timeZone: PT_TZ, month: 'numeric', day: 'numeric' });
+}
+
+// Format a timestamp in IST for the meta change history
+const formatIST = (date) => {
+  if (!date) return '';
+  return new Date(date).toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  }) + ' IST';
+};
 // CHAT_TEMPLATES are now fetched from API - see chatTemplates state in component
 
 // Helper to get initial state from sessionStorage
@@ -51,25 +85,169 @@ const getInitialState = (key, defaultValue) => {
   return defaultValue;
 };
 
-const KpiCard = ({ label, value, color, bgcolor = '#f8fafc' }) => (
-  <Card sx={{ borderRadius: 2, bgcolor, height: '100%' }}>
-    <CardContent sx={{ py: 1.5, px: 2, '&:last-child': { pb: 1.5 } }}>
-      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
-        {label}
-      </Typography>
-      <Typography variant="h6" sx={{ fontWeight: 800, color, lineHeight: 1.2 }}>
-        {value}
-      </Typography>
-    </CardContent>
-  </Card>
-);
+/** Collect seller store/login names (for header hints only). */
+function collectSellerIdentities(sellers = []) {
+  const names = new Set();
+  const add = (v) => {
+    if (v) names.add(String(v).trim().toLowerCase());
+  };
+  for (const s of sellers) {
+    add(s?.user?.username);
+    add(s?.user?.email);
+    add(s?.ebayUserId);
+    add(s?.ebayUsername);
+  }
+  return names;
+}
+
+/**
+ * Inbox title = buyer eBay UserID.
+ * Never show this store's login / eBay UserID as the buyer title.
+ */
+function getThreadBuyerDisplay(thread, extraSellerKeys = []) {
+  const buyer = String(thread?.buyerUsername || '').trim();
+  const sender = String(thread?.lastSenderUsername || '').trim();
+  const recipient = String(thread?.lastRecipientUsername || '').trim();
+  const buyerName = String(thread?.buyerName || '').trim();
+
+  const sellerKeys = new Set(
+    [
+      thread?.sellerEbayUsername,
+      thread?.sellerUsername,
+      thread?.sellerEmail,
+      ...(extraSellerKeys || [])
+    ]
+      .map((v) => String(v || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const isSeller = (name) => {
+    const n = String(name || '').trim().toLowerCase();
+    return Boolean(n) && sellerKeys.has(n);
+  };
+
+  if (thread?.buyerLooksLikeSeller === true && buyerName && !isSeller(buyerName)) {
+    return buyerName;
+  }
+
+  // Strongest: sender/recipient vs this store's eBay id / login
+  if (sender && recipient) {
+    if (isSeller(sender) && !isSeller(recipient)) return recipient;
+    if (isSeller(recipient) && !isSeller(sender)) return sender;
+    if (buyer && isSeller(buyer)) {
+      if (buyer.toLowerCase() === sender.toLowerCase()) return recipient;
+      if (buyer.toLowerCase() === recipient.toLowerCase()) return sender;
+    }
+  }
+
+  if (buyer && !isSeller(buyer)) return buyer;
+  if (buyerName && !isSeller(buyerName)) return buyerName;
+
+  // Never surface the store id as the inbox title
+  if (buyer && isSeller(buyer)) return buyerName || 'Unknown buyer';
+
+  return buyer || buyerName || recipient || sender || 'Unknown buyer';
+}
+
+/** Isolated composer — keeps inbox from re-rendering on every keystroke. */
+const ChatComposer = memo(function ChatComposer({
+  isMobile,
+  isDirectMessage,
+  attachments,
+  uploading,
+  sending,
+  newMessage,
+  fileInputRef,
+  onFileSelect,
+  onRemoveAttachment,
+  onChangeMessage,
+  onSend
+}) {
+  if (isDirectMessage) {
+    return (
+      <Alert severity="warning" sx={{ width: '100%' }}>
+        <strong>Direct messages cannot be replied to via API.</strong> Respond through eBay&apos;s messaging center.
+      </Alert>
+    );
+  }
+
+  return (
+    <>
+      {attachments.length > 0 && (
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          {attachments.map((att, idx) => (
+            <Chip
+              key={`${att.name}-${idx}`}
+              label={att.name}
+              onDelete={() => onRemoveAttachment(idx)}
+              variant="outlined"
+              size="small"
+              sx={{ maxWidth: { xs: 150, md: 200 } }}
+            />
+          ))}
+        </Box>
+      )}
+
+      <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end' }}>
+        <input
+          type="file"
+          multiple
+          accept="image/*"
+          style={{ display: 'none' }}
+          ref={fileInputRef}
+          onChange={onFileSelect}
+        />
+        <IconButton
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading || sending}
+          sx={{ alignSelf: 'flex-end', mb: 0.5 }}
+          size="small"
+        >
+          {uploading ? <CircularProgress size={20} /> : <AttachFileIcon fontSize="small" />}
+        </IconButton>
+
+        <TextField
+          fullWidth
+          multiline
+          maxRows={isMobile ? 3 : 4}
+          placeholder="Type a message..."
+          value={newMessage}
+          onChange={onChangeMessage}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              onSend();
+            }
+          }}
+          disabled={sending}
+          size="small"
+        />
+
+        <Button
+          variant="contained"
+          size="small"
+          sx={{ px: { xs: 1.5, md: 2.5 }, alignSelf: 'flex-end', mb: 0.5, minWidth: 0 }}
+          endIcon={sending ? <CircularProgress size={16} color="inherit" /> : <SendIcon fontSize="small" />}
+          onClick={onSend}
+          disabled={sending || (!newMessage.trim() && attachments.length === 0)}
+        >
+          {isMobile ? '' : 'Send'}
+        </Button>
+      </Box>
+    </>
+  );
+});
 
 const ThreadListItem = memo(function ThreadListItem({
-  thread, index, isSelected, imageUrl, isLoadingImage, onSelect
+  thread, isSelected, imageUrl, isLoadingImage, onSelect, sellerKeys
 }) {
   const msgType = thread.actualMessageType || thread.messageType;
   const isOrder = msgType === 'ORDER';
   const isDirect = msgType === 'DIRECT';
+
+  // Prefer the buyer's real name from the matched order; fall back to eBay UserID
+  // for inquiries or orders whose Fulfillment data has no full name.
+  const buyerName = String(thread?.buyerName || '').trim();
+  const displayName = buyerName || getThreadBuyerDisplay(thread, sellerKeys);
 
   return (
     <ListItem disablePadding dense>
@@ -103,10 +281,10 @@ const ThreadListItem = memo(function ThreadListItem({
           primary={
             <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.5}>
               <Typography variant="body2" noWrap sx={{ fontWeight: thread.unreadCount > 0 ? 700 : 600, flex: 1 }}>
-                {thread.buyerName || thread.buyerUsername || 'Unknown Buyer'}
+                {displayName}
               </Typography>
               <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
-                {new Date(thread.lastDate).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })}
+                {formatThreadListTime(thread.lastDate)}
               </Typography>
             </Stack>
           }
@@ -134,7 +312,9 @@ const ThreadListItem = memo(function ThreadListItem({
                 noWrap
                 sx={{ display: 'block', lineHeight: 1.2 }}
               >
-                {thread.itemId === 'DIRECT_MESSAGE' ? 'No item' : (thread.itemTitle || thread.itemId)}
+                {thread.itemId === 'DIRECT_MESSAGE'
+                  ? 'No item'
+                  : (thread.itemTitle || (thread.itemId ? `Item ${thread.itemId}` : ''))}
               </Typography>
               <Typography
                 variant="caption"
@@ -159,20 +339,25 @@ const ThreadListItem = memo(function ThreadListItem({
 
 export default function BuyerChatPage() {
   const [threads, setThreads] = useState([]);
-  const [selectedThread, setSelectedThread] = useState(() => getInitialState('selectedThread', null));
+  const [selectedThread, setSelectedThread] = useState(null);
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [syncingInbox, setSyncingInbox] = useState(false);
+  /** Which sync button is active: 'full' | 'todayTomorrow' | null */
+  const [syncingMode, setSyncingMode] = useState(null);
   const [searchQuery, setSearchQuery] = useState(() => getInitialState('searchQuery', ''));
-  const [searchError, setSearchError] = useState('');
   const [sellers, setSellers] = useState([]);
   const [selectedSeller, setSelectedSeller] = useState(() => getInitialState('selectedSeller', ''));
   const [filterType, setFilterType] = useState(() => getInitialState('filterType', 'ALL'));
   const [filterMarketplace, setFilterMarketplace] = useState(() => getInitialState('filterMarketplace', ''));
-  const [showUnreadOnly, setShowUnreadOnly] = useState(() => getInitialState('showUnreadOnly', false));
-  const [includeResolved, setIncludeResolved] = useState(() => getInitialState('includeResolved', true));
+  const [showUnreadOnly, setShowUnreadOnly] = useState(() => {
+    const saved = getInitialState('showUnreadOnly', 'all');
+    if (saved === true || saved === 'true' || saved === 'unread') return 'unread';
+    if (saved === 'read') return 'read';
+    return 'all';
+  });
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [threadTotal, setThreadTotal] = useState(0);
@@ -181,6 +366,8 @@ export default function BuyerChatPage() {
   const [metaCategory, setMetaCategory] = useState('');
   const [metaCaseStatus, setMetaCaseStatus] = useState('');
   const [metaPickedUpBy, setMetaPickedUpBy] = useState('');
+  const [metaChangeLog, setMetaChangeLog] = useState([]);
+  const [historyAnchorEl, setHistoryAnchorEl] = useState(null);
   const [savingMeta, setSavingMeta] = useState(false);
 
   // Chat agents for "Picked Up By" dropdown
@@ -206,7 +393,15 @@ export default function BuyerChatPage() {
   const pollingIntervalRef = useRef(null);
   const hasFetchedInitialData = useRef(false);
   const didAutoSync = useRef(false);
+  const loadRequestIdRef = useRef(0);
+  const messageLoadRequestIdRef = useRef(0);
   const fileInputRef = useRef(null);
+  const syncingInboxRef = useRef(false);
+  const pollActiveThreadRef = useRef(null);
+  const handleManualSyncRef = useRef(null);
+  const handleThreadSelectRef = useRef(null);
+  const threadImagesRef = useRef({});
+  const fetchingImagesRef = useRef(new Set());
 
   const handleCopy = (text) => {
     const val = text || '-';
@@ -221,6 +416,8 @@ export default function BuyerChatPage() {
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [markingUnread, setMarkingUnread] = useState(false);
+  const [markingRead, setMarkingRead] = useState(false);
+  const [resolvingOrder, setResolvingOrder] = useState(false);
   const [copiedText, setCopiedText] = useState('');
   const [templateAnchorEl, setTemplateAnchorEl] = useState(null);
   const [chatTemplates, setChatTemplates] = useState([]);
@@ -251,15 +448,47 @@ export default function BuyerChatPage() {
     }
   }, [isTablet, selectedThread]);
 
-  // Persist state to sessionStorage (selected thread only — filters reset on reload)
+  // Do not persist selected thread — reopening Buyer Messages starts with empty chat pane
   useEffect(() => {
-    const stateToSave = { selectedThread };
     try {
-      sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(stateToSave));
+      sessionStorage.removeItem('buyer_chat_page_state_v2');
+      sessionStorage.removeItem(CHAT_STORAGE_KEY);
     } catch (e) {
-      console.error('Error saving to sessionStorage:', e);
+      /* ignore */
+    }
+  }, []);
+
+  // No conversation selected → never keep stale/cached messages in the pane
+  useEffect(() => {
+    if (!selectedThread) {
+      setMessages([]);
+      setThreadThumbnail(null);
     }
   }, [selectedThread]);
+
+  const threadEquals = (a, b) => {
+    if (!a || !b) return false;
+    if (a.conversationId && b.conversationId) {
+      return String(a.conversationId) === String(b.conversationId);
+    }
+    // An order id can be shared by multiple buyers — always disambiguate by buyer + item
+    return (
+      String(a.orderId || '') === String(b.orderId || '') &&
+      a.buyerUsername === b.buyerUsername &&
+      a.itemId === b.itemId &&
+      String(a.sellerId || '') === String(b.sellerId || '')
+    );
+  };
+
+  // If the open chat is not in the current inbox list (filters / seller change), close it
+  useEffect(() => {
+    if (!selectedThread || loadingThreads) return;
+    const visible = threads.some((t) => threadEquals(t, selectedThread));
+    if (!visible) {
+      setSelectedThread(null);
+      setMessages([]);
+    }
+  }, [threads, loadingThreads, selectedThread]);
 
 
 
@@ -272,6 +501,8 @@ export default function BuyerChatPage() {
       setMetaCategory('');
       setMetaCaseStatus('');
       setMetaPickedUpBy('');
+      setMetaChangeLog([]);
+      setHistoryAnchorEl(null);
     }
   }, [selectedThread]);
 
@@ -311,10 +542,12 @@ export default function BuyerChatPage() {
         setMetaCategory(data.category);
         setMetaCaseStatus(data.status || data.caseStatus || '');
         setMetaPickedUpBy(data.pickedUpBy || '');
+        setMetaChangeLog(data.changeLog || []);
       } else {
         setMetaCategory('');
         setMetaCaseStatus('');
         setMetaPickedUpBy('');
+        setMetaChangeLog([]);
       }
     } catch (e) {
       // Don't log 401 errors - they're handled by the interceptor
@@ -325,6 +558,7 @@ export default function BuyerChatPage() {
       setMetaCategory('');
       setMetaCaseStatus('');
       setMetaPickedUpBy('');
+      setMetaChangeLog([]);
     }
   }
 
@@ -336,7 +570,7 @@ export default function BuyerChatPage() {
 
     setSavingMeta(true);
     try {
-      await api.post('/ebay/conversation-meta', {
+      const { data } = await api.post('/ebay/conversation-meta', {
         sellerId: selectedThread.sellerId,
         buyerUsername: selectedThread.buyerUsername,
         orderId: selectedThread.orderId,
@@ -346,7 +580,7 @@ export default function BuyerChatPage() {
         status: metaCaseStatus,      // synced status field
         pickedUpBy: metaPickedUpBy || null
       });
-      // Optional: Show a small success toast or icon change
+      if (data?.meta?.changeLog) setMetaChangeLog(data.meta.changeLog);
     } catch (e) {
       alert("Failed to save tags: " + e.message);
     } finally {
@@ -399,7 +633,7 @@ export default function BuyerChatPage() {
     if (!hasFetchedInitialData.current) {
       hasFetchedInitialData.current = true;
       fetchSellers();
-      loadAllThreadPages().then((count) => {
+      loadThreads(true).then((count) => {
         if (count === 0 && !didAutoSync.current) {
           didAutoSync.current = true;
           handleManualSync();
@@ -407,11 +641,7 @@ export default function BuyerChatPage() {
       });
       loadChatTemplates();
       fetchAgents();
-
-      // If we have a restored selectedThread, load its messages
-      if (selectedThread && !selectedThread.isNew) {
-        loadMessages(selectedThread);
-      }
+      // Never auto-load a cached conversation — wait for user to select a thread
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -422,7 +652,6 @@ export default function BuyerChatPage() {
   const prevFilterType = useRef(filterType);
   const prevFilterMarketplace = useRef(filterMarketplace);
   const prevShowUnreadOnly = useRef(showUnreadOnly);
-  const prevIncludeResolved = useRef(includeResolved);
   const isFirstRender = useRef(true);
 
   useEffect(() => {
@@ -438,50 +667,67 @@ export default function BuyerChatPage() {
       prevSelectedSeller.current !== selectedSeller ||
       prevFilterType.current !== filterType ||
       prevFilterMarketplace.current !== filterMarketplace ||
-      prevShowUnreadOnly.current !== showUnreadOnly ||
-      prevIncludeResolved.current !== includeResolved
+      prevShowUnreadOnly.current !== showUnreadOnly
     ) {
       prevSearchQuery.current = searchQuery;
       prevSelectedSeller.current = selectedSeller;
       prevFilterType.current = filterType;
       prevFilterMarketplace.current = filterMarketplace;
       prevShowUnreadOnly.current = showUnreadOnly;
-      prevIncludeResolved.current = includeResolved;
+
+      // Close any open chat that may no longer be in the filtered inbox
+      setSelectedThread(null);
+      setMessages([]);
 
       const delayDebounceFn = setTimeout(() => {
         setPage(1);
-        loadAllThreadPages();
+        loadThreads(true);
       }, 500);
 
       return () => clearTimeout(delayDebounceFn);
     }
-  }, [searchQuery, selectedSeller, filterType, filterMarketplace, showUnreadOnly, includeResolved]);
+  }, [searchQuery, selectedSeller, filterType, filterMarketplace, showUnreadOnly]);
 
-  // 2. Scroll Effect
+  // 2. Scroll Effect — only when the thread changes or a genuinely new
+  // message arrives (not on every background refresh that returns the same list).
+  const lastScrollSigRef = useRef('');
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    const last = messages[messages.length - 1];
+    const sig = `${selectedThread?.conversationId || selectedThread?.orderId || selectedThread?.buyerUsername || ''}:${messages.length}:${last?._id || last?.messageId || ''}`;
+    if (sig === lastScrollSigRef.current) return;
+    const threadChanged =
+      !lastScrollSigRef.current ||
+      lastScrollSigRef.current.split(':')[0] !== sig.split(':')[0];
+    lastScrollSigRef.current = sig;
+    scrollToBottom(threadChanged ? 'auto' : 'smooth');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, selectedThread]);
 
-  // 3. ACTIVE POLLING
+  // 3. ACTIVE POLLING — pause when the tab is hidden
   useEffect(() => {
     if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
 
-    if (selectedThread && !selectedThread.isNew) {
-      pollingIntervalRef.current = setInterval(() => {
-        pollActiveThread();
-      }, 10000);
+    if (!selectedThread || selectedThread.isNew) {
+      return undefined;
     }
+
+    const tick = () => {
+      if (document.visibilityState === 'visible') {
+        pollActiveThreadRef.current?.();
+      }
+    };
+    pollingIntervalRef.current = setInterval(tick, THREAD_POLL_MS);
 
     return () => {
       if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedThread]);
 
-  // 4. FETCH MISSING PRODUCT IMAGES — only for first visible threads
+  // 4. FETCH MISSING PRODUCT IMAGES — all loaded order threads missing a URL
   useEffect(() => {
     const fetchMissingImages = async () => {
-      const visibleThreads = threads.slice(0, 12);
-      const threadsNeedingImages = visibleThreads.filter(thread => {
+      const threadsNeedingImages = threads.filter((thread) => {
         const msgType = thread.actualMessageType || thread.messageType;
         return (
           msgType === 'ORDER' &&
@@ -489,16 +735,20 @@ export default function BuyerChatPage() {
           thread.itemId &&
           thread.itemId !== 'DIRECT_MESSAGE' &&
           thread.sellerId &&
-          !threadImages[thread.itemId] &&
-          !fetchingImages.has(thread.itemId)
+          // undefined = not tried; '' = tried and failed; url = success
+          threadImagesRef.current[thread.itemId] === undefined &&
+          !fetchingImagesRef.current.has(thread.itemId)
         );
       });
 
       if (threadsNeedingImages.length === 0) return;
 
-      const newFetching = new Set(fetchingImages);
-      threadsNeedingImages.forEach(t => newFetching.add(t.itemId));
-      setFetchingImages(newFetching);
+      setFetchingImages((prev) => {
+        const next = new Set(prev);
+        threadsNeedingImages.forEach((t) => next.add(t.itemId));
+        fetchingImagesRef.current = next;
+        return next;
+      });
 
       const batchSize = 4;
       for (let i = 0; i < threadsNeedingImages.length; i += batchSize) {
@@ -510,15 +760,24 @@ export default function BuyerChatPage() {
                 params: { sellerId: thread.sellerId, thumbnail: true }
               });
               const url = res.data?.thumbnail || res.data?.images?.[0] || null;
-              if (url) {
-                setThreadImages(prev => ({ ...prev, [thread.itemId]: url }));
-              }
+              setThreadImages((prev) => {
+                // Store '' on miss so we don't re-hammer eBay for the same item
+                const next = { ...prev, [thread.itemId]: url || '' };
+                threadImagesRef.current = next;
+                return next;
+              });
             } catch (err) {
               console.debug(`Failed to fetch image for ${thread.itemId}`, err.message);
+              setThreadImages((prev) => {
+                const next = { ...prev, [thread.itemId]: '' };
+                threadImagesRef.current = next;
+                return next;
+              });
             } finally {
-              setFetchingImages(prev => {
+              setFetchingImages((prev) => {
                 const updated = new Set(prev);
                 updated.delete(thread.itemId);
+                fetchingImagesRef.current = updated;
                 return updated;
               });
             }
@@ -528,42 +787,61 @@ export default function BuyerChatPage() {
     };
 
     fetchMissingImages();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threads]);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  const scrollToBottom = (behavior = 'smooth') => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
   };
 
   // API CALLS
-  async function handleManualSync() {
-    if (syncingInbox) return;
+  async function runInboxSync({ mode = 'full', timeout = 180000 } = {}) {
+    if (syncingInboxRef.current) return;
+    syncingInboxRef.current = true;
     setSyncingInbox(true);
+    setSyncingMode(mode === 'todayTomorrow' ? 'todayTomorrow' : 'full');
     try {
-      const res = await api.post('/ebay/sync-inbox', {}, { timeout: 180000 });
+      const body = { mode };
+      // Scope eBay fetch to the selected seller when one is chosen
+      if (selectedSeller) body.sellerId = selectedSeller;
+      const res = await api.post('/ebay/sync-inbox', body, { timeout });
       setPage(1);
-      await loadAllThreadPages();
+      // Reload with current Type / Marketplace / Search / Unread filters
+      await loadThreads(true);
 
       if (res.data.success) {
-        const { syncResults, totalNewMessages } = res.data;
-        const commerceCount = (syncResults || []).reduce((sum, r) => sum + (r.commerceConversations || 0), 0);
-        const commerceErrors = (syncResults || []).filter((r) => r.commerceError).map((r) => `${r.sellerName}: ${r.commerceError}`);
+        const { syncResults, totalNewMessages, dateRange, skipped, error: syncError } = res.data;
+        const commerceCount = (syncResults || []).reduce(
+          (sum, r) => sum + (r.conversationsUpserted || r.commerceConversations || 0),
+          0
+        );
+        const commerceErrors = (syncResults || []).filter((r) => r.commerceError || r.error).map((r) => `${r.sellerName}: ${r.commerceError || r.error}`);
+        const rangeLabel = dateRange?.from && dateRange?.to
+          ? ` (${dateRange.from} → ${dateRange.to} PT)`
+          : '';
 
-        if (totalNewMessages > 0 && syncResults) {
+        if (skipped) {
+          setSnackbarMsg(syncError || 'Sync was skipped because another sync is already running. Try again in a moment.');
+          setSnackbarSeverity('warning');
+        } else if (totalNewMessages > 0 && syncResults) {
           const sellerSummary = syncResults
             .filter(r => r.newMessages > 0)
             .map(r => `${r.sellerName}: ${r.newMessages} new`)
             .join('\n');
 
-          setSnackbarMsg(`Found ${totalNewMessages} new message${totalNewMessages > 1 ? 's' : ''}!\n\n${sellerSummary}`);
+          setSnackbarMsg(`Found ${totalNewMessages} new message${totalNewMessages > 1 ? 's' : ''}${rangeLabel}!\n\n${sellerSummary}`);
           setSnackbarSeverity('success');
         } else if (commerceCount > 0) {
-          setSnackbarMsg(`Synced ${commerceCount} conversation${commerceCount === 1 ? '' : 's'} from eBay.`);
+          setSnackbarMsg(`Synced ${commerceCount} conversation${commerceCount === 1 ? '' : 's'} from eBay${rangeLabel}.`);
           setSnackbarSeverity('success');
         } else if (commerceErrors.length > 0) {
           setSnackbarMsg(`Commerce API sync issue:\n${commerceErrors.join('\n')}`);
           setSnackbarSeverity('warning');
+        } else if (syncError) {
+          setSnackbarMsg(syncError);
+          setSnackbarSeverity('warning');
         } else {
-          setSnackbarMsg('No new messages found.');
+          setSnackbarMsg(`No new messages found${rangeLabel}.`);
           setSnackbarSeverity('info');
         }
         setSnackbarOpen(true);
@@ -575,10 +853,20 @@ export default function BuyerChatPage() {
         setSnackbarSeverity('error');
         setSnackbarOpen(true);
       }
-      await loadAllThreadPages();
+      await loadThreads(true);
     } finally {
+      syncingInboxRef.current = false;
       setSyncingInbox(false);
+      setSyncingMode(null);
     }
+  }
+
+  async function handleManualSync() {
+    await runInboxSync({ mode: 'full', timeout: 180000 });
+  }
+
+  async function handleTodayTomorrowSync() {
+    await runInboxSync({ mode: 'todayTomorrow', timeout: 120000 });
   }
 
   async function pollActiveThread() {
@@ -592,7 +880,9 @@ export default function BuyerChatPage() {
         sellerId: selectedThread.sellerId,
         buyerUsername: selectedThread.buyerUsername,
         itemId: selectedThread.itemId,
-        orderId: selectedThread.orderId || undefined
+        orderId: selectedThread.orderId || undefined,
+        conversationId: selectedThread.conversationId || undefined,
+        commerceOnly: true
       });
 
       await loadMessages(selectedThread, false);
@@ -606,27 +896,33 @@ export default function BuyerChatPage() {
   }
 
   async function loadThreads(reset = false) {
-    if (loadingThreads) return;
+    const requestId = ++loadRequestIdRef.current;
     setLoadingThreads(true);
-    if (reset) setThreads([]);
+    // Keep previous threads visible while refreshing to avoid inbox flash.
 
     try {
       const currentPage = reset ? 1 : page;
+      // Grow model: always bound inbox to last 45 days
       const params = {
         page: currentPage,
         limit: 50,
         search: searchQuery,
         filterType: filterType,
         filterMarketplace: filterMarketplace,
-        showUnreadOnly: showUnreadOnly,
-        includeResolved: includeResolved,
-        maxAgeDays: 0
+        showUnreadOnly: showUnreadOnly === 'unread',
+        showReadOnly: showUnreadOnly === 'read',
+        readFilter: showUnreadOnly,
+        maxAgeDays: 45,
+        // Same fast path as Buyer Messages (Test)
+        variant: 'v2'
       };
 
       if (selectedSeller) params.sellerId = selectedSeller;
 
       const res = await api.get('/ebay/chat/threads', { params });
-      const newThreads = res.data.threads;
+      if (requestId !== loadRequestIdRef.current) return 0;
+
+      const newThreads = res.data.threads || [];
       const total = res.data.total ?? 0;
 
       if (reset) {
@@ -635,132 +931,129 @@ export default function BuyerChatPage() {
         setHasMore(newThreads.length < total);
       } else {
         setThreads(prev => {
-          const combined = [...prev, ...newThreads];
+          const byKey = new Map();
+          const keyOf = (t) =>
+            t.conversationId
+              ? `c:${t.conversationId}`
+              : `t:${t.sellerId}|${t.orderId || ''}|${t.buyerUsername || ''}|${t.itemId || ''}`;
+          [...prev, ...newThreads].forEach((t) => byKey.set(keyOf(t), t));
+          const combined = [...byKey.values()].sort((a, b) => {
+            const ta = a.lastDate ? new Date(a.lastDate).getTime() : 0;
+            const tb = b.lastDate ? new Date(b.lastDate).getTime() : 0;
+            return tb - ta;
+          });
           setHasMore(combined.length < total);
           return combined;
         });
+        setThreadTotal(total);
       }
 
       setPage(currentPage + 1);
+      return newThreads.length;
     } catch (e) {
+      if (requestId !== loadRequestIdRef.current) return 0;
       if (e.response?.status !== 401) {
         console.error('Failed to load threads', e);
       }
       if (reset) {
         setThreads([]);
+        setThreadTotal(0);
       }
-    } finally {
-      setLoadingThreads(false);
-    }
-  }
-
-  async function loadAllThreadPages() {
-    if (loadingThreads) return;
-    setLoadingThreads(true);
-    setThreads([]);
-
-    try {
-      let pageNum = 1;
-      let combined = [];
-      let total = 0;
-
-      while (pageNum <= 40) {
-        const params = {
-          page: pageNum,
-          limit: 50,
-          search: searchQuery,
-          filterType: filterType,
-          filterMarketplace: filterMarketplace,
-          showUnreadOnly: showUnreadOnly,
-          includeResolved: includeResolved,
-          maxAgeDays: 0
-        };
-        if (selectedSeller) params.sellerId = selectedSeller;
-
-        const res = await api.get('/ebay/chat/threads', { params });
-        const batch = res.data.threads || [];
-        total = res.data.total ?? 0;
-        combined = [...combined, ...batch];
-
-        if (batch.length === 0 || combined.length >= total) break;
-        pageNum += 1;
-      }
-
-      setThreads(combined);
-      setThreadTotal(total);
-      setHasMore(combined.length < total);
-      setPage(pageNum + 1);
-      return combined.length;
-    } catch (e) {
-      if (e.response?.status !== 401) {
-        console.error('Failed to load threads', e);
-      }
-      setThreads([]);
       return 0;
     } finally {
-      setLoadingThreads(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoadingThreads(false);
+      }
     }
   }
 
   async function handleThreadSelect(thread) {
+    // Bump request id so any in-flight load for the previous thread is ignored
+    const requestId = ++messageLoadRequestIdRef.current;
+
     setSelectedThread(thread);
-    setSearchError('');
+    setNewMessage('');
+    setAttachments([]);
+    // Clear previous conversation immediately so it doesn't linger while loading
+    setMessages([]);
+    setLoadingMessages(!thread.isNew);
 
     // Close sidebar on mobile and tablet when thread is selected
     if (isMobile || isTablet) {
       setSidebarOpen(false);
     }
 
-    // 1. OPTIMISTIC UPDATE: Remove Red Dot Immediately
-    if (thread.unreadCount > 0) {
-      setThreads(prevThreads =>
-        prevThreads.map(t => {
-          // Match by OrderId OR (Buyer + Item)
-          const isMatch = t.orderId
-            ? t.orderId === thread.orderId
-            : (t.buyerUsername === thread.buyerUsername && t.itemId === thread.itemId);
+    // Do not auto-clear unread — agents must click Mark Read explicitly
 
-          if (isMatch) {
-            return { ...t, unreadCount: 0 }; // Zero out unread count
-          }
-          return t;
-        })
-      );
-    }
-
-    // 2. Sync from eBay then load messages from DB
+    // DB-first: show cached messages immediately, then soft-refresh from Commerce in background.
     if (!thread.isNew) {
-      try {
-        await api.post('/ebay/sync-thread', {
-          sellerId: thread.sellerId,
-          buyerUsername: thread.buyerUsername,
-          itemId: thread.itemId,
-          orderId: thread.orderId || undefined
-        });
-      } catch (e) {
-        if (e.response?.status !== 401 && e.response?.status !== 400) {
-          console.error('Thread sync failed', e);
+      await loadMessages(thread, true, requestId);
+      if (requestId !== messageLoadRequestIdRef.current) return;
+
+      // Background refresh — never block the chat pane on Trading API crawls
+      (async () => {
+        try {
+          await api.post(
+            '/ebay/sync-thread',
+            {
+              sellerId: thread.sellerId,
+              buyerUsername: thread.buyerUsername,
+              itemId: thread.itemId,
+              orderId: thread.orderId || undefined,
+              conversationId: thread.conversationId || undefined,
+              commerceOnly: true
+            },
+            { timeout: 45000 }
+          );
+          if (requestId !== messageLoadRequestIdRef.current) return;
+          await loadMessages(thread, false, requestId);
+        } catch (e) {
+          if (e.response?.status !== 401 && e.response?.status !== 400) {
+            console.error('Thread sync failed', e);
+          }
         }
-      }
-      await loadMessages(thread, true);
+      })();
     } else {
+      if (requestId !== messageLoadRequestIdRef.current) return;
       setMessages([]);
+      setLoadingMessages(false);
     }
   }
 
-  async function loadMessages(thread, showLoading = true) {
+  // Keep latest handlers in refs so intervals / memo children stay stable
+  handleManualSyncRef.current = handleManualSync;
+  pollActiveThreadRef.current = pollActiveThread;
+  handleThreadSelectRef.current = handleThreadSelect;
+
+  const onSelectThread = useCallback((thread) => {
+    handleThreadSelectRef.current?.(thread);
+  }, []);
+
+  const onChangeMessage = useCallback((e) => {
+    setNewMessage(e.target.value);
+  }, []);
+
+  async function loadMessages(thread, showLoading = true, requestId = null) {
+    const activeRequestId = requestId ?? ++messageLoadRequestIdRef.current;
     if (showLoading) setLoadingMessages(true);
     try {
-      const params = {
-        buyerUsername: thread.buyerUsername
-      };
-      if (thread.orderId) params.orderId = thread.orderId;
-      if (thread.itemId) params.itemId = thread.itemId;
+      const params = {};
+      // Prefer Commerce conversation id when present (Message Conversations cache)
+      if (thread.conversationId) params.conversationId = thread.conversationId;
       if (thread.sellerId) params.sellerId = thread.sellerId;
+      // Grow scoping: order threads load by orderId only; inquiries by buyer+item(+seller)
+      if (thread.orderId) {
+        params.orderId = thread.orderId;
+      } else {
+        if (thread.buyerUsername) params.buyerUsername = thread.buyerUsername;
+        if (thread.itemId) params.itemId = thread.itemId;
+      }
 
       const res = await api.get('/ebay/chat/messages', { params });
-      setMessages(res.data);
+      if (activeRequestId !== messageLoadRequestIdRef.current) return;
+      setMessages(Array.isArray(res.data) ? res.data : []);
     } catch (e) {
+      if (activeRequestId !== messageLoadRequestIdRef.current) return;
       // Don't log 401 errors - they're handled by the interceptor
       if (e.response?.status !== 401) {
         console.error('Failed to load messages', e);
@@ -768,7 +1061,9 @@ export default function BuyerChatPage() {
       // Set empty array on error to prevent crashes
       setMessages([]);
     } finally {
-      if (showLoading) setLoadingMessages(false);
+      if (activeRequestId === messageLoadRequestIdRef.current && showLoading) {
+        setLoadingMessages(false);
+      }
     }
   }
 
@@ -804,42 +1099,30 @@ export default function BuyerChatPage() {
     }
   }
 
-  async function handleSearchOrder() {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return;
-    setSearchError('');
-
-    // 1. Local Search (Checks OrderID OR Username)
-    const foundLocal = threads.find(t =>
-      (t.orderId && t.orderId.toLowerCase().includes(query)) ||
-      (t.buyerUsername && t.buyerUsername.toLowerCase().includes(query)) ||
-      (t.buyerName && t.buyerName.toLowerCase().includes(query))
-    );
-
-    if (foundLocal) {
-      handleThreadSelect(foundLocal);
-      return;
-    }
-
-    // 2. Remote Search (Only if looks like Order ID)
-    // We assume usernames are found locally since you fetch all active threads.
-    // Only fetch from API if it looks like an Order ID (contains hyphens or numbers)
-    if (query.match(/[\d-]/)) {
-      try {
-        const res = await api.get('/ebay/chat/search-order', { params: { orderId: searchQuery.trim() } });
-        handleThreadSelect(res.data);
-      } catch (e) {
-        setSearchError('Not found locally or remotely.');
-      }
-    } else {
-      setSearchError('User conversation not found in active threads.');
-    }
-  }
-
   const getSellerName = (id) => {
-    const seller = sellers.find(s => s._id === id);
-    return seller?.user?.username || 'Unknown Seller';
+    const seller = sellers.find(s => String(s._id) === String(id));
+    return seller?.user?.username || seller?.username || 'Unknown Seller';
   };
+
+  // All known store names — used so inquiry titles never show the seller as "buyer"
+  const sellerIdentities = useMemo(
+    () => collectSellerIdentities(sellers),
+    [sellers]
+  );
+
+  // Per-store identity keys for inbox titles (ebay UserID + app username)
+  const sellerKeysById = useMemo(() => {
+    const map = new Map();
+    for (const s of sellers) {
+      map.set(
+        String(s._id),
+        [s?.user?.username, s?.user?.email, s?.ebayUserId, s?.ebayUsername]
+          .map((v) => String(v || '').trim().toLowerCase())
+          .filter(Boolean)
+      );
+    }
+    return map;
+  }, [sellers]);
 
   async function handleFileSelect(e) {
     const files = Array.from(e.target.files);
@@ -874,6 +1157,21 @@ export default function BuyerChatPage() {
     setAttachments(prev => prev.filter((_, i) => i !== index));
   }
 
+  const handleSendMessageRef = useRef(handleSendMessage);
+  handleSendMessageRef.current = handleSendMessage;
+  const handleFileSelectRef = useRef(handleFileSelect);
+  handleFileSelectRef.current = handleFileSelect;
+
+  const onSendMessage = useCallback(() => {
+    handleSendMessageRef.current?.();
+  }, []);
+  const onFileSelect = useCallback((e) => {
+    handleFileSelectRef.current?.(e);
+  }, []);
+  const onRemoveAttachment = useCallback((idx) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
+
   // Template menu handlers
   const handleTemplateClick = (event) => {
     setTemplateAnchorEl(event.currentTarget);
@@ -899,6 +1197,47 @@ export default function BuyerChatPage() {
     setNewMessage(personalizedText);
     handleTemplateClose();
   };
+
+  async function handleResolveOrder() {
+    if (!selectedThread || !selectedThread.buyerUsername) return;
+    if (!selectedThread.itemId || selectedThread.itemId === 'DIRECT_MESSAGE') return;
+
+    setResolvingOrder(true);
+    try {
+      const { data } = await api.post('/ebay/chat/resolve-order', {
+        sellerId: selectedThread.sellerId,
+        conversationId: selectedThread.conversationId || '',
+        buyerUsername: selectedThread.buyerUsername,
+        itemId: selectedThread.itemId,
+        date: selectedThread.lastDate || ''
+      });
+
+      if (data?.orderId) {
+        setSelectedThread((prev) => (prev ? { ...prev, orderId: data.orderId } : prev));
+        setThreads((prev) =>
+          prev.map((t) =>
+            threadEquals(t, selectedThread) ? { ...t, orderId: data.orderId } : t
+          )
+        );
+        setSnackbarMsg(
+          data.source === 'ebay'
+            ? `Order ${data.orderId} matched from eBay`
+            : `Order ${data.orderId} matched`
+        );
+        setSnackbarSeverity('success');
+      } else {
+        setSnackbarMsg('No matching order found for this buyer + item');
+        setSnackbarSeverity('info');
+      }
+      setSnackbarOpen(true);
+    } catch (err) {
+      setSnackbarMsg('Failed to find order: ' + (err.response?.data?.error || err.message));
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setResolvingOrder(false);
+    }
+  }
 
   async function handleMarkAsUnread() {
     if (!selectedThread) return;
@@ -947,29 +1286,62 @@ export default function BuyerChatPage() {
     }
   }
 
+  async function handleMarkAsRead() {
+    if (!selectedThread) return;
+
+    setMarkingRead(true);
+    try {
+      const payload = {
+        orderId: selectedThread.orderId,
+        buyerUsername: selectedThread.buyerUsername,
+        itemId: selectedThread.itemId
+      };
+
+      await api.post('/ebay/chat/mark-read', payload);
+
+      setThreads(prevThreads =>
+        prevThreads.map(t => {
+          const isMatch = t.orderId
+            ? t.orderId === selectedThread.orderId
+            : (t.buyerUsername === selectedThread.buyerUsername && t.itemId === selectedThread.itemId);
+          return isMatch ? { ...t, unreadCount: 0 } : t;
+        })
+      );
+      setSelectedThread(prev => prev ? { ...prev, unreadCount: 0 } : prev);
+      setMessages(prev => prev.map(m => m.sender === 'BUYER' ? { ...m, read: true } : m));
+
+      setSnackbarMsg('Conversation marked as read');
+      setSnackbarSeverity('success');
+      setSnackbarOpen(true);
+    } catch (err) {
+      setSnackbarMsg('Failed to mark as read: ' + (err.response?.data?.error || err.message));
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setMarkingRead(false);
+    }
+  }
+
   const narrowingFiltersActive = useMemo(() => (
     Boolean(searchQuery.trim()) ||
     Boolean(selectedSeller) ||
     filterType !== 'ALL' ||
     Boolean(filterMarketplace) ||
-    showUnreadOnly
+    showUnreadOnly === 'unread' ||
+    showUnreadOnly === 'read'
   ), [searchQuery, selectedSeller, filterType, filterMarketplace, showUnreadOnly]);
-
-  const hasActiveFilters = narrowingFiltersActive || includeResolved;
 
   const clearAllFilters = () => {
     setSearchQuery('');
     setSelectedSeller('');
     setFilterType('ALL');
     setFilterMarketplace('');
-    setShowUnreadOnly(false);
-    setIncludeResolved(true);
+    setShowUnreadOnly('all');
     setPage(1);
   };
 
   const inboxStats = useMemo(() => ({
     unreadThreads: threads.filter(t => t.unreadCount > 0).length,
-    unreadMessages: threads.reduce((sum, t) => sum + (t.unreadCount || 0), 0),
     loaded: threads.length
   }), [threads]);
 
@@ -977,42 +1349,46 @@ export default function BuyerChatPage() {
     <Box sx={{
       display: 'flex',
       flexDirection: 'column',
-      height: { xs: '100vh', md: '85vh' },
-      gap: 1.5,
-      position: 'relative'
+      height: { xs: '100dvh', md: 'calc(100vh - 72px)' },
+      gap: 1,
+      position: 'relative',
+      minHeight: 0
     }}>
-      {/* KPI + compact filters */}
+      {/* Filters */}
       <Box sx={{ px: { xs: 1, md: 0 }, flexShrink: 0 }}>
-        {!loadingThreads && (threads.length > 0 || threadTotal > 0) && (
-          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 1.5, mb: 1.5 }}>
-            <KpiCard label="Conversations" value={threadTotal.toLocaleString()} color="#3b82f6" bgcolor="#eff6ff" />
-            <KpiCard label="Unread Threads" value={inboxStats.unreadThreads} color="#ef4444" bgcolor="#fef2f2" />
-            <KpiCard label="Unread Messages" value={inboxStats.unreadMessages} color="#f59e0b" bgcolor="#fffbeb" />
-            <KpiCard label="Loaded" value={`${inboxStats.loaded} / ${threadTotal}`} color="#64748b" bgcolor="#f8fafc" />
-          </Box>
-        )}
-
         {narrowingFiltersActive && !loadingThreads && (
           <Alert
             severity="info"
-            sx={{ mb: 1.5, py: 0.25, alignItems: 'center' }}
+            sx={{ mb: 1, py: 0, alignItems: 'center' }}
             action={
               <Button color="inherit" size="small" startIcon={<FilterAltOffIcon />} onClick={clearAllFilters}>
                 Clear filters
               </Button>
             }
           >
-            Filters are narrowing results — showing {threadTotal.toLocaleString()} conversation{threadTotal === 1 ? '' : 's'}.
-            {searchQuery.trim() && ' Search matches buyer, order, item title, seller, or message text.'}
+            Showing {threadTotal.toLocaleString()} filtered conversation{threadTotal === 1 ? '' : 's'}
           </Alert>
         )}
 
-        <Paper sx={{ p: 1.5, borderRadius: 2 }}>
-          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1} alignItems={{ lg: 'center' }}>
+        <Paper sx={{ p: 1, borderRadius: 2 }}>
+          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1} alignItems={{ lg: 'center' }} flexWrap="wrap" useFlexGap>
             <FormControl size="small" sx={{ minWidth: { xs: '100%', lg: 140 }, flex: { lg: 1 } }}>
-              <InputLabel>Seller</InputLabel>
-              <Select value={selectedSeller} label="Seller" onChange={(e) => setSelectedSeller(e.target.value)}>
-                <MenuItem value=""><em>All Sellers</em></MenuItem>
+              <InputLabel shrink>Seller</InputLabel>
+              <Select
+                value={selectedSeller}
+                label="Seller"
+                displayEmpty
+                notched
+                onChange={(e) => setSelectedSeller(e.target.value)}
+                renderValue={(value) => {
+                  if (!value) return 'All Sellers';
+                  const s = sellers.find((x) => String(x._id) === String(value));
+                  return s?.user?.username || s?.user?.email || 'Seller';
+                }}
+              >
+                <MenuItem value="">
+                  <em>All Sellers</em>
+                </MenuItem>
                 {sellers.map((s) => (
                   <MenuItem key={s._id} value={s._id}>{s.user?.username || s.user?.email}</MenuItem>
                 ))}
@@ -1027,8 +1403,19 @@ export default function BuyerChatPage() {
               </Select>
             </FormControl>
             <FormControl size="small" sx={{ minWidth: { xs: '100%', lg: 140 } }}>
-              <InputLabel>Marketplace</InputLabel>
-              <Select value={filterMarketplace} label="Marketplace" onChange={(e) => setFilterMarketplace(e.target.value)}>
+              <InputLabel shrink>Marketplace</InputLabel>
+              <Select
+                value={filterMarketplace}
+                label="Marketplace"
+                displayEmpty
+                notched
+                onChange={(e) => setFilterMarketplace(e.target.value)}
+                renderValue={(value) => {
+                  if (!value) return 'All';
+                  const labels = { EBAY_US: 'US', EBAY_CA: 'CA', EBAY_AU: 'AU', EBAY_GB: 'GB' };
+                  return labels[value] || value;
+                }}
+              >
                 <MenuItem value="">All</MenuItem>
                 <MenuItem value="EBAY_US">US</MenuItem>
                 <MenuItem value="EBAY_CA">CA</MenuItem>
@@ -1039,21 +1426,11 @@ export default function BuyerChatPage() {
             <FormControl size="small" sx={{ minWidth: { xs: '100%', lg: 130 } }}>
               <InputLabel>Show</InputLabel>
               <Select value={showUnreadOnly} label="Show" onChange={(e) => setShowUnreadOnly(e.target.value)}>
-                <MenuItem value={false}>All</MenuItem>
-                <MenuItem value={true}>Unread Only</MenuItem>
+                <MenuItem value="all">All</MenuItem>
+                <MenuItem value="unread">Unread Only</MenuItem>
+                <MenuItem value="read">Read Only</MenuItem>
               </Select>
             </FormControl>
-            <FormControlLabel
-              control={
-                <Checkbox
-                  size="small"
-                  checked={includeResolved}
-                  onChange={(e) => setIncludeResolved(e.target.checked)}
-                />
-              }
-              label={<Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>Include resolved</Typography>}
-              sx={{ ml: 0, flexShrink: 0 }}
-            />
             <TextField
               size="small"
               placeholder="Search buyer, order, item, seller..."
@@ -1063,13 +1440,33 @@ export default function BuyerChatPage() {
             />
             <Button
               size="small"
-              startIcon={syncingInbox ? <CircularProgress size={16} /> : <RefreshIcon />}
+              startIcon={syncingMode === 'todayTomorrow' ? <CircularProgress size={16} /> : <RefreshIcon />}
+              onClick={handleTodayTomorrowSync}
+              disabled={syncingInbox}
+              variant="contained"
+              title={
+                selectedSeller
+                  ? 'Fetch today & tomorrow (PT) for the selected seller, then show results with your current filters'
+                  : 'Fetch today & tomorrow (PT) for all sellers, then show results with your current filters'
+              }
+              sx={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+            >
+              {syncingMode === 'todayTomorrow' ? 'Syncing...' : 'Sync Today+'}
+            </Button>
+            <Button
+              size="small"
+              startIcon={syncingMode === 'full' ? <CircularProgress size={16} /> : <RefreshIcon />}
               onClick={handleManualSync}
               disabled={syncingInbox}
               variant="outlined"
+              title={
+                selectedSeller
+                  ? 'Full inbox sync (longer lookback) for the selected seller, then show results with your current filters'
+                  : 'Full inbox sync (longer lookback) for all sellers, then show results with your current filters'
+              }
               sx={{ whiteSpace: 'nowrap', flexShrink: 0 }}
             >
-              {syncingInbox ? 'Syncing...' : 'Check New'}
+              {syncingMode === 'full' ? 'Syncing...' : 'Check New'}
             </Button>
           </Stack>
         </Paper>
@@ -1158,20 +1555,27 @@ export default function BuyerChatPage() {
         <List dense sx={{ overflow: 'auto', flex: 1, py: 0 }}>
           {threads.map((thread, index) => {
             const isSelected = selectedThread && (
-              (selectedThread.orderId && selectedThread.orderId === thread.orderId) ||
-              (!selectedThread.orderId && selectedThread.buyerUsername === thread.buyerUsername && selectedThread.itemId === thread.itemId)
+              selectedThread.conversationId && thread.conversationId
+                ? String(selectedThread.conversationId) === String(thread.conversationId)
+                : (
+                  // An order id can be shared by multiple buyers — always disambiguate
+                  String(selectedThread.orderId || '') === String(thread.orderId || '') &&
+                  selectedThread.buyerUsername === thread.buyerUsername &&
+                  selectedThread.itemId === thread.itemId &&
+                  String(selectedThread.sellerId || '') === String(thread.sellerId || '')
+                )
             );
             const imageUrl = thread.productImageUrl || threadImages[thread.itemId] || null;
 
             return (
               <ThreadListItem
-                key={`${thread.orderId || 'inq'}-${thread.itemId || index}`}
+                key={thread.conversationId || `${thread.sellerId || 's'}-${thread.orderId || 'inq'}-${thread.buyerUsername || 'b'}-${thread.itemId || index}`}
                 thread={thread}
-                index={index}
                 isSelected={isSelected}
                 imageUrl={imageUrl}
                 isLoadingImage={fetchingImages.has(thread.itemId)}
-                onSelect={handleThreadSelect}
+                onSelect={onSelectThread}
+                sellerKeys={sellerKeysById.get(String(thread.sellerId)) || EMPTY_SELLER_KEYS}
               />
             );
           })}
@@ -1191,11 +1595,21 @@ export default function BuyerChatPage() {
 
           {/* EMPTY STATE */}
           {threads.length === 0 && !loadingThreads && (
-            <Typography variant="caption" sx={{ p: 3, display: 'block', textAlign: 'center', color: 'text.secondary' }}>
-              {syncingInbox
-                ? 'Syncing conversations from eBay...'
-                : 'No conversations yet. Click Check New to sync from eBay.'}
-            </Typography>
+            <Box sx={{ p: 3, textAlign: 'center' }}>
+              <QuestionAnswerIcon sx={{ fontSize: 36, color: 'text.disabled', mb: 1 }} />
+              <Typography variant="body2" color="text.secondary">
+                {syncingInbox
+                  ? 'Syncing conversations from eBay…'
+                  : threadTotal > 0
+                    ? 'Conversations failed to load. Try Check New or pick a seller.'
+                    : 'No conversations yet.'}
+              </Typography>
+              {!syncingInbox && (
+                <Button size="small" sx={{ mt: 1.5 }} startIcon={<RefreshIcon />} onClick={handleManualSync}>
+                  Check New
+                </Button>
+              )}
+            </Box>
           )}
         </List>
       </Box>
@@ -1223,7 +1637,7 @@ export default function BuyerChatPage() {
               }}>
                 {(isMobile || isTablet) && (
                   <IconButton
-                    onClick={() => { setSelectedThread(null); setSidebarOpen(true); }}
+                    onClick={() => { setSelectedThread(null); setMessages([]); setSidebarOpen(true); }}
                     size="small"
                     sx={{ mb: 0.5 }}
                   >
@@ -1294,6 +1708,56 @@ export default function BuyerChatPage() {
                     {savingMeta ? <CircularProgress size={14} color="inherit" /> : <SaveIcon sx={{ fontSize: 18 }} />}
                   </Button>
 
+                  {metaChangeLog.length > 0 && (
+                    <>
+                      <Tooltip title="View change history">
+                        <IconButton
+                          size="small"
+                          onClick={(e) => setHistoryAnchorEl(e.currentTarget)}
+                          sx={{ height: 32, width: 32 }}
+                        >
+                          <HistoryIcon sx={{ fontSize: 18 }} />
+                        </IconButton>
+                      </Tooltip>
+                      <Typography
+                        variant="caption"
+                        sx={{ color: 'text.secondary', fontSize: '0.68rem', lineHeight: 1.2, maxWidth: 180 }}
+                      >
+                        Last changed by <b>{metaChangeLog[metaChangeLog.length - 1].changedBy}</b>
+                        <br />
+                        {formatIST(metaChangeLog[metaChangeLog.length - 1].changedAt)}
+                      </Typography>
+                      <Popover
+                        open={Boolean(historyAnchorEl)}
+                        anchorEl={historyAnchorEl}
+                        onClose={() => setHistoryAnchorEl(null)}
+                        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+                        transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                      >
+                        <Box sx={{ p: 1.5, maxWidth: 380, maxHeight: 320, overflowY: 'auto' }}>
+                          <Typography variant="subtitle2" sx={{ mb: 1, fontSize: '0.78rem' }}>
+                            Change History (IST)
+                          </Typography>
+                          <Stack spacing={1}>
+                            {[...metaChangeLog].reverse().map((entry, idx) => (
+                              <Box key={idx} sx={{ borderBottom: idx < metaChangeLog.length - 1 ? '1px solid #eee' : 'none', pb: 0.75 }}>
+                                <Typography variant="body2" sx={{ fontSize: '0.74rem' }}>
+                                  <b>{entry.changedBy}</b> changed <b>{entry.field}</b>:{' '}
+                                  <span style={{ color: '#999' }}>{entry.oldValue || '— empty —'}</span>
+                                  {' → '}
+                                  <span style={{ fontWeight: 600 }}>{entry.newValue || '— empty —'}</span>
+                                </Typography>
+                                <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.66rem' }}>
+                                  {formatIST(entry.changedAt)}
+                                </Typography>
+                              </Box>
+                            ))}
+                          </Stack>
+                        </Box>
+                      </Popover>
+                    </>
+                  )}
+
                   <Box sx={{ flex: 1 }} />
 
                   <Chip
@@ -1315,20 +1779,32 @@ export default function BuyerChatPage() {
                   </Button>
 
                   {!selectedThread.isNew && (
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      onClick={handleMarkAsUnread}
-                      disabled={markingUnread}
-                      startIcon={markingUnread ? <CircularProgress size={12} /> : <MarkAsUnreadIcon sx={{ fontSize: 16 }} />}
-                      sx={{ height: 28, fontSize: '0.7rem', px: 1 }}
-                    >
-                      Unread
-                    </Button>
+                    <>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={handleMarkAsRead}
+                        disabled={markingRead}
+                        startIcon={markingRead ? <CircularProgress size={12} /> : <MarkEmailReadIcon sx={{ fontSize: 16 }} />}
+                        sx={{ height: 28, fontSize: '0.7rem', px: 1 }}
+                      >
+                        {markingRead ? 'Marking...' : 'Mark Read'}
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={handleMarkAsUnread}
+                        disabled={markingUnread}
+                        startIcon={markingUnread ? <CircularProgress size={12} /> : <MarkAsUnreadIcon sx={{ fontSize: 16 }} />}
+                        sx={{ height: 28, fontSize: '0.7rem', px: 1 }}
+                      >
+                        Unread
+                      </Button>
+                    </>
                   )}
 
                   {!isMobile && (
-                    <IconButton onClick={() => setSelectedThread(null)} size="small" sx={{ color: 'text.disabled' }}>
+                    <IconButton onClick={() => { setSelectedThread(null); setMessages([]); }} size="small" sx={{ color: 'text.disabled' }}>
                       <CloseIcon fontSize="small" />
                     </IconButton>
                   )}
@@ -1336,12 +1812,30 @@ export default function BuyerChatPage() {
 
                 {/* Row 2: Buyer + product context */}
                 <Stack direction="row" alignItems="center" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', gap: 1 }}>
-                  <Typography variant="body2" fontWeight={600} noWrap>
-                    {selectedThread.buyerName || selectedThread.buyerUsername}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
-                    @{selectedThread.buyerUsername}
-                  </Typography>
+                  {(() => {
+                    const buyerTitle =
+                      String(selectedThread.buyerName || '').trim() ||
+                      getThreadBuyerDisplay(
+                        selectedThread,
+                        sellerKeysById.get(String(selectedThread.sellerId)) || []
+                      );
+                    const buyerIsSellerIdentity =
+                      selectedThread.buyerLooksLikeSeller === true ||
+                      (selectedThread.buyerUsername &&
+                        sellerIdentities.has(String(selectedThread.buyerUsername).toLowerCase()));
+                    return (
+                      <>
+                        <Typography variant="body2" fontWeight={600} noWrap>
+                          {buyerTitle}
+                        </Typography>
+                        {!buyerIsSellerIdentity && selectedThread.buyerUsername && (
+                          <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+                            @{selectedThread.buyerUsername}
+                          </Typography>
+                        )}
+                      </>
+                    );
+                  })()}
 
                   {selectedThread.itemId !== 'DIRECT_MESSAGE' && (
                     <>
@@ -1372,7 +1866,7 @@ export default function BuyerChatPage() {
                     </>
                   )}
 
-                  {selectedThread.orderId && (
+                  {selectedThread.orderId ? (
                     <Chip
                       label={`#${selectedThread.orderId}`}
                       size="small"
@@ -1380,6 +1874,19 @@ export default function BuyerChatPage() {
                       onClick={() => setSelectedOrderId(selectedThread.orderId)}
                       sx={{ height: 24, fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer' }}
                     />
+                  ) : (
+                    selectedThread.itemId && selectedThread.itemId !== 'DIRECT_MESSAGE' && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={handleResolveOrder}
+                        disabled={resolvingOrder}
+                        startIcon={resolvingOrder ? <CircularProgress size={12} /> : null}
+                        sx={{ height: 24, fontSize: '0.68rem', px: 1, textTransform: 'none' }}
+                      >
+                        {resolvingOrder ? 'Finding…' : 'Find order'}
+                      </Button>
+                    )
                   )}
                   {selectedThread.marketplaceId && selectedThread.marketplaceId !== 'Unknown' && (
                     <Chip
@@ -1507,66 +2014,156 @@ export default function BuyerChatPage() {
                 minHeight: 0,
                 p: { xs: 1, md: 1.5 },
                 overflowY: 'auto',
-                bgcolor: '#f0f2f5'
+                bgcolor: 'grey.100'
               }}>
                 {loadingMessages ? (
                   <Box display="flex" justifyContent="center" mt={4}><CircularProgress /></Box>
                 ) : (
-                  <Stack spacing={2}>
+                  <Stack spacing={2} sx={{ width: '100%' }}>
                     {messages.length === 0 && selectedThread.isNew && (
                       <Alert severity="info">Start the conversation by typing a welcome message below!</Alert>
                     )}
+                    {messages.length === 0 && !selectedThread.isNew && (
+                      <Alert severity="info">No messages in this thread yet. Try Check New or reopen the conversation.</Alert>
+                    )}
 
-                    {messages.map((msg) => (
+                    {messages.map((msg) => {
+                      const isSeller = String(msg.sender || '').toUpperCase() === 'SELLER';
+                      // Prefer human/store names over eBay UserIDs in bubble labels
+                      const senderLabel = isSeller
+                        ? (
+                            String(selectedThread?.sellerUsername || '').trim() ||
+                            String(selectedThread?.sellerEbayUsername || '').trim() ||
+                            String(msg.senderUsername || '').trim() ||
+                            'Seller'
+                          )
+                        : (
+                            String(selectedThread?.buyerName || '').trim() ||
+                            String(msg.senderUsername || '').trim() ||
+                            String(selectedThread?.buyerUsername || '').trim() ||
+                            'Buyer'
+                          );
+                      return (
                       <Box
-                        key={msg._id}
+                        key={msg._id || msg.messageId}
                         sx={{
-                          alignSelf: msg.sender === 'SELLER' ? 'flex-end' : 'flex-start',
-                          maxWidth: { xs: '85%', sm: '75%', md: '70%' }
+                          display: 'flex',
+                          justifyContent: isSeller ? 'flex-end' : 'flex-start',
+                          width: '100%'
                         }}
                       >
+                        <Box sx={{ maxWidth: { xs: '85%', sm: '75%', md: '70%' } }}>
                         <Paper
                           elevation={1}
                           sx={{
                             p: { xs: 1, md: 1.5 },
-                            bgcolor: msg.sender === 'SELLER' ? '#1976d2' : '#ffffff',
-                            color: msg.sender === 'SELLER' ? '#fff' : 'text.primary',
+                            bgcolor: isSeller ? '#1976d2' : '#ffffff',
+                            color: isSeller ? '#fff' : 'text.primary',
                             borderRadius: 2,
                             position: 'relative'
                           }}
                         >
                           <Typography
+                            variant="caption"
+                            sx={{
+                              display: 'block',
+                              mb: 0.5,
+                              opacity: 0.85,
+                              fontWeight: 600,
+                              fontSize: '0.7rem'
+                            }}
+                          >
+                            {senderLabel} ({isSeller ? 'seller' : 'buyer'})
+                          </Typography>
+                          <Typography
                             variant="body1"
                             sx={{
                               whiteSpace: 'pre-wrap',
                               wordBreak: 'break-word',
-                              fontSize: { xs: '0.875rem', md: '1rem' }
+                              fontSize: { xs: '0.8rem', md: '0.875rem' },
+                              lineHeight: 1.45
                             }}
                           >
                             {msg.body}
                           </Typography>
 
-                          {/* IMAGES */}
-                          {msg.mediaUrls && msg.mediaUrls.length > 0 && (
+                          {/* Attachments / images */}
+                          {((msg.mediaUrls && msg.mediaUrls.length > 0) ||
+                            (Array.isArray(msg.messageMedia) && msg.messageMedia.length > 0)) && (
                             <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                              {msg.mediaUrls.map((url, idx) => {
-                                const fileName = url.split('/').pop() || 'Attachment';
-                                return (
-                                  <Chip
-                                    key={idx}
-                                    icon={<AttachFileIcon />}
-                                    label={fileName}
-                                    onClick={() => window.open(url, '_blank')}
-                                    sx={{
-                                      cursor: 'pointer',
-                                      bgcolor: msg.sender === 'SELLER' ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.08)',
-                                      color: 'inherit',
-                                      maxWidth: { xs: 150, md: 200 },
-                                      fontSize: { xs: '0.7rem', md: '0.75rem' }
-                                    }}
-                                  />
-                                );
-                              })}
+                              {(msg.mediaUrls?.length
+                                ? msg.mediaUrls.map((url) => ({ url, name: '' }))
+                                : (msg.messageMedia || []).map((m) => ({
+                                    url: m?.mediaUrl,
+                                    name: m?.mediaName || '',
+                                    type: m?.mediaType
+                                  }))
+                              )
+                                .filter((m) => m?.url)
+                                .map((media, idx) => {
+                                  const url = String(media.url);
+                                  const name = media.name || url.split('/').pop() || 'Attachment';
+                                  const type = String(media.type || '').toUpperCase();
+                                  const isImage =
+                                    type === 'IMAGE' ||
+                                    /\.(jpe?g|png|gif|webp|bmp)(\?|$)/i.test(url) ||
+                                    /\.(jpe?g|png|gif|webp|bmp)(\?|$)/i.test(name) ||
+                                    /i\.ebayimg\.com/i.test(url) ||
+                                    /\$\_\d+\.(jpe?g|png|gif|webp)/i.test(url);
+
+                                  if (isImage) {
+                                    return (
+                                      <Box
+                                        key={idx}
+                                        component="a"
+                                        href={url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        sx={{
+                                          display: 'block',
+                                          borderRadius: 1,
+                                          overflow: 'hidden',
+                                          border: '1px solid',
+                                          borderColor: isSeller ? 'rgba(255,255,255,0.35)' : 'divider',
+                                          lineHeight: 0,
+                                          maxWidth: '100%'
+                                        }}
+                                      >
+                                        <Box
+                                          component="img"
+                                          src={url}
+                                          alt={name}
+                                          loading="lazy"
+                                          sx={{
+                                            display: 'block',
+                                            maxWidth: { xs: 180, md: 260 },
+                                            maxHeight: 200,
+                                            width: 'auto',
+                                            height: 'auto',
+                                            objectFit: 'contain',
+                                            bgcolor: '#fff'
+                                          }}
+                                        />
+                                      </Box>
+                                    );
+                                  }
+
+                                  return (
+                                    <Chip
+                                      key={idx}
+                                      icon={<AttachFileIcon />}
+                                      label={name.length > 28 ? `${name.slice(0, 28)}…` : name}
+                                      onClick={() => window.open(url, '_blank')}
+                                      sx={{
+                                        cursor: 'pointer',
+                                        bgcolor: isSeller ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.08)',
+                                        color: 'inherit',
+                                        maxWidth: { xs: 150, md: 200 },
+                                        fontSize: { xs: '0.7rem', md: '0.75rem' }
+                                      }}
+                                    />
+                                  );
+                                })}
                             </Box>
                           )}
                         </Paper>
@@ -1576,115 +2173,58 @@ export default function BuyerChatPage() {
                           sx={{
                             display: 'block',
                             mt: 0.5,
-                            textAlign: msg.sender === 'SELLER' ? 'right' : 'left',
+                            textAlign: isSeller ? 'right' : 'left',
                             fontSize: { xs: '0.7rem', md: '0.75rem' }
                           }}
                         >
                           {new Date(msg.messageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} PT
-                          {msg.sender === 'SELLER' && (msg.read ? ' • Read' : ' • Sent')}
+                          {isSeller && (msg.read ? ' • Read' : ' • Sent')}
                         </Typography>
+                        </Box>
                       </Box>
-                    ))}
+                      );
+                    })}
                     <div ref={messagesEndRef} />
                   </Stack>
                 )}
               </Box>
 
               <Box sx={{
-                p: { xs: 1, md: 1.5 },
+                p: { xs: 1, md: 1.25 },
                 borderTop: 1,
                 borderColor: 'divider',
-                bgcolor: '#fff',
+                bgcolor: 'background.paper',
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 1,
                 flexShrink: 0
               }}>
-                {selectedThread.itemId === 'DIRECT_MESSAGE' ? (
-                  <Alert severity="warning" sx={{ width: '100%' }}>
-                    <strong>Direct messages cannot be replied to via API.</strong> These are account-level messages without item context. Please respond through eBay's messaging center directly.
-                  </Alert>
-                ) : (
-                  <>
-                    {/* ATTACHMENT PREVIEWS */}
-                    {attachments.length > 0 && (
-                      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1 }}>
-                        {attachments.map((att, idx) => (
-                          <Chip
-                            key={idx}
-                            label={att.name}
-                            onDelete={() => handleRemoveAttachment(idx)}
-                            variant="outlined"
-                            size="small"
-                            sx={{ maxWidth: { xs: 150, md: 200 } }}
-                          />
-                        ))}
-                      </Box>
-                    )}
-
-                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end' }}>
-                      <input
-                        type="file"
-                        multiple
-                        accept="image/*"
-                        style={{ display: 'none' }}
-                        ref={fileInputRef}
-                        onChange={handleFileSelect}
-                      />
-                      <IconButton
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={uploading || sending}
-                        sx={{ alignSelf: 'flex-end', mb: 0.5 }}
-                      >
-                        {uploading ? <CircularProgress size={24} /> : <AttachFileIcon />}
-                      </IconButton>
-
-                      <TextField
-                        fullWidth
-                        multiline
-                        maxRows={isMobile ? 3 : 5}
-                        placeholder="Type a message..."
-                        value={newMessage}
-                        onChange={(e) => setNewMessage(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            handleSendMessage();
-                          }
-                        }}
-                        disabled={sending}
-                        size={isMobile ? 'small' : 'medium'}
-                      />
-
-                      <Button
-                        variant="contained"
-                        sx={{
-                          px: { xs: 2, md: 3 },
-                          alignSelf: 'flex-end',
-                          mb: 0.5,
-                          minWidth: { xs: 'auto', md: 'auto' }
-                        }}
-                        endIcon={sending ? <CircularProgress size={20} color="inherit" /> : <SendIcon />}
-                        onClick={handleSendMessage}
-                        disabled={sending || (!newMessage.trim() && attachments.length === 0)}
-                      >
-                        {isMobile ? '' : 'Send'}
-                      </Button>
-                    </Box>
-                  </>
-                )}
+                <ChatComposer
+                  isMobile={isMobile}
+                  isDirectMessage={selectedThread.itemId === 'DIRECT_MESSAGE'}
+                  attachments={attachments}
+                  uploading={uploading}
+                  sending={sending}
+                  newMessage={newMessage}
+                  fileInputRef={fileInputRef}
+                  onFileSelect={onFileSelect}
+                  onRemoveAttachment={onRemoveAttachment}
+                  onChangeMessage={onChangeMessage}
+                  onSend={onSendMessage}
+                />
               </Box>
             </>
           ) : (
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', bgcolor: '#fafafa' }}>
-              <Stack alignItems="center" spacing={1}>
-                <QuestionAnswerIcon sx={{ fontSize: { xs: 40, md: 60 }, color: 'text.secondary', opacity: 0.2 }} />
-                <Typography color="text.secondary" sx={{ fontSize: { xs: '0.875rem', md: '1rem' } }}>
-                  {isMobile ? 'Select a conversation' : 'Select a conversation or search an Order ID'}
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', bgcolor: 'action.hover' }}>
+              <Stack alignItems="center" spacing={1} sx={{ px: 2 }}>
+                <QuestionAnswerIcon sx={{ fontSize: { xs: 40, md: 52 }, color: 'text.disabled' }} />
+                <Typography color="text.secondary" variant="body2">
+                  Select a conversation from the inbox
                 </Typography>
                 {!sidebarOpen && (
                   <Button
                     variant="contained"
+                    size="small"
                     onClick={() => setSidebarOpen(true)}
                     sx={{ mt: 1 }}
                     startIcon={<MenuIcon />}
@@ -1701,7 +2241,7 @@ export default function BuyerChatPage() {
       </Paper>
 
       {/* Snackbar for sync results */}
-      < Snackbar
+      <Snackbar
         open={snackbarOpen}
         autoHideDuration={8000}
         onClose={() => setSnackbarOpen(false)}
@@ -1720,7 +2260,7 @@ export default function BuyerChatPage() {
         >
           {snackbarMsg}
         </Alert>
-      </Snackbar >
+      </Snackbar>
 
       {/* Copy Feedback Snackbar */}
       <Snackbar
@@ -1738,6 +2278,6 @@ export default function BuyerChatPage() {
           orderId={selectedOrderId}
         />
       )}
-    </Box >
+    </Box>
   );
 }

@@ -30,7 +30,18 @@ const ConversationMetaSchema = new mongoose.Schema(
     // Resolution Details
     notes: { type: String, default: '' },
     resolvedAt: Date,
-    resolvedBy: String
+    resolvedBy: String,
+
+    // Audit trail for the workflow dropdowns (About / Status / Picked Up By)
+    changeLog: [
+      {
+        field: { type: String, enum: ['About', 'Status', 'Picked Up By'] },
+        oldValue: { type: String, default: null },
+        newValue: { type: String, default: null },
+        changedBy: { type: String, default: 'Unknown' },
+        changedAt: { type: Date, default: Date.now }
+      }
+    ]
   },
   { timestamps: true }
 );

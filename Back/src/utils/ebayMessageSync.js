@@ -2,6 +2,9 @@ import axios from 'axios';
 import { parseStringPromise } from 'xml2js';
 import Message from '../models/Message.js';
 import Order from '../models/Order.js';
+import Seller from '../models/Seller.js';
+import { EbayMessageConversationMessage } from '../models/EbayMessageConversation.js';
+import { upsertCommerceConversationCache, normalizeCommerceConversation } from './buyerChatCommerce.js';
 
 const EBAY_XML_HEADERS = {
   'X-EBAY-API-SITEID': '0',
@@ -9,119 +12,46 @@ const EBAY_XML_HEADERS = {
   'Content-Type': 'text/xml'
 };
 
-function decodeHtmlEntities(text = '') {
-  return String(text)
+export function extractTextFromHtml(html) {
+  if (!html) return '';
+
+  if (!/<[^>]+>/.test(html)) {
+    return html.trim();
+  }
+
+  let cleanText = '';
+
+  const userInputMatch = html.match(/<div\s+id=["']UserInputtedText["'][^>]*>(.*?)<\/div>/is);
+  if (userInputMatch && userInputMatch[1]) {
+    cleanText = userInputMatch[1];
+  } else {
+    const v4Match = html.match(/<div\s+id=["']V4PrimaryMessage["'][^>]*>.*?<strong>Dear[^<]*<\/strong>\s*(?:<br\s*\/?>)*\s*(.*?)\s*(?:<br\s*\/?>)*\s*<\/font>/is);
+    if (v4Match && v4Match[1]) {
+      cleanText = v4Match[1];
+    } else {
+      cleanText = html;
+    }
+  }
+
+  cleanText = cleanText.replace(/<[^>]+>/g, ' ');
+  cleanText = cleanText
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&copy;/g, '(c)');
-}
-
-function stripEbayNotificationNoise(text = '') {
-  let cleanText = decodeHtmlEntities(text).replace(/\r\n?/g, '\n');
-  const cssMarkers = [
-    '@media only screen',
-    '@-moz-document',
-    'body[yahoo]',
-    'td.wrapText',
-    '.ExternalClass',
-    '.ReadMsgBody',
-    'mso-table-lspace'
-  ];
-
-  const cssStart = cssMarkers
-    .map((marker) => cleanText.toLowerCase().indexOf(marker.toLowerCase()))
-    .filter((index) => index >= 0)
-    .sort((a, b) => a - b)[0];
-  if (cssStart !== undefined) {
-    cleanText = cleanText.slice(0, cssStart);
-  }
-
-  const footerMarkers = [
-    'Order status:',
-    'We scan messages to enforce policies.',
-    'Email reference id:',
-    "We don't check this mailbox",
-    'eBay sent this message to',
-    'eBay is committed to your privacy'
-  ];
-  const footerStart = footerMarkers
-    .map((marker) => cleanText.toLowerCase().indexOf(marker.toLowerCase()))
-    .filter((index) => index >= 0)
-    .sort((a, b) => a - b)[0];
-  if (footerStart !== undefined) {
-    cleanText = cleanText.slice(0, footerStart);
-  }
-
+    .replace(/&apos;/g, "'");
   cleanText = cleanText
-    .replace(/\bNew message:\s*New message\b/gi, '')
     .replace(/\s+/g, ' ')
+    .replace(/\n\s*\n/g, '\n')
     .trim();
-
-  const lower = cleanText.toLowerCase();
-  const cssSignalCount = ['!important', '{', '}', 'padding:', 'width:', 'font-family:', 'word-wrap:']
-    .filter((token) => lower.includes(token)).length;
-  if (cssSignalCount >= 3) return '';
 
   return cleanText;
 }
 
-export function extractTextFromHtml(html) {
-  if (!html) return '';
-
-  if (!/<[^>]+>/.test(html)) {
-    return stripEbayNotificationNoise(html);
-  }
-
-  let cleanText = '';
-  const htmlWithoutStyles = String(html)
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ');
-
-  const userInputMatch = htmlWithoutStyles.match(/<div\s+id=["']UserInputtedText["'][^>]*>(.*?)<\/div>/is);
-  if (userInputMatch && userInputMatch[1]) {
-    cleanText = userInputMatch[1];
-  } else {
-    const v4Match = htmlWithoutStyles.match(/<div\s+id=["']V4PrimaryMessage["'][^>]*>.*?<strong>Dear[^<]*<\/strong>\s*(?:<br\s*\/?>)*\s*(.*?)\s*(?:<br\s*\/?>)*\s*<\/font>/is);
-    if (v4Match && v4Match[1]) {
-      cleanText = v4Match[1];
-    } else {
-      cleanText = htmlWithoutStyles;
-    }
-  }
-
-  cleanText = cleanText.replace(/<[^>]+>/g, ' ');
-  return stripEbayNotificationNoise(cleanText);
-}
-
 function normalizeBody(body = '') {
   return extractTextFromHtml(body).replace(/\s+/g, ' ').trim().toLowerCase();
-}
-
-function looksLikeSellerTemplate(body = '') {
-  const normalized = normalizeBody(body);
-  if (!normalized) return false;
-
-  const sellerTemplateSignals = [
-    "we're pleased to inform you that your order has been processed",
-    'your package has been successfully delivered',
-    'tracking number will be updated on your ebay order page',
-    'thank you for choosing us',
-    'customer support team',
-    'if you have any questions or concerns, please contact us directly through ebay messages',
-    'before opening any cases such as inr',
-    'thank you for your recent purchase',
-    'orders are typically shipped within',
-    'your return request has been approved',
-    'we have approved your return request',
-    'we will keep you updated'
-  ];
-
-  return sellerTemplateSignals.some((signal) => normalized.includes(signal));
 }
 
 function parseXmlDate(value) {
@@ -199,15 +129,8 @@ async function resolveThreadContext({ itemID, senderID, itemTitle, sellerId, mes
       }
     }
 
-    if (!order && sellerId) {
-      const fallbackOrders = await Order.find({
-        seller: sellerId,
-        'lineItems.legacyItemId': itemID
-      }).select('orderId').sort({ dateSold: -1 }).limit(2).lean();
-      if (fallbackOrders.length === 1) {
-        order = fallbackOrders[0];
-      }
-    }
+    // Do NOT fall back to "any order for this item" — that stamps another
+    // buyer's order onto an inquiry (same bug as dame254 / Nguyet Tran).
 
     if (order) {
       orderId = order.orderId;
@@ -264,60 +187,13 @@ async function saveThreadMessage({
 }) {
   const normalized = normalizeBody(body);
   if (!normalized) return false;
-  const finalSender = looksLikeSellerTemplate(body) ? 'SELLER' : sender;
-  const finalRead = finalSender === 'SELLER' ? true : Boolean(read);
 
   if (externalMessageId) {
-    const byExternal = await Message.findOne({ externalMessageId }).select('sender read subject orderId itemId itemTitle messageType conversationId').lean();
-    if (byExternal) {
-      const repairFields = {};
-      if (orderId && byExternal.orderId !== orderId) {
-        repairFields.orderId = orderId;
-        repairFields.messageType = messageType || 'ORDER';
-      }
-      if (itemId && byExternal.itemId !== itemId) repairFields.itemId = itemId;
-      if (itemTitle && !byExternal.itemTitle) repairFields.itemTitle = itemTitle;
-      if (conversationId && !byExternal.conversationId) repairFields.conversationId = conversationId;
-
-      if (byExternal.sender !== finalSender || Object.keys(repairFields).length > 0) {
-        await Message.updateOne(
-          { _id: byExternal._id },
-          {
-            $set: {
-              ...repairFields,
-              sender: finalSender,
-              subject: subject || (finalSender === 'SELLER' ? 'Reply' : 'Message'),
-              read: finalRead
-            }
-          }
-        );
-        return true;
-      }
-      return false;
-    }
+    const byExternal = await Message.findOne({ externalMessageId }).select('_id').lean();
+    if (byExternal) return false;
   }
 
-  const threadQuery = buildThreadQuery({ sellerId, buyerUsername, orderId, itemId });
-  const sameBodyRows = await Message.find(threadQuery).select('body sender read subject externalMessageId').lean();
-  const sameBody = sameBodyRows.find((row) => normalizeBody(row.body) === normalized);
-  if (sameBody) {
-    if (sameBody.sender === finalSender) return false;
-
-    await Message.updateOne(
-      { _id: sameBody._id },
-      {
-        $set: {
-          sender: finalSender,
-          subject: subject || (finalSender === 'SELLER' ? 'Reply' : 'Message'),
-          read: finalRead,
-          ...(externalMessageId && !sameBody.externalMessageId ? { externalMessageId } : {})
-        }
-      }
-    );
-    return true;
-  }
-
-  if (await threadHasBody({ sellerId, buyerUsername, orderId, itemId, sender: finalSender, body })) {
+  if (await threadHasBody({ sellerId, buyerUsername, orderId, itemId, sender, body })) {
     return false;
   }
 
@@ -329,11 +205,11 @@ async function saveThreadMessage({
     buyerUsername,
     conversationId: conversationId || undefined,
     externalMessageId: externalMessageId || undefined,
-    sender: finalSender,
-    subject: subject || (finalSender === 'SELLER' ? 'Reply' : 'Message'),
+    sender,
+    subject: subject || (sender === 'SELLER' ? 'Reply' : 'Message'),
     body: extractTextFromHtml(body),
     mediaUrls,
-    read: finalRead,
+    read: sender === 'SELLER' ? true : Boolean(read),
     messageType,
     messageDate: messageDate || new Date()
   });
@@ -356,10 +232,99 @@ async function saveThreadMessage({
   return true;
 }
 
+function getSellerIdentityNames(seller) {
+  return [
+    seller?.user?.username,
+    seller?.user?.email,
+    seller?.ebayUserId,
+    seller?.ebayUsername
+  ]
+    .filter(Boolean)
+    .map((s) => String(s).toLowerCase());
+}
+
+/**
+ * eBay GetMemberMessages: for buyer?seller questions SenderID is the buyer.
+ * For seller-initiated AAQ, SenderID is often the seller and RecipientID is the buyer.
+ * Using SenderID blindly stores the store name as buyerUsername in the inbox.
+ */
+function resolveExchangeBuyer(question, seller) {
+  const senderID = question?.SenderID?.[0] || question?.SenderID || '';
+  const recipientID =
+    question?.RecipientID?.[0] ||
+    question?.RecipientID ||
+    question?.SendToName?.[0] ||
+    question?.SendToName ||
+    '';
+  const sellerNames = getSellerIdentityNames(seller);
+  const senderIsSeller = senderID && sellerNames.includes(String(senderID).toLowerCase());
+  const recipientIsSeller = recipientID && sellerNames.includes(String(recipientID).toLowerCase());
+
+  // Seller-initiated AAQ: RecipientID is the real buyer
+  if (senderIsSeller && recipientID && !recipientIsSeller) {
+    return { buyerUsername: String(recipientID), questionFromSeller: true };
+  }
+
+  // Never persist the store name as buyerUsername (causes inquiry inbox titles to show the seller)
+  if (senderIsSeller) {
+    return { buyerUsername: '', questionFromSeller: true };
+  }
+
+  if (recipientIsSeller && senderID && !sellerNames.includes(String(senderID).toLowerCase())) {
+    return { buyerUsername: String(senderID), questionFromSeller: false };
+  }
+
+  const buyer = String(senderID || recipientID || '');
+  if (buyer && sellerNames.includes(buyer.toLowerCase())) {
+    return { buyerUsername: '', questionFromSeller: false };
+  }
+
+  return { buyerUsername: buyer, questionFromSeller: false };
+}
+
 async function saveBuyerQuestionMessage(msg, seller, question) {
   const msgID = question.MessageID?.[0];
-  const senderID = question.SenderID?.[0];
-  if (!msgID || !senderID) return false;
+  const { buyerUsername, questionFromSeller } = resolveExchangeBuyer(question, seller);
+  if (!msgID || !buyerUsername) return false;
+
+  // If the "question" envelope is actually seller-initiated, don't save it as a buyer message here.
+  // Seller body is handled via responses / dedicated seller save path.
+  if (questionFromSeller) {
+    const rawBody = question.Body?.[0];
+    const body = extractTextFromHtml(rawBody);
+    if (!body) return false;
+
+    const itemID = msg.Item?.[0]?.ItemID?.[0];
+    const itemTitle = msg.Item?.[0]?.Title?.[0];
+    const subject = question.Subject?.[0];
+    const mediaUrls = collectMediaUrls(msg, question);
+    const messageDate = parseXmlDate(question.CreationDate?.[0])
+      || parseXmlDate(msg.CreationDate?.[0])
+      || new Date();
+    const context = await resolveThreadContext({
+      itemID,
+      senderID: buyerUsername,
+      itemTitle,
+      sellerId: seller._id,
+      messageDate
+    });
+
+    return saveThreadMessage({
+      sellerId: seller._id,
+      buyerUsername,
+      orderId: context.orderId,
+      itemId: context.finalItemId,
+      itemTitle: context.finalItemTitle,
+      messageType: context.messageType,
+      sender: 'SELLER',
+      subject,
+      body,
+      mediaUrls,
+      read: true,
+      messageDate,
+      externalMessageId: msgID
+    });
+  }
 
   const rawBody = question.Body?.[0];
   const body = extractTextFromHtml(rawBody);
@@ -374,11 +339,17 @@ async function saveBuyerQuestionMessage(msg, seller, question) {
     || parseXmlDate(msg.CreationDate?.[0])
     || new Date();
 
-  const context = await resolveThreadContext({ itemID, senderID, itemTitle, sellerId: seller._id, messageDate });
+  const context = await resolveThreadContext({
+    itemID,
+    senderID: buyerUsername,
+    itemTitle,
+    sellerId: seller._id,
+    messageDate
+  });
 
   return saveThreadMessage({
     sellerId: seller._id,
-    buyerUsername: senderID,
+    buyerUsername,
     orderId: context.orderId,
     itemId: context.finalItemId,
     itemTitle: context.finalItemTitle,
@@ -398,7 +369,7 @@ async function saveSellerResponsesFromExchange(msg, seller, question, context) {
   if (responses.length === 0) return 0;
 
   const questionMsgId = question.MessageID?.[0];
-  const buyerUsername = question.SenderID?.[0];
+  const { buyerUsername } = resolveExchangeBuyer(question, seller);
   const subject = question.Subject?.[0];
   if (!questionMsgId || !buyerUsername) return 0;
 
@@ -439,9 +410,19 @@ export async function processEbayMessage(msg, seller) {
 
     const itemID = msg.Item?.[0]?.ItemID?.[0];
     const itemTitle = msg.Item?.[0]?.Title?.[0];
-    const senderID = question.SenderID?.[0];
-    const messageDate = parseXmlDate(question.CreationDate?.[0]) || parseXmlDate(msg.CreationDate?.[0]) || new Date();
-    const context = await resolveThreadContext({ itemID, senderID, itemTitle, sellerId: seller._id, messageDate });
+    const { buyerUsername } = resolveExchangeBuyer(question, seller);
+    if (!buyerUsername) return { buyerNew: false, sellerNew: 0 };
+
+    const messageDate = parseXmlDate(question.CreationDate?.[0])
+      || parseXmlDate(msg.CreationDate?.[0])
+      || new Date();
+    const context = await resolveThreadContext({
+      itemID,
+      senderID: buyerUsername,
+      itemTitle,
+      sellerId: seller._id,
+      messageDate
+    });
 
     const buyerNew = await saveBuyerQuestionMessage(msg, seller, question);
     const sellerNew = await saveSellerResponsesFromExchange(msg, seller, question, context);
@@ -472,11 +453,11 @@ function inferSenderFromSegment(segment, { sellerUsername, buyerUsername, envelo
   const buyer = String(buyerUsername || '').toLowerCase();
   const envelope = String(envelopeSender || '').toLowerCase();
 
-  if (envelope && envelope === seller) return 'SELLER';
-  if (envelope && envelope === buyer) return 'BUYER';
   if (seller && (lower.includes(seller) || lower.startsWith(`hi ${seller}`))) return 'SELLER';
   if (buyer && (lower.includes(buyer) || lower.includes(`@${buyer}`))) return 'BUYER';
-  return 'BUYER';
+  if (envelope && envelope === seller) return 'SELLER';
+  if (envelope && envelope === buyer) return 'BUYER';
+  return envelope === seller ? 'SELLER' : 'BUYER';
 }
 
 async function fetchMyMessagesByExternalIds(token, externalMessageIds) {
@@ -655,10 +636,9 @@ export async function syncMyMessagesForThread({
     const segments = splitThreadText(text);
     const senderLower = String(envelopeSender).toLowerCase();
     const buyerLower = String(buyerUsername).toLowerCase();
-    const envelopeIsSeller = Boolean(senderLower)
-      && (senderLower !== buyerLower
+    const envelopeIsSeller = senderLower !== buyerLower
       || messageTypeCode.toLowerCase().includes('response')
-      || messageTypeCode.toLowerCase().includes('contact'));
+      || messageTypeCode.toLowerCase().includes('contact');
 
     if (segments.length > 1) {
       for (let idx = 0; idx < segments.length; idx++) {
@@ -755,9 +735,18 @@ function resolveBuyerFromCommerceMessage(msg, sellerEbayUserId, sellerAppUsernam
   const recipient = String(msg?.recipientUsername || '');
   const sellerIds = [sellerEbayUserId, sellerAppUsername].filter(Boolean).map((s) => s.toLowerCase());
 
-  if (sellerIds.includes(sender.toLowerCase())) return recipient;
-  if (sellerIds.includes(recipient.toLowerCase())) return sender;
-  return sender || recipient;
+  let buyer = '';
+  if (sellerIds.includes(sender.toLowerCase())) buyer = recipient;
+  else if (sellerIds.includes(recipient.toLowerCase())) buyer = sender;
+  else buyer = sender || recipient;
+
+  // Never treat the seller identity as the buyer
+  if (buyer && sellerIds.includes(buyer.toLowerCase())) {
+    const other = [sender, recipient].find((name) => name && !sellerIds.includes(name.toLowerCase()));
+    return other || '';
+  }
+
+  return buyer;
 }
 
 function resolveSenderFromCommerceMessage(msg, buyerUsername) {
@@ -776,7 +765,13 @@ async function saveCommerceMessage(seller, msg, conversationSummary, sellerEbayU
   const body = extractTextFromHtml(msg?.messageBody || '');
   if (!buyerUsername || !body) return { buyerNew: false, sellerNew: false };
 
-  const context = await resolveThreadContext({ itemID: itemId, senderID: buyerUsername, itemTitle, sellerId: seller._id, messageDate: parseXmlDate(msg?.createdDate) || new Date() });
+  const context = await resolveThreadContext({
+    itemID: itemId,
+    senderID: buyerUsername,
+    itemTitle,
+    sellerId: seller._id,
+    messageDate: parseXmlDate(msg?.createdDate) || new Date()
+  });
   const sender = resolveSenderFromCommerceMessage(msg, buyerUsername);
   const read = sender === 'SELLER' || String(msg?.readStatus || '').toUpperCase() === 'READ';
 
@@ -834,6 +829,35 @@ async function syncCommerceConversationMessages(seller, token, conversationSumma
       const one = await saveCommerceMessage(seller, msg, conversationSummary, sellerEbayUserId);
       buyerNew += one.buyerNew ? 1 : 0;
       sellerNew += one.sellerNew ? 1 : 0;
+
+      const messageId = String(msg?.messageId || '').trim();
+      if (messageId) {
+        try {
+          await EbayMessageConversationMessage.findOneAndUpdate(
+            { seller: seller._id, conversationId, messageId },
+            {
+              $set: {
+                seller: seller._id,
+                conversationId,
+                conversationType: 'FROM_MEMBERS',
+                messageId,
+                senderUsername: msg.senderUsername || '',
+                recipientUsername: msg.recipientUsername || '',
+                subject: msg.subject || '',
+                messageBody: msg.messageBody || '',
+                readStatus: msg.readStatus ?? null,
+                createdDate: msg.createdDate ? new Date(msg.createdDate) : null,
+                messageMedia: Array.isArray(msg.messageMedia) ? msg.messageMedia : [],
+                lastSyncedAt: new Date(),
+                raw: msg
+              }
+            },
+            { upsert: true, setDefaultsOnInsert: true }
+          );
+        } catch (_) {
+          /* ignore cache write errors */
+        }
+      }
     }
 
     if (messages.length < 50) break;
@@ -846,23 +870,37 @@ async function syncCommerceConversationMessages(seller, token, conversationSumma
 export async function syncCommerceConversationsForSeller(seller, token, {
   buyerUsername,
   summaryOnly = false,
-  maxConversations = 200
+  maxConversations = 200,
+  startTime: startTimeOpt,
+  endTime: endTimeOpt
 } = {}) {
   const sellerName = seller.user?.username || seller._id;
-  const sellerEbayUserId = summaryOnly ? null : await fetchSellerEbayUserId(token);
+  // Always resolve eBay UserID ? summary path was passing null into saveCommerceMessage
+  // which broke buyer detection when the app username differs from the eBay store id.
+  const sellerEbayUserId =
+    seller.ebayUserId ||
+    (await fetchSellerEbayUserId(token).catch(() => null));
+  if (sellerEbayUserId && !seller.ebayUserId) {
+    Seller.updateOne({ _id: seller._id }, { $set: { ebayUserId: sellerEbayUserId } }).catch(() => {});
+    seller.ebayUserId = sellerEbayUserId;
+  }
   const now = new Date();
-  const startTime = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const startTime = startTimeOpt
+    ? new Date(startTimeOpt).toISOString()
+    : new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const endTime = endTimeOpt ? new Date(endTimeOpt).toISOString() : now.toISOString();
 
   let offset = 0;
   let buyerNew = 0;
   let sellerNew = 0;
   let conversationsFetched = 0;
+  let conversationsUpserted = 0;
 
   while (offset < 1000 && conversationsFetched < maxConversations) {
     const params = {
       conversation_type: 'FROM_MEMBERS',
       start_time: startTime,
-      end_time: now.toISOString(),
+      end_time: endTime,
       limit: 50,
       offset
     };
@@ -884,20 +922,39 @@ export async function syncCommerceConversationsForSeller(seller, token, {
         buyerNew,
         sellerNew,
         conversationsFetched,
+        conversationsUpserted,
         error: typeof detail === 'string' ? detail : JSON.stringify(detail)
       };
     }
 
     let processedThisPage = 0;
-    for (const conv of conversations) {
+    for (const rawConv of conversations) {
       if (conversationsFetched + processedThisPage >= maxConversations) break;
 
+      const conv = normalizeCommerceConversation(rawConv);
+
+      // Dual-write conversation cache used by Buyer Messages + Message Conversations page
+      try {
+        const saved = await upsertCommerceConversationCache(seller, conv);
+        if (saved) conversationsUpserted++;
+      } catch (cacheErr) {
+        console.warn(`[Commerce Sync] cache upsert failed for ${conv?.conversationId}:`, cacheErr.message);
+      }
+
       if (summaryOnly) {
-        if (!conv.latestMessage) continue;
-        const one = await saveCommerceMessage(seller, conv.latestMessage, conv, sellerEbayUserId);
-        buyerNew += one.buyerNew ? 1 : 0;
-        sellerNew += one.sellerNew ? 1 : 0;
+        // Always count the conversation toward fetch progress even without a
+        // latestMessage seed ? otherwise snackbar says "No new messages" while
+        // rows were written, and pagination can stall.
         processedThisPage++;
+        if (conv.latestMessage) {
+          try {
+            const one = await saveCommerceMessage(seller, conv.latestMessage, conv, sellerEbayUserId);
+            buyerNew += one.buyerNew ? 1 : 0;
+            sellerNew += one.sellerNew ? 1 : 0;
+          } catch (msgErr) {
+            console.warn(`[Commerce Sync] seed message failed for ${conv?.conversationId}:`, msgErr.message);
+          }
+        }
         continue;
       }
 
@@ -912,8 +969,8 @@ export async function syncCommerceConversationsForSeller(seller, token, {
     if (conversations.length === 0 || offset >= total || conversationsFetched >= maxConversations) break;
   }
 
-  console.log(`[Commerce Sync] ${sellerName}: ${conversationsFetched} conversations (${summaryOnly ? 'summary' : 'full'}), saved ${buyerNew} buyer + ${sellerNew} seller messages`);
-  return { buyerNew, sellerNew, conversationsFetched };
+  console.log(`[Commerce Sync] ${sellerName}: ${conversationsFetched} conversations (${summaryOnly ? 'summary' : 'full'}), upserted ${conversationsUpserted}, saved ${buyerNew} buyer + ${sellerNew} seller messages`);
+  return { buyerNew, sellerNew, conversationsFetched, conversationsUpserted };
 }
 
 export async function resolveCommerceConversationId(token, { sellerId, buyerUsername, itemId, orderId }) {
