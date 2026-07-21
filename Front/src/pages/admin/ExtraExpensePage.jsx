@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
     Alert,
     Box,
@@ -35,6 +36,7 @@ import {
     useTheme,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import ReceiptLongIcon from '@mui/icons-material/ReceiptLong';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
 import FileDownloadIcon from '@mui/icons-material/FileDownload';
@@ -488,6 +490,7 @@ function CreditHistoryTable({ onClose }) {
 
 const ExtraExpensePage = () => {
     const theme = useTheme();
+    const navigate = useNavigate();
     const isMobile = useMediaQuery(theme.breakpoints.down('md'));
     const isSmallMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
@@ -909,6 +912,32 @@ const ExtraExpensePage = () => {
                     Extra Expenses
                 </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                    <Button
+                        variant="outlined"
+                        startIcon={<ReceiptLongIcon />}
+                        onClick={() => navigate('/admin/invoice-upload')}
+                        fullWidth={isMobile}
+                        sx={{
+                            px: 3,
+                            py: 1.2,
+                            borderRadius: 2,
+                            fontWeight: 700,
+                            color: '#2563eb',
+                            borderColor: 'rgba(37, 99, 235, 0.5)',
+                            borderWidth: '2px',
+                            background: 'linear-gradient(135deg, rgba(239, 246, 255, 0.35) 0%, rgba(224, 231, 255, 0.35) 100%)',
+                            backdropFilter: 'blur(10px)',
+                            transition: 'all 0.3s ease',
+                            '&:hover': {
+                                borderColor: '#2563eb',
+                                background: 'linear-gradient(135deg, rgba(239, 246, 255, 0.6) 0%, rgba(224, 231, 255, 0.6) 100%)',
+                                transform: 'translateY(-2px)',
+                                boxShadow: '0 6px 16px rgba(37, 99, 235, 0.25)'
+                            }
+                        }}
+                    >
+                        Invoice Upload
+                    </Button>
                     <Button
                         variant="outlined"
                         startIcon={<FileDownloadIcon />}

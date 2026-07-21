@@ -10,6 +10,8 @@ import Message from '../models/Message.js';
 import MarketMetric from '../models/MarketMetric.js';
 import TemplateListing from '../models/TemplateListing.js';
 import ConversationMeta from '../models/ConversationMeta.js';
+import OrderActivityLog from '../models/OrderActivityLog.js';
+import User from '../models/User.js';
 
 const router = Router();
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
@@ -2257,7 +2259,8 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       // Cancellation statuses
       'cancellation_request', 'accepted', 'declined',
       // INR statuses
-      'inr_case_opened', 'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'
+      'inr_case_opened', 'inr_follow_up', 'inr_tracking_id_upload', 'inr_case_open_ebay_step_in',
+      'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'
     ];
     if (!validStatuses.includes(complianceBoardStatus)) {
       return res.status(400).json({ error: 'Invalid status' });
@@ -2323,6 +2326,33 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       return res.status(404).json({ error: 'Order not found' });
     }
 
+    // Log the activity - fetch user details first
+    try {
+      const user = await User.findById(req.user?.userId).select('username email role').lean();
+      if (user) {
+        await OrderActivityLog.create({
+          orderId: order.orderId,
+          orderObjectId: order._id,
+          action: 'board_moved',
+          board: req.body.complianceBoardCategory || 'order_fulfillment',
+          fromStatus: req.body.previousStatus || null,
+          toStatus: req.body.complianceBoardStatus,
+          category: req.body.complianceBoardCategory,
+          changedBy: {
+            userId: req.user?.userId,
+            username: user.username,
+            email: user.email,
+            isAdmin: req.user?.role === 'superadmin' || req.user?.role?.includes('admin'),
+          },
+          details: `Moved to ${req.body.complianceBoardStatus} by ${user.username}`,
+          timestamp: new Date(),
+        });
+      }
+    } catch (logError) {
+      console.warn('Failed to log activity:', logError);
+      // Don't fail the main request if logging fails
+    }
+
     res.json(order);
   } catch (error) {
     console.error('Error updating compliance board status:', error);
@@ -2330,6 +2360,100 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
   }
 });
 
+/**
+ * GET /orders/:orderId/activity-logs
+ * Get activity logs for a specific order
+ */
+router.get('/:orderId/activity-logs', requireAuth, requirePageAccess('ComplianceBoard'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { limit = 50, skip = 0 } = req.query;
+
+    // Find logs by either orderId string or orderObjectId
+    const orderQuery = mongoose.Types.ObjectId.isValid(orderId)
+      ? { orderObjectId: orderId }
+      : { orderId };
+
+    const logs = await OrderActivityLog.find(orderQuery)
+      .sort({ timestamp: -1 })
+      .skip(parseInt(skip))
+      .limit(parseInt(limit))
+      .select('action board fromStatus toStatus category changedBy details noteContent timestamp')
+      .lean();
+
+    const total = await OrderActivityLog.countDocuments(orderQuery);
+
+    res.json({
+      logs,
+      total,
+      page: Math.floor(parseInt(skip) / parseInt(limit)) + 1,
+      pages: Math.ceil(total / parseInt(limit)),
+    });
+  } catch (error) {
+    console.error('Error fetching activity logs:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch activity logs' });
+  }
+});
+
+/**
+ * POST /orders/:orderId/add-note
+ * Add a note/remark to an order's activity log
+ */
+router.post('/:orderId/add-note', requireAuth, requirePageAccess('ComplianceBoard'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { noteContent } = req.body;
+
+    if (!noteContent || noteContent.trim() === '') {
+      return res.status(400).json({ error: 'Note content is required' });
+    }
+
+    const orderQuery = mongoose.Types.ObjectId.isValid(orderId)
+      ? { _id: orderId }
+      : { orderId };
+
+    const order = await Order.findOne(orderQuery);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    // Fetch user details from database to get username and email
+    const user = await User.findById(req.user?.userId).select('username email role').lean();
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    // Determine if user is admin (check if they have admin role)
+    const isAdmin = req.user?.role === 'superadmin' || req.user?.role === 'admin' || req.user?.role?.includes('admin');
+
+    // Create activity log entry for the note
+    const activityLog = await OrderActivityLog.create({
+      orderId: order.orderId,
+      orderObjectId: order._id,
+      action: 'note_added',
+      board: null,
+      fromStatus: null,
+      toStatus: null,
+      category: null,
+      noteContent: noteContent.trim(),
+      changedBy: {
+        userId: req.user?.userId,
+        username: user.username,
+        email: user.email,
+        isAdmin,
+      },
+      details: `Note added by ${user.username}`,
+      timestamp: new Date(),
+    });
+
+    res.json({
+      success: true,
+      log: activityLog,
+      message: 'Note added successfully',
+    });
+  } catch (error) {
+    console.error('Error adding note:', error);
+    res.status(500).json({ error: error.message || 'Failed to add note' });
 
 /**
  * @swagger

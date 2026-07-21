@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import BankAccount from '../models/BankAccount.js';
+import { initGridFS } from './gridfs.js';
 
 /** Drop legacy DB indexes that no longer match the schema (e.g. unique `name` on bankaccounts). */
 async function reconcileModelIndexes() {
@@ -20,6 +21,10 @@ export async function connectToDatabase() {
         maxPoolSize: 20,
     });
     await reconcileModelIndexes();
+    
+    // Initialize GridFS for file storage
+    initGridFS();
+    
     return mongoose.connection;
 }
 

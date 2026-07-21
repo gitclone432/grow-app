@@ -20,6 +20,8 @@ import {
   TextField,
   Dialog,
   DialogContent,
+  DialogTitle,
+  DialogActions,
 } from '@mui/material';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -28,6 +30,7 @@ import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import CommentIcon from '@mui/icons-material/Comment';
 import ChatIcon from '@mui/icons-material/Chat';
+import HistoryIcon from '@mui/icons-material/History';
 import CloseIcon from '@mui/icons-material/Close';
 import { format } from 'date-fns';
 import api from '../../lib/api';
@@ -53,6 +56,7 @@ const COLUMN_STATUS = {
   // Return/Refund statuses
   CASE_OPENED: 'case_opened',
   CASE_NOT_OPENED: 'case_not_opened',
+  RETURN_FOLLOW_UP: 'return_follow_up',
   PROVIDE_RETURN_LABEL: 'provide_return_label',
   BUYER_DROP_OFF: 'buyer_drop_off',
   ITEM_DELIVERED: 'item_delivered',
@@ -65,10 +69,12 @@ const COLUMN_STATUS = {
   DECLINED: 'declined',
   // INR statuses
   INR_CASE_OPENED: 'inr_case_opened',
+  INR_FOLLOW_UP: 'inr_follow_up',
+  INR_TRACKING_ID_UPLOAD: 'inr_tracking_id_upload',
+  INR_CASE_OPEN_EBAY_STEP_IN: 'inr_case_open_ebay_step_in',
   INR_FULLY_REFUNDED: 'inr_fully_refunded',
   INR_PARTIAL_REFUND: 'inr_partial_refund',
   INR_NOT_REFUNDED_RESOLVED: 'inr_not_refunded_resolved',
-  INR_CASE_CLOSED: 'inr_case_closed',
 };
 
 // Message categories for Order Communication
@@ -109,6 +115,21 @@ const ORDER_FULFILLMENT_PROGRESS_OPTIONS = [
 ];
 
 const RETURN_FLOW_OPTIONS = [
+  { id: COLUMN_STATUS.RETURN_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6' },
+  { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: '#3b82f6' },
+  { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7' },
+  { id: COLUMN_STATUS.ITEM_DELIVERED, label: 'Item Delivered', color: '#06b6d4' },
+];
+
+const RETURN_CASE_OPENED_OPTIONS = [
+  { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: '#ef4444' },
+  { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: '#f97316' },
+];
+
+const RETURN_CASE_NOT_OPENED_OPTIONS = [
+  { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: '#ef4444' },
+  { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: '#f97316' },
+  { id: COLUMN_STATUS.RETURN_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6' },
   { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: '#3b82f6' },
   { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7' },
   { id: COLUMN_STATUS.ITEM_DELIVERED, label: 'Item Delivered', color: '#06b6d4' },
@@ -131,6 +152,32 @@ const INR_REFUND_OPTIONS = [
   { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Not Refunded but Resolved', color: '#3b82f6' },
 ];
 
+const INR_ACTION_OPTIONS = [
+  { id: COLUMN_STATUS.INR_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6' },
+  { id: COLUMN_STATUS.INR_TRACKING_ID_UPLOAD, label: 'Tracking ID Upload', color: '#06b6d4' },
+  { id: COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN, label: 'Case Open (Ebay Step In)', color: '#ef4444' },
+];
+
+const INR_PRIMARY_VIEW_OPTIONS = [
+  { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: '#ef4444' },
+  { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: '#f97316' },
+];
+
+const INR_SECONDARY_VIEW_OPTIONS = [
+  { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: '#ef4444' },
+  { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: '#f97316' },
+  { id: COLUMN_STATUS.INR_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6' },
+  { id: COLUMN_STATUS.INR_TRACKING_ID_UPLOAD, label: 'Tracking ID Upload', color: '#06b6d4' },
+  { id: COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN, label: 'Case Open (Ebay Step In)', color: '#ef4444' },
+];
+
+const INR_VIEW_IDS = {
+  PRIMARY: 'inr_view_primary',
+  SECONDARY: 'inr_view_secondary',
+  ACTION: 'inr_view_action',
+  REFUND: 'inr_view_refund',
+};
+
 const BRAND_YELLOW = '#fbbf24';
 const BRAND_YELLOW_DARK = '#f59e0b';
 const BRAND_DARK = '#1e293b';
@@ -141,8 +188,10 @@ const BRAND_GREEN = '#10b981';
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
 const RETURN_LABEL_SLA_MS = 48 * ONE_HOUR_MS;
+const MESSAGE_REPLY_SLA_MS = 8 * ONE_HOUR_MS;
 const RETURN_LABEL_OVERDUE_ALERT_ID = 'return_label_overdue';
 const PAYMENT_STATUS_OVERDUE_ALERT_ID = 'payment_status_overdue';
+const MESSAGE_OVERDUE_ALERT_ID = 'message_overdue';
 const FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS = {
   [COLUMN_STATUS.OUT_OF_STOCK]: 'fulfillment_out_of_stock_overdue',
   [COLUMN_STATUS.CANCELLATION]: 'fulfillment_cancellation_overdue',
@@ -253,6 +302,7 @@ function ComplianceBoardPage() {
     // Return/Refund columns
     [COLUMN_STATUS.CASE_OPENED]: [],
     [COLUMN_STATUS.CASE_NOT_OPENED]: [],
+    [COLUMN_STATUS.RETURN_FOLLOW_UP]: [],
     [COLUMN_STATUS.PROVIDE_RETURN_LABEL]: [],
     [COLUMN_STATUS.BUYER_DROP_OFF]: [],
     [COLUMN_STATUS.ITEM_DELIVERED]: [],
@@ -265,10 +315,12 @@ function ComplianceBoardPage() {
     [COLUMN_STATUS.DECLINED]: [],
     // INR columns
     [COLUMN_STATUS.INR_CASE_OPENED]: [],
+    [COLUMN_STATUS.INR_FOLLOW_UP]: [],
+    [COLUMN_STATUS.INR_TRACKING_ID_UPLOAD]: [],
+    [COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN]: [],
     [COLUMN_STATUS.INR_FULLY_REFUNDED]: [],
     [COLUMN_STATUS.INR_PARTIAL_REFUND]: [],
     [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]: [],
-    [COLUMN_STATUS.INR_CASE_CLOSED]: [],
   });
   const [pagination, setPagination] = useState({ total: 0, page: 1, limit: 500, totalPages: 0 });
   const [currentPage, setCurrentPage] = useState(1);
@@ -289,6 +341,14 @@ function ComplianceBoardPage() {
   // Message modal state
   const [messageModalOpen, setMessageModalOpen] = useState(false);
   const [selectedOrderForMessage, setSelectedOrderForMessage] = useState(null);
+
+  // Activity logs modal state
+  const [logsModalOpen, setLogsModalOpen] = useState(false);
+  const [selectedOrderForLogs, setSelectedOrderForLogs] = useState(null);
+  const [orderActivityLogs, setOrderActivityLogs] = useState([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [newNote, setNewNote] = useState('');
+  const [addingNote, setAddingNote] = useState(false);
 
   // Order Communication specific state
   const [messages, setMessages] = useState({
@@ -313,11 +373,17 @@ function ComplianceBoardPage() {
   const [orderCommunicationWorkCategory, setOrderCommunicationWorkCategory] = useState(MESSAGE_CATEGORIES.INR);
   const [fulfillmentIssueCategory, setFulfillmentIssueCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
   const [fulfillmentProgressCategory, setFulfillmentProgressCategory] = useState(COLUMN_STATUS.NOT_FULFILLED);
+  const [returnCaseOpenedCategory, setReturnCaseOpenedCategory] = useState(COLUMN_STATUS.CASE_OPENED);
+  const [returnCaseNotOpenedCategory, setReturnCaseNotOpenedCategory] = useState(COLUMN_STATUS.CASE_NOT_OPENED);
   const [returnFlowCategory, setReturnFlowCategory] = useState(COLUMN_STATUS.PROVIDE_RETURN_LABEL);
   const [returnResolutionCategory, setReturnResolutionCategory] = useState(COLUMN_STATUS.PARTIAL_REFUND);
   const [cancellationDecisionCategory, setCancellationDecisionCategory] = useState(COLUMN_STATUS.ACCEPTED);
+  const [inrPrimaryCategory, setInrPrimaryCategory] = useState(COLUMN_STATUS.INR_CASE_OPENED);
+  const [inrSecondaryCategory, setInrSecondaryCategory] = useState(COLUMN_STATUS.CASE_NOT_OPENED);
+  const [inrActionCategory, setInrActionCategory] = useState(COLUMN_STATUS.INR_FOLLOW_UP);
   const [inrRefundCategory, setInrRefundCategory] = useState(COLUMN_STATUS.INR_FULLY_REFUNDED);
   const [activeAlertPreviewId, setActiveAlertPreviewId] = useState(null);
+  const [allMessagesForAlerts, setAllMessagesForAlerts] = useState([]);
 
   const buildDateParams = () => {
     const params = {};
@@ -537,6 +603,9 @@ function ComplianceBoardPage() {
         setVisibleOrderCounts((prev) => ({ ...prev, ...buildVisibleCountMap(groupedOrders) }));
         setVisibleMessageCounts((prev) => ({ ...prev, ...buildVisibleCountMap(groupedMessages) }));
         setPagination({ total: 0, page: 1, limit: 0, totalPages: 0 });
+        // Store all messages for alert calculations
+        const allIssueHubMessages = Object.values(groupedMessages).flat();
+        setAllMessagesForAlerts(allIssueHubMessages);
       } catch (err) {
         console.error('Failed to load issue hub:', err);
         setError(err.response?.data?.error || 'Failed to load issue hub');
@@ -584,6 +653,7 @@ function ComplianceBoardPage() {
         // Return/Refund columns
         [COLUMN_STATUS.CASE_OPENED]: [],
         [COLUMN_STATUS.CASE_NOT_OPENED]: [],
+        [COLUMN_STATUS.RETURN_FOLLOW_UP]: [],
         [COLUMN_STATUS.PROVIDE_RETURN_LABEL]: [],
         [COLUMN_STATUS.BUYER_DROP_OFF]: [],
         [COLUMN_STATUS.ITEM_DELIVERED]: [],
@@ -596,14 +666,19 @@ function ComplianceBoardPage() {
         [COLUMN_STATUS.DECLINED]: [],
         // INR columns
         [COLUMN_STATUS.INR_CASE_OPENED]: [],
+        [COLUMN_STATUS.INR_FOLLOW_UP]: [],
+        [COLUMN_STATUS.INR_TRACKING_ID_UPLOAD]: [],
+        [COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN]: [],
         [COLUMN_STATUS.INR_FULLY_REFUNDED]: [],
         [COLUMN_STATUS.INR_PARTIAL_REFUND]: [],
         [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]: [],
-        [COLUMN_STATUS.INR_CASE_CLOSED]: [],
       };
       
       response.data.orders.forEach((order) => {
-        const status = order.complianceBoardStatus || COLUMN_STATUS.TODO;
+        const rawStatus = order.complianceBoardStatus || COLUMN_STATUS.TODO;
+        const status = rawStatus === 'inr_case_closed'
+          ? COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED
+          : rawStatus;
         if (grouped[status]) {
           grouped[status].push(order);
         }
@@ -677,6 +752,9 @@ function ComplianceBoardPage() {
         fulfilled: grouped[COLUMN_STATUS.FULFILLED].length,
         buyerConfirmation: grouped[COLUMN_STATUS.BUYER_CONFIRMATION].length
       });
+
+      // Fetch messages for alert system
+      await fetchMessagesForAlerts();
     } catch (err) {
       console.error('Failed to fetch compliance board orders:', err);
       setError(err.response?.data?.error || 'Failed to load orders');
@@ -684,6 +762,29 @@ function ComplianceBoardPage() {
       setLoading(false);
     }
   }, [selectedCategory, currentPage, dateFilter, selectedSeller, searchOrderId, searchBuyerName]);
+
+  // Fetch messages for alert system (all boards except order_communication)
+  const fetchMessagesForAlerts = async () => {
+    try {
+      const params = {
+        page: 1,
+        limit: MESSAGE_THREAD_LIMIT,
+        excludeClient: false,
+        filterType: 'ALL',
+        complianceBoardMode: true,
+        maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
+        ...buildMessageDateParams(),
+        ...buildBoardFilterParams(),
+      };
+
+      const response = await api.get('/ebay/chat/threads', { params });
+      const threads = response.data.threads || [];
+      setAllMessagesForAlerts(threads);
+    } catch (err) {
+      console.warn('Failed to fetch messages for alerts:', err);
+      setAllMessagesForAlerts([]);
+    }
+  };
 
   // Fetch messages for Order Communication board using existing buyer messages endpoint
   const fetchMessages = async () => {
@@ -844,6 +945,8 @@ function ComplianceBoardPage() {
       setMessages(grouped);
       setPendingMessageMoves({});
       setVisibleMessageCounts(buildVisibleCountMap(grouped));
+      // Store all messages for alert calculations
+      setAllMessagesForAlerts(threads);
     } catch (err) {
       console.error('Failed to fetch messages:', err);
       setError(err.response?.data?.error || 'Failed to load messages');
@@ -921,6 +1024,37 @@ function ComplianceBoardPage() {
     const ms = new Date(value).getTime();
     return Number.isNaN(ms) ? null : ms;
   };
+
+  const getOverdueMessages = () => {
+    const nowMs = Date.now();
+    const allBoardMessages = selectedCategory === 'order_communication' || selectedCategory === 'issue_hub'
+      ? Object.values(messages).flat()
+      : allMessagesForAlerts;
+
+    return allBoardMessages.filter((msg) => {
+      // Only check messages where buyer sent the last message
+      if (msg.sender !== 'BUYER') return false;
+
+      const lastMessageTime = parseTimeMs(msg.lastDate || msg.lastMessageDate || msg.messageDate);
+      if (!lastMessageTime) return false;
+
+      const elapsedMs = nowMs - lastMessageTime;
+      return elapsedMs > MESSAGE_REPLY_SLA_MS;
+    }).map((msg) => {
+      const lastMessageTime = parseTimeMs(msg.lastDate || msg.lastMessageDate || msg.messageDate);
+      const elapsedMs = nowMs - lastMessageTime;
+      return {
+        ...msg,
+        _overdueInfo: {
+          lastMessageTime: msg.lastDate || msg.lastMessageDate || msg.messageDate,
+          elapsedMs,
+          overdueMs: elapsedMs - MESSAGE_REPLY_SLA_MS,
+          alertType: MESSAGE_OVERDUE_ALERT_ID,
+          message: `No reply sent for ${formatElapsed(elapsedMs)}.`,
+        }
+      };
+    });
+  };
   const formatElapsed = (ms) => {
     if (ms < ONE_HOUR_MS) return '<1 hr';
     if (ms < ONE_DAY_MS) {
@@ -935,9 +1069,13 @@ function ComplianceBoardPage() {
   };
   const isReturnOverdueAlert = (alertId) => [RETURN_LABEL_OVERDUE_ALERT_ID, PAYMENT_STATUS_OVERDUE_ALERT_ID].includes(alertId);
   const isFulfillmentIssueOverdueAlert = (alertId) => Boolean(FULFILLMENT_ISSUE_STATUS_BY_ALERT_ID[alertId]);
+  const isMessageOverdueAlert = (alertId) => alertId === MESSAGE_OVERDUE_ALERT_ID;
 
-  const getAlertPreviewItems = (boardCategory, alertId) => (
-    boardCategory === 'order_communication'
+  const getAlertPreviewItems = (boardCategory, alertId) => {
+    if (isMessageOverdueAlert(alertId)) {
+      return getOverdueMessages();
+    }
+    return boardCategory === 'order_communication'
       ? (messages[alertId] || [])
       : boardCategory === 'order_fulfillment' && isFulfillmentIssueOverdueAlert(alertId)
         ? getOverdueFulfillmentIssueOrders(FULFILLMENT_ISSUE_STATUS_BY_ALERT_ID[alertId])
@@ -945,17 +1083,28 @@ function ComplianceBoardPage() {
           ? getOverdueReturnLabelOrders()
           : boardCategory === 'return_refund' && alertId === PAYMENT_STATUS_OVERDUE_ALERT_ID
             ? getOverduePaymentStatusOrders()
-            : (orders[alertId] || [])
-  );
-  const getAlertPreviewVisibleCount = (boardCategory, alertId) => (
-    boardCategory === 'order_communication'
+            : (orders[alertId] || []);
+  };
+  const getAlertPreviewVisibleCount = (boardCategory, alertId) => {
+    if (isMessageOverdueAlert(alertId)) {
+      return visibleMessageCounts[alertId] ?? LOAD_MORE_STEP;
+    }
+    return boardCategory === 'order_communication'
       ? getVisibleMessageCount(alertId)
       : (boardCategory === 'return_refund' && isReturnOverdueAlert(alertId)) ||
         (boardCategory === 'order_fulfillment' && isFulfillmentIssueOverdueAlert(alertId))
         ? (visibleOrderCounts[alertId] ?? LOAD_MORE_STEP)
-        : getVisibleOrderCount(alertId)
-  );
+        : getVisibleOrderCount(alertId);
+  };
   const handleLoadMoreAlertPreviewItems = (boardCategory, alertId, totalItems) => {
+    if (isMessageOverdueAlert(alertId)) {
+      setVisibleMessageCounts((prev) => ({
+        ...prev,
+        [alertId]: Math.min(totalItems, (prev[alertId] ?? LOAD_MORE_STEP) + LOAD_MORE_STEP),
+      }));
+      return;
+    }
+
     if (boardCategory === 'order_communication') {
       handleLoadMoreMessages(alertId);
       return;
@@ -1072,6 +1221,8 @@ function ComplianceBoardPage() {
   };
 
   const getAlertsForCurrentBoard = () => {
+    const overdueMessages = getOverdueMessages();
+    
     if (selectedCategory === 'issue_hub') {
       return ISSUE_HUB_OPTIONS.map((option) => ({
         id: option.id,
@@ -1089,6 +1240,7 @@ function ComplianceBoardPage() {
         { id: MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE, label: 'Return / Refund / Replace', color: '#8b5cf6', count: messages[MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE]?.length || 0, type: 'stat' },
         { id: MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT, label: 'Issue with Product', color: '#ea580c', count: messages[MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT]?.length || 0, type: 'stat' },
         { id: MESSAGE_CATEGORIES.INQUIRY, label: 'Inquiry', color: BRAND_GREEN, count: messages[MESSAGE_CATEGORIES.INQUIRY]?.length || 0, type: 'stat' },
+        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
       ];
     }
 
@@ -1098,6 +1250,7 @@ function ComplianceBoardPage() {
       return [
         { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.CASE_OPENED]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.RETURN_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6', count: orders[COLUMN_STATUS.RETURN_FOLLOW_UP]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: BRAND_BLUE, count: orders[COLUMN_STATUS.PROVIDE_RETURN_LABEL]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7', count: orders[COLUMN_STATUS.BUYER_DROP_OFF]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.ITEM_DELIVERED, label: 'Item Delivered', color: '#06b6d4', count: orders[COLUMN_STATUS.ITEM_DELIVERED]?.length || 0, type: 'stat' },
@@ -1106,6 +1259,7 @@ function ComplianceBoardPage() {
         { id: COLUMN_STATUS.REPLACEMENT, label: 'Replacement', color: '#0f766e', count: orders[COLUMN_STATUS.REPLACEMENT]?.length || 0, type: 'stat' },
         { id: RETURN_LABEL_OVERDUE_ALERT_ID, label: '48h Not Moved', color: '#dc2626', count: overdueReturnLabelOrders.length, type: 'alert' },
         { id: PAYMENT_STATUS_OVERDUE_ALERT_ID, label: 'Payment Status', color: '#b91c1c', count: overduePaymentStatusOrders.length, type: 'alert' },
+        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#7f1d1d', count: overdueMessages.length, type: 'alert' },
       ];
     }
 
@@ -1115,6 +1269,7 @@ function ComplianceBoardPage() {
         { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN, count: orders[COLUMN_STATUS.ACCEPTED]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.DECLINED]?.length || 0, type: 'stat' },
+        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
       ];
     }
 
@@ -1122,10 +1277,13 @@ function ComplianceBoardPage() {
       return [
         { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.INR_CASE_OPENED]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.INR_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6', count: orders[COLUMN_STATUS.INR_FOLLOW_UP]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.INR_TRACKING_ID_UPLOAD, label: 'Tracking ID Upload', color: '#06b6d4', count: orders[COLUMN_STATUS.INR_TRACKING_ID_UPLOAD]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN, label: 'Case Open (Ebay Step In)', color: BRAND_RED, count: orders[COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.INR_FULLY_REFUNDED, label: 'Fully Refunded', color: BRAND_GREEN, count: orders[COLUMN_STATUS.INR_FULLY_REFUNDED]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.INR_PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.INR_PARTIAL_REFUND]?.length || 0, type: 'stat' },
         { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Resolved', color: BRAND_BLUE, count: orders[COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.INR_CASE_CLOSED, label: 'Case Closed', color: '#10b981', count: orders[COLUMN_STATUS.INR_CASE_CLOSED]?.length || 0, type: 'stat' },
+        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
       ];
     }
 
@@ -1143,6 +1301,7 @@ function ComplianceBoardPage() {
       { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.OUT_OF_STOCK], label: 'Out of Stock 48h+', color: '#dc2626', count: overdueOutOfStockOrders.length, type: 'alert' },
       { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.CANCELLATION], label: 'Cancellation 48h+', color: '#b91c1c', count: overdueCancellationOrders.length, type: 'alert' },
       { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.ADDRESS_ISSUE], label: 'Address Issue 48h+', color: '#7f1d1d', count: overdueAddressIssueOrders.length, type: 'alert' },
+      { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#991b1b', count: overdueMessages.length, type: 'alert' },
     ];
   };
 
@@ -1397,6 +1556,21 @@ function ComplianceBoardPage() {
     }
   };
 
+  const resolveOrderColumnStatus = (columnId) => {
+    switch (columnId) {
+      case INR_VIEW_IDS.PRIMARY:
+        return inrPrimaryCategory;
+      case INR_VIEW_IDS.SECONDARY:
+        return inrSecondaryCategory;
+      case INR_VIEW_IDS.ACTION:
+        return inrActionCategory;
+      case INR_VIEW_IDS.REFUND:
+        return inrRefundCategory;
+      default:
+        return columnId;
+    }
+  };
+
   const handleDragEnd = async (result) => {
     const { source, destination, draggableId } = result;
 
@@ -1408,8 +1582,8 @@ function ComplianceBoardPage() {
       return;
     }
 
-    const sourceColumn = source.droppableId;
-    const destColumn = destination.droppableId;
+    const sourceColumn = resolveOrderColumnStatus(source.droppableId);
+    const destColumn = resolveOrderColumnStatus(destination.droppableId);
 
     // Handle Order Communication drag-and-drop differently
     if (selectedCategory === 'order_communication') {
@@ -1418,7 +1592,7 @@ function ComplianceBoardPage() {
     }
 
     if (selectedCategory === 'issue_hub') {
-      if (ISSUE_HUB_MESSAGE_COLUMNS.has(sourceColumn) || ISSUE_HUB_MESSAGE_COLUMNS.has(destColumn)) {
+      if (ISSUE_HUB_MESSAGE_COLUMNS.has(source.droppableId) || ISSUE_HUB_MESSAGE_COLUMNS.has(destination.droppableId)) {
         await handleMessageDragEnd(result);
         return;
       }
@@ -1538,6 +1712,8 @@ function ComplianceBoardPage() {
           return 'Case Opened';
         case COLUMN_STATUS.CASE_NOT_OPENED:
           return 'Case Not Opened';
+        case COLUMN_STATUS.RETURN_FOLLOW_UP:
+          return 'Follow Up';
         case COLUMN_STATUS.PROVIDE_RETURN_LABEL:
           return 'Provide Return Label';
         case COLUMN_STATUS.BUYER_DROP_OFF:
@@ -1578,14 +1754,18 @@ function ComplianceBoardPage() {
           return 'Case Opened';
         case COLUMN_STATUS.CASE_NOT_OPENED:
           return 'Case Not Opened';
+        case COLUMN_STATUS.INR_FOLLOW_UP:
+          return 'Follow Up';
+        case COLUMN_STATUS.INR_TRACKING_ID_UPLOAD:
+          return 'Tracking ID Upload';
+        case COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN:
+          return 'Case Open (Ebay Step In)';
         case COLUMN_STATUS.INR_FULLY_REFUNDED:
           return 'Fully Refunded';
         case COLUMN_STATUS.INR_PARTIAL_REFUND:
           return 'Partial Refund';
         case COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED:
           return 'Not Refunded but Resolved';
-        case COLUMN_STATUS.INR_CASE_CLOSED:
-          return 'Case Closed';
         default:
           return status;
       }
@@ -1633,6 +1813,8 @@ function ComplianceBoardPage() {
         return BRAND_RED;
       case COLUMN_STATUS.CASE_NOT_OPENED:
         return BRAND_ORANGE;
+      case COLUMN_STATUS.RETURN_FOLLOW_UP:
+        return '#8b5cf6'; // purple
       case COLUMN_STATUS.PROVIDE_RETURN_LABEL:
         return BRAND_BLUE;
       case COLUMN_STATUS.BUYER_DROP_OFF:
@@ -1655,14 +1837,18 @@ function ComplianceBoardPage() {
       // INR colors
       case COLUMN_STATUS.INR_CASE_OPENED:
         return BRAND_RED;
+      case COLUMN_STATUS.INR_FOLLOW_UP:
+        return '#8b5cf6';
+      case COLUMN_STATUS.INR_TRACKING_ID_UPLOAD:
+        return '#06b6d4';
+      case COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN:
+        return BRAND_RED;
       case COLUMN_STATUS.INR_FULLY_REFUNDED:
         return BRAND_GREEN;
       case COLUMN_STATUS.INR_PARTIAL_REFUND:
         return BRAND_YELLOW_DARK;
       case COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED:
         return BRAND_BLUE;
-      case COLUMN_STATUS.INR_CASE_CLOSED:
-        return '#10b981'; // green shade
       default:
         return '#6b7280';
     }
@@ -1805,6 +1991,58 @@ function ComplianceBoardPage() {
   const handleCloseMessageDialog = () => {
     setMessageModalOpen(false);
     setSelectedOrderForMessage(null);
+  };
+
+  const handleOpenActivityLogs = async (order) => {
+    setSelectedOrderForLogs(order);
+    setLogsModalOpen(true);
+    setLogsLoading(true);
+
+    try {
+      const orderId = order._id || order.orderId;
+      const { data } = await api.get(`/orders/${encodeURIComponent(orderId)}/activity-logs`, {
+        params: { limit: 100 },
+      });
+      setOrderActivityLogs(data.logs || []);
+    } catch (err) {
+      console.error('Failed to fetch activity logs:', err);
+      setOrderActivityLogs([]);
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+
+  const handleCloseActivityLogs = () => {
+    setLogsModalOpen(false);
+    setSelectedOrderForLogs(null);
+    setOrderActivityLogs([]);
+    setNewNote('');
+  };
+
+  const handleAddNote = async () => {
+    if (!newNote.trim()) {
+      setSnackbar({ open: true, message: 'Please enter a note' });
+      return;
+    }
+
+    setAddingNote(true);
+    try {
+      const orderId = selectedOrderForLogs?._id || selectedOrderForLogs?.orderId;
+      const { data } = await api.post(
+        `/orders/${encodeURIComponent(orderId)}/add-note`,
+        { noteContent: newNote }
+      );
+
+      // Add the new note to the logs and refresh
+      setOrderActivityLogs([data.log, ...orderActivityLogs]);
+      setNewNote('');
+      setSnackbar({ open: true, message: 'Note added successfully' });
+    } catch (err) {
+      console.error('Failed to add note:', err);
+      setSnackbar({ open: true, message: 'Failed to add note' });
+    } finally {
+      setAddingNote(false);
+    }
   };
 
   // Render message card for Order Communication board
@@ -2236,6 +2474,11 @@ function ComplianceBoardPage() {
                     <ChatIcon sx={{ fontSize: 16 }} />
                   </IconButton>
                 </Tooltip>
+                <Tooltip title="View Activity Logs">
+                  <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleOpenActivityLogs(order); }} sx={{ color: '#8b5cf6', p: 0.5 }}>
+                    <HistoryIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Tooltip>
               </Stack>
             </Stack>
 
@@ -2333,12 +2576,12 @@ function ComplianceBoardPage() {
   };
 
   // Helper function to render a droppable column
-  const renderDroppableColumn = (status, title, color, height = '100%', minHeight = 500, headerControl = null) => {
+  const renderDroppableColumn = (status, title, color, height = '100%', minHeight = 500, headerControl = null, droppableId = status) => {
     const visibleCount = getVisibleOrderCount(status);
     const remainingCount = Math.max(0, (orders[status]?.length || 0) - visibleCount);
 
     return (
-    <Droppable droppableId={status} type="order">
+    <Droppable droppableId={droppableId} type="order">
       {(provided, snapshot) => (
         <Paper
           ref={provided.innerRef}
@@ -2429,42 +2672,124 @@ function ComplianceBoardPage() {
     const buyerName = item.buyerName || item.buyerUsername || 'Unknown Buyer';
     const messageType = item.actualMessageType || item.messageType;
     const isInquiry = !item.orderId && (messageType === 'INQUIRY' || messageType === 'DIRECT' || item.itemId === 'DIRECT_MESSAGE');
-    const orderId = item.orderId || (isInquiry ? 'Inquiry' : 'Order ID Missing');
+    const orderId = item.orderId || (isInquiry ? 'Inquiry' : 'N/A');
     const itemTitle = item.itemTitle || item.productName || (messageType === 'INQUIRY' ? 'Inquiry Message' : (messageType === 'DIRECT' ? 'Direct Message' : 'No Item'));
     const lastMessageText = cleanMessagePreviewText(item.messageText || item.lastMessage || '');
     const unreadCount = item.unreadCount || 0;
     const messageDate = item.lastDate || item.lastMessageDate || item.messageDate;
+    const overdueInfo = item._overdueInfo;
 
     return (
-      <Card key={getMessageKey(item)} sx={{ borderRadius: 1.5, border: '1px solid #e2e8f0', boxShadow: 'none' }}>
-        <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
-          <Stack spacing={1}>
-            <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-              <Stack spacing={0.5}>
-                <Typography variant="caption" fontWeight={700} color="text.secondary">
-                  {sellerName}
-                </Typography>
-                <Typography variant="body2" fontWeight={700}>
-                  {buyerName}
+      <Card key={getMessageKey(item)} sx={{ borderRadius: 1.5, border: '1px solid #e2e8f0', boxShadow: 'none', flexShrink: 0 }}>
+        <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+          <Stack spacing={1.5}>
+            {/* Top Row - Order ID with Actions */}
+            <Stack direction="row" alignItems="center" justifyContent="space-between">
+              <Stack direction="row" alignItems="center" spacing={1}>
+                <ShoppingCartIcon sx={{ fontSize: 18, color: BRAND_YELLOW_DARK }} />
+                <Typography variant="body2" fontWeight={700} sx={{ color: BRAND_DARK, fontSize: '0.95rem' }}>
+                  {orderId}
                 </Typography>
               </Stack>
-              {unreadCount > 0 && <Chip label={`${unreadCount} unread`} size="small" color="error" sx={{ height: 20, fontSize: '0.7rem' }} />}
+              <Stack direction="row" spacing={0.5}>
+                {item.orderId && (
+                  <Tooltip title="Copy Order ID">
+                    <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleCopyOrderId(orderId); }} sx={{ p: 0.5 }}>
+                      <ContentCopyIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                <Tooltip title="Message Buyer">
+                  <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleOpenMessageDialog(item); }} sx={{ color: '#3b82f6', p: 0.5 }}>
+                    <ChatIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
             </Stack>
-            <Typography variant="caption" color="text.secondary">{orderId}</Typography>
-            <Typography variant="caption" color="text.secondary">{itemTitle}</Typography>
+
+            {/* Seller and Buyer Info */}
+            <Stack direction="column" spacing={0.75}>
+              <Stack direction="row" alignItems="center" spacing={0.5}>
+                <PersonIcon sx={{ fontSize: 14, color: '#64748b' }} />
+                <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ fontSize: '0.8rem' }}>
+                  Seller: {sellerName}
+                </Typography>
+              </Stack>
+              <Stack direction="row" alignItems="center" spacing={0.5}>
+                <PersonIcon sx={{ fontSize: 14, color: '#64748b' }} />
+                <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ fontSize: '0.8rem' }}>
+                  Buyer: {buyerName}
+                </Typography>
+              </Stack>
+            </Stack>
+
+            {/* Item Title */}
+            <Stack spacing={0.25}>
+              <Typography variant="caption" sx={{ fontSize: '0.75rem', color: '#64748b', textTransform: 'uppercase', fontWeight: 600 }}>
+                Item
+              </Typography>
+              <Typography variant="body2" fontWeight={600} sx={{ color: BRAND_DARK, fontSize: '0.9rem' }}>
+                {itemTitle}
+              </Typography>
+            </Stack>
+
+            {/* Last Message Preview */}
             {lastMessageText && (
-              <Typography variant="body2" sx={{ fontSize: '0.8rem' }}>
-                {lastMessageText}
-              </Typography>
+              <Stack spacing={0.25} sx={{ borderLeft: '3px solid #fbbf24', bgcolor: '#fef3c7', p: 1, borderRadius: 0.5 }}>
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <CommentIcon sx={{ fontSize: 14, color: '#f59e0b' }} />
+                  <Typography variant="caption" fontWeight={700} sx={{ color: '#f59e0b', textTransform: 'uppercase', fontSize: '0.7rem' }}>
+                    Latest Message
+                  </Typography>
+                </Stack>
+                <Typography variant="body2" sx={{ color: '#92400e', fontWeight: 600, wordBreak: 'break-word', fontSize: '0.85rem', lineHeight: 1.3 }}>
+                  {lastMessageText}
+                </Typography>
+              </Stack>
             )}
-            <Stack direction="row" justifyContent="space-between" alignItems="center">
-              <Typography variant="caption" color="text.secondary">
-                {messageDate ? format(new Date(messageDate), 'MMM dd, yyyy HH:mm') : ''}
-              </Typography>
-              <IconButton size="small" onClick={() => handleOpenMessageDialog(item)} sx={{ color: BRAND_BLUE }}>
-                <ChatIcon sx={{ fontSize: 16 }} />
-              </IconButton>
+
+            {/* Overdue Warning */}
+            {overdueInfo && (
+              <Box sx={{ bgcolor: '#fef2f2', border: '1px solid #fecaca', borderRadius: 1, p: 1 }}>
+                <Typography variant="caption" sx={{ color: '#b91c1c', fontWeight: 700, display: 'block', fontSize: '0.75rem' }}>
+                  🔴 NO REPLY FOR {formatElapsed(overdueInfo.elapsedMs).toUpperCase()}
+                </Typography>
+                <Typography variant="caption" sx={{ color: '#b91c1c', fontWeight: 700, display: 'block', fontSize: '0.75rem', mt: 0.5 }}>
+                  Buyer sent message: {format(new Date(overdueInfo.lastMessageTime), 'MMM dd, yyyy HH:mm')}
+                </Typography>
+                <Typography variant="caption" sx={{ color: '#991b1b', display: 'block', fontSize: '0.75rem', mt: 0.25 }}>
+                  Overdue by {formatElapsed(overdueInfo.overdueMs)} beyond 8h SLA
+                </Typography>
+              </Box>
+            )}
+
+            {/* Message Type Badge */}
+            <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+              <Chip
+                label={messageType === 'ORDER' ? 'Order Message' : 'Inquiry'}
+                size="small"
+                sx={{ 
+                  bgcolor: messageType === 'ORDER' ? '#dbeafe' : '#fef3c7',
+                  color: messageType === 'ORDER' ? '#1d4ed8' : '#92400e',
+                  fontSize: '0.75rem',
+                  height: 24,
+                  fontWeight: 700
+                }}
+              />
+              {unreadCount > 0 && (
+                <Chip 
+                  label={`${unreadCount} unread`} 
+                  size="small" 
+                  color="error" 
+                  sx={{ fontSize: '0.75rem', height: 24, fontWeight: 700 }}
+                />
+              )}
             </Stack>
+
+            {/* Timestamp */}
+            <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.75rem' }}>
+              Last message: {messageDate ? format(new Date(messageDate), 'MMM dd, yyyy HH:mm') : 'N/A'}
+            </Typography>
           </Stack>
         </CardContent>
       </Card>
@@ -2549,6 +2874,9 @@ function ComplianceBoardPage() {
                 </IconButton>
                 <IconButton size="small" onClick={() => handleOpenMessageDialog(order)} sx={{ color: BRAND_BLUE, p: 0.25 }}>
                   <ChatIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+                <IconButton size="small" onClick={() => handleOpenActivityLogs(order)} sx={{ color: '#8b5cf6', p: 0.25 }}>
+                  <HistoryIcon sx={{ fontSize: 14 }} />
                 </IconButton>
               </Stack>
             </Stack>
@@ -2641,7 +2969,7 @@ function ComplianceBoardPage() {
   const renderAlertPreviewDialog = (alerts) => {
     const activeAlert = alerts.find((alert) => alert.id === activeAlertPreviewId);
     const previewItems = activeAlert ? getAlertPreviewItems(selectedCategory, activeAlert.id) : [];
-    const isMessageAlert = selectedCategory === 'order_communication';
+    const isMessageAlert = selectedCategory === 'order_communication' || (activeAlert && isMessageOverdueAlert(activeAlert.id));
     const visibleCount = activeAlert
       ? getAlertPreviewVisibleCount(selectedCategory, activeAlert.id)
       : 0;
@@ -2670,7 +2998,7 @@ function ComplianceBoardPage() {
               </Typography>
               {activeAlert && (
                 <Typography variant="body2" color="text.secondary">
-                  {previewItems.length} order{previewItems.length === 1 ? '' : 's'} in this category
+                  {previewItems.length} {isMessageAlert ? 'message' : 'order'}{previewItems.length === 1 ? '' : 's'} in this category
                 </Typography>
               )}
             </Box>
@@ -2805,6 +3133,8 @@ function ComplianceBoardPage() {
 
   // Render Return/Refund Board
   const renderReturnRefundBoard = () => {
+    const caseOpenedOption = RETURN_CASE_OPENED_OPTIONS.find((option) => option.id === returnCaseOpenedCategory) || RETURN_CASE_OPENED_OPTIONS[0];
+    const caseNotOpenedOption = RETURN_CASE_NOT_OPENED_OPTIONS.find((option) => option.id === returnCaseNotOpenedCategory) || RETURN_CASE_NOT_OPENED_OPTIONS[0];
     const flowOption = RETURN_FLOW_OPTIONS.find((option) => option.id === returnFlowCategory) || RETURN_FLOW_OPTIONS[0];
     const resolutionOption = RETURN_RESOLUTION_OPTIONS.find((option) => option.id === returnResolutionCategory) || RETURN_RESOLUTION_OPTIONS[0];
 
@@ -2812,18 +3142,20 @@ function ComplianceBoardPage() {
     <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'repeat(3, 1fr)' }, gap: 3 }}>
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {renderDroppableColumn(
-          COLUMN_STATUS.CASE_OPENED,
-          getColumnTitle(COLUMN_STATUS.CASE_OPENED),
-          getColumnColor(COLUMN_STATUS.CASE_OPENED),
+          caseOpenedOption.id,
+          caseOpenedOption.label,
+          caseOpenedOption.color,
           '360px',
-          0
+          0,
+          renderColumnViewSelect('Box View', returnCaseOpenedCategory, RETURN_CASE_OPENED_OPTIONS, setReturnCaseOpenedCategory)
         )}
         {renderDroppableColumn(
-          COLUMN_STATUS.CASE_NOT_OPENED,
-          getColumnTitle(COLUMN_STATUS.CASE_NOT_OPENED),
-          getColumnColor(COLUMN_STATUS.CASE_NOT_OPENED),
+          caseNotOpenedOption.id,
+          caseNotOpenedOption.label,
+          caseNotOpenedOption.color,
           '360px',
-          0
+          0,
+          renderColumnViewSelect('Box View', returnCaseNotOpenedCategory, RETURN_CASE_NOT_OPENED_OPTIONS, setReturnCaseNotOpenedCategory)
         )}
       </Box>
 
@@ -2891,24 +3223,43 @@ function ComplianceBoardPage() {
 
   // Render INR Board
   const renderINRBoard = () => {
+    const primaryOption = INR_PRIMARY_VIEW_OPTIONS.find((option) => option.id === inrPrimaryCategory) || INR_PRIMARY_VIEW_OPTIONS[0];
+    const secondaryOption = INR_SECONDARY_VIEW_OPTIONS.find((option) => option.id === inrSecondaryCategory) || INR_SECONDARY_VIEW_OPTIONS[0];
+    const actionOption = INR_ACTION_OPTIONS.find((option) => option.id === inrActionCategory) || INR_ACTION_OPTIONS[0];
     const refundOption = INR_REFUND_OPTIONS.find((option) => option.id === inrRefundCategory) || INR_REFUND_OPTIONS[0];
 
     return (
-    <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'repeat(3, 1fr)' }, gap: 3 }}>
+    <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', xl: 'repeat(3, 1fr)' }, gap: 3 }}>
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {renderDroppableColumn(
-          COLUMN_STATUS.INR_CASE_OPENED,
-          getColumnTitle(COLUMN_STATUS.INR_CASE_OPENED),
-          getColumnColor(COLUMN_STATUS.INR_CASE_OPENED),
+          primaryOption.id,
+          primaryOption.label,
+          primaryOption.color,
           '280px',
-          0
+          0,
+          renderColumnViewSelect('Box View', inrPrimaryCategory, INR_PRIMARY_VIEW_OPTIONS, setInrPrimaryCategory),
+          INR_VIEW_IDS.PRIMARY
         )}
         {renderDroppableColumn(
-          COLUMN_STATUS.CASE_NOT_OPENED,
-          getColumnTitle(COLUMN_STATUS.CASE_NOT_OPENED),
-          getColumnColor(COLUMN_STATUS.CASE_NOT_OPENED),
+          secondaryOption.id,
+          secondaryOption.label,
+          secondaryOption.color,
           '280px',
-          0
+          0,
+          renderColumnViewSelect('Box View', inrSecondaryCategory, INR_SECONDARY_VIEW_OPTIONS, setInrSecondaryCategory),
+          INR_VIEW_IDS.SECONDARY
+        )}
+      </Box>
+
+      <Box sx={{ minWidth: 0 }}>
+        {renderDroppableColumn(
+          actionOption.id,
+          actionOption.label,
+          actionOption.color,
+          '580px',
+          0,
+          renderColumnViewSelect('Box View', inrActionCategory, INR_ACTION_OPTIONS, setInrActionCategory),
+          INR_VIEW_IDS.ACTION
         )}
       </Box>
 
@@ -2919,17 +3270,8 @@ function ComplianceBoardPage() {
           refundOption.color,
           '580px',
           0,
-          renderColumnViewSelect('Box View', inrRefundCategory, INR_REFUND_OPTIONS, setInrRefundCategory)
-        )}
-      </Box>
-
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {renderDroppableColumn(
-          COLUMN_STATUS.INR_CASE_CLOSED,
-          getColumnTitle(COLUMN_STATUS.INR_CASE_CLOSED),
-          getColumnColor(COLUMN_STATUS.INR_CASE_CLOSED),
-          '580px',
-          0
+          renderColumnViewSelect('Box View', inrRefundCategory, INR_REFUND_OPTIONS, setInrRefundCategory),
+          INR_VIEW_IDS.REFUND
         )}
       </Box>
     </Box>
@@ -3202,6 +3544,184 @@ function ComplianceBoardPage() {
         onClose={handleCloseMessageDialog}
         order={selectedOrderForMessage}
       />
+
+      {/* Activity Logs Dialog */}
+      <Dialog
+        open={logsModalOpen}
+        onClose={handleCloseActivityLogs}
+        maxWidth="md"
+        fullWidth
+        PaperProps={{
+          sx: {
+            backgroundImage: 'none',
+            backgroundColor: '#f5f5f5'
+          }
+        }}
+      >
+        <DialogTitle sx={{ pb: 1, fontWeight: 'bold', fontSize: '1.1rem' }}>
+          Activity Log for {selectedOrderForLogs?.orderId || 'Order'}
+        </DialogTitle>
+        <DialogContent dividers sx={{ maxHeight: '70vh', overflow: 'auto' }}>
+          {/* Add Note Section */}
+          <Box sx={{ mb: 3, p: 2, backgroundColor: '#fff', borderRadius: 1, border: '2px solid #8b5cf6' }}>
+            <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 'bold', color: '#8b5cf6' }}>
+              + Add Note
+            </Typography>
+            <Stack spacing={1}>
+              <TextField
+                fullWidth
+                multiline
+                rows={3}
+                placeholder="Enter your note or remark here..."
+                value={newNote}
+                onChange={(e) => setNewNote(e.target.value)}
+                disabled={addingNote}
+                size="small"
+                sx={{
+                  backgroundColor: '#fafafa',
+                  '& .MuiOutlinedInput-root': {
+                    fontSize: '0.9rem',
+                  }
+                }}
+              />
+              <Button
+                variant="contained"
+                onClick={handleAddNote}
+                disabled={addingNote || !newNote.trim()}
+                sx={{ bgcolor: '#8b5cf6', '&:hover': { bgcolor: '#7c3aed' } }}
+              >
+                {addingNote ? <CircularProgress size={20} sx={{ mr: 1 }} /> : null}
+                {addingNote ? 'Adding...' : 'Add Note'}
+              </Button>
+            </Stack>
+          </Box>
+
+          {/* Activity Logs Display */}
+          {logsLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
+              <CircularProgress />
+            </Box>
+          ) : orderActivityLogs.length === 0 ? (
+            <Typography color="textSecondary" sx={{ py: 2 }}>
+              No activity logs found for this order.
+            </Typography>
+          ) : (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+              {orderActivityLogs.map((log, idx) => {
+                const isNote = log.action === 'note_added';
+                const isAdmin = log.changedBy?.isAdmin;
+
+                return (
+                  <Box
+                    key={idx}
+                    sx={{
+                      p: 1.5,
+                      backgroundColor: isNote ? '#fef9f3' : '#fff',
+                      border: isNote ? '2px solid #f97316' : '1px solid #e0e0e0',
+                      borderRadius: '6px',
+                      fontSize: '0.85rem',
+                      lineHeight: 1.6,
+                      transition: 'all 0.2s ease',
+                      '&:hover': {
+                        boxShadow: isNote ? '0 2px 8px rgba(249, 115, 22, 0.2)' : '0 2px 4px rgba(0,0,0,0.1)',
+                      }
+                    }}
+                  >
+                    {/* Header */}
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1 }}>
+                      <Box sx={{ flex: 1 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                          <Box sx={{ fontWeight: 'bold', color: isNote ? '#d97706' : '#333' }}>
+                            {log.action?.replace(/_/g, ' ').toUpperCase()}
+                          </Box>
+                          {isAdmin && (
+                            <Chip
+                              label="ADMIN"
+                              size="small"
+                              sx={{
+                                height: 20,
+                                fontSize: '0.7rem',
+                                fontWeight: 'bold',
+                                backgroundColor: '#dc2626',
+                                color: '#fff'
+                              }}
+                            />
+                          )}
+                          {log.board && (
+                            <Chip
+                              label={log.board?.replace(/_/g, ' ')}
+                              size="small"
+                              sx={{
+                                height: 20,
+                                fontSize: '0.7rem',
+                                backgroundColor: '#e0e7ff',
+                                color: '#4c1d95'
+                              }}
+                            />
+                          )}
+                        </Box>
+                      </Box>
+                      <Typography
+                        variant="caption"
+                        sx={{ color: '#999', fontFamily: 'monospace', fontSize: '0.75rem' }}
+                      >
+                        {log.timestamp ? format(new Date(log.timestamp), 'MMM d, yyyy p') : 'Unknown'}
+                      </Typography>
+                    </Box>
+
+                    {/* Note Content (if it's a note) */}
+                    {isNote && log.noteContent && (
+                      <Box sx={{
+                        mb: 1,
+                        p: 1.2,
+                        backgroundColor: '#fffbeb',
+                        borderLeft: '4px solid #f97316',
+                        borderRadius: '4px',
+                        fontStyle: 'italic',
+                        color: '#92400e',
+                        wordBreak: 'break-word'
+                      }}>
+                        <strong>Note: </strong>{log.noteContent}
+                      </Box>
+                    )}
+
+                    {/* Status Changes */}
+                    {log.fromStatus && log.toStatus && (
+                      <Box sx={{ mb: 0.5, color: '#555', fontSize: '0.9rem' }}>
+                        Status: <strong>{log.fromStatus}</strong> → <strong>{log.toStatus}</strong>
+                      </Box>
+                    )}
+
+                    {/* Category */}
+                    {log.category && (
+                      <Box sx={{ mb: 0.5, color: '#666', fontSize: '0.9rem' }}>
+                        Category: <strong>{log.category}</strong>
+                      </Box>
+                    )}
+
+                    {/* Changed By */}
+                    {log.changedBy && (
+                      <Box sx={{ mb: 0.5, color: '#666', fontSize: '0.9rem' }}>
+                        By: <strong>{log.changedBy?.username || log.changedBy?.email || 'System'}</strong>
+                      </Box>
+                    )}
+
+                    {/* Details */}
+                    {log.details && !isNote && (
+                      <Box sx={{ color: '#666', fontStyle: 'italic', fontSize: '0.9rem' }}>
+                        {log.details}
+                      </Box>
+                    )}
+                  </Box>
+                );
+              })}
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ pt: 2 }}>
+          <Button onClick={handleCloseActivityLogs}>Close</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Snackbar for copy notification */}
       <Snackbar
