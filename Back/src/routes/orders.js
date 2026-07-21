@@ -2454,6 +2454,8 @@ router.post('/:orderId/add-note', requireAuth, requirePageAccess('ComplianceBoar
   } catch (error) {
     console.error('Error adding note:', error);
     res.status(500).json({ error: error.message || 'Failed to add note' });
+  }
+});
 
 /**
  * @swagger
