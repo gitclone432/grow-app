@@ -53,10 +53,18 @@ const DEFAULT_CATEGORIES = [
 // Helper to construct proper file URL from invoice ID
 const getFileUrl = (invoice) => {
   if (!invoice || !invoice._id) return '';
-  // Files are now served from /api/invoices/:id/file endpoint
+  
+  // Get the base API URL from environment
+  const apiUrl = import.meta.env.VITE_API_URL || '/api';
+  
+  // Remove /api suffix if present (we'll add the full path)
+  const baseUrl = apiUrl.replace(/\/api\/?$/, '');
+  
   // Include auth token in query param for iframe/img src compatibility
   const token = localStorage.getItem('auth_token');
-  return `/api/invoices/${invoice._id}/file${token ? `?token=${token}` : ''}`;
+  
+  // Construct absolute URL for production, relative for dev
+  return `${baseUrl}/api/invoices/${invoice._id}/file${token ? `?token=${token}` : ''}`;
 };
 
 export default function InvoiceUploadPage() {
@@ -660,73 +668,6 @@ export default function InvoiceUploadPage() {
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, p: 2, overflow: 'auto' }}>
           {selectedInvoice && (
             <>
-              {/* Invoice Preview Section */}
-              <Box
-                sx={{
-                  flex: 1,
-                  border: '1px solid #e0e0e0',
-                  borderRadius: 1,
-                  overflow: 'auto',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  bgcolor: '#f9f9f9',
-                  minHeight: '400px',
-                  mb: 2
-                }}
-              >
-                {/* PDF Preview */}
-                {selectedInvoice.fileName.match(/\.pdf$/i) && (
-                  <iframe
-                    src={getFileUrl(selectedInvoice)}
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      minHeight: '500px',
-                      border: 'none',
-                      borderRadius: '4px'
-                    }}
-                    title="Invoice PDF Preview"
-                  />
-                )}
-
-                {/* Image Preview */}
-                {selectedInvoice.fileName.match(/\.(jpg|jpeg|png|gif)$/i) && (
-                  <img
-                    src={getFileUrl(selectedInvoice)}
-                    alt="Invoice Preview"
-                    style={{
-                      maxWidth: '100%',
-                      maxHeight: '100%',
-                      objectFit: 'contain',
-                      borderRadius: '4px',
-                      padding: '16px'
-                    }}
-                  />
-                )}
-
-                {/* Document Files - Show Placeholder */}
-                {selectedInvoice.fileName.match(/\.(docx|doc|xlsx|xls)$/i) && (
-                  <Box sx={{ textAlign: 'center', py: 8 }}>
-                    <Typography variant="h6" color="text.secondary" sx={{ mb: 2 }}>
-                      Document Preview Not Available
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                      Click the download button below to open this {selectedInvoice.fileName.split('.').pop().toUpperCase()} file
-                    </Typography>
-                    <Button
-                      variant="contained"
-                      startIcon={<DownloadIcon />}
-                      href={getFileUrl(selectedInvoice)}
-                      download
-                      target="_blank"
-                    >
-                      Download {selectedInvoice.fileName.split('.').pop().toUpperCase()} File
-                    </Button>
-                  </Box>
-                )}
-              </Box>
-
               {/* Invoice Details Section */}
               <Box sx={{ bgcolor: '#f5f5f5', p: 2, borderRadius: 1 }}>
                 <Grid container spacing={2}>
