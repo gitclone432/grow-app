@@ -110,6 +110,7 @@ import microOrdersRoutes from './routes/microOrders.js';
 import etsyOrderFulfilmentRoutes from './routes/etsyOrderFulfilment.js';
 import etsyProductsRoutes from './routes/etsyProducts.js';
 import etsyStoresRoutes from './routes/etsyStores.js';
+import invoiceRoutes from './routes/invoices.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
@@ -252,6 +253,7 @@ app.use('/api/micro-orders', microOrdersRoutes);
 app.use('/api/etsy/order-fulfilment', etsyOrderFulfilmentRoutes);
 app.use('/api/etsy/products', etsyProductsRoutes);
 app.use('/api/etsy/stores', etsyStoresRoutes);
+app.use('/api/invoices', invoiceRoutes);
 
 // Optional: same-origin production — serve Vite build (see Dockerfile / deployment-plan.md)
 if (process.env.SERVE_FRONTEND === 'true') {

@@ -55,6 +55,7 @@ export const AdsAndMarketingPage = lazy(() => import('../pages/admin/AdsAndMarke
 export const MarketingCampaignsPage = lazy(() => import('../pages/admin/MarketingCampaignsPage.jsx'));
 export const MarketingPromotionsPage = lazy(() => import('../pages/admin/MarketingPromotionsPage.jsx'));
 export const FinanceCashflowPage = lazy(() => import('../pages/admin/FinanceCashflowPage.jsx'));
+export const InvoiceUploadPage = lazy(() => import('../pages/admin/InvoiceUploadPage.jsx'));
 export const StoreSubscriptionPage = lazy(() => import('../pages/admin/StoreSubscriptionPage.jsx'));
 export const CompatibilityDashboard = lazy(() => import('../pages/compatibility/CompatibilityDashboard.jsx'));
 export const EditListingsDashboard = lazy(() => import('../pages/listings/EditListingsDashboard.jsx'));

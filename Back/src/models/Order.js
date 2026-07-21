@@ -187,7 +187,8 @@ const OrderSchema = new mongoose.Schema(
         // Cancellation statuses
         'cancellation_request', 'accepted', 'declined',
         // INR statuses
-        'inr_case_opened', 'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'
+        'inr_case_opened', 'inr_follow_up', 'inr_tracking_id_upload', 'inr_case_open_ebay_step_in',
+        'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'
       ],
       default: 'todo'
     },
