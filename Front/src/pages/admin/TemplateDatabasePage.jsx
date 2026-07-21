@@ -1,10 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { 
   Box, Button, Paper, Table, TableBody, TableCell, TableContainer, TableHead, 
   TableRow, Typography, Chip, Stack, IconButton, Link as MuiLink, FormControl,
   InputLabel, Select, MenuItem, TextField, Collapse, Pagination, Alert,
   useMediaQuery, useTheme, Dialog, DialogTitle, DialogContent, DialogActions,
-  Divider, Grid
+  Divider, Grid, Tabs, Tab, TableSortLabel
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
@@ -42,6 +42,18 @@ function resolveSupplierLink(listing) {
   return `https://www.amazon.com/dp/${asin}`;
 }
 
+/** Where the row was created: CSV Listings Lab vs Direct List to eBay */
+function getListingSource(listing) {
+  if (listing?.listingOrigin === 'direct_list') {
+    return { key: 'direct_list', label: 'Direct List', color: 'secondary' };
+  }
+  // Legacy rows before listingOrigin: published via Direct List API
+  if (!listing?.listingOrigin && listing?.ebayPublishedAt) {
+    return { key: 'direct_list', label: 'Direct List', color: 'secondary' };
+  }
+  return { key: 'template_listings', label: 'CSV Listings', color: 'info' };
+}
+
 function getCustomFieldEntries(customFields) {
   if (!customFields) return [];
   if (customFields instanceof Map) {
@@ -53,6 +65,31 @@ function getCustomFieldEntries(customFields) {
   return [];
 }
 
+const SUMMARY_SORT_COLUMNS = [
+  { id: 'sellerName', label: 'Seller', align: 'left', numeric: false },
+  { id: 'csvActive', label: 'CSV Active', align: 'right', numeric: true },
+  { id: 'csvDraft', label: 'CSV Draft', align: 'right', numeric: true },
+  { id: 'csvTotal', label: 'CSV Total', align: 'right', numeric: true },
+  { id: 'directTotal', label: 'Direct List', align: 'right', numeric: true },
+  { id: 'directDraft', label: 'Direct Draft', align: 'right', numeric: true },
+  { id: 'total', label: 'Total', align: 'right', numeric: true },
+];
+
+function compareSummaryRows(a, b, orderBy, order) {
+  const direction = order === 'asc' ? 1 : -1;
+  if (orderBy === 'sellerName') {
+    const left = String(a.sellerName || '').toLowerCase();
+    const right = String(b.sellerName || '').toLowerCase();
+    return left.localeCompare(right, undefined, { sensitivity: 'base' }) * direction;
+  }
+  const left = Number(a[orderBy]) || 0;
+  const right = Number(b[orderBy]) || 0;
+  if (left === right) {
+    return String(a.sellerName || '').localeCompare(String(b.sellerName || ''), undefined, { sensitivity: 'base' });
+  }
+  return (left - right) * direction;
+}
+
 export default function TemplateDatabasePage() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
@@ -61,6 +98,7 @@ export default function TemplateDatabasePage() {
   const [selectedSeller, setSelectedSeller] = useState('');
   const [selectedTemplate, setSelectedTemplate] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [originFilter, setOriginFilter] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   
   // Data state
@@ -69,6 +107,13 @@ export default function TemplateDatabasePage() {
   const [sellers, setSellers] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [stats, setStats] = useState({});
+  const [activeTab, setActiveTab] = useState(0);
+  const [summaryRows, setSummaryRows] = useState([]);
+  const [summaryTotals, setSummaryTotals] = useState(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryError, setSummaryError] = useState('');
+  const [summarySortBy, setSummarySortBy] = useState('total');
+  const [summarySortOrder, setSummarySortOrder] = useState('desc');
   
   // UI state
   const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0, pages: 0 });
@@ -80,6 +125,21 @@ export default function TemplateDatabasePage() {
   const [detailsDialogOpen, setDetailsDialogOpen] = useState(false);
   const [selectedListing, setSelectedListing] = useState(null);
 
+  const sortedSummaryRows = useMemo(() => {
+    return [...summaryRows].sort((a, b) =>
+      compareSummaryRows(a, b, summarySortBy, summarySortOrder)
+    );
+  }, [summaryRows, summarySortBy, summarySortOrder]);
+
+  const handleSummarySort = (columnId) => {
+    if (summarySortBy === columnId) {
+      setSummarySortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+    setSummarySortBy(columnId);
+    setSummarySortOrder(columnId === 'sellerName' ? 'asc' : 'desc');
+  };
+
   useEffect(() => {
     fetchSellers();
     fetchTemplates();
@@ -87,8 +147,16 @@ export default function TemplateDatabasePage() {
   }, []);
 
   useEffect(() => {
-    fetchListings();
-  }, [selectedSeller, selectedTemplate, statusFilter, searchQuery, pagination.page]);
+    if (activeTab === 0) {
+      fetchListings();
+    }
+  }, [selectedSeller, selectedTemplate, statusFilter, originFilter, searchQuery, pagination.page, activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 1) {
+      fetchSummary();
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     // Group listings by seller
@@ -133,6 +201,21 @@ export default function TemplateDatabasePage() {
     }
   };
 
+  const fetchSummary = async () => {
+    setSummaryLoading(true);
+    setSummaryError('');
+    try {
+      const { data } = await api.get('/template-listings/database-summary');
+      setSummaryRows(data.rows || []);
+      setSummaryTotals(data.totals || null);
+    } catch (err) {
+      console.error('Error fetching summary:', err);
+      setSummaryError('Failed to load summary');
+    } finally {
+      setSummaryLoading(false);
+    }
+  };
+
   const fetchListings = async () => {
     setLoading(true);
     setError('');
@@ -145,6 +228,7 @@ export default function TemplateDatabasePage() {
       if (selectedSeller) params.sellerId = selectedSeller;
       if (selectedTemplate) params.templateId = selectedTemplate;
       if (statusFilter) params.status = statusFilter;
+      if (originFilter) params.listingOrigin = originFilter;
       if (searchQuery) params.search = searchQuery;
       
       const { data } = await api.get('/template-listings/database-view', { params });
@@ -156,6 +240,16 @@ export default function TemplateDatabasePage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const openSellerInListings = (sellerId, { origin = '', status = '' } = {}) => {
+    setSelectedSeller(sellerId || '');
+    setOriginFilter(origin);
+    setStatusFilter(status);
+    setSelectedTemplate('');
+    setSearchQuery('');
+    setPagination((prev) => ({ ...prev, page: 1 }));
+    setActiveTab(0);
   };
 
   const handleCopy = (text) => {
@@ -188,11 +282,12 @@ export default function TemplateDatabasePage() {
     setSelectedSeller('');
     setSelectedTemplate('');
     setStatusFilter('');
+    setOriginFilter('');
     setSearchQuery('');
     setPagination(prev => ({ ...prev, page: 1 }));
   };
 
-  const hasActiveFilters = selectedSeller || selectedTemplate || statusFilter || searchQuery;
+  const hasActiveFilters = selectedSeller || selectedTemplate || statusFilter || originFilter || searchQuery;
 
   // Filter templates based on selected seller
   const filteredTemplates = selectedSeller
@@ -216,11 +311,150 @@ export default function TemplateDatabasePage() {
           <Chip label={`Total: ${stats.total || 0}`} color="primary" variant="outlined" />
           <Chip label={`Sellers: ${stats.sellers || 0}`} variant="outlined" />
           <Chip label={`Templates: ${stats.templates || 0}`} variant="outlined" />
+          {stats.csvListings > 0 && (
+            <Chip label={`CSV Listings: ${stats.csvListings}`} size="small" color="info" variant="outlined" />
+          )}
+          {stats.directList > 0 && (
+            <Chip label={`Direct List: ${stats.directList}`} size="small" color="secondary" variant="outlined" />
+          )}
           {stats.draft > 0 && <Chip label={`Draft: ${stats.draft}`} size="small" />}
           {stats.active > 0 && <Chip label={`Active: ${stats.active}`} size="small" color="success" />}
         </Stack>
       </Stack>
 
+      <Tabs
+        value={activeTab}
+        onChange={(_, value) => setActiveTab(value)}
+        sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}
+      >
+        <Tab label="Listings" />
+        <Tab label="Summary" />
+      </Tabs>
+
+      {activeTab === 1 && (
+        <Box>
+          {summaryError && (
+            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setSummaryError('')}>
+              {summaryError}
+            </Alert>
+          )}
+          {summaryLoading ? (
+            <Paper sx={{ p: 3, textAlign: 'center' }}>
+              <Typography>Loading summary...</Typography>
+            </Paper>
+          ) : summaryRows.length === 0 ? (
+            <Paper sx={{ p: 3, textAlign: 'center' }}>
+              <Typography color="text.secondary">No listing data to summarize yet.</Typography>
+            </Paper>
+          ) : (
+            <TableContainer component={Paper} sx={{ overflowX: 'auto' }}>
+              <Table size="small">
+                <TableHead>
+                  <TableRow sx={{ bgcolor: 'grey.100' }}>
+                    {SUMMARY_SORT_COLUMNS.map((column) => (
+                      <TableCell
+                        key={column.id}
+                        align={column.align}
+                        sortDirection={summarySortBy === column.id ? summarySortOrder : false}
+                        sx={{ fontWeight: 'bold' }}
+                      >
+                        <TableSortLabel
+                          active={summarySortBy === column.id}
+                          direction={summarySortBy === column.id ? summarySortOrder : 'asc'}
+                          onClick={() => handleSummarySort(column.id)}
+                          sx={{
+                            justifyContent: column.align === 'right' ? 'flex-end' : 'flex-start',
+                            width: column.align === 'right' ? '100%' : 'auto',
+                            '& .MuiTableSortLabel-icon': {
+                              opacity: summarySortBy === column.id ? 1 : 0.3,
+                            },
+                          }}
+                        >
+                          {column.label}
+                        </TableSortLabel>
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {sortedSummaryRows.map((row) => (
+                    <TableRow key={String(row.sellerId)} hover>
+                      <TableCell>
+                        <Button
+                          size="small"
+                          onClick={() => openSellerInListings(row.sellerId)}
+                          sx={{ textTransform: 'none', fontWeight: 600, px: 0 }}
+                        >
+                          {row.sellerName}
+                        </Button>
+                      </TableCell>
+                      <TableCell align="right">
+                        <Button
+                          size="small"
+                          color="info"
+                          disabled={!row.csvActive}
+                          onClick={() => openSellerInListings(row.sellerId, { origin: 'template_listings', status: 'active' })}
+                          sx={{ minWidth: 40 }}
+                        >
+                          {row.csvActive || 0}
+                        </Button>
+                      </TableCell>
+                      <TableCell align="right">
+                        <Button
+                          size="small"
+                          disabled={!row.csvDraft}
+                          onClick={() => openSellerInListings(row.sellerId, { origin: 'template_listings', status: 'draft' })}
+                          sx={{ minWidth: 40 }}
+                        >
+                          {row.csvDraft || 0}
+                        </Button>
+                      </TableCell>
+                      <TableCell align="right">
+                        <Chip
+                          size="small"
+                          color="info"
+                          variant="outlined"
+                          label={row.csvTotal || 0}
+                          onClick={row.csvTotal ? () => openSellerInListings(row.sellerId, { origin: 'template_listings' }) : undefined}
+                          sx={{ cursor: row.csvTotal ? 'pointer' : 'default' }}
+                        />
+                      </TableCell>
+                      <TableCell align="right">
+                        <Chip
+                          size="small"
+                          color="secondary"
+                          variant="outlined"
+                          label={row.directTotal || 0}
+                          onClick={row.directTotal ? () => openSellerInListings(row.sellerId, { origin: 'direct_list' }) : undefined}
+                          sx={{ cursor: row.directTotal ? 'pointer' : 'default' }}
+                        />
+                      </TableCell>
+                      <TableCell align="right">{row.directDraft || 0}</TableCell>
+                      <TableCell align="right">
+                        <Typography variant="body2" fontWeight="bold">{row.total || 0}</Typography>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {summaryTotals && (
+                    <TableRow sx={{ bgcolor: 'grey.50' }}>
+                      <TableCell sx={{ fontWeight: 'bold' }}>All sellers</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 'bold' }}>{summaryTotals.csvActive || 0}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 'bold' }}>{summaryTotals.csvDraft || 0}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 'bold' }}>{summaryTotals.csvTotal || 0}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 'bold' }}>{summaryTotals.directTotal || 0}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 'bold' }}>{summaryTotals.directDraft || 0}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 'bold' }}>{summaryTotals.total || 0}</TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </Box>
+      )}
+
+      {activeTab === 0 && (
+      <>
       {/* Filter Bar */}
       <Paper sx={{ p: 2, mb: 3 }}>
         <Stack spacing={2}>
@@ -281,6 +515,22 @@ export default function TemplateDatabasePage() {
                 <MenuItem value="inactive">Inactive</MenuItem>
               </Select>
             </FormControl>
+
+            <FormControl sx={{ minWidth: 180 }}>
+              <InputLabel>Source</InputLabel>
+              <Select
+                value={originFilter}
+                onChange={(e) => {
+                  setOriginFilter(e.target.value);
+                  setPagination(prev => ({ ...prev, page: 1 }));
+                }}
+                label="Source"
+              >
+                <MenuItem value="">All Sources</MenuItem>
+                <MenuItem value="template_listings">CSV Listings</MenuItem>
+                <MenuItem value="direct_list">Direct List</MenuItem>
+              </Select>
+            </FormControl>
           </Stack>
 
           {/* Search Bar */}
@@ -325,6 +575,14 @@ export default function TemplateDatabasePage() {
                   color="primary"
                 />
               )}
+              {originFilter && (
+                <Chip
+                  label={`Source: ${originFilter === 'direct_list' ? 'Direct List' : 'CSV Listings'}`}
+                  onDelete={() => setOriginFilter('')}
+                  size="small"
+                  color="primary"
+                />
+              )}
               {searchQuery && (
                 <Chip
                   label={`Search: "${searchQuery}"`}
@@ -358,7 +616,7 @@ export default function TemplateDatabasePage() {
           <Typography color="text.secondary">
             {hasActiveFilters 
               ? 'No listings found matching your filters.' 
-              : 'No listings found. Add listings from the Add Template Listings page.'}
+              : 'No listings found. Add listings from CSV Listings or Direct List to eBay.'}
           </Typography>
           {hasActiveFilters && (
             <Button onClick={clearAllFilters} sx={{ mt: 2 }}>
@@ -509,7 +767,7 @@ export default function TemplateDatabasePage() {
                             {listing.title}
                           </Typography>
 
-                          {/* Template & Status */}
+                          {/* Template, Source & Status */}
                           <Stack direction="row" spacing={1} flexWrap="wrap">
                             <Chip
                               label={listing.templateId?.name || 'N/A'}
@@ -517,6 +775,18 @@ export default function TemplateDatabasePage() {
                               variant="outlined"
                               sx={{ fontSize: '0.75rem' }}
                             />
+                            {(() => {
+                              const source = getListingSource(listing);
+                              return (
+                                <Chip
+                                  label={source.label}
+                                  size="small"
+                                  color={source.color}
+                                  variant="outlined"
+                                  sx={{ fontSize: '0.75rem' }}
+                                />
+                              );
+                            })()}
                             <Chip
                               label={listing.status || 'draft'}
                               size="small"
@@ -567,6 +837,7 @@ export default function TemplateDatabasePage() {
                           <TableCell sx={{ fontWeight: 'bold', minWidth: 300 }}>Link</TableCell>
                           <TableCell sx={{ fontWeight: 'bold', minWidth: 200 }}>Title</TableCell>
                           <TableCell sx={{ fontWeight: 'bold', width: 120 }}>Template</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', width: 120 }}>Source</TableCell>
                           <TableCell sx={{ fontWeight: 'bold', width: 100 }}>Amazon</TableCell>
                           <TableCell sx={{ fontWeight: 'bold', width: 100 }}>eBay</TableCell>
                           <TableCell sx={{ fontWeight: 'bold', width: 80 }}>Qty</TableCell>
@@ -677,6 +948,20 @@ export default function TemplateDatabasePage() {
                               />
                             </TableCell>
                             <TableCell>
+                              {(() => {
+                                const source = getListingSource(listing);
+                                return (
+                                  <Chip
+                                    label={source.label}
+                                    size="small"
+                                    color={source.color}
+                                    variant="outlined"
+                                    sx={{ fontSize: '0.75rem' }}
+                                  />
+                                );
+                              })()}
+                            </TableCell>
+                            <TableCell>
                               <Typography variant="body2" fontWeight="medium" color="text.secondary">
                                 {formatListingPrice(listing.amazonScrapedPrice)}
                               </Typography>
@@ -749,6 +1034,8 @@ export default function TemplateDatabasePage() {
           />
         </Box>
       )}
+      </>
+      )}
 
       {/* Details Dialog */}
       <Dialog
@@ -759,13 +1046,26 @@ export default function TemplateDatabasePage() {
         fullScreen={isMobile}
       >
         <DialogTitle sx={{ pb: 1 }}>
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
             <Typography variant="h6">Listing Details</Typography>
-            <Chip 
-              label={selectedListing?.status || 'draft'} 
-              size="small" 
-              color={selectedListing?.status === 'active' ? 'success' : 'default'}
-            />
+            <Stack direction="row" spacing={1}>
+              {selectedListing && (() => {
+                const source = getListingSource(selectedListing);
+                return (
+                  <Chip
+                    label={source.label}
+                    size="small"
+                    color={source.color}
+                    variant="outlined"
+                  />
+                );
+              })()}
+              <Chip 
+                label={selectedListing?.status || 'draft'} 
+                size="small" 
+                color={selectedListing?.status === 'active' ? 'success' : 'default'}
+              />
+            </Stack>
           </Stack>
         </DialogTitle>
         <Divider />

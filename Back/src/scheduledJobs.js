@@ -10,6 +10,8 @@ import {
   processPendingPolicyMessages,
   processPendingListingQtyUpdates,
 } from './routes/ebay.js';
+import { refreshDiscountAlertsCache } from './routes/discounts.js';
+import { scheduledSkuIndexSyncAllSellers } from './lib/skuIndexSync.js';
 import { importTransactionsFromGmail } from './utils/gmailTransactionImporter.js';
 import { runScheduledDirectListJobs } from './lib/directListJobRunner.js';
 
@@ -96,6 +98,22 @@ export const CRON_JOB_DEFINITIONS = [
     description: 'Fetch SUCCEEDED payouts from eBay and save to MongoDB for Payoneer sheet.',
     cronExpr: '30 2 * * *',
     timezone: 'Asia/Kolkata',
+    enabled: true,
+  },
+  {
+    jobKey: 'skuIndexSyncAllSellers',
+    label: 'SKU index sync (all sellers)',
+    description: 'Rebuild SellerSkuIndex for all eBay-connected sellers via GetSellerList.',
+    cronExpr: '30 12 * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: true,
+  },
+  {
+    jobKey: 'discountAlertsCacheRefresh',
+    label: 'Discount alerts cache refresh',
+    description: 'Refresh the header bell\'s cache of active coupons/sale events (ending-soon alerts) from eBay every 12 hours. User activity never triggers eBay calls — only this job, server boot, or an explicit "Refresh now" click.',
+    cronExpr: '0 */12 * * *',
+    timezone: '',
     enabled: true,
   },
 ];
@@ -191,6 +209,17 @@ async function runPayoneerFeedRefresh() {
   console.log(`[CRON] Payoneer feed cache saved ${result?.total ?? 0} row(s)`);
 }
 
+async function runSkuIndexSyncAllSellers() {
+  console.log('[CRON] SKU index sync (all sellers) starting…');
+  const results = await scheduledSkuIndexSyncAllSellers();
+  console.log(`[CRON] SKU index sync finished ${Array.isArray(results) ? results.length : 0} seller(s)`);
+}
+
+async function runDiscountAlertsCacheRefresh() {
+  console.log('[CRON] Refreshing discount alerts cache...');
+  await refreshDiscountAlertsCache();
+}
+
 const CRON_JOB_HANDLERS = {
   dailyTimerAutoStop: runDailyTimerAutoStop,
   csvAutoUpload: runCsvAutoUpload,
@@ -202,6 +231,8 @@ const CRON_JOB_HANDLERS = {
   autoCompatRunForDate: runAutoCompatForDate,
   gmailImport: runGmailImport,
   payoneerFeedRefresh: runPayoneerFeedRefresh,
+  skuIndexSyncAllSellers: runSkuIndexSyncAllSellers,
+  discountAlertsCacheRefresh: runDiscountAlertsCacheRefresh,
 };
 
 function scheduleJob(config) {
@@ -239,4 +270,11 @@ export async function reloadScheduledJobs() {
 export async function initializeScheduledJobs() {
   await ensureCronConfigDefaults();
   await reloadScheduledJobs();
+
+  // Warm the discount alerts cache once at startup so the first user to open
+  // the header bell doesn't wait on a cold cache (the 12-hour cron job above
+  // keeps it fresh afterwards).
+  refreshDiscountAlertsCache().catch((error) =>
+    console.error('[CRON] Initial discount alerts cache warm failed:', error.message)
+  );
 }

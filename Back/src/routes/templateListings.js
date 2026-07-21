@@ -535,7 +535,8 @@ router.get('/database-view', requireAuth, async (req, res) => {
     const { 
       sellerId, 
       templateId, 
-      status, 
+      status,
+      listingOrigin,
       search, 
       page = 1, 
       limit = 50 
@@ -547,6 +548,40 @@ router.get('/database-view', requireAuth, async (req, res) => {
     if (sellerId) query.sellerId = sellerId;
     if (templateId) query.templateId = templateId;
     if (status) query.status = status;
+
+    // Source filter: CSV Listings vs Direct List to eBay
+    if (listingOrigin === 'direct_list') {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { listingOrigin: 'direct_list' },
+          // Legacy Direct List rows saved before listingOrigin existed
+          {
+            $and: [
+              { $or: [{ listingOrigin: { $exists: false } }, { listingOrigin: null }] },
+              { ebayPublishedAt: { $ne: null } },
+            ],
+          },
+        ],
+      });
+    } else if (listingOrigin === 'template_listings') {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { listingOrigin: 'template_listings' },
+          { listingOrigin: { $exists: false } },
+          { listingOrigin: null },
+        ],
+      });
+      // Exclude legacy Direct List rows that have no listingOrigin but were published on eBay
+      query.$and.push({
+        $or: [
+          { listingOrigin: 'template_listings' },
+          { ebayPublishedAt: { $exists: false } },
+          { ebayPublishedAt: null },
+        ],
+      });
+    }
     
     // Search across ASIN, SKU (customLabel), and Title
     if (search) {
@@ -613,21 +648,216 @@ router.get('/database-stats', requireAuth, async (req, res) => {
           },
           inactiveCount: {
             $sum: { $cond: [{ $eq: ['$status', 'inactive'] }, 1, 0] }
-          }
+          },
+          directListCount: {
+            $sum: {
+              $cond: [
+                {
+                  $or: [
+                    { $eq: ['$listingOrigin', 'direct_list'] },
+                    {
+                      $and: [
+                        {
+                          $in: [
+                            { $ifNull: ['$listingOrigin', null] },
+                            [null],
+                          ],
+                        },
+                        { $ne: [{ $ifNull: ['$ebayPublishedAt', null] }, null] },
+                      ],
+                    },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
         }
       }
     ]);
+
+    const total = stats[0]?.totalListings || 0;
+    const directList = stats[0]?.directListCount || 0;
     
     res.json({
-      total: stats[0]?.totalListings || 0,
+      total,
       sellers: stats[0]?.uniqueSellers?.length || 0,
       templates: stats[0]?.uniqueTemplates?.length || 0,
       draft: stats[0]?.draftCount || 0,
       active: stats[0]?.activeCount || 0,
-      inactive: stats[0]?.inactiveCount || 0
+      inactive: stats[0]?.inactiveCount || 0,
+      csvListings: Math.max(0, total - directList),
+      directList,
     });
   } catch (error) {
     console.error('Database stats error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Per-seller summary: CSV Listings vs Direct List, draft/active breakdown
+router.get('/database-summary', requireAuth, async (req, res) => {
+  try {
+    const rows = await TemplateListing.aggregate([
+      { $match: { deletedAt: null, sellerId: { $ne: null } } },
+      {
+        $addFields: {
+          isDirectList: {
+            $or: [
+              { $eq: ['$listingOrigin', 'direct_list'] },
+              {
+                $and: [
+                  { $eq: [{ $ifNull: ['$listingOrigin', null] }, null] },
+                  { $ne: [{ $ifNull: ['$ebayPublishedAt', null] }, null] },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: '$sellerId',
+          total: { $sum: 1 },
+          csvTotal: {
+            $sum: { $cond: [{ $eq: ['$isDirectList', false] }, 1, 0] },
+          },
+          csvActive: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$isDirectList', false] },
+                    { $eq: ['$status', 'active'] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          csvDraft: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$isDirectList', false] },
+                    { $eq: ['$status', 'draft'] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          directTotal: {
+            $sum: { $cond: [{ $eq: ['$isDirectList', true] }, 1, 0] },
+          },
+          directActive: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$isDirectList', true] },
+                    { $eq: ['$status', 'active'] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          directDraft: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$isDirectList', true] },
+                    { $eq: ['$status', 'draft'] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+          draft: {
+            $sum: { $cond: [{ $eq: ['$status', 'draft'] }, 1, 0] },
+          },
+          active: {
+            $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] },
+          },
+        },
+      },
+      {
+        $lookup: {
+          from: 'sellers',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'seller',
+        },
+      },
+      { $unwind: { path: '$seller', preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'seller.user',
+          foreignField: '_id',
+          as: 'user',
+        },
+      },
+      { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 0,
+          sellerId: '$_id',
+          sellerName: {
+            $ifNull: ['$user.username', { $ifNull: ['$user.email', 'Unknown'] }],
+          },
+          total: 1,
+          csvTotal: 1,
+          csvActive: 1,
+          csvDraft: 1,
+          directTotal: 1,
+          directActive: 1,
+          directDraft: 1,
+          draft: 1,
+          active: 1,
+        },
+      },
+      { $sort: { total: -1, sellerName: 1 } },
+    ]);
+
+    const totals = rows.reduce(
+      (acc, row) => {
+        acc.total += row.total || 0;
+        acc.csvTotal += row.csvTotal || 0;
+        acc.csvActive += row.csvActive || 0;
+        acc.csvDraft += row.csvDraft || 0;
+        acc.directTotal += row.directTotal || 0;
+        acc.directActive += row.directActive || 0;
+        acc.directDraft += row.directDraft || 0;
+        acc.draft += row.draft || 0;
+        acc.active += row.active || 0;
+        return acc;
+      },
+      {
+        total: 0,
+        csvTotal: 0,
+        csvActive: 0,
+        csvDraft: 0,
+        directTotal: 0,
+        directActive: 0,
+        directDraft: 0,
+        draft: 0,
+        active: 0,
+      }
+    );
+
+    res.json({ rows, totals, sellerCount: rows.length });
+  } catch (error) {
+    console.error('Database summary error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1426,6 +1656,7 @@ router.post('/bulk-apply-schedule', requireAuth, async (req, res) => {
       listingFilter.$or = [{ downloadBatchId: null }, { pendingRedownload: true }];
     }
     // batchFilter === 'all' → no additional filter
+    applyExcludeDirectListFilter(listingFilter);
 
     // Fetch all listings for this template + seller, sorted by creation order
     const listings = await TemplateListing.find(listingFilter)
@@ -1514,6 +1745,7 @@ router.post('/clear-schedule', requireAuth, async (req, res) => {
     } else if (!batchFilter || batchFilter === 'active') {
       filter.$or = [{ downloadBatchId: null }, { pendingRedownload: true }];
     }
+    applyExcludeDirectListFilter(filter);
 
     const result = await TemplateListing.updateMany(filter, { $set: { scheduleTime: '' } });
 
@@ -3635,6 +3867,8 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
       if (sellerId) {
         filter.sellerId = sellerId;
       }
+      // Keep Direct List → eBay rows out of CSV Listings downloads (still in Listings Database)
+      applyExcludeDirectListFilter(filter);
     }
     
     // Fetch effective template (includes seller overrides), seller, and filtered listings

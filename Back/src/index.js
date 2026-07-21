@@ -49,7 +49,10 @@ import compatibilityRoutes from './routes/compatibility.js';
 import listingCompletionsRoutes from './routes/listingCompletions.js';
 
 import ebayRoutes, { resumeRunningAutoCompatibilityBatches } from './routes/ebay.js';
+import skuIndexRoutes from './routes/skuIndex.js';
+import { initializeSkuIndexSyncState } from './lib/skuIndexSync.js';
 import bestOffersRoutes from './routes/bestOffers.js';
+import discountsRoutes from './routes/discounts.js';
 import sellersRoutes from './routes/sellers.js';
 import employeeProfilesRoutes from './routes/employeeProfiles.js';
 import storeWiseTasksRoutes from './routes/storeWiseTasks.js';
@@ -84,6 +87,15 @@ import customColumnsRoutes from './routes/customColumns.js';
 import amazonPiSourceColumnsRoutes from './routes/amazonPiSourceColumns.js';
 import listingTemplateRoutes from './routes/listingTemplates.js';
 import templateListingsRoutes from './routes/templateListings.js';
+import asinPrecheckRoutes from './routes/asinPrecheck.js';
+import skuSellerProfitRoutes from './routes/skuSellerProfit.js';
+import amazonStockChecksRoutes, { resumeRunningAmazonStockCheckRuns } from './routes/amazonStockChecks.js';
+import featurePermissionsRoutes from './routes/featurePermissions.js';
+import endListingLogsRoutes from './routes/endListingLogs.js';
+import manualEndListingsRoutes from './routes/manualEndListings.js';
+import dailyListingComparisonRoutes from './routes/dailyListingComparison.js';
+import activeListingTiersRoutes from './routes/activeListingTiers.js';
+import expiringListingsRoutes from './routes/expiringListings.js';
 import templateOverridesRoutes from './routes/templateOverrides.js';
 import sellerPricingConfigRoutes from './routes/sellerPricingConfig.js';
 import accountHealthRoutes from './routes/accountHealth.js';
@@ -98,7 +110,9 @@ import asinListCategoriesRoutes from './routes/asinListCategories.js';
 import asinListRangesRoutes from './routes/asinListRanges.js';
 import asinListProductsRoutes from './routes/asinListProducts.js';
 import csvStorageRoutes from './routes/csvStorage.js';
+import sellerUploadLimitsRoutes from './routes/sellerUploadLimits.js';
 import attendanceRoutes from './routes/attendance.js';
+import meetingsRoutes from './routes/meetings.js';
 import userSellersRoutes from './routes/userSellers.js';
 import salaryRoutes from './routes/salary.js';
 import aiRoutes from './routes/ai.js';
@@ -111,6 +125,7 @@ import etsyOrderFulfilmentRoutes from './routes/etsyOrderFulfilment.js';
 import etsyProductsRoutes from './routes/etsyProducts.js';
 import etsyStoresRoutes from './routes/etsyStores.js';
 import invoiceRoutes from './routes/invoices.js';
+import userCategoryTargetsRoutes from './routes/userCategoryTargets.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
@@ -186,7 +201,13 @@ app.use('/api/compatibility', compatibilityRoutes);
 app.use('/api/listing-completions', listingCompletionsRoutes);
 
 app.use('/api/ebay', ebayRoutes);
+app.use('/api/ebay', skuIndexRoutes);
 app.use('/api/ebay', bestOffersRoutes);
+app.use('/api/ebay', discountsRoutes);
+app.use('/api/ebay', manualEndListingsRoutes);
+app.use('/api/ebay', dailyListingComparisonRoutes);
+app.use('/api/ebay', activeListingTiersRoutes);
+app.use('/api/ebay', expiringListingsRoutes);
 app.use('/api/sellers', sellersRoutes);
 app.use('/api/employee-profiles', employeeProfilesRoutes);
 app.use('/api/store-wise-tasks', storeWiseTasksRoutes);
@@ -222,7 +243,14 @@ app.use('/api/amazon-pi-source-columns', amazonPiSourceColumnsRoutes);
 // Alias without "amazon" in the path — some browser extensions block /amazon-* URLs.
 app.use('/api/pi-source-columns', amazonPiSourceColumnsRoutes);
 app.use('/api/listing-templates', listingTemplateRoutes);
+app.use('/api/template-listings', asinPrecheckRoutes);
+app.use('/api/template-listings', skuSellerProfitRoutes);
 app.use('/api/template-listings', templateListingsRoutes);
+// Top-level alias: GET /api/precheck-usage-summary
+app.use('/api', asinPrecheckRoutes);
+app.use('/api/amazon-stock-checks', amazonStockChecksRoutes);
+app.use('/api/feature-permissions', featurePermissionsRoutes);
+app.use('/api/end-listing-logs', endListingLogsRoutes);
 app.use('/api/template-overrides', templateOverridesRoutes);
 app.use('/api/seller-pricing-config', sellerPricingConfigRoutes);
 app.use('/api/account-health', accountHealthRoutes);
@@ -237,10 +265,12 @@ app.use('/api/asin-list-categories', asinListCategoriesRoutes);
 app.use('/api/asin-list-ranges', asinListRangesRoutes);
 app.use('/api/asin-list-products', asinListProductsRoutes);
 app.use('/api/csv-storage', csvStorageRoutes);
+app.use('/api/seller-upload-limits', sellerUploadLimitsRoutes);
 // Nomenclature note:
 // `/api/attendance` is a legacy endpoint name kept for compatibility;
 // it serves working-hours tracking behavior (timer sessions), not traditional attendance management.
 app.use('/api/attendance', attendanceRoutes);
+app.use('/api/meetings', meetingsRoutes);
 app.use('/api/user-sellers', userSellersRoutes);
 app.use('/api/salary', salaryRoutes);
 app.use('/api/ai', aiRoutes);
@@ -254,6 +284,7 @@ app.use('/api/etsy/order-fulfilment', etsyOrderFulfilmentRoutes);
 app.use('/api/etsy/products', etsyProductsRoutes);
 app.use('/api/etsy/stores', etsyStoresRoutes);
 app.use('/api/invoices', invoiceRoutes);
+app.use('/api/user-category-targets', userCategoryTargetsRoutes);
 
 // Optional: same-origin production — serve Vite build (see Dockerfile / deployment-plan.md)
 if (process.env.SERVE_FRONTEND === 'true') {
@@ -326,6 +357,20 @@ connectToDatabase()
         })
         .catch((e) => {
           console.error('[AutoCompat] Failed to resume running batches:', e.message);
+        });
+
+      initializeSkuIndexSyncState().catch((e) => {
+        console.error('[SKU Index Sync] Failed to initialize startup state:', e.message);
+      });
+
+      resumeRunningAmazonStockCheckRuns()
+        .then((resumed) => {
+          if (resumed > 0) {
+            console.log(`[Amazon Stock Check] Resumed ${resumed} run(s) after server restart`);
+          }
+        })
+        .catch((e) => {
+          console.error('[Amazon Stock Check] Failed to resume runs:', e.message);
         });
     });
   })

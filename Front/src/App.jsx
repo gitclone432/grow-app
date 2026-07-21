@@ -23,6 +23,7 @@ const STATIC_PAGE_TITLES = {
   '/ideas': `Ideas & Issues • ${BASE_DOCUMENT_TITLE}`,
   '/about-me': `About Me • ${BASE_DOCUMENT_TITLE}`,
   '/admin/about-me': `About Me • ${BASE_DOCUMENT_TITLE}`,
+  '/admin/welcome': `Home • ${BASE_DOCUMENT_TITLE}`,
   '/admin/my-leaves': `My Leaves • ${BASE_DOCUMENT_TITLE}`,
   '/admin/internal-messages': `Team Chat • ${BASE_DOCUMENT_TITLE}`,
   '/admin/ideas': `Ideas & Issues • ${BASE_DOCUMENT_TITLE}`,
@@ -37,7 +38,7 @@ const ADMIN_ROUTE_TITLE_OVERRIDES = {
   '/admin/return-requested': 'Issues and Resolutions',
   '/admin/worksheet': 'Issues and Resolutions',
   '/admin/template-listings-lab': 'Template Listings',
-  '/admin/select-seller-lab': 'Template listing',
+  '/admin/select-seller-lab': 'CSV Listings',
   '/admin/seller-templates-lab': 'Seller Templates',
   '/admin/template-listing-analytics': 'Template Listing Analytics',
 };
@@ -123,17 +124,9 @@ function useAuth() {
     setAuthToken(t);
     localStorage.setItem('user', JSON.stringify(u));
 
-    if (u.role === 'lister') navigate('/lister');
-    else if (u.role === 'advancelister') navigate('/lister');
-    else if (u.role === 'trainee') navigate('/lister');
-    else if (u.role === 'compatibilityadmin') navigate('/admin/compatibility-tasks');
-    else if (u.role === 'compatibilityeditor') navigate('/admin/compatibility-editor');
-    else if (u.role === 'seller') navigate('/seller-ebay');
-    else if (u.role === 'fulfillmentadmin') navigate('/admin/fulfillment');
-    else if (u.role === 'hradmin') navigate('/admin/employee-management');
-    else if (u.role === 'hr') navigate('/admin/about-me');
-    else if (u.role === 'operationhead') navigate('/admin/employee-management');
-    else navigate('/admin');
+    // Sellers stay on seller profile; everyone else (including listers) lands on Home
+    if (u.role === 'seller') navigate('/seller-ebay');
+    else navigate('/admin/welcome');
   };
   const logout = () => {
     setToken(null);

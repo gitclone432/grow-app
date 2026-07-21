@@ -11,9 +11,66 @@ import FormData from 'form-data';
 import Seller from '../models/Seller.js';
 import FeedUpload from '../models/FeedUpload.js';
 import CsvStorage from '../models/CsvStorage.js';
+import SellerUploadLimit from '../models/SellerUploadLimit.js';
 
 import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
 import { prepareFxCsvBufferForUpload } from '../utils/ebayDraftListingCsv.js';
+
+/**
+ * Returns the start of the current IST day as a UTC Date.
+ * IST = UTC + 5:30, so midnight IST = 18:30 UTC the previous day.
+ */
+function getISTDayStart() {
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // +5:30 in ms
+    const now = new Date();
+    // Shift now to IST, zero out the time component, then shift back to UTC.
+    const nowIST = new Date(now.getTime() + IST_OFFSET_MS);
+    nowIST.setUTCHours(0, 0, 0, 0); // midnight in IST-shifted space
+    return new Date(nowIST.getTime() - IST_OFFSET_MS);
+}
+
+/**
+ * Checks whether a seller has reached their configured daily upload limit for a given country.
+ * Counts the sum of uploadSummary.successCount across all COMPLETED/COMPLETED_WITH_ERROR
+ * FeedUpload records for the seller+country pair since 12:00 AM IST today.
+ * The count resets automatically at midnight IST.
+ *
+ * Soft block: when no limit row exists, uploads are allowed.
+ *
+ * @param {string} sellerId
+ * @param {string} country
+ * @returns {Promise<{ isBlocked: boolean, currentCount: number, limit: number|null }>}
+ */
+export async function checkUploadLimit(sellerId, country) {
+    const limitConfig = await SellerUploadLimit.findOne({ seller: sellerId, country });
+    if (!limitConfig) return { isBlocked: false, currentCount: 0, limit: null };
+
+    const istDayStart = getISTDayStart();
+
+    const result = await FeedUpload.aggregate([
+        {
+            $match: {
+                seller: limitConfig.seller,
+                country,
+                status: { $in: ['COMPLETED', 'COMPLETED_WITH_ERROR'] },
+                creationDate: { $gte: istDayStart }
+            }
+        },
+        {
+            $group: {
+                _id: null,
+                totalSuccess: { $sum: '$uploadSummary.successCount' }
+            }
+        }
+    ]);
+
+    const currentCount = result[0]?.totalSuccess || 0;
+    return {
+        isBlocked: currentCount >= limitConfig.limit,
+        currentCount,
+        limit: limitConfig.limit
+    };
+}
 
 async function ensureValidToken(seller) {
     const now = Date.now();
@@ -54,9 +111,10 @@ async function ensureValidToken(seller) {
  * @param {string} fileName - Original filename for the upload
  * @param {string} feedType - eBay feed type (default: 'FX_LISTING')
  * @param {string} schemaVersion - eBay schema version (default: '1.0')
+ * @param {object} [options] - Optional metadata: { country, categoryId, rangeId, productId }
  * @returns {Promise<string>} taskId
  */
-export async function performFeedUpload(sellerId, fileBuffer, fileName, feedType = 'FX_LISTING', schemaVersion = '1.0') {
+export async function performFeedUpload(sellerId, fileBuffer, fileName, feedType = 'FX_LISTING', schemaVersion = '1.0', options = {}) {
     const seller = await Seller.findById(sellerId);
     if (!seller) throw new Error(`Seller not found: ${sellerId}`);
 
@@ -110,14 +168,19 @@ export async function performFeedUpload(sellerId, fileBuffer, fileName, feedType
     );
 
     // 3. Create local FeedUpload record
-    await FeedUpload.create({
+    const feedUploadData = {
         seller: seller._id,
         taskId,
         fileName,
         feedType,
         schemaVersion,
         status: 'CREATED'
-    });
+    };
+    if (options.country) feedUploadData.country = options.country;
+    if (options.categoryId) feedUploadData.categoryId = options.categoryId;
+    if (options.rangeId) feedUploadData.rangeId = options.rangeId;
+    if (options.productId) feedUploadData.productId = options.productId;
+    await FeedUpload.create(feedUploadData);
 
     return taskId;
 }
@@ -143,11 +206,33 @@ export async function runScheduledUploads() {
         try {
             const full = await CsvStorage.findById(record._id);
             const sellerId = (full.scheduledSellerId || full.seller).toString();
+            const uploadCountry = full.country || 'US';
+
+            const limitCheck = await checkUploadLimit(sellerId, uploadCountry);
+            if (limitCheck.isBlocked) {
+                console.warn(
+                    `[CRON] Auto-upload BLOCKED for "${full.fileName}": limit of ${limitCheck.limit} reached ` +
+                    `(current: ${limitCheck.currentCount}) for seller ${sellerId} in ${uploadCountry}`
+                );
+                await CsvStorage.findByIdAndUpdate(record._id, { scheduledUploadStatus: 'limit_blocked' });
+                continue;
+            }
+
+            // Pass through metadata fields so FeedUpload record has correct
+            // country, category, range, and product instead of defaulting.
+            const uploadOptions = {};
+            if (full.country) uploadOptions.country = full.country;
+            if (full.categoryId) uploadOptions.categoryId = full.categoryId;
+            if (full.rangeId) uploadOptions.rangeId = full.rangeId;
+            if (full.productId) uploadOptions.productId = full.productId;
 
             const taskId = await performFeedUpload(
                 sellerId,
                 full.csvData,
-                full.fileName
+                full.fileName,
+                'FX_LISTING',
+                '1.0',
+                uploadOptions
             );
 
             // Link FeedUpload record back to CsvStorage

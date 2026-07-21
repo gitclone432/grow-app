@@ -2,6 +2,7 @@ import { generateWithGemini, replacePlaceholders } from './gemini.js';
 import { calculateStartPrice } from './pricingCalculator.js';
 import { processImagePlaceholders } from './imageReplacer.js';
 import { scrapeAmazonProductWithScraperAPI } from './scraperApiProduct.js';
+import { scrapeAmazonProductWithScrapingdog } from './scrapingdogProduct.js';
 import AmazonPiSourceColumn from '../models/AmazonPiSourceColumn.js';
 import { augmentAmazonDataWithPiColumns, filterAmazonPiCatalogColumns } from './amazonPiSourceColumnUtils.js';
 import {
@@ -90,34 +91,46 @@ export async function applyOverlayToScrapedImages(imageUrls = []) {
 
 /**
  * Fetch Amazon product data by ASIN
- * Uses ScraperAPI for ALL product data (Title, Brand, Description, Images, Price)
+ * Uses ScraperAPI (default) or Scrapingdog via AMAZON_PRODUCT_PROVIDER
+ * for ALL product data (Title, Brand, Description, Images, Price).
  * Replaces PAAPI entirely
  */
-export async function fetchAmazonData(asin, region = 'US') {
+export async function fetchAmazonData(asin, region = 'US', options = {}) {
   const startTime = Date.now();
+  const { forceRefresh = false } = options;
   
   try {
     console.log(`[fetchAmazonData] 🔍 Fetching product data for ASIN: ${asin} (${region})`);
     
     // Check in-memory cache first
-    const cached = getCachedAsinData(asin, region);
-    if (cached) {
-      const cacheTime = Date.now() - startTime;
-      console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${region}, ${cacheTime}ms)`);
-      return { ...cached, scrapeSource: 'cache' };
+    if (!forceRefresh) {
+      const cached = getCachedAsinData(asin, region);
+      if (cached) {
+        const cacheTime = Date.now() - startTime;
+        console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${region}, ${cacheTime}ms)`);
+        // Cache hits made no fetch — do not re-report availabilityRetry
+        return { ...cached, availabilityRetry: null, scrapeSource: 'cache' };
+      }
+
+      // Reuse Amazon scrape saved on any Listings Database row for this ASIN
+      const fromListingsDb = await getAmazonDataFromListingsDatabase(asin, region);
+      if (fromListingsDb) {
+        setCachedAsinData(asin, { ...fromListingsDb, availabilityRetry: null }, region);
+        const dbTime = Date.now() - startTime;
+        console.log(`[fetchAmazonData] 📚 Listings Database reused for ${asin} (${region}, ${dbTime}ms)`);
+        return { ...fromListingsDb, availabilityRetry: null, scrapeSource: 'listings_db' };
+      }
+    } else {
+      console.log(`[fetchAmazonData] 🔄 Force refresh enabled for ${asin} (${region})`);
     }
 
-    // Reuse Amazon scrape saved on any Listings Database row for this ASIN
-    const fromListingsDb = await getAmazonDataFromListingsDatabase(asin, region);
-    if (fromListingsDb) {
-      setCachedAsinData(asin, fromListingsDb, region);
-      const dbTime = Date.now() - startTime;
-      console.log(`[fetchAmazonData] 📚 Listings Database reused for ${asin} (${region}, ${dbTime}ms)`);
-      return { ...fromListingsDb, scrapeSource: 'listings_db' };
-    }
-    
-    // Live ScraperAPI / ScrapingDog scrape
-    const scrapedData = await scrapeAmazonProductWithScraperAPI(asin, region);
+    // Single provider call for ALL data. Provider is env-switchable so a bad
+    // rollout can be reverted by flipping AMAZON_PRODUCT_PROVIDER — no code change.
+    // Both clients return the identical object shape for core fields.
+    const provider = (process.env.AMAZON_PRODUCT_PROVIDER || 'scraperapi').toLowerCase();
+    const scrapedData = provider === 'scrapingdog'
+      ? await scrapeAmazonProductWithScrapingdog(asin, region)
+      : await scrapeAmazonProductWithScraperAPI(asin, region);
     
     const responseTime = Date.now() - startTime;
     
@@ -202,18 +215,40 @@ export async function fetchAmazonData(asin, region = 'US') {
         productInformation && typeof productInformation === 'object' && !Array.isArray(productInformation)
           ? productInformation
           : {},
+      // Set only on a fresh Scrapingdog fetch that re-tried for missing
+      // stock/delivery info; nulled when served from cache (no fetch = no retry)
+      availabilityRetry: scrapedData.availabilityRetry || null,
       rawData: scrapedData, // Store scraped data for debugging
       scrapeSource: 'live_scrape',
     };
     
-    // Cache the result — skip if description is empty so the next request
-    // triggers a fresh scrape rather than serving a stale empty-description entry
-    if (result.description) {
-      const { scrapeSource: _scrapeSource, ...toCache } = result;
-      setCachedAsinData(asin, toCache, region);
-      await rememberAmazonSourceSnapshot(asin, region, toCache);
-    } else {
+    // Cache the result — skip if description is empty. For Scrapingdog, also
+    // skip when stock/delivery info is missing so precheck columns don't pin
+    // to "Unknown" for the whole cache TTL. ScraperAPI keeps the prior
+    // description-only gate so the default path is unchanged.
+    const raw = scrapedData.rawData || {};
+    const stockText = String(
+      raw.availability_status || raw.purchase_options?.single_offer?.stock || availabilityStatus || ''
+    ).trim().toLowerCase();
+    const outOfStock = stockText.includes('unavailable') || stockText.includes('out of stock');
+    const hasDeliveryInfo = Boolean(
+      raw.shipping_time || raw.shipping_condition // ScraperAPI names
+      || raw.shipping_info // Scrapingdog name
+      || (Array.isArray(raw.delivery) && raw.delivery.length > 0)
+      || (Array.isArray(raw.purchase_options?.single_offer?.delivery) && raw.purchase_options.single_offer.delivery.length > 0)
+    );
+    const hasAvailabilityInfo = Boolean(stockText) && (outOfStock || hasDeliveryInfo);
+    const canCache = Boolean(result.description)
+      && (provider !== 'scrapingdog' || hasAvailabilityInfo);
+    if (canCache) {
+      // Strip retry marker + scrapeSource before caching
+      const { scrapeSource: _scrapeSource, availabilityRetry: _retry, ...toCache } = result;
+      setCachedAsinData(asin, { ...toCache, availabilityRetry: null }, region);
+      await rememberAmazonSourceSnapshot(asin, region, { ...toCache, availabilityRetry: null });
+    } else if (!result.description) {
       console.log(`[fetchAmazonData] ⚠️ Skipping cache for ${asin} (no description) — will retry on next request`);
+    } else {
+      console.log(`[fetchAmazonData] ⚠️ Skipping cache for ${asin} (no stock/delivery info) — will retry on next request`);
     }
     
     return result;

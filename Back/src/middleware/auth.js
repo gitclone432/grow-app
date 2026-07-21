@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import FeaturePermission from '../models/FeaturePermission.js';
 
 /** Short-lived in-memory cache for auth version checks (cuts DB round-trips on page APIs). */
 const AUTH_VERSION_CACHE_TTL_MS = 60_000;
@@ -52,6 +53,7 @@ export const PAGE_DEFAULT_ROLES = {
   'OrdersDashboard': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'OrderAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'MicroOrders': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'LegacyItemAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'CRPAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'CRPComparison': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'Fulfillment': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
@@ -77,6 +79,8 @@ export const PAGE_DEFAULT_ROLES = {
   'ListingsDatabase': ['superadmin'],
   'SelectSellerLab': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'SellerTemplatesLab': ['superadmin', 'lister', 'advancelister', 'trainee'],
+  'AsinPrecheck': ['superadmin', 'lister', 'advancelister', 'trainee'],
+  'AsinPrecheckStats': ['superadmin'],
   'TemplateListingsLab': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'ListingDirectory': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'TemplateDirectory': ['superadmin', 'lister', 'advancelister', 'trainee'],
@@ -86,8 +90,14 @@ export const PAGE_DEFAULT_ROLES = {
   'FeedUpload': ['superadmin', 'listingadmin', 'lister'],
   'DirectList': ['superadmin', 'listingadmin', 'lister'],
   'FeedUploadStats': ['superadmin', 'listingadmin'],
+  'DailyListingComparison': ['superadmin', 'listingadmin'],
+  'ManualEndListing': ['superadmin', 'listingadmin'],
+  'UserCategoryTargets': ['superadmin', 'hradmin', 'hr'],
+  'UserListingPerformance': ['superadmin', 'hradmin', 'hr'],
+  'SkuSellerOrderProfit': ['superadmin', 'listingadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'AiListingUsage': ['superadmin', 'listingadmin'],
+  'SellerUploadLimits': ['superadmin', 'listingadmin'],
   'CsvStorage': ['superadmin', 'listingadmin', 'lister'],
-  'ProductResearch': ['superadmin', 'productadmin'],
 
   // Finance & Cash Flow
   'Payoneer': ['superadmin'],
@@ -121,6 +131,16 @@ export const PAGE_DEFAULT_ROLES = {
   'EbayAnalyticsHub': ['superadmin', 'listingadmin'],
   'EbayFeedback': ['superadmin', 'listingadmin'],
   'EbayApiTester': ['superadmin', 'listingadmin'],
+  'SkuIndexSync': ['superadmin', 'listingadmin'],
+  'DuplicateSkus': ['superadmin', 'listingadmin'],
+  'SkuIndexDashboard': ['superadmin', 'listingadmin'],
+  'AmazonStockCheck': ['superadmin', 'listingadmin'],
+  'SellerSkuStockCheck': ['superadmin', 'listingadmin'],
+  'ExpiringListings': ['superadmin', 'listingadmin'],
+  'ActiveListingTiers': ['superadmin', 'listingadmin'],
+  'EndListingStats': ['superadmin', 'listingadmin'],
+  'EndListingByDate': ['superadmin', 'listingadmin'],
+  'PrecheckAiUsage': ['superadmin', 'listingadmin'],
   'AdsAndMarketing': ['superadmin', 'listingadmin'],
   'MarketingCampaigns': ['superadmin', 'listingadmin'],
   'MarketingPromotions': ['superadmin', 'listingadmin'],
@@ -128,15 +148,19 @@ export const PAGE_DEFAULT_ROLES = {
   'FinancesTransactionSummary': ['superadmin', 'listingadmin'],
   'FinancesTransactions': ['superadmin', 'listingadmin'],
   'FinancesPayoutGroups': ['superadmin', 'listingadmin'],
+  'Discounts': ['superadmin', 'listingadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // HR & Management
   'IdeasAndIssues': ['superadmin', 'hradmin', 'operationhead', 'listingadmin'],
   'TeamChat': ['superadmin', 'hradmin', 'operationhead', 'listingadmin'],
   'LeaveAdmin': ['superadmin', 'hradmin'],
   'EmployeeManagement': ['superadmin', 'listingadmin', 'hradmin', 'operationhead'],
+  'AddUser': ['superadmin', 'listingadmin', 'hradmin', 'operationhead'],
   'AddSeller': ['superadmin', 'hradmin', 'operationhead'],
   'UserSellerAssignments': ['superadmin', 'hradmin', 'hr'],
+  'Meetings': ['superadmin', 'productadmin', 'listingadmin', 'lister', 'advancelister', 'compatibilityadmin', 'compatibilityeditor', 'fulfillmentadmin', 'hradmin', 'hr', 'operationhead', 'trainee', 'hoc', 'compliancemanager'],
   'ViewAllMessages': ['superadmin'],
+  'Attendance': ['superadmin'],
   'PageAccessManagement': ['superadmin'],
   'PageAccessAuditLog': ['superadmin'],
   'UserPasswordManagement': ['superadmin'],
@@ -344,6 +368,34 @@ export function requirePageAccess(pageId, defaultRoles) {
       }
     } catch (err) {
       console.error('requirePageAccess error:', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  };
+}
+
+// Button/feature-level gate, finer-grained than requirePageAccess: superadmin
+// always passes, everyone else must be explicitly listed in the FeaturePermission
+// doc for featureId (defaults to nobody until a superadmin configures it).
+export function requireFeatureAccess(featureId) {
+  return async function (req, res, next) {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (req.user.role === 'superadmin') {
+      return next();
+    }
+
+    try {
+      const permission = await FeaturePermission.findOne({ featureId }).lean();
+      const allowedUserIds = permission?.allowedUserIds || [];
+      const isAllowed = allowedUserIds.some((id) => id.toString() === req.user.userId);
+      if (isAllowed) {
+        return next();
+      }
+      return res.status(403).json({ error: 'Forbidden: You do not have access to this feature' });
+    } catch (err) {
+      console.error('requireFeatureAccess error:', err);
       return res.status(500).json({ error: 'Internal server error' });
     }
   };

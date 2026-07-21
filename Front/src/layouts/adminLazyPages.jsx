@@ -1,9 +1,9 @@
 import { lazyWithRetry as lazy } from '../lib/lazyImport.js';
 
 /** Lazy page loaders — keeps AdminLayout bundle small so navigation stays fast. */
-export const ProductResearchPage = lazy(() => import('../pages/admin/ProductResearchPage.jsx'));
 export const AddListerPage = lazy(() => import('../pages/admin/AddListerPage.jsx'));
 export const AddSellerPage = lazy(() => import('../pages/admin/AddSellerPage.jsx'));
+export const AddUserPage = lazy(() => import('../pages/admin/AddUserPage.jsx'));
 export const ListingManagementPage = lazy(() => import('../pages/admin/ListingManagementPage.jsx'));
 export const ManagePlatformsPage = lazy(() => import('../pages/admin/ManagePlatformsPage.jsx'));
 export const ManageStoresPage = lazy(() => import('../pages/admin/ManageStoresPage.jsx'));
@@ -34,6 +34,7 @@ export const TransactionPage = lazy(() => import('../pages/admin/TransactionPage
 export const ExtraExpensePage = lazy(() => import('../pages/admin/ExtraExpensePage.jsx'));
 export const RevenueGrossNetPage = lazy(() => import('../pages/admin/RevenueGrossNetPage.jsx'));
 export const AboutMePage = lazy(() => import('../pages/AboutMePage.jsx'));
+export const WelcomePage = lazy(() => import('../pages/admin/WelcomePage.jsx'));
 export const EmployeeManagementPage = lazy(() => import('../pages/admin/EmployeeManagementPage.jsx'));
 export const BuyerChatPage = lazy(() => import('../pages/admin/BuyerChatPage.jsx'));
 export const FeedUploadPage = lazy(() => import('../pages/ebay/FeedUploadPage.jsx'));
@@ -43,9 +44,25 @@ export const EbayApiUsagePage = lazy(() => import('../pages/admin/EbayApiUsagePa
 export const EbayAnalyticsHubPage = lazy(() => import('../pages/admin/EbayAnalyticsHubPage.jsx'));
 export const EbayFeedbackPage = lazy(() => import('../pages/admin/EbayFeedbackPage.jsx'));
 export const EbayApiTesterPage = lazy(() => import('../pages/admin/EbayApiTesterPage.jsx'));
+export const SkuIndexSyncPage = lazy(() => import('../pages/admin/SkuIndexSyncPage.jsx'));
+export const DuplicateSkusPage = lazy(() => import('../pages/admin/DuplicateSkusPage.jsx'));
+export const SkuIndexDashboardPage = lazy(() => import('../pages/admin/SkuIndexDashboardPage.jsx'));
+export const AmazonStockCheckPage = lazy(() => import('../pages/admin/AmazonStockCheckPage.jsx'));
+export const SellerSkuStockCheckPage = lazy(() => import('../pages/admin/SellerSkuStockCheckPage.jsx'));
+export const ExpiringListingsPage = lazy(() => import('../pages/admin/ExpiringListingsPage.jsx'));
+export const EndListingStatsPage = lazy(() => import('../pages/admin/EndListingStatsPage.jsx'));
+export const EndListingByDatePage = lazy(() => import('../pages/admin/EndListingByDatePage.jsx'));
+export const PrecheckAiUsagePage = lazy(() => import('../pages/admin/PrecheckAiUsagePage.jsx'));
+export const AiListingUsagePage = lazy(() => import('../pages/admin/AiListingUsagePage.jsx'));
+export const DailyListingComparisonPage = lazy(() => import('../pages/admin/DailyListingComparisonPage.jsx'));
+export const ManualEndListingPage = lazy(() => import('../pages/admin/ManualEndListingPage.jsx'));
+export const SkuSellerProfitPage = lazy(() => import('../pages/admin/SkuSellerProfitPage.jsx'));
+export const ActiveListingTiersPage = lazy(() => import('../pages/admin/ActiveListingTiersPage.jsx'));
+export const DiscountsPage = lazy(() => import('../pages/admin/DiscountsPage.jsx'));
 export const StoreListingsPage = lazy(() => import('../pages/admin/StoreListingsPage.jsx'));
 export const SendOfferEligiblePage = lazy(() => import('../pages/admin/SendOfferEligiblePage.jsx'));
 export const FeedUploadStatsPage = lazy(() => import('../pages/admin/FeedUploadStatsPage.jsx'));
+export const SellerUploadLimitsPage = lazy(() => import('../pages/admin/SellerUploadLimitsPage.jsx'));
 export const SalaryPage = lazy(() => import('../pages/admin/SalaryPage.jsx'));
 export const SellerFundsPage = lazy(() => import('../pages/admin/SellerFundsPage.jsx'));
 export const TransactionSummaryPage = lazy(() => import('../pages/admin/TransactionSummaryPage.jsx'));
@@ -79,6 +96,7 @@ export const AffiliateOrdersPage = lazy(() => import('../pages/admin/AffiliateOr
 export const IdeasPage = lazy(() => import('../pages/IdeasPage.jsx'));
 export const OrderAnalyticsPage = lazy(() => import('../pages/admin/OrderAnalyticsPage.jsx'));
 export const MicroOrdersPage = lazy(() => import('../pages/admin/MicroOrdersPage.jsx'));
+export const LegacyItemAnalyticsPage = lazy(() => import('../pages/admin/LegacyItemAnalyticsPage.jsx'));
 export const CRPAnalyticsPage = lazy(() => import('../pages/admin/CRPAnalyticsPage.jsx'));
 export const SellerAnalyticsPage = lazy(() => import('../pages/admin/SellerAnalyticsPage.jsx'));
 export const OrdersDepartmentDashboardPage = lazy(() => import('../pages/admin/OrdersDepartmentDashboardPage.jsx'));
@@ -88,6 +106,8 @@ export const TemplateListingsLabPage = lazy(() => import('../pages/admin/Templat
 export const TemplateListingAnalyticsPage = lazy(() => import('../pages/admin/TemplateListingAnalyticsPage.jsx'));
 export const SelectSellerLabPage = lazy(() => import('../pages/admin/SelectSellerLabPage.jsx'));
 export const SellerTemplatesLabPage = lazy(() => import('../pages/admin/SellerTemplatesLabPage.jsx'));
+export const AsinPrecheckPage = lazy(() => import('../pages/admin/AsinPrecheckPage.jsx'));
+export const AsinPrecheckStatsPage = lazy(() => import('../pages/admin/AsinPrecheckStatsPage.jsx'));
 export const ListingDirectoryPage = lazy(() => import('../pages/admin/ListingDirectoryPage.jsx'));
 export const TemplateDirectoryPage = lazy(() => import('../pages/admin/TemplateDirectoryPage.jsx'));
 export const TemplateDatabasePage = lazy(() => import('../pages/admin/TemplateDatabasePage.jsx'));
@@ -108,3 +128,6 @@ export const UserPasswordManagementPage = lazy(() => import('../pages/admin/User
 export const StoresPage = lazy(() => import('../pages/admin/StoresPage.jsx'));
 export const EtsyStoresPage = lazy(() => import('../pages/admin/EtsyStoresPage.jsx'));
 export const DescriptionTemplatesPage = lazy(() => import('../pages/admin/DescriptionTemplatesPage.jsx'));
+export const UserCategoryTargetsPage = lazy(() => import('../pages/admin/UserCategoryTargetsPage.jsx'));
+export const UserListingPerformancePage = lazy(() => import('../pages/admin/UserListingPerformancePage.jsx'));
+export const MeetingsPage = lazy(() => import('../pages/admin/MeetingsPage.jsx'));
