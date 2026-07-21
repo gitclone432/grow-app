@@ -8,12 +8,20 @@ let gridfsBucket;
  * Call this after MongoDB connection is established
  */
 export function initGridFS() {
-  const db = mongoose.connection.db;
-  gridfsBucket = new mongoose.mongo.GridFSBucket(db, {
-    bucketName: 'invoices'
-  });
-  console.log('[GridFS] Invoice storage bucket initialized');
-  return gridfsBucket;
+  try {
+    const db = mongoose.connection.db;
+    if (!db) {
+      throw new Error('MongoDB connection not available');
+    }
+    gridfsBucket = new mongoose.mongo.GridFSBucket(db, {
+      bucketName: 'invoices'
+    });
+    console.log('[GridFS] ✓ Invoice storage bucket initialized successfully');
+    return gridfsBucket;
+  } catch (error) {
+    console.error('[GridFS] ✗ Failed to initialize:', error.message);
+    throw error;
+  }
 }
 
 /**
@@ -35,26 +43,40 @@ export function getGridFSBucket() {
  */
 export function uploadToGridFS(fileBuffer, filename, metadata = {}) {
   return new Promise((resolve, reject) => {
-    const bucket = getGridFSBucket();
-    const readableStream = Readable.from(fileBuffer);
-    
-    const uploadStream = bucket.openUploadStream(filename, {
-      metadata: {
-        ...metadata,
-        uploadDate: new Date()
-      }
-    });
+    try {
+      const bucket = getGridFSBucket();
+      const readableStream = Readable.from([fileBuffer]);
+      
+      const uploadStream = bucket.openUploadStream(filename, {
+        metadata: {
+          ...metadata,
+          uploadDate: new Date()
+        }
+      });
 
-    readableStream.pipe(uploadStream)
-      .on('error', (error) => {
+      uploadStream.on('error', (error) => {
+        console.error('GridFS upload stream error:', error);
         reject(error);
-      })
-      .on('finish', () => {
+      });
+
+      uploadStream.on('finish', () => {
+        console.log('[GridFS] File uploaded successfully:', uploadStream.id);
         resolve({
           fileId: uploadStream.id,
           filename: uploadStream.filename
         });
       });
+
+      readableStream.on('error', (error) => {
+        console.error('Readable stream error:', error);
+        reject(error);
+      });
+
+      readableStream.pipe(uploadStream);
+    } catch (error) {
+      console.error('GridFS upload error:', error);
+      reject(error);
+    }
   });
 }
 
@@ -75,9 +97,11 @@ export function downloadFromGridFS(fileId) {
         chunks.push(chunk);
       })
       .on('error', (error) => {
+        console.error('[GridFS] Download error for file:', fileId, error.message);
         reject(error);
       })
       .on('end', () => {
+        console.log('[GridFS] File downloaded successfully:', fileId);
         resolve(Buffer.concat(chunks));
       });
   });
@@ -98,17 +122,46 @@ export function streamFromGridFS(fileId) {
  * @param {ObjectId|string} fileId - The GridFS file ID
  * @returns {Promise<void>}
  */
-export function deleteFromGridFS(fileId) {
-  return new Promise((resolve, reject) => {
+export async function deleteFromGridFS(fileId) {
+  try {
     const bucket = getGridFSBucket();
-    bucket.delete(new mongoose.Types.ObjectId(fileId), (error) => {
-      if (error) {
-        reject(error);
-      } else {
-        resolve();
-      }
+    const objectId = new mongoose.Types.ObjectId(fileId);
+    
+    // Check if file exists first
+    const files = await bucket.find({ _id: objectId }).toArray();
+    
+    if (files.length === 0) {
+      console.warn('[GridFS] File already deleted or never existed:', fileId);
+      return; // Success - file doesn't exist, which is what we want
+    }
+    
+    // File exists, delete it
+    return new Promise((resolve, reject) => {
+      bucket.delete(objectId, (error) => {
+        if (error) {
+          console.error('[GridFS] Delete error:', error);
+          reject(error);
+        } else {
+          console.log('[GridFS] File deleted successfully:', fileId);
+          resolve();
+        }
+      });
     });
-  });
+  } catch (error) {
+    // Handle any synchronous errors
+    const isNotFoundError = 
+      error.code === 'ENOENT' || 
+      error.message?.includes('not found') ||
+      error.message?.includes('FileNotFound') ||
+      error.name === 'MongoRuntimeError';
+    
+    if (isNotFoundError) {
+      console.warn('[GridFS] File not found during delete:', fileId);
+      return; // Success - file doesn't exist
+    }
+    
+    throw error;
+  }
 }
 
 /**

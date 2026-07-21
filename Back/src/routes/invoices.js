@@ -189,6 +189,12 @@ router.post('/', requireAuth, upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
     
+    console.log('[Invoice Upload] Starting upload:', {
+      filename: req.file.originalname,
+      size: req.file.size,
+      mimetype: req.file.mimetype
+    });
+
     const { category, invoiceDate, notes } = req.body;
     
     if (!category || typeof category !== 'string' || category.trim() === '') {
@@ -200,6 +206,7 @@ router.post('/', requireAuth, upload.single('file'), async (req, res) => {
     }
     
     // Upload file to GridFS
+    console.log('[Invoice Upload] Uploading to GridFS...');
     const { fileId, filename } = await uploadToGridFS(
       req.file.buffer,
       req.file.originalname,
@@ -209,6 +216,8 @@ router.post('/', requireAuth, upload.single('file'), async (req, res) => {
         originalName: req.file.originalname
       }
     );
+    
+    console.log('[Invoice Upload] GridFS upload complete:', fileId);
     
     const invoice = new Invoice({
       category: category.trim(),
@@ -223,11 +232,13 @@ router.post('/', requireAuth, upload.single('file'), async (req, res) => {
     
     await invoice.save();
     
+    console.log('[Invoice Upload] Invoice saved to DB:', invoice._id);
+    
     const populatedInvoice = await invoice.populate('createdBy', 'firstName lastName email');
     
     res.status(201).json(populatedInvoice);
   } catch (error) {
-    console.error('Error uploading invoice:', error);
+    console.error('[Invoice Upload] Error:', error);
     res.status(500).json({ error: error.message || 'Failed to upload invoice' });
   }
 });
@@ -278,8 +289,11 @@ router.get('/:id/file', requireAuthFile, async (req, res) => {
     }
     
     if (!invoice.gridFsFileId) {
+      console.warn('[Invoice] No gridFsFileId for invoice:', req.params.id);
       return res.status(404).json({ error: 'Invoice file not found' });
     }
+    
+    console.log('[Invoice Download] Fetching file:', invoice.gridFsFileId);
     
     // Set appropriate headers
     res.set('Content-Type', invoice.mimeType || 'application/octet-stream');
@@ -289,15 +303,25 @@ router.get('/:id/file', requireAuthFile, async (req, res) => {
     const downloadStream = streamFromGridFS(invoice.gridFsFileId);
     
     downloadStream.on('error', (error) => {
-      console.error('Error streaming file from GridFS:', error);
+      console.error('[Invoice Download] Stream error:', {
+        invoiceId: req.params.id,
+        gridFsFileId: invoice.gridFsFileId,
+        error: error.message
+      });
       if (!res.headersSent) {
         res.status(500).json({ error: 'Failed to retrieve file' });
+      } else {
+        res.destroy();
       }
+    });
+    
+    res.on('finish', () => {
+      console.log('[Invoice Download] File sent successfully:', invoice.gridFsFileId);
     });
     
     downloadStream.pipe(res);
   } catch (error) {
-    console.error('Error downloading invoice:', error);
+    console.error('[Invoice Download] Error:', error);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to download invoice' });
     }
