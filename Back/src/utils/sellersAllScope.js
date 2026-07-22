@@ -40,21 +40,21 @@ export async function getSellersMatchingAllRoute(req) {
   };
 
   if (ORG_WIDE_SELLER_ROLES.has(req.user?.role)) {
-    return Seller.find(baseFilter).select('_id user').populate('user', 'username email active').lean();
+    return Seller.find(baseFilter).select('_id user ebayUserId').populate('user', 'username email active').lean();
   }
 
   const assignments = await UserSellerAssignment.find({ user: req.user.userId }).select('seller').lean();
   const assignedSellerIds = assignments.map((a) => a.seller);
 
   if (assignedSellerIds.length === 0) {
-    return Seller.find(baseFilter).select('_id user').populate('user', 'username email active').lean();
+    return Seller.find(baseFilter).select('_id user ebayUserId').populate('user', 'username email active').lean();
   }
 
   return Seller.find({
     _id: { $in: assignedSellerIds },
     ...baseFilter,
   })
-    .select('_id user')
+    .select('_id user ebayUserId')
     .populate('user', 'username email active')
     .lean();
 }
@@ -78,7 +78,7 @@ export async function getSellersForEbayApiPicker(req) {
     isStoreActive: { $ne: false },
     'ebayTokens.refresh_token': { $exists: true, $nin: [null, ''] },
   })
-    .select('_id user')
+    .select('_id user ebayUserId')
     .populate('user', 'username email active')
     .lean();
 

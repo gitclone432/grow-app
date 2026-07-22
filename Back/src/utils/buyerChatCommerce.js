@@ -1374,12 +1374,73 @@ export async function findBuyerChatConversationsFromCommerce(query = {}) {
         orderMatchedConversations = candidates;
         conv = candidates[0];
         strictSingleConversation = true;
+        // Persist orderId on commerce rows that matched by item/buyer only
+        for (const c of candidates) {
+          if (!c.orderId || String(c.orderId) !== oid) {
+            EbayMessageConversation.updateOne(
+              { _id: c._id },
+              { $set: { orderId: oid, otherPartyUsername: requestedBuyer || c.otherPartyUsername } }
+            ).catch(() => {});
+          }
+        }
         return {
           conv,
           orderMatchedConversations: [conv],
           trustedOrderId,
           requestedBuyer,
           strictSingleConversation
+        };
+      }
+
+      // 1b) Legacy Message rows often have conversationId when commerce cache does not
+      const legacyConv = await Message.findOne({
+        seller: sellerOid,
+        orderId: oid,
+        buyerUsername: buyerRe,
+        conversationId: { $nin: [null, ''] }
+      })
+        .select('conversationId itemId')
+        .sort({ messageDate: -1 })
+        .lean();
+      if (legacyConv?.conversationId) {
+        const cid = String(legacyConv.conversationId);
+        let cached = await EbayMessageConversation.findOne({
+          seller: sellerOid,
+          conversationId: cid
+        }).lean();
+        if (!cached) {
+          cached = {
+            seller: sellerOid,
+            conversationId: cid,
+            orderId: oid,
+            otherPartyUsername: requestedBuyer,
+            referenceId: String(legacyConv.itemId || itemId || '').trim() || undefined
+          };
+          EbayMessageConversation.findOneAndUpdate(
+            { seller: sellerOid, conversationId: cid },
+            {
+              $set: {
+                orderId: oid,
+                otherPartyUsername: requestedBuyer,
+                ...(cached.referenceId ? { referenceId: cached.referenceId } : {})
+              },
+              $setOnInsert: { conversationType: 'FROM_MEMBERS' }
+            },
+            { upsert: true }
+          ).catch(() => {});
+        } else if (!cached.orderId) {
+          EbayMessageConversation.updateOne(
+            { _id: cached._id },
+            { $set: { orderId: oid } }
+          ).catch(() => {});
+          cached = { ...cached, orderId: oid };
+        }
+        return {
+          conv: cached,
+          orderMatchedConversations: [cached],
+          trustedOrderId: oid,
+          requestedBuyer,
+          strictSingleConversation: true
         };
       }
     }

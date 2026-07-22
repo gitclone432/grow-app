@@ -91,6 +91,7 @@ import {
 } from '../utils/storeListingsQuery.js';
 
 const ORG_WIDE_SELLER_ROLES = new Set(['superadmin', 'listingadmin']);
+const activeEbayPollJobs = new Set();
 import ItemCategoryMap from '../models/ItemCategoryMap.js';
 import AutoCompatibilityBatch from '../models/AutoCompatibilityBatch.js';
 import AutoCompatibilityBatchItem from '../models/AutoCompatibilityBatchItem.js';
@@ -98,6 +99,8 @@ import AsinListCategory from '../models/AsinListCategory.js';
 import AsinListRange from '../models/AsinListRange.js';
 import AsinListProduct from '../models/AsinListProduct.js';
 import PriceChangeLog from '../models/PriceChangeLog.js';
+import EbayPollRun from '../models/EbayPollRun.js';
+import PtRefreshLog from '../models/PtRefreshLog.js';
 import OpenAI from 'openai';
 import {
   calculateOrderAmazonFinancials,
@@ -374,6 +377,125 @@ function sendTokenReconnectError(err, res) {
 // Set RUNNER_ID=render in Render's env vars, leave unset (defaults to 'local') locally.
 const RUNNER_ID = process.env.RUNNER_ID || 'local';
 
+// ============================================
+// EbayPollRun tracking — records manual/cron poll runs so the Fulfillment
+// dashboard can show "last run" status strips, and prevents overlapping runs
+// of the same job type.
+// ============================================
+function getPollTotals(jobType, payload = {}) {
+  if (jobType === 'poll-new-orders') {
+    return {
+      totalPolled: payload.totalPolled || 0,
+      totalNewOrders: payload.totalNewOrders || 0,
+      results: payload.pollResults || []
+    };
+  }
+  if (jobType === 'poll-order-updates') {
+    return {
+      totalPolled: payload.totalPolled || 0,
+      totalUpdatedOrders: payload.totalUpdatedOrders || 0,
+      results: payload.pollResults || []
+    };
+  }
+  if (jobType === 'buyer-chat-check-new') {
+    return {
+      totalNewMessages: payload.totalNewMessages || 0,
+      totalUpdatedMessages: payload.totalUpdatedMessages || 0,
+      results: payload.syncResults || payload.results || []
+    };
+  }
+  return {};
+}
+
+/**
+ * Wraps a poll job with EbayPollRun bookkeeping: prevents overlapping runs of the
+ * same jobType, records a running/completed/failed/skipped row, and returns the
+ * resolved payload from `runJob()` (or throws with `.statusCode` set on conflict).
+ */
+export async function withEbayPollRun(jobType, source, triggeredBy, runJob) {
+  const activeKey = jobType;
+
+  if (activeEbayPollJobs.has(activeKey)) {
+    const skippedRun = await EbayPollRun.create({
+      jobType,
+      source,
+      status: 'skipped',
+      startedAt: new Date(),
+      completedAt: new Date(),
+      triggeredBy: triggeredBy || null,
+      runnerId: RUNNER_ID,
+      error: 'Another run is already active.'
+    });
+    const err = new Error('This poll is already running. Please wait for it to finish.');
+    err.statusCode = 409;
+    err.runId = skippedRun._id;
+    throw err;
+  }
+
+  activeEbayPollJobs.add(activeKey);
+  const staleBefore = new Date(Date.now() - 45 * 60 * 1000);
+  await EbayPollRun.updateMany(
+    { jobType, status: 'running', startedAt: { $lt: staleBefore } },
+    {
+      $set: {
+        status: 'failed',
+        completedAt: new Date(),
+        error: 'Marked failed because the running poll became stale.'
+      }
+    }
+  );
+
+  let run;
+  try {
+    run = await EbayPollRun.create({
+      jobType,
+      source,
+      status: 'running',
+      startedAt: new Date(),
+      triggeredBy: triggeredBy || null,
+      runnerId: RUNNER_ID
+    });
+  } catch (err) {
+    activeEbayPollJobs.delete(activeKey);
+    if (err?.code === 11000) {
+      const skippedRun = await EbayPollRun.create({
+        jobType,
+        source,
+        status: 'skipped',
+        startedAt: new Date(),
+        completedAt: new Date(),
+        triggeredBy: triggeredBy || null,
+        runnerId: RUNNER_ID,
+        error: 'Another run is already active on another server.'
+      });
+      const conflictErr = new Error('This poll is already running on another server. Please wait for it to finish.');
+      conflictErr.statusCode = 409;
+      conflictErr.runId = skippedRun._id;
+      throw conflictErr;
+    }
+    throw err;
+  }
+
+  try {
+    const payload = await runJob();
+    await EbayPollRun.findByIdAndUpdate(run._id, {
+      status: 'completed',
+      completedAt: new Date(),
+      ...getPollTotals(jobType, payload)
+    });
+    return payload;
+  } catch (err) {
+    await EbayPollRun.findByIdAndUpdate(run._id, {
+      status: 'failed',
+      completedAt: new Date(),
+      error: err.message
+    });
+    throw err;
+  } finally {
+    activeEbayPollJobs.delete(activeKey);
+  }
+}
+
 const EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS = 120;
 /** Fulfillment getOrders: practical backfill window for first sync (days). */
 const EBAY_ORDER_INITIAL_LOOKBACK_DAYS = (() => {
@@ -407,21 +529,31 @@ function getClampedSellerListStart(startTimeFrom, startTimeTo) {
 }
 
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
+let excludedClientSellerIdsCache = { at: 0, value: null };
+const EXCLUDED_CLIENT_CACHE_MS = 5 * 60 * 1000;
 
 async function getExcludedClientSellerIds() {
+  if (
+    excludedClientSellerIdsCache.value != null
+    && Date.now() - excludedClientSellerIdsCache.at < EXCLUDED_CLIENT_CACHE_MS
+  ) {
+    return excludedClientSellerIdsCache.value;
+  }
+
   const excludedUsers = await User.find({
     username: { $regex: new RegExp(`^${EXCLUDED_CLIENT_USERNAME}$`, 'i') }
   })
     .select('_id')
     .lean();
 
-  if (excludedUsers.length === 0) {
-    return [];
-  }
+  const ids = excludedUsers.length === 0
+    ? []
+    : await Seller.find({
+      user: { $in: excludedUsers.map((user) => user._id) }
+    }).distinct('_id');
 
-  return Seller.find({
-    user: { $in: excludedUsers.map((user) => user._id) }
-  }).distinct('_id');
+  excludedClientSellerIdsCache = { at: Date.now(), value: ids };
+  return ids;
 }
 
 function getInternalApiBaseUrl(req) {
@@ -2826,7 +2958,7 @@ const STORED_ORDER_LIST_OMIT = '-paymentSummary -fulfillmentStartInstructions -e
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, sortBy, sortDir, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient } = req.query;
 
   try {
     let query = {};
@@ -2942,6 +3074,29 @@ router.get('/stored-orders', async (req, res) => {
         query.$and.push(itemClause);
       } else {
         query.$or = itemClause.$or;
+      }
+    }
+
+    // SKU search (checks common line-item SKU field variants + a top-level sku field)
+    if (searchSku) {
+      const skuClause = {
+        $or: [
+          { 'lineItems.sku': { $regex: searchSku, $options: 'i' } },
+          { 'lineItems.SKU': { $regex: searchSku, $options: 'i' } },
+          { 'lineItems.sellerSku': { $regex: searchSku, $options: 'i' } },
+          { sku: { $regex: searchSku, $options: 'i' } }
+        ]
+      };
+
+      if (query.$or) {
+        if (!query.$and) query.$and = [];
+        query.$and.push({ $or: query.$or });
+        delete query.$or;
+        query.$and.push(skuClause);
+      } else if (query.$and) {
+        query.$and.push(skuClause);
+      } else {
+        query.$or = skuClause.$or;
       }
     }
 
@@ -3114,7 +3269,26 @@ router.get('/stored-orders', async (req, res) => {
           awaitingShipment === 'true'
             ? { shipByDate: 1 }
             : amazonArriving === 'true'
-              ? { arrivingDate: arrivalSort === 'desc' ? -1 : 1 }
+              ? (() => {
+                  const AMAZON_ARRIVAL_SORT_FIELDS = {
+                    arrivingDate: 'arrivingDate',
+                    orderId: 'orderId',
+                    marketplace: 'purchaseMarketplaceId',
+                    amazonAccount: 'amazonAccount',
+                    productName: 'productName',
+                    azOrderId: 'azOrderId',
+                    trackingId: 'notes',
+                    notes: 'fulfillmentNotes',
+                    remark: 'remark',
+                    seller: 'seller'
+                    // buyerSla is sorted on the client after SLA enrichment
+                  };
+                  const requested = String(sortBy || '').trim();
+                  const field = AMAZON_ARRIVAL_SORT_FIELDS[requested] || 'arrivingDate';
+                  const dirRaw = String(sortDir || arrivalSort || 'asc').toLowerCase();
+                  const dir = dirRaw === 'desc' ? -1 : 1;
+                  return { [field]: dir, _id: 1 };
+                })()
               : { creationDate: -1 }
         )
         .skip(skip)
@@ -3123,11 +3297,61 @@ router.get('/stored-orders', async (req, res) => {
     ]);
     const totalPages = Math.ceil(totalOrders / limitNum);
 
+    let remarkCounts = {};
+    if (amazonArriving === 'true') {
+      const remarkStatsQuery = { ...query };
+      if (
+        remarkStatsQuery.remark &&
+        typeof remarkStatsQuery.remark === 'object' &&
+        remarkStatsQuery.remark.$ne === 'Delivered'
+      ) {
+        delete remarkStatsQuery.remark;
+      }
+
+      const remarkStats = await Order.aggregate([
+        { $match: remarkStatsQuery },
+        {
+          $group: {
+            _id: '$remark',
+            count: { $sum: 1 }
+          }
+        }
+      ]);
+
+      remarkCounts = remarkStats.reduce((acc, stat) => {
+        if (stat._id) acc[stat._id] = stat.count;
+        return acc;
+      }, {});
+    }
+
     // Lookup ConversationMeta for each order to get category (Case) and caseStatus
     const orderIds = orders.map(order => order.orderId).filter(Boolean);
-    const conversationMetas = await ConversationMeta.find({
-      orderId: { $in: orderIds }
-    }).select('orderId category caseStatus').lean();
+
+    // Buyer SLA timestamps (last buyer/seller message per seller+order)
+    const sellerIdsForSla = [...new Set(orders.map(order => order.seller?._id?.toString()).filter(Boolean))]
+      .map(id => new mongoose.Types.ObjectId(id));
+
+    // Run independent enrichments in parallel (was sequential — major latency on Fulfillment)
+    const [conversationMetas, slaAgg, enrichedOrders] = await Promise.all([
+      orderIds.length
+        ? ConversationMeta.find({ orderId: { $in: orderIds } }).select('orderId category caseStatus').lean()
+        : Promise.resolve([]),
+      (amazonArriving === 'true' && orderIds.length > 0 && sellerIdsForSla.length > 0)
+        ? Message.aggregate([
+          { $match: { orderId: { $in: orderIds }, seller: { $in: sellerIdsForSla } } },
+          {
+            $group: {
+              _id: { seller: '$seller', orderId: '$orderId' },
+              lastBuyerMessageAt: { $max: { $cond: [{ $eq: ['$sender', 'BUYER'] }, '$messageDate', null] } },
+              lastSellerMessageAt: { $max: { $cond: [{ $eq: ['$sender', 'SELLER'] }, '$messageDate', null] } }
+            }
+          }
+        ])
+        : Promise.resolve([]),
+      includeSupplierLinks
+        ? enrichOrdersWithSupplierLinks(orders)
+        : Promise.resolve(orders),
+    ]);
 
     // Create a map for quick lookup
     const conversationMetaMap = new Map();
@@ -3138,24 +3362,32 @@ router.get('/stored-orders', async (req, res) => {
       });
     });
 
-    // Add fromConvoManagement fields to each order
-  const ordersWithConvoData = orders.map((order) => {
+    const slaMap = new Map();
+    slaAgg.forEach(row => {
+      slaMap.set(`${row._id.seller}_${row._id.orderId}`, {
+        lastBuyerMessageAt: row.lastBuyerMessageAt,
+        lastSellerMessageAt: row.lastSellerMessageAt
+      });
+    });
+
+    // Add fromConvoManagement + SLA fields to each order
+    const ordersWithConvoData = enrichedOrders.map((order) => {
       const convoData = conversationMetaMap.get(order.orderId);
+      const slaData = slaMap.get(`${order.seller?._id}_${order.orderId}`);
       return {
         ...order,
         convoCategory: convoData?.category || null,
         convoCaseStatus: convoData?.caseStatus || null,
+        lastBuyerMessageAt: slaData?.lastBuyerMessageAt || null,
+        lastSellerMessageAt: slaData?.lastSellerMessageAt || null,
       };
     });
-
-    const ordersWithSupplierLinks = includeSupplierLinks
-      ? await enrichOrdersWithSupplierLinks(ordersWithConvoData)
-      : ordersWithConvoData;
 
     console.log(`[Stored Orders] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${totalOrders} orders`);
 
     res.json({
-      orders: ordersWithSupplierLinks,
+      orders: ordersWithConvoData,
+      remarkCounts,
       pagination: {
         currentPage: pageNum,
         totalPages,
@@ -5330,12 +5562,37 @@ export async function scheduledPollNewOrders() {
   }
 }
 
-router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+router.get('/poll-runs/latest', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
   try {
-    const payload = await scheduledPollNewOrders();
-    res.json(payload);
+    const jobTypes = ['poll-new-orders', 'poll-order-updates', 'buyer-chat-check-new'];
+    const runs = await EbayPollRun.find({
+      jobType: { $in: jobTypes },
+      status: { $in: ['completed', 'failed', 'skipped'] }
+    })
+      .sort({ startedAt: -1 })
+      .limit(100)
+      .lean();
+
+    const latest = {};
+    for (const run of runs) {
+      latest[run.jobType] ||= {};
+      if (!latest[run.jobType][run.source]) {
+        latest[run.jobType][run.source] = run;
+      }
+    }
+
+    res.json({ latest });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/poll-new-orders', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  try {
+    const payload = await withEbayPollRun('poll-new-orders', 'manual', req.user?.userId || null, scheduledPollNewOrders);
+    res.json(payload);
+  } catch (err) {
+    res.status(err.statusCode === 409 ? 409 : 500).json({ error: err.message });
   }
 });
 
@@ -5480,7 +5737,7 @@ router.post('/resync-from-dec1', requireAuth, requirePageAccess('Fulfillment'), 
 });
 
 // Poll all sellers for ORDER UPDATES ONLY (Phase 2)
-router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+async function runPollOrderUpdatesJob() {
   try {
     // Helper function to normalize dates for comparison (ignore milliseconds/format)
     function normalizeDateForComparison(date) {
@@ -5526,12 +5783,12 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
       .populate('user', 'username email');
 
     if (sellers.length === 0) {
-      return res.json({
+      return {
         message: 'No sellers with connected eBay accounts found',
         pollResults: [],
         totalPolled: 0,
         totalUpdatedOrders: 0
-      });
+      };
     }
 
     const nowUTC = Date.now();
@@ -5838,19 +6095,28 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
     const pollResults = results.map(result => result.status === 'fulfilled' ? result.value : { success: false, error: result.reason?.message || 'Unknown error' });
     const totalUpdatedOrders = pollResults.reduce((sum, r) => sum + (r.totalUpdated || 0), 0);
 
-    res.json({
+    console.log(`\n========== ORDER UPDATES SUMMARY ==========`);
+    console.log(`Total updated orders: ${totalUpdatedOrders}`);
+
+    return {
       message: 'Order updates polling complete',
       pollResults,
       totalPolled: sellers.length,
       totalUpdatedOrders
-    });
-
-    console.log(`\n========== ORDER UPDATES SUMMARY ==========`);
-    console.log(`Total updated orders: ${totalUpdatedOrders}`);
+    };
 
   } catch (err) {
     console.error('Error polling order updates:', err);
-    res.status(500).json({ error: err.message });
+    throw err;
+  }
+}
+
+router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  try {
+    const payload = await withEbayPollRun('poll-order-updates', 'manual', req.user?.userId || null, runPollOrderUpdatesJob);
+    res.json(payload);
+  } catch (err) {
+    res.status(err.statusCode === 409 ? 409 : 500).json({ error: err.message });
   }
 });
 
@@ -6149,6 +6415,464 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
 
   } catch (err) {
     console.error('Error in resync:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// PT (Pacific Time) Refresh — refreshes EXISTING orders created on a specific
+// PT calendar date/range from eBay. New orders in that window are intentionally
+// ignored (use "Poll New Orders" for those). Superadmin-only.
+// ============================================
+router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAccess('Fulfillment'), requireRole('superadmin'), async (req, res) => {
+  let logEntry = null;
+  const { startDate, endDate, sellerId, dateMode, clickedRefreshAt, clickedConfirmAt } = req.body;
+  try {
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+
+    if (!dateRegex.test(startDate || '') || !dateRegex.test(endDate || '')) {
+      return res.status(400).json({ error: 'startDate and endDate are required in YYYY-MM-DD format' });
+    }
+
+    const { start: startUTC } = getPTDayBoundsUTC(startDate);
+    const { end: endUTC } = getPTDayBoundsUTC(endDate);
+
+    if (Number.isNaN(startUTC.getTime()) || Number.isNaN(endUTC.getTime()) || startUTC > endUTC) {
+      return res.status(400).json({ error: 'Invalid Pacific Time date range' });
+    }
+
+    const rangeDays = Math.floor((endUTC.getTime() - startUTC.getTime()) / 86400000) + 1;
+    if (rangeDays > 90) {
+      return res.status(400).json({ error: 'Date range cannot exceed 90 Pacific Time days' });
+    }
+
+    // Create the PT Refresh log entry
+    try {
+      const refreshAt = clickedRefreshAt ? new Date(clickedRefreshAt) : new Date();
+      const confirmAt = clickedConfirmAt ? new Date(clickedConfirmAt) : new Date();
+      const clickedRefreshAtIST = moment(refreshAt).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm:ss [IST]');
+      const clickedConfirmAtIST = moment(confirmAt).tz('Asia/Kolkata').format('YYYY-MM-DD HH:mm:ss [IST]');
+
+      logEntry = await PtRefreshLog.create({
+        user: req.user.userId,
+        dateMode: dateMode || (startDate === endDate ? 'single' : 'range'),
+        startDate,
+        endDate,
+        sellerId: sellerId || null,
+        clickedRefreshAt: refreshAt,
+        clickedConfirmAt: confirmAt,
+        clickedRefreshAtIST,
+        clickedConfirmAtIST,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent']
+      });
+    } catch (logErr) {
+      console.error('Error creating PT refresh log entry:', logErr);
+    }
+
+    const sellerQuery = { 'ebayTokens.access_token': { $exists: true, $ne: null } };
+    if (sellerId) {
+      if (!mongoose.Types.ObjectId.isValid(sellerId)) {
+        return res.status(400).json({ error: 'Invalid sellerId' });
+      }
+      sellerQuery._id = sellerId;
+    }
+
+    const sellers = await Seller.find(sellerQuery).populate('user', 'username email');
+    if (sellers.length === 0) {
+      if (logEntry) {
+        try {
+          logEntry.success = true;
+          logEntry.status = 'completed';
+          logEntry.totalFetched = 0;
+          logEntry.totalExistingMatched = 0;
+          logEntry.totalUpdated = 0;
+          logEntry.totalIgnoredNew = 0;
+          await logEntry.save();
+        } catch (logErr) {
+          console.error('Error updating PT refresh log for 0 sellers:', logErr);
+        }
+      }
+      return res.json({
+        message: 'No matching connected eBay sellers found',
+        pollResults: [],
+        totalPolled: 0,
+        totalFetched: 0,
+        totalUpdated: 0,
+        totalIgnoredNew: 0
+      });
+    }
+
+    // Fields that should NOT be overwritten (manually set by team) — same set used by /resync-recent.
+    const MANUAL_FIELDS = new Set([
+      'amazonAccount', 'beforeTax', 'estimatedTax', 'beforeTaxUSD', 'estimatedTaxUSD',
+      'amazonTotal', 'amazonTotalINR', 'marketplaceFee', 'igst', 'totalCC', 'amazonExchangeRate',
+      'fulfillmentNotes', 'remark', 'messagingStatus', 'itemStatus', 'resolvedFrom',
+      'arrivingDate',
+      '_id', '__v', 'createdAt', 'updatedAt'
+    ]);
+
+    function normalizeDateForComparison(date) {
+      if (!date) return null;
+      return Math.floor(new Date(date).getTime() / 1000);
+    }
+
+    const filter = `creationdate:[${startUTC.toISOString()}..${endUTC.toISOString()}]`;
+    console.log(`\n========== PT ORDER REFRESH ${filter} FOR ${sellers.length} SELLER(S) ==========`);
+
+    const refreshPromises = sellers.map(async (seller) => {
+      const sellerName = seller.user?.username || seller.user?.email || seller._id.toString();
+
+      try {
+        const accessToken = await ensureValidToken(seller);
+        const ebayOrders = await fetchAllOrdersWithPagination(accessToken, filter, sellerName);
+
+        const updatedOrders = [];
+        const ignoredNewOrders = [];
+        const changedFieldCounts = {};
+        let existingMatchedOrders = 0;
+
+        for (const ebayOrder of ebayOrders) {
+          const existingOrder = await Order.findOne({
+            orderId: ebayOrder.orderId,
+            seller: seller._id
+          });
+
+          if (!existingOrder) {
+            ignoredNewOrders.push(ebayOrder.orderId);
+            continue;
+          }
+
+          existingMatchedOrders += 1;
+
+          const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+          const changedFields = [];
+
+          for (const [key, value] of Object.entries(orderData)) {
+            if (MANUAL_FIELDS.has(key) || key === 'seller') continue;
+
+            const oldVal = existingOrder[key];
+            const newVal = value;
+            let changed = false;
+
+            if (oldVal === null || oldVal === undefined) {
+              changed = newVal !== null && newVal !== undefined;
+            } else if (key === 'creationDate' || key === 'lastModifiedDate' || key === 'dateSold' || key === 'shipByDate' || key === 'estimatedDelivery') {
+              changed = normalizeDateForComparison(oldVal) !== normalizeDateForComparison(newVal);
+            } else if (typeof newVal === 'object' && newVal !== null) {
+              changed = JSON.stringify(oldVal) !== JSON.stringify(newVal);
+            } else {
+              changed = oldVal !== newVal;
+            }
+
+            if (changed) {
+              existingOrder[key] = value;
+              changedFields.push(key);
+            }
+          }
+
+          if (changedFields.length > 0) {
+            if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED' || existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
+              existingOrder.orderEarnings = 0;
+              const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+              const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+              existingOrder.tds = financials.tds;
+              existingOrder.tid = financials.tid;
+              existingOrder.net = financials.net;
+              existingOrder.pBalanceINR = financials.pBalanceINR;
+              existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+              existingOrder.profit = financials.profit;
+            }
+          }
+
+          // Refresh ad fee if not already set — mirrors /resync-recent behavior.
+          if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
+            try {
+              const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
+              const adFeeResult = await fetchOrderAdFee(
+                accessToken,
+                ebayOrder.orderId,
+                null,
+                financeMpIds[0],
+                financeMpIds,
+                { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
+              );
+              if (adFeeResult.success && adFeeResult.adFeeGeneral) {
+                existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
+                existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
+                if (!changedFields.includes('adFeeGeneral')) changedFields.push('adFeeGeneral');
+
+                if (existingOrder.orderPaymentStatus === 'PAID') {
+                  const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
+                  const adFeeVal = parseFloat(existingOrder.adFeeGeneral || 0);
+                  existingOrder.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
+
+                  const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                    existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                  const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
+                  existingOrder.tds = financials.tds;
+                  existingOrder.tid = financials.tid;
+                  existingOrder.net = financials.net;
+                  existingOrder.pBalanceINR = financials.pBalanceINR;
+                  existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+                  existingOrder.profit = financials.profit;
+                }
+              }
+            } catch (adFeeErr) {
+              console.log(`  ⚠️ PT refresh ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
+            }
+          }
+
+          if (changedFields.length > 0) {
+            await existingOrder.save();
+            for (const field of changedFields) {
+              changedFieldCounts[field] = (changedFieldCounts[field] || 0) + 1;
+            }
+            updatedOrders.push({
+              orderId: existingOrder.orderId,
+              changedFields
+            });
+            console.log(`  🔄 PT REFRESHED: ${existingOrder.orderId} - ${changedFields.join(', ')}`);
+          }
+        }
+
+        return {
+          sellerId: seller._id,
+          sellerName,
+          success: true,
+          totalFetched: ebayOrders.length,
+          totalExistingMatched: existingMatchedOrders,
+          updatedOrders,
+          ignoredNewOrders,
+          changedFieldCounts,
+          totalUpdated: updatedOrders.length,
+          totalIgnoredNew: ignoredNewOrders.length
+        };
+      } catch (sellerErr) {
+        console.error(`[${sellerName}] PT refresh error:`, sellerErr.message);
+        return {
+          sellerId: seller._id,
+          sellerName,
+          success: false,
+          error: sellerErr.message
+        };
+      }
+    });
+
+    const settled = await Promise.allSettled(refreshPromises);
+    const pollResults = settled.map(result =>
+      result.status === 'fulfilled' ? result.value : { success: false, error: result.reason?.message || 'Unknown error' }
+    );
+
+    const totalFetched = pollResults.reduce((sum, r) => sum + (r.totalFetched || 0), 0);
+    const totalExistingMatched = pollResults.reduce((sum, r) => sum + (r.totalExistingMatched || 0), 0);
+    const totalUpdated = pollResults.reduce((sum, r) => sum + (r.totalUpdated || 0), 0);
+    const totalIgnoredNew = pollResults.reduce((sum, r) => sum + (r.totalIgnoredNew || 0), 0);
+    const changedFieldCounts = pollResults.reduce((acc, r) => {
+      for (const [field, count] of Object.entries(r.changedFieldCounts || {})) {
+        acc[field] = (acc[field] || 0) + count;
+      }
+      return acc;
+    }, {});
+
+    if (logEntry) {
+      try {
+        logEntry.success = true;
+        logEntry.status = 'completed';
+        logEntry.totalFetched = totalFetched;
+        logEntry.totalExistingMatched = totalExistingMatched;
+        logEntry.totalUpdated = totalUpdated;
+        logEntry.totalIgnoredNew = totalIgnoredNew;
+        await logEntry.save();
+      } catch (logErr) {
+        console.error('Error updating PT refresh log success status:', logErr);
+      }
+    }
+
+    res.json({
+      message: 'Pacific Time order refresh complete',
+      startDate,
+      endDate,
+      pollResults,
+      totalPolled: sellers.length,
+      totalFetched,
+      totalExistingMatched,
+      totalUpdated,
+      totalIgnoredNew,
+      changedFieldCounts
+    });
+  } catch (err) {
+    console.error('Error in PT order refresh:', err);
+    if (logEntry) {
+      try {
+        logEntry.success = false;
+        logEntry.status = 'failed';
+        logEntry.errorMessage = err.message;
+        await logEntry.save();
+      } catch (logErr) {
+        console.error('Error updating PT refresh log failure status:', logErr);
+      }
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PT Refresh preview: token health + order count for the selected PT date/range, without mutating orders.
+router.get('/pt-refresh-preview', requireAuth, requirePageAccess('Fulfillment'), requireRole('superadmin'), async (req, res) => {
+  try {
+    const { startDate, endDate, sellerId } = req.query;
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+
+    if (!dateRegex.test(startDate || '') || !dateRegex.test(endDate || '')) {
+      return res.status(400).json({ error: 'startDate and endDate are required in YYYY-MM-DD format' });
+    }
+
+    const { start: startUTC } = getPTDayBoundsUTC(startDate);
+    const { end: endUTC } = getPTDayBoundsUTC(endDate);
+
+    if (Number.isNaN(startUTC.getTime()) || Number.isNaN(endUTC.getTime()) || startUTC > endUTC) {
+      return res.status(400).json({ error: 'Invalid Pacific Time date range' });
+    }
+
+    const rangeDays = Math.floor((endUTC.getTime() - startUTC.getTime()) / 86400000) + 1;
+    if (rangeDays > 90) {
+      return res.status(400).json({ error: 'Date range cannot exceed 90 Pacific Time days' });
+    }
+
+    const sellerQuery = { 'ebayTokens.refresh_token': { $exists: true, $ne: null } };
+    if (sellerId) {
+      if (!mongoose.Types.ObjectId.isValid(sellerId)) {
+        return res.status(400).json({ error: 'Invalid sellerId' });
+      }
+      sellerQuery._id = sellerId;
+    }
+
+    const sellers = await Seller.find(sellerQuery).populate('user', 'username email');
+    const filter = `creationdate:[${startUTC.toISOString()}..${endUTC.toISOString()}]`;
+
+    // Count-only fetch with the same retry/backoff behavior as the real paginated
+    // fetch (fetchAllOrdersWithPagination), so a transient 429/503/timeout doesn't
+    // get misreported as a broken seller token.
+    async function fetchOrderCountWithRetry(accessToken, maxRetries = 3) {
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          const response = await axios.get('https://api.ebay.com/sell/fulfillment/v1/order', {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            params: { filter, limit: 1 },
+            timeout: 15000
+          });
+          return response.data.total ?? (response.data.orders || []).length;
+        } catch (err) {
+          const status = err.response?.status;
+          const isRetryable = status === 503 || status === 429 || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT';
+          if (isRetryable && attempt < maxRetries) {
+            const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            continue;
+          }
+          throw err;
+        }
+      }
+    }
+
+    async function checkSeller(seller) {
+      const sellerName = seller.user?.username || seller.user?.email || seller._id.toString();
+      const now = Date.now();
+      const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
+      const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
+      const bufferTime = 2 * 60 * 1000;
+      const wasValidBefore = !!(fetchedAt && (now - fetchedAt < expiresInMs - bufferTime));
+
+      let accessToken;
+      try {
+        accessToken = await ensureValidToken(seller);
+      } catch (tokenErr) {
+        return {
+          sellerId: seller._id,
+          sellerName,
+          tokenStatus: 'needs_reconnect',
+          orderCountPreview: null,
+          error: tokenErr.message
+        };
+      }
+
+      try {
+        const orderCountPreview = await fetchOrderCountWithRetry(accessToken);
+        return {
+          sellerId: seller._id,
+          sellerName,
+          tokenStatus: wasValidBefore ? 'active' : 'refreshed',
+          orderCountPreview,
+          error: null
+        };
+      } catch (fetchErr) {
+        console.error(
+          `[PT Refresh Preview] Fulfillment API call failed for ${sellerName}:`,
+          fetchErr.response?.status,
+          JSON.stringify(fetchErr.response?.data) || fetchErr.message
+        );
+        return {
+          sellerId: seller._id,
+          sellerName,
+          tokenStatus: 'fetch_error',
+          orderCountPreview: null,
+          error: fetchErr.response?.data?.errors?.[0]?.message || fetchErr.message
+        };
+      }
+    }
+
+    // Check sellers in small concurrent batches (instead of all at once) to avoid
+    // bursting eBay's rate limiter across many sellers simultaneously.
+    const BATCH_SIZE = 5;
+    const sellerResults = [];
+    for (let i = 0; i < sellers.length; i += BATCH_SIZE) {
+      const batch = sellers.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.allSettled(batch.map(checkSeller));
+      sellerResults.push(...batchResults.map(result =>
+        result.status === 'fulfilled'
+          ? result.value
+          : { tokenStatus: 'fetch_error', orderCountPreview: null, error: result.reason?.message || 'Unknown error' }
+      ));
+      if (i + BATCH_SIZE < sellers.length) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+    }
+
+    const totalPreviewCount = sellerResults.reduce((sum, s) => sum + (s.orderCountPreview || 0), 0);
+    const sellersNeedingAttention = sellerResults.filter(s => s.tokenStatus === 'needs_reconnect' || s.tokenStatus === 'fetch_error');
+
+    res.json({
+      sellers: sellerResults,
+      totalPreviewCount,
+      sellersNeedingAttention
+    });
+  } catch (err) {
+    console.error('Error in PT refresh preview:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/pt-refresh-history', requireAuth, requirePageAccess('Fulfillment'), requireRole('superadmin'), async (req, res) => {
+  try {
+    const logs = await PtRefreshLog.find()
+      .populate('user', 'username email')
+      .populate({
+        path: 'sellerId',
+        populate: {
+          path: 'user',
+          select: 'username email'
+        }
+      })
+      .sort({ createdAt: -1 })
+      .limit(100);
+
+    res.json(logs);
+  } catch (err) {
+    console.error('Error fetching PT refresh history:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -7546,7 +8270,7 @@ router.get('/stored-payment-disputes', async (req, res) => {
 // Get a lightweight index of all issues (INR/SNAD cases, returns, disputes) keyed by orderId
 // Used by Fulfillment Dashboard to show an "Issues" column
 let issuesByOrderCache = { at: 0, index: null };
-const ISSUES_BY_ORDER_CACHE_MS = 2 * 60 * 1000;
+const ISSUES_BY_ORDER_CACHE_MS = 10 * 60 * 1000;
 
 router.get('/issues-by-order', requireAuth, async (req, res) => {
   try {
@@ -7713,7 +8437,7 @@ function getTodayTomorrowPTRange() {
   return { start: todayStart, end: tomorrowEnd, todayStr, tomorrowStr };
 }
 
-router.post('/sync-inbox', requireAuth, requirePageAccess(['BuyerMessages', 'BuyerMessagesTest']), async (req, res) => {
+router.post('/sync-inbox', requireAuth, requirePageAccess(['BuyerMessages']), async (req, res) => {
   try {
     const mode = String(req.body?.mode || 'full').toLowerCase();
     const sellerId = String(req.body?.sellerId || '').trim() || null;
@@ -7880,7 +8604,7 @@ export async function scheduledSyncBuyerInbox({
 //LIGHT SYNC: Active Thread Poll (Auto Interval)
 // Filters by SenderID to be lightweight
 // 2. LIGHT SYNC: Active Thread Poll
-router.post('/sync-thread', requireAuth, requirePageAccess(['BuyerMessages', 'BuyerMessagesTest', 'Disputes', 'ConversationManagement']), async (req, res) => {
+router.post('/sync-thread', requireAuth, requirePageAccess(['BuyerMessages', 'Disputes', 'ConversationManagement', 'FulfillmentNotes', 'AmazonArrivals', 'Fulfillment']), async (req, res) => {
   const {
     sellerId,
     buyerUsername,
@@ -7900,11 +8624,27 @@ router.post('/sync-thread', requireAuth, requirePageAccess(['BuyerMessages', 'Bu
 
     const token = await ensureValidToken(seller);
 
-    // Prefer Commerce getConversation (same structured cache as Message Conversations)
-    // when we already know the conversationId.
+    // Prefer Commerce getConversation when we already know the conversationId.
     let commerceDetail = null;
-    const resolvedConversationId = String(conversationId || '').trim();
+    let resolvedConversationId = String(conversationId || '').trim();
     const lightSync = commerceOnly === true || commerceOnly === 'true' || commerceOnly === 1;
+
+    // No conversationId yet: resolve live from seller + buyer (+ item/order)
+    if (!resolvedConversationId && buyerUsername) {
+      try {
+        resolvedConversationId = String(
+          (await resolveCommerceConversationId(token, {
+            sellerId: seller._id,
+            buyerUsername,
+            itemId: itemId || undefined,
+            orderId: orderId || undefined
+          })) || ''
+        ).trim();
+      } catch (resolveErr) {
+        console.warn('[sync-thread] live conversation resolve failed:', resolveErr.message);
+      }
+    }
+
     if (resolvedConversationId) {
       try {
         commerceDetail = await fetchAndCacheConversationMessagesFromEbay(
@@ -7914,6 +8654,19 @@ router.post('/sync-thread', requireAuth, requirePageAccess(['BuyerMessages', 'Bu
           'FROM_MEMBERS',
           { limit: 50, offset: 0 }
         );
+        if (orderId) {
+          EbayMessageConversation.updateOne(
+            { seller: seller._id, conversationId: resolvedConversationId },
+            {
+              $set: {
+                orderId: String(orderId),
+                otherPartyUsername: String(buyerUsername || ''),
+                ...(itemId ? { referenceId: String(itemId) } : {})
+              }
+            },
+            { upsert: true }
+          ).catch(() => {});
+        }
       } catch (commerceErr) {
         console.warn(
           `[sync-thread] commerce getConversation failed for ${resolvedConversationId}:`,
@@ -8172,7 +8925,7 @@ async function uploadImageToEbay(token, filePath) {
 }
 
 // 3. SEND MESSAGE (Chat Window)
-router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'BuyerMessagesTest', 'Disputes', 'ConversationManagement']), async (req, res) => {
+router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'Disputes', 'ConversationManagement', 'FulfillmentNotes', 'AmazonArrivals', 'Fulfillment']), async (req, res) => {
   const {
     orderId,
     buyerUsername,
@@ -9173,17 +9926,89 @@ router.get('/chat/resolve-conversation', requireAuth, async (req, res) => {
     if (!sellerId && !buyerUsername && !conversationId) {
       return res.status(400).json({ error: 'sellerId and buyerUsername (or conversationId) required' });
     }
-    const resolved = await resolveBuyerChatConversationFromCommerce({
+
+    let resolved = await resolveBuyerChatConversationFromCommerce({
       sellerId,
       buyerUsername,
       itemId,
       orderId,
       conversationId
     });
-    if (!resolved?.conversationId) {
-      return res.status(404).json({ error: 'Conversation not found in Buyer Messages cache' });
+
+    // Cache miss: ask eBay Commerce live for seller+buyer (+ item) conversationId
+    if (!resolved?.conversationId && sellerId && buyerUsername) {
+      try {
+        const seller = await Seller.findById(sellerId).populate('user', 'username email');
+        if (seller) {
+          const token = await ensureValidToken(seller);
+          const liveId = await resolveCommerceConversationId(token, {
+            sellerId: seller._id,
+            buyerUsername: String(buyerUsername),
+            itemId: itemId ? String(itemId) : undefined,
+            orderId: orderId ? String(orderId) : undefined
+          });
+          if (liveId) {
+            // Pull messages into cache so the next /chat/messages load succeeds
+            try {
+              await fetchAndCacheConversationMessagesFromEbay(
+                seller,
+                token,
+                String(liveId),
+                'FROM_MEMBERS',
+                { limit: 50, offset: 0 }
+              );
+            } catch (cacheErr) {
+              console.warn('[chat/resolve-conversation] live message cache failed:', cacheErr.message);
+            }
+            if (orderId) {
+              EbayMessageConversation.updateOne(
+                { seller: seller._id, conversationId: String(liveId) },
+                {
+                  $set: {
+                    orderId: String(orderId),
+                    otherPartyUsername: String(buyerUsername),
+                    ...(itemId ? { referenceId: String(itemId) } : {})
+                  }
+                },
+                { upsert: true }
+              ).catch(() => {});
+            }
+            resolved = await resolveBuyerChatConversationFromCommerce({
+              sellerId,
+              buyerUsername,
+              itemId,
+              orderId,
+              conversationId: String(liveId)
+            });
+            if (!resolved?.conversationId) {
+              resolved = {
+                conversationId: String(liveId),
+                orderId: orderId ? String(orderId) : null,
+                itemId: itemId ? String(itemId) : null,
+                buyerUsername: String(buyerUsername),
+                sellerId: seller._id,
+                source: 'ebay-live'
+              };
+            } else {
+              resolved.source = 'ebay-live';
+            }
+          }
+        }
+      } catch (liveErr) {
+        console.warn('[chat/resolve-conversation] live resolve failed:', liveErr.message);
+      }
     }
-    res.json(resolved);
+
+    if (!resolved?.conversationId) {
+      return res.status(404).json({
+        error: 'Conversation not found for this seller + buyer + order',
+        matched: false,
+        sellerId: sellerId || null,
+        buyerUsername: buyerUsername || null,
+        orderId: orderId || null
+      });
+    }
+    res.json({ ...resolved, matched: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -9340,10 +10165,25 @@ router.get('/chat/search-order', requireAuth, async (req, res) => {
       const orderBuyer = String(doc?.buyer?.username || '').trim().toLowerCase();
       return Boolean(orderBuyer) && orderBuyer === buyerLc;
     };
+    const sellerMatches = (doc) => {
+      if (!sid || !mongoose.Types.ObjectId.isValid(sid)) return true;
+      const orderSeller = String(doc?.seller?._id || doc?.seller || '').trim();
+      return !orderSeller || orderSeller === sid;
+    };
 
-    // 1) Prefer seller + buyer (+ item). Never trust a mis-stamped orderId alone —
-    // that is how a different buyer's shipping name (e.g. "Michael Bender") leaks in.
-    if (sid && mongoose.Types.ObjectId.isValid(sid) && buyer) {
+    // 1) Exact orderId (+ seller + buyer when provided) — Amazon Arrivals / Open must not
+    // swap to a different order for the same buyer.
+    if (oid) {
+      const byId = await Order.findOne({
+        $or: [{ orderId: oid }, { legacyOrderId: oid }]
+      }).populate('seller');
+      if (byId && buyerMatches(byId) && sellerMatches(byId)) {
+        order = byId;
+      }
+    }
+
+    // 2) Prefer seller + buyer (+ item) only when no trusted orderId match
+    if (!order && sid && mongoose.Types.ObjectId.isValid(sid) && buyer) {
       const query = {
         seller: sid,
         'buyer.username': new RegExp(`^${escapeRegexLiteral(buyer)}$`, 'i')
@@ -9360,16 +10200,6 @@ router.get('/chat/search-order', requireAuth, async (req, res) => {
         })
           .sort({ creationDate: -1 })
           .populate('seller');
-      }
-    }
-
-    // 2) orderId / legacyOrderId — only accept if buyer matches when buyer is known
-    if (!order && oid) {
-      const byId = await Order.findOne({
-        $or: [{ orderId: oid }, { legacyOrderId: oid }]
-      }).populate('seller');
-      if (byId && buyerMatches(byId)) {
-        order = byId;
       }
     }
 
@@ -17691,589 +18521,6 @@ async function listConversationsFromDb(sellerId, query = {}) {
     sellerEbayUsername: inferredEbayUser || sellerDoc?.ebayUserId || null
   };
 }
-
-/**
- * List from DB by default (no eBay call).
- * Pass refresh=1 / sync=1 to pull from eBay Message API and upsert into Mongo.
- */
-router.get('/message/conversations', requireAuth, requirePageAccess('EbayMessageConversations'), async (req, res) => {
-  try {
-    const sellerLookup = String(req.query.sellerId || '').trim();
-    if (!sellerLookup) return res.status(400).json({ error: 'sellerId is required' });
-
-    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
-    if (!seller) return res.status(404).json({ error: 'Seller not found' });
-
-    const refresh =
-      req.query.refresh === '1' ||
-      req.query.refresh === 'true' ||
-      req.query.sync === '1' ||
-      req.query.sync === 'true' ||
-      req.query.source === 'ebay';
-
-    if (refresh) {
-      if (!seller.ebayTokens?.refresh_token) {
-        return res.status(400).json({ error: 'Seller not connected to eBay', needsReconnect: true });
-      }
-      const accessToken = await ensureValidToken(seller);
-      const result = await fetchAndCacheConversationsFromEbay(seller, accessToken, req.query);
-      const messageType = String(req.query.message_type || req.query.messageType || 'ALL')
-        .trim()
-        .toUpperCase();
-      if (messageType === 'ORDERED' || messageType === 'INQUIRY') {
-        const listed = await listConversationsFromDb(seller._id, req.query);
-        return res.json({
-          success: true,
-          source: 'ebay',
-          statusCode: result.statusCode,
-          sellerId: seller._id,
-          sellerName: seller.user?.username || null,
-          sellerEbayUsername:
-            listed.sellerEbayUsername ||
-            seller.ebayUserId ||
-            inferSellerEbayUsernameFromConversations(result.conversations) ||
-            null,
-          request: { params: result.params },
-          conversations: listed.conversations,
-          total: listed.total,
-          limit: listed.limit,
-          offset: listed.offset,
-          saved: result.saved,
-          messagesSaved: result.messagesSaved || 0,
-          lastSyncedAt: new Date().toISOString()
-        });
-      }
-      return res.json({
-        success: true,
-        source: 'ebay',
-        statusCode: result.statusCode,
-        sellerId: seller._id,
-        sellerName: seller.user?.username || null,
-        sellerEbayUsername: seller.ebayUserId || inferSellerEbayUsernameFromConversations(result.conversations) || null,
-        request: { params: result.params },
-        conversations: result.conversations,
-        total: result.total,
-        limit: result.limit,
-        offset: result.offset,
-        saved: result.saved,
-        messagesSaved: result.messagesSaved || 0,
-        lastSyncedAt: new Date().toISOString()
-      });
-    }
-
-    const listed = await listConversationsFromDb(seller._id, req.query);
-    return res.json({
-      success: true,
-      source: 'db',
-      sellerId: seller._id,
-      sellerName: seller.user?.username || null,
-      sellerEbayUsername: listed.sellerEbayUsername || seller.ebayUserId || null,
-      request: { params: listed.params },
-      conversations: listed.conversations,
-      total: listed.total,
-      limit: listed.limit,
-      offset: listed.offset,
-      lastSyncedAt: listed.lastSyncedAt
-    });
-  } catch (err) {
-    if (err.statusCode) {
-      return res.status(err.statusCode).json({
-        error: err.message,
-        needsReconnect: Boolean(err.needsReconnect),
-        hint: err.needsReconnect
-          ? 'Message API requires commerce.message scope. Disconnect & reconnect the seller on eBay OAuth, then retry.'
-          : null,
-        data: err.data || null
-      });
-    }
-    console.error('[Message Conversations] list error:', err.message);
-    const payload = messageApiErrorPayload(err);
-    return res.status(payload.statusCode >= 400 ? payload.statusCode : 500).json(payload);
-  }
-});
-
-/** Explicit sync endpoint (same as GET ?refresh=1). */
-router.post('/message/conversations/sync', requireAuth, requirePageAccess('EbayMessageConversations'), async (req, res) => {
-  try {
-    const sellerLookup = String(req.body?.sellerId || req.query.sellerId || '').trim();
-    if (!sellerLookup) return res.status(400).json({ error: 'sellerId is required' });
-    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
-    if (!seller) return res.status(404).json({ error: 'Seller not found' });
-    if (!seller.ebayTokens?.refresh_token) {
-      return res.status(400).json({ error: 'Seller not connected to eBay', needsReconnect: true });
-    }
-    const accessToken = await ensureValidToken(seller);
-    const query = { ...(req.query || {}), ...(req.body || {}) };
-    const result = await fetchAndCacheConversationsFromEbay(seller, accessToken, query);
-    return res.json({
-      success: true,
-      source: 'ebay',
-      statusCode: result.statusCode,
-      sellerId: seller._id,
-      sellerName: seller.user?.username || null,
-      request: { params: result.params },
-      conversations: result.conversations,
-      total: result.total,
-      limit: result.limit,
-      offset: result.offset,
-      saved: result.saved,
-      messagesSaved: result.messagesSaved || 0,
-      lastSyncedAt: new Date().toISOString()
-    });
-  } catch (err) {
-    if (err.statusCode) {
-      return res.status(err.statusCode).json({
-        error: err.message,
-        needsReconnect: Boolean(err.needsReconnect),
-        hint: err.needsReconnect
-          ? 'Message API requires commerce.message scope. Disconnect & reconnect the seller on eBay OAuth, then retry.'
-          : null,
-        data: err.data || null
-      });
-    }
-    console.error('[Message Conversations] sync error:', err.message);
-    const payload = messageApiErrorPayload(err);
-    return res.status(payload.statusCode >= 400 ? payload.statusCode : 500).json(payload);
-  }
-});
-
-router.get('/message/conversations/:conversationId', requireAuth, requirePageAccess('EbayMessageConversations'), async (req, res) => {
-  try {
-    const conversationId = String(req.params.conversationId || '').trim();
-    if (!conversationId) {
-      return res.status(400).json({ error: 'conversationId is required' });
-    }
-
-    const sellerLookup = String(req.query.sellerId || '').trim();
-    if (!sellerLookup) return res.status(400).json({ error: 'sellerId is required' });
-    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
-    if (!seller) return res.status(404).json({ error: 'Seller not found' });
-
-    const conversationType =
-      String(req.query.conversation_type || req.query.conversationType || 'FROM_MEMBERS').trim() ||
-      'FROM_MEMBERS';
-    const refresh =
-      req.query.refresh === '1' ||
-      req.query.refresh === 'true' ||
-      req.query.sync === '1' ||
-      req.query.sync === 'true' ||
-      req.query.source === 'ebay';
-
-    const limitRaw = req.query.limit;
-    const limit = limitRaw != null && String(limitRaw).trim() !== ''
-      ? Math.min(Math.max(parseInt(limitRaw, 10) || 50, 1), 200)
-      : 50;
-    const offsetRaw = req.query.offset;
-    const offset = offsetRaw != null && String(offsetRaw).trim() !== ''
-      ? Math.max(parseInt(offsetRaw, 10) || 0, 0)
-      : 0;
-
-    const loadFromDb = async () => {
-      const [rows, conversation] = await Promise.all([
-        EbayMessageConversationMessage.find({
-          seller: seller._id,
-          conversationId
-        })
-          .sort({ createdDate: 1 })
-          .lean(),
-        EbayMessageConversation.findOne({
-          seller: seller._id,
-          conversationId,
-          conversationType
-        })
-          .select('messagesSyncedAt')
-          .lean()
-      ]);
-
-      const messages = rows.map((m) => ({
-        messageId: m.messageId,
-        senderUsername: m.senderUsername,
-        recipientUsername: m.recipientUsername,
-        subject: m.subject,
-        messageBody: m.messageBody,
-        readStatus: m.readStatus,
-        createdDate: m.createdDate,
-        messageMedia: m.messageMedia || []
-      }));
-
-      const lastSyncedAt = rows.reduce((max, row) => {
-        const t = row.lastSyncedAt ? new Date(row.lastSyncedAt).getTime() : 0;
-        return t > max ? t : max;
-      }, 0);
-
-      // List-sync only seeds the latest message with a synthetic `seed-` id.
-      // Treat a cache that has no real messages as incomplete so we pull the
-      // full thread from eBay instead of showing just the last message.
-      const hasRealMessage = rows.some(
-        (m) => !String(m.messageId || '').startsWith('seed-')
-      );
-
-      return {
-        messages,
-        hasRealMessage,
-        fullySynced: Boolean(conversation?.messagesSyncedAt),
-        lastSyncedAt: lastSyncedAt ? new Date(lastSyncedAt).toISOString() : null
-      };
-    };
-
-    const syncFromEbay = async () => {
-      if (!seller.ebayTokens?.refresh_token) {
-        const err = new Error('Seller not connected to eBay');
-        err.statusCode = 400;
-        err.needsReconnect = true;
-        throw err;
-      }
-      const accessToken = await ensureValidToken(seller);
-      return fetchAndCacheConversationMessagesFromEbay(
-        seller,
-        accessToken,
-        conversationId,
-        conversationType,
-        { limit, offset }
-      );
-    };
-
-    if (refresh) {
-      const result = await syncFromEbay();
-      return res.json({
-        success: true,
-        source: 'ebay',
-        statusCode: result.statusCode,
-        sellerId: seller._id,
-        sellerName: seller.user?.username || null,
-        conversationId,
-        request: { params: result.params },
-        messages: result.messages,
-        saved: result.saved,
-        lastSyncedAt: new Date().toISOString(),
-        ...(result.ebay && typeof result.ebay === 'object' ? result.ebay : {})
-      });
-    }
-
-    const cached = await loadFromDb();
-    if (cached.messages.length > 0 && cached.fullySynced) {
-      return res.json({
-        success: true,
-        source: 'db',
-        sellerId: seller._id,
-        sellerName: seller.user?.username || null,
-        conversationId,
-        messages: cached.messages,
-        total: cached.messages.length,
-        lastSyncedAt: cached.lastSyncedAt
-      });
-    }
-
-    // Empty cache → auto-pull from eBay once and save (so the drawer always works)
-    try {
-      const result = await syncFromEbay();
-      return res.json({
-        success: true,
-        source: 'ebay',
-        autoSynced: true,
-        statusCode: result.statusCode,
-        sellerId: seller._id,
-        sellerName: seller.user?.username || null,
-        conversationId,
-        request: { params: result.params },
-        messages: result.messages,
-        saved: result.saved,
-        lastSyncedAt: new Date().toISOString()
-      });
-    } catch (syncErr) {
-      // eBay pull failed — fall back to any seeded message so the drawer still shows something
-      if (cached.messages.length > 0) {
-        return res.json({
-          success: true,
-          source: 'db',
-          sellerId: seller._id,
-          sellerName: seller.user?.username || null,
-          conversationId,
-          messages: cached.messages,
-          total: cached.messages.length,
-          lastSyncedAt: cached.lastSyncedAt,
-          partial: true
-        });
-      }
-      if (syncErr.statusCode) {
-        return res.status(syncErr.statusCode).json({
-          error: syncErr.message,
-          needsReconnect: Boolean(syncErr.needsReconnect),
-          hint: syncErr.needsReconnect
-            ? 'Message API requires commerce.message scope. Disconnect & reconnect the seller on eBay OAuth, then retry.'
-            : null,
-          data: syncErr.data || null,
-          messages: []
-        });
-      }
-      throw syncErr;
-    }
-  } catch (err) {
-    if (err.statusCode) {
-      return res.status(err.statusCode).json({
-        error: err.message,
-        needsReconnect: Boolean(err.needsReconnect)
-      });
-    }
-    console.error('[Message Conversations] detail error:', err.message);
-    const payload = messageApiErrorPayload(err);
-    return res.status(payload.statusCode >= 400 ? payload.statusCode : 500).json(payload);
-  }
-});
-
-/**
- * Commerce Message API — sendMessage
- * POST /commerce/message/v1/send_message
- */
-function inferMessageMediaType(nameOrUrl = '') {
-  const lower = String(nameOrUrl).toLowerCase().split('?')[0];
-  if (/\.(pdf)$/i.test(lower)) return 'PDF';
-  if (/\.(doc|docx)$/i.test(lower)) return 'DOC';
-  if (/\.(txt)$/i.test(lower)) return 'TXT';
-  if (/\.(png|jpe?g|gif|webp|bmp|heic)$/i.test(lower)) return 'IMAGE';
-  return 'IMAGE';
-}
-
-function normalizeMessageMediaList(rawList = []) {
-  if (!Array.isArray(rawList)) return [];
-  const allowed = new Set(['IMAGE', 'PDF', 'DOC', 'TXT']);
-  return rawList
-    .slice(0, 5)
-    .map((item) => {
-      if (!item || typeof item !== 'object') return null;
-      const mediaUrl = String(item.mediaUrl || item.url || '').trim();
-      if (!mediaUrl) return null;
-      const mediaName = String(item.mediaName || item.name || mediaUrl.split('/').pop() || 'attachment').trim();
-      let mediaType = String(item.mediaType || item.type || '').trim().toUpperCase();
-      if (!allowed.has(mediaType)) {
-        mediaType = inferMessageMediaType(mediaName || mediaUrl);
-      }
-      return { mediaName, mediaType, mediaUrl };
-    })
-    .filter(Boolean);
-}
-
-/** Local /uploads URLs are not reachable by eBay — host IMAGE files on EPS first. */
-async function resolveMessageMediaForEbay(accessToken, messageMedia = []) {
-  const resolved = [];
-  for (const item of messageMedia) {
-    const mediaUrl = String(item.mediaUrl || '').trim();
-    if (!mediaUrl) continue;
-
-    const filename = mediaUrl.split('/').pop()?.split('?')[0];
-    const localPath = filename ? path.join(process.cwd(), 'public/uploads', filename) : null;
-    const isLocalUpload = Boolean(localPath && fs.existsSync(localPath));
-
-    if (isLocalUpload) {
-      if (item.mediaType !== 'IMAGE' && !/\.(png|jpe?g|gif|webp|bmp|heic)$/i.test(filename)) {
-        const err = new Error(
-          `Local ${item.mediaType} file "${item.mediaName}" cannot be sent. Upload IMAGE files, or provide a public https mediaUrl for PDF/DOC/TXT.`
-        );
-        err.statusCode = 400;
-        throw err;
-      }
-      const ebayUrl = await uploadImageToEbay(accessToken, localPath);
-      resolved.push({
-        mediaName: item.mediaName || filename,
-        mediaType: 'IMAGE',
-        mediaUrl: ebayUrl
-      });
-      continue;
-    }
-
-    if (!/^https:\/\//i.test(mediaUrl)) {
-      const err = new Error(`mediaUrl must be https (got: ${mediaUrl})`);
-      err.statusCode = 400;
-      throw err;
-    }
-
-    resolved.push(item);
-  }
-  return resolved;
-}
-
-router.post('/message/send', requireAuth, requirePageAccess('EbayMessageConversations'), async (req, res) => {
-  try {
-    const body = req.body || {};
-    const { seller, accessToken } = await resolveMessageApiSeller(body.sellerId);
-    const messageText = String(body.messageText || '').trim();
-    let messageMedia = normalizeMessageMediaList(body.messageMedia);
-    if (!messageText && messageMedia.length === 0) {
-      return res.status(400).json({ error: 'messageText or messageMedia is required' });
-    }
-
-    messageMedia = await resolveMessageMediaForEbay(accessToken, messageMedia);
-
-    // eBay requires messageText; use a short placeholder when only media is attached
-    const finalText = messageText || (messageMedia.length > 0 ? '(see attached media)' : '');
-
-    const conversationId = body.conversationId ? String(body.conversationId).trim() : '';
-    const otherPartyUsername = body.otherPartyUsername ? String(body.otherPartyUsername).trim() : '';
-    if (!conversationId && !otherPartyUsername) {
-      return res.status(400).json({ error: 'conversationId or otherPartyUsername is required' });
-    }
-
-    const payload = { messageText: finalText };
-    if (conversationId) {
-      payload.conversationId = conversationId;
-    } else {
-      payload.otherPartyUsername = otherPartyUsername;
-      const referenceId = body.referenceId ? String(body.referenceId).trim() : '';
-      const referenceType = body.referenceType ? String(body.referenceType).trim() : 'LISTING';
-      if (referenceId) {
-        payload.reference = { referenceId, referenceType: referenceType || 'LISTING' };
-      }
-    }
-    if (messageMedia.length > 0) {
-      payload.messageMedia = messageMedia;
-    }
-    if (body.emailCopyToSender === true) {
-      payload.emailCopyToSender = true;
-    }
-
-    const response = await axios.post(`${COMMERCE_MESSAGE_BASE}/send_message`, payload, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
-      },
-      validateStatus: () => true
-    });
-
-    return respondMessageApiEbayResult(res, response, {
-      sellerId: seller._id,
-      sellerName: seller.user?.username || null,
-      request: { payload }
-    });
-  } catch (err) {
-    if (err.statusCode) {
-      return res.status(err.statusCode).json({
-        error: err.message,
-        needsReconnect: Boolean(err.needsReconnect)
-      });
-    }
-    console.error('[Message Conversations] send error:', err.message);
-    const payload = messageApiErrorPayload(err);
-    return res.status(payload.statusCode >= 400 ? payload.statusCode : 500).json(payload);
-  }
-});
-
-/**
- * Commerce Message API — updateConversation
- * POST /commerce/message/v1/update_conversation
- * Updates conversationStatus OR read (if both sent, eBay applies read only).
- */
-router.post('/message/update-conversation', requireAuth, requirePageAccess('EbayMessageConversations'), async (req, res) => {
-  try {
-    const body = req.body || {};
-    const { seller, accessToken } = await resolveMessageApiSeller(body.sellerId);
-    const conversationId = String(body.conversationId || '').trim();
-    const conversationType = String(body.conversationType || body.conversation_type || 'FROM_MEMBERS').trim() || 'FROM_MEMBERS';
-    if (!conversationId) {
-      return res.status(400).json({ error: 'conversationId is required' });
-    }
-
-    const payload = {
-      conversationId,
-      conversationType
-    };
-
-    if (body.read !== undefined && body.read !== null && body.read !== '') {
-      payload.read = Boolean(body.read);
-    } else if (body.conversationStatus || body.conversation_status) {
-      payload.conversationStatus = String(body.conversationStatus || body.conversation_status).trim();
-    } else {
-      return res.status(400).json({ error: 'Provide read (boolean) or conversationStatus' });
-    }
-
-    const response = await axios.post(`${COMMERCE_MESSAGE_BASE}/update_conversation`, payload, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
-      },
-      validateStatus: () => true
-    });
-
-    return respondMessageApiEbayResult(res, response, {
-      sellerId: seller._id,
-      sellerName: seller.user?.username || null,
-      request: { payload }
-    });
-  } catch (err) {
-    if (err.statusCode) {
-      return res.status(err.statusCode).json({
-        error: err.message,
-        needsReconnect: Boolean(err.needsReconnect)
-      });
-    }
-    console.error('[Message Conversations] update error:', err.message);
-    const payload = messageApiErrorPayload(err);
-    return res.status(payload.statusCode >= 400 ? payload.statusCode : 500).json(payload);
-  }
-});
-
-/**
- * Commerce Message API — bulkUpdateConversation
- * POST /commerce/message/v1/bulk_update_conversation
- * Up to 10 conversations per request.
- */
-router.post('/message/bulk-update-conversation', requireAuth, requirePageAccess('EbayMessageConversations'), async (req, res) => {
-  try {
-    const body = req.body || {};
-    const { seller, accessToken } = await resolveMessageApiSeller(body.sellerId);
-    const conversations = Array.isArray(body.conversations) ? body.conversations : [];
-    if (conversations.length === 0) {
-      return res.status(400).json({ error: 'conversations array is required' });
-    }
-    if (conversations.length > 10) {
-      return res.status(400).json({ error: 'Maximum 10 conversations per bulk update' });
-    }
-
-    const defaultType = String(body.conversationType || body.conversation_type || 'FROM_MEMBERS').trim() || 'FROM_MEMBERS';
-    const defaultStatus = body.conversationStatus || body.conversation_status || '';
-
-    const normalized = conversations.map((c) => {
-      const conversationId = String(c?.conversationId || '').trim();
-      const conversationType = String(c?.conversationType || c?.conversation_type || defaultType).trim() || defaultType;
-      const conversationStatus = String(c?.conversationStatus || c?.conversation_status || defaultStatus).trim();
-      return { conversationId, conversationType, conversationStatus };
-    });
-
-    if (normalized.some((c) => !c.conversationId || !c.conversationStatus)) {
-      return res.status(400).json({
-        error: 'Each conversation needs conversationId and conversationStatus'
-      });
-    }
-
-    const payload = { conversations: normalized };
-
-    const response = await axios.post(`${COMMERCE_MESSAGE_BASE}/bulk_update_conversation`, payload, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
-      },
-      validateStatus: () => true
-    });
-
-    return respondMessageApiEbayResult(res, response, {
-      sellerId: seller._id,
-      sellerName: seller.user?.username || null,
-      request: { payload }
-    });
-  } catch (err) {
-    if (err.statusCode) {
-      return res.status(err.statusCode).json({
-        error: err.message,
-        needsReconnect: Boolean(err.needsReconnect)
-      });
-    }
-    console.error('[Message Conversations] bulk update error:', err.message);
-    const payload = messageApiErrorPayload(err);
-    return res.status(payload.statusCode >= 400 ? payload.statusCode : 500).json(payload);
-  }
-});
 
 /**
  * Dev-only generic eBay API proxy for internal tester page.

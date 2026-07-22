@@ -10,6 +10,7 @@ import {
   refreshPayoneerFeedCache,
   processPendingPolicyMessages,
   processPendingListingQtyUpdates,
+  withEbayPollRun,
 } from './routes/ebay.js';
 import { refreshDiscountAlertsCache } from './routes/discounts.js';
 import { scheduledSkuIndexSyncAllSellers } from './lib/skuIndexSync.js';
@@ -181,7 +182,7 @@ async function runPollAllSellers() {
 
 async function runPollNewOrders() {
   console.log('[CRON] Scheduled Poll New Orders starting...');
-  await scheduledPollNewOrders();
+  await withEbayPollRun('poll-new-orders', 'cron', null, scheduledPollNewOrders);
 }
 
 async function runOrderListingQtyUpdate() {

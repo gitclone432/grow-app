@@ -2,26 +2,48 @@ import mongoose from 'mongoose';
 import User from '../models/User.js';
 import Seller from '../models/Seller.js';
 
+const ACTIVE_SCOPE_CACHE_MS = 60 * 1000;
+
+let activeUserIdsCache = { at: 0, value: null };
+let activeSellerIdsCache = { at: 0, value: null };
+
+function cacheFresh(entry) {
+  return entry.value != null && Date.now() - entry.at < ACTIVE_SCOPE_CACHE_MS;
+}
+
+/** Clear caches after seller/user activation changes so lists stay correct. */
+export function invalidateActiveSellerScopeCache() {
+  activeUserIdsCache = { at: 0, value: null };
+  activeSellerIdsCache = { at: 0, value: null };
+}
+
 /**
  * Users treated as active for order visibility.
  * Legacy rows without `active` are included (local DBs often omit the field).
  */
 export async function getActiveUserIds() {
-  return User.find({
+  if (cacheFresh(activeUserIdsCache)) return activeUserIdsCache.value;
+
+  const ids = await User.find({
     $or: [
       { active: true },
       { active: { $exists: false } },
       { active: null },
     ],
   }).distinct('_id');
+
+  activeUserIdsCache = { at: Date.now(), value: ids };
+  return ids;
 }
 
 /**
  * Sellers whose orders appear on fulfillment / stored-orders views.
  */
 export async function getActiveSellerIds() {
+  if (cacheFresh(activeSellerIdsCache)) return activeSellerIdsCache.value;
+
   const activeUserIds = await getActiveUserIds();
-  return Seller.find({
+  const ids = await Seller.find({
     isStoreActive: { $ne: false },
     $or: activeUserIds.length
       ? [
@@ -34,6 +56,9 @@ export async function getActiveSellerIds() {
         { user: null },
       ],
   }).distinct('_id');
+
+  activeSellerIdsCache = { at: Date.now(), value: ids };
+  return ids;
 }
 
 export async function applyActiveSellerScope(query, requestedSellerId) {

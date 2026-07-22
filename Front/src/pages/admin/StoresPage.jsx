@@ -57,6 +57,7 @@ const EMPTY_LISTER = {
 
 const EMPTY_GENERAL = {
   descriptionTemplateId: '',
+  ebayUserId: '',
 };
 
 function truncateMessagePreview(text, max = 140) {
@@ -298,7 +299,15 @@ export default function StoresPage() {
         general,
       });
       setGeneral({ ...EMPTY_GENERAL, ...data.settings.general });
-      setSuccess('General settings saved.');
+      // Refresh sellers so Buyer Messages identity cache picks up ebayUserId
+      try {
+        const { invalidateSellersAllCache } = await import('../../lib/sellersAllCache.js');
+        invalidateSellersAllCache();
+      } catch (_) {
+        /* optional */
+      }
+      await loadSellers();
+      setSuccess('General settings saved. eBay UserID is used by Buyer Messages.');
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to save general settings');
     } finally {
@@ -705,34 +714,51 @@ export default function StoresPage() {
               </TabPanel>
 
               <TabPanel active={tab === 3}>
-                <SettingsSection
-                  title="Description template"
-                  description="Used when building HTML descriptions for this store."
-                  action={(
-                    <SaveButton
-                      saving={saving}
-                      disabled={!selectedSellerId}
-                      onClick={saveGeneralSettings}
-                      label="Save general settings"
+                <Stack spacing={2.5}>
+                  <SettingsSection
+                    title="eBay UserID"
+                    description="eBay account UserID for this store (used by Buyer Messages to tell seller vs buyer in conversations). Often differs from the Grow store login name."
+                  >
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="eBay UserID"
+                      value={general.ebayUserId || ''}
+                      onChange={(e) => setGeneral((p) => ({ ...p, ebayUserId: e.target.value }))}
+                      placeholder="e.g. techkey2025"
+                      helperText="Enter the exact eBay UserID that appears in Message sender/recipient fields."
                     />
-                  )}
-                >
-                  <FormControl fullWidth size="small">
-                    <InputLabel>Description template</InputLabel>
-                    <Select
-                      label="Description template"
-                      value={general.descriptionTemplateId}
-                      onChange={(e) => setGeneral((p) => ({ ...p, descriptionTemplateId: e.target.value }))}
-                    >
-                      <MenuItem value=""><em>None</em></MenuItem>
-                      {descriptionTemplates.map((template) => (
-                        <MenuItem key={template.id} value={template.id}>
-                          {template.title}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </SettingsSection>
+                  </SettingsSection>
+
+                  <SettingsSection
+                    title="Description template"
+                    description="Used when building HTML descriptions for this store."
+                    action={(
+                      <SaveButton
+                        saving={saving}
+                        disabled={!selectedSellerId}
+                        onClick={saveGeneralSettings}
+                        label="Save general settings"
+                      />
+                    )}
+                  >
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Description template</InputLabel>
+                      <Select
+                        label="Description template"
+                        value={general.descriptionTemplateId}
+                        onChange={(e) => setGeneral((p) => ({ ...p, descriptionTemplateId: e.target.value }))}
+                      >
+                        <MenuItem value=""><em>None</em></MenuItem>
+                        {descriptionTemplates.map((template) => (
+                          <MenuItem key={template.id} value={template.id}>
+                            {template.title}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </SettingsSection>
+                </Stack>
               </TabPanel>
             </>
           )}

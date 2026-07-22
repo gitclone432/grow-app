@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Box,
   Paper,
@@ -12,7 +12,6 @@ import {
   CircularProgress,
   Chip,
   Tooltip,
-  IconButton,
   Stack,
   Divider,
   Pagination,
@@ -22,305 +21,17 @@ import {
   Select,
   MenuItem,
   Button,
-  Dialog,
-  DialogContent,
-  DialogActions,
-  Link,
   Alert,
   Snackbar,
   Fade,
 } from '@mui/material';
 import NoteIcon from '@mui/icons-material/Note';
 import ChatIcon from '@mui/icons-material/Chat';
-import SendIcon from '@mui/icons-material/Send';
-import CloseIcon from '@mui/icons-material/Close';
-import PersonIcon from '@mui/icons-material/Person';
-import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import api from '../../lib/api';
+import ChatModal from '../../components/ChatModal';
 import FulfillmentNotesSkeleton from '../../components/skeletons/FulfillmentNotesSkeleton';
 import { sortSellersByName } from '../../lib/sellersSort';
-
-// --- Chat Dialog Component ---
-function ChatDialog({ open, onClose, order }) {
-  const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [sending, setSending] = useState(false);
-  const messagesEndRef = useRef(null);
-  const pollingInterval = useRef(null);
-
-  useEffect(() => {
-    if (open && order) {
-      loadMessages();
-      startPolling();
-    } else {
-      stopPolling();
-      setMessages([]);
-    }
-    return () => stopPolling();
-  }, [open, order]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  const stopPolling = () => {
-    if (pollingInterval.current) {
-      clearInterval(pollingInterval.current);
-      pollingInterval.current = null;
-    }
-  };
-
-  const startPolling = () => {
-    stopPolling();
-    pollingInterval.current = setInterval(() => {
-      if (order) {
-        const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
-        api
-          .post("/ebay/sync-thread", {
-            sellerId: order.seller?._id || order.seller,
-            buyerUsername: order.buyer?.username,
-            itemId: itemId,
-          })
-          .then((res) => {
-            if (res.data.newMessagesFound) {
-              loadMessages(false);
-            }
-          })
-          .catch((err) => console.error("Polling error", err));
-      }
-    }, 10000);
-  };
-
-  async function loadMessages(showLoading = true) {
-    if (showLoading) setLoading(true);
-    try {
-      const { data } = await api.get("/ebay/chat/messages", {
-        params: { orderId: order.orderId },
-      });
-      setMessages(data || []);
-    } catch (err) {
-      console.error('Error loading messages:', err);
-    } finally {
-      if (showLoading) setLoading(false);
-    }
-  }
-
-  async function handleSendMessage() {
-    if (!newMessage.trim()) return;
-    setSending(true);
-    try {
-      const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
-      const { data } = await api.post("/ebay/send-message", {
-        orderId: order.orderId,
-        buyerUsername: order.buyer?.username,
-        itemId: itemId,
-        body: newMessage,
-        subject: `Regarding Order #${order.orderId}`,
-      });
-
-      setMessages([...messages, data.message]);
-      setNewMessage("");
-    } catch (err) {
-      console.error('Error sending message:', err);
-      alert('Failed to send: ' + (err.response?.data?.error || err.message));
-    } finally {
-      setSending(false);
-    }
-  }
-
-  const sellerName = order?.seller?.user?.username || 'Seller';
-  const buyerName = order?.buyer?.buyerRegistrationAddress?.fullName || '-';
-  const buyerUsername = order?.buyer?.username || '-';
-  const itemId = order?.itemNumber || order?.lineItems?.[0]?.legacyItemId || '';
-  let itemTitle = order?.productName || order?.lineItems?.[0]?.title || '';
-  const itemCount = order?.lineItems?.length || 0;
-  if (itemCount > 1) {
-    itemTitle = `${itemTitle} (+${itemCount - 1} more items)`;
-  }
-
-  return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-            <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider', bgcolor: '#fff', position: 'relative' }}>
-        <Stack 
-          direction="row" 
-          spacing={1} 
-          alignItems="center" 
-          sx={{ position: 'absolute', top: 12, right: 12 }}
-        >
-          <Chip
-            label={sellerName}
-            size='small'
-            icon={<PersonIcon style={{ fontSize: 16 }} />}
-            sx={{
-              bgcolor: '#e3f2fd',
-              color: '#1565c0',
-              fontWeight: 'bold',
-              height: 24,
-              fontSize: '0.75rem',
-            }}
-          />
-          <IconButton onClick={onClose} size="small" sx={{ color: 'text.disabled', ml: 1 }}>
-            <CloseIcon />
-          </IconButton>
-        </Stack>
-
-        <Stack spacing={1.5} sx={{ pr: 12 }}> 
-        <Stack direction="row" alignItems="center" spacing={3} sx={{ mt: 0.5 }}>
-            <Box>
-            <Typography variant="caption" display="block" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 'bold', textTransform: 'uppercase' }}>
-                Buyer Name
-              </Typography>
-              <Typography variant="subtitle1" sx={{ fontWeight: 600, lineHeight: 1.1 }}>
-                {buyerName}
-              </Typography>
-            </Box>
-
-            <Divider orientation="vertical" flexItem sx={{ height: 20, alignSelf: 'center', opacity: 0.5 }} />
-
-            <Box>
-            <Typography variant="caption" display="block" color="text.secondary" sx={{ fontSize: '0.7rem', fontWeight: 'bold', textTransform: 'uppercase' }}>
-                Username
-              </Typography>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace', bgcolor: 'rgba(0,0,0,0.05)', px: 0.5, borderRadius: 0.5 }}>
-                {buyerUsername}
-              </Typography>
-            </Box>
-          </Stack>
-
-          <Box>
-            <Link
-              href={`https://www.ebay.com/itm/${itemId}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              underline="hover"
-              sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, mb: 0.5 }}
-            >
-              <Typography variant="subtitle2" sx={{ color: 'primary.main', fontWeight: 600, lineHeight: 1.3 }}>
-                {itemTitle || `Item ID: ${itemId}`}
-              </Typography>
-              <OpenInNewIcon
-                sx={{ fontSize: 16, color: "primary.main", mt: 0.3 }}
-              />
-            </Link>
-
-            <Chip
-              label={`Order #: ${order?.orderId}`}
-              size="small"
-              variant="outlined"
-              sx={{ 
-                borderRadius: 1, 
-                height: 22, 
-                fontSize: '0.7rem',
-                color: 'text.secondary',
-                borderColor: 'divider',
-                bgcolor: '#fafafa'
-              }}
-            />
-          </Box>
-        </Stack>
-      </Box>
-
-      <DialogContent
-        sx={{ p: 0, bgcolor: '#f0f2f5', height: '500px', display: 'flex', flexDirection: 'column' }}
-      >
-        <Box sx={{ flex: 1, p: 2, overflowY: 'auto' }}>
-          {loading ? (
-            <Box display="flex" justifyContent="center" mt={4}><CircularProgress /></Box>
-          ) : (
-            <Stack spacing={2}>
-              {messages.length === 0 && (
-                <Alert severity="info" sx={{ mx: 'auto', width: 'fit-content' }}>
-                  No messages yet. Start the conversation below!
-                </Alert>
-              )}
-
-              {messages.map((msg) => (
-                <Box 
-                key={msg._id} 
-                sx={{ 
-                  alignSelf: msg.sender === 'SELLER' ? 'flex-end' : 'flex-start',
-                  maxWidth: '70%'
-                  }}
-                >
-                  <Paper
-                    elevation={1}
-                    sx={{ 
-                      p: 1.5, 
-                      bgcolor: msg.sender === 'SELLER' ? '#1976d2' : '#ffffff',
-                      color: msg.sender === 'SELLER' ? '#fff' : 'text.primary',
-                      borderRadius: 2,
-                      position: 'relative',
-                    }}
-                  >
-                    <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>{msg.body}</Typography>
-
-                    {msg.mediaUrls && msg.mediaUrls.length > 0 && (
-                      <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                        {msg.mediaUrls.map((url, idx) => (
-                          <Box
-                            key={idx}
-                            component="img"
-                            src={url}
-                            alt="Attachment"
-                            sx={{ 
-                              width: 100, 
-                              height: 100, 
-                              objectFit: 'cover', 
-                              borderRadius: 1, 
-                              cursor: 'pointer', 
-                              border: '1px solid #ccc' 
-                            }}
-                            onClick={() => window.open(url, '_blank')}
-                          />
-                        ))}
-                      </Box>
-                    )}
-                  </Paper>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, textAlign: msg.sender === 'SELLER' ? 'right' : 'left', fontSize: '0.7rem' }}>
-                    {new Date(msg.messageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} PT
-                    {msg.sender === 'SELLER' && (msg.read ? ' • Read' : ' • Sent')}
-                  </Typography>
-                </Box>
-              ))}
-              <div ref={messagesEndRef} />
-            </Stack>
-          )}
-        </Box>
-
-        <Box
-          sx={{ p: 2, bgcolor: '#fff', borderTop: 1, borderColor: 'divider', display: 'flex', gap: 1 }}
-        >
-          <TextField
-            fullWidth
-            multiline
-            maxRows={3}
-            placeholder="Type a message..."
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSendMessage();
-              }
-            }}
-            disabled={sending}
-            size="small"
-          />
-          <Button 
-            variant="contained" 
-            sx={{ px: 3 }}
-            endIcon={sending ? <CircularProgress size={20} color="inherit"/> : <SendIcon />}
-            onClick={handleSendMessage}
-            disabled={sending || !newMessage.trim()}
-          >
-            Send
-          </Button>
-        </Box>
-      </DialogContent>
-    </Dialog>
-  );
-}
+import { yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 
 // --- Notes Cell Component ---
 function NotesCell({ order, onSave, onNotify }) {
@@ -473,25 +184,12 @@ export default function FulfillmentNotesPage() {
   // Debounced Values
   const [debouncedOrderId, setDebouncedOrderId] = useState('');
 
-  // Message dialog state
-  const [messageModalOpen, setMessageModalOpen] = useState(false);
-  const [selectedOrderForMessage, setSelectedOrderForMessage] = useState(null);
+  const [selectedOrder, setSelectedOrder] = useState(null);
 
   // Snackbar state
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMsg, setSnackbarMsg] = useState('');
   const [snackbarSeverity, setSnackbarSeverity] = useState('success');
-
-  // Handlers for messaging
-  const handleOpenMessageDialog = (order) => {
-    setSelectedOrderForMessage(order);
-    setMessageModalOpen(true);
-  };
-
-  const handleCloseMessageDialog = () => {
-    setMessageModalOpen(false);
-    setSelectedOrderForMessage(null);
-  };
 
   // Handler for saving notes
   const handleSaveNote = async (orderId, newNote) => {
@@ -691,7 +389,7 @@ export default function FulfillmentNotesPage() {
                   <TableCell sx={{ backgroundColor: 'primary.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 100 }}>Buyer Name</TableCell>
                   <TableCell sx={{ backgroundColor: 'primary.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 100, minWidth: 150 }}>Delivery Date</TableCell>
                   <TableCell sx={{ backgroundColor: 'primary.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 100, minWidth: 300 }}>Fulfillment Notes</TableCell>
-                  <TableCell sx={{ backgroundColor: 'primary.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 100, align: 'center' }}>Chat</TableCell>
+                  <TableCell sx={{ backgroundColor: 'primary.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 100 }} align="center">Action</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -740,14 +438,16 @@ export default function FulfillmentNotesPage() {
                         />
                       </TableCell>
                       <TableCell align="center">
-                        <Tooltip title="Message Buyer">
-                          <IconButton
-                            color="primary"
+                        <Tooltip title="Open conversation">
+                          <Button
                             size="small"
-                            onClick={() => handleOpenMessageDialog(order)}
+                            variant="outlined"
+                            startIcon={<ChatIcon fontSize="small" />}
+                            onClick={() => setSelectedOrder(order)}
+                            sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
                           >
-                            <ChatIcon />
-                          </IconButton>
+                            Open
+                          </Button>
                         </Tooltip>
                       </TableCell>
                     </TableRow>
@@ -771,12 +471,19 @@ export default function FulfillmentNotesPage() {
         </>
       )}
 
-      {/* Chat Dialog */}
-      {selectedOrderForMessage && (
-        <ChatDialog 
-          open={messageModalOpen} 
-          onClose={handleCloseMessageDialog} 
-          order={selectedOrderForMessage} 
+      {selectedOrder && (
+        <ChatModal
+          open={Boolean(selectedOrder)}
+          onClose={() => setSelectedOrder(null)}
+          orderId={selectedOrder.orderId || selectedOrder.legacyOrderId}
+          buyerUsername={selectedOrder.buyer?.username || ''}
+          buyerName={selectedOrder.shippingFullName || selectedOrder.buyer?.buyerRegistrationAddress?.fullName || ''}
+          itemId={selectedOrder.itemNumber || selectedOrder.lineItems?.[0]?.legacyItemId || selectedOrder.lineItems?.[0]?.itemId || ''}
+          itemTitle={selectedOrder.productName || selectedOrder.lineItems?.[0]?.title || ''}
+          sellerId={selectedOrder.seller?._id || selectedOrder.seller || selectedOrder.sellerId || null}
+          sellerName={selectedOrder.seller?.user?.username || ''}
+          title="Chat"
+          showManageCase={false}
         />
       )}
 

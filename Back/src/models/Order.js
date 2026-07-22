@@ -229,13 +229,20 @@ const OrderSchema = new mongoose.Schema(
 // Index for faster queries
 OrderSchema.index({ seller: 1, orderId: 1 });
 OrderSchema.index({ seller: 1, creationDate: -1 });
+OrderSchema.index({ seller: 1, dateSold: -1 });
 OrderSchema.index({ seller: 1, lastModifiedDate: -1 });
 OrderSchema.index({ seller: 1, creationDate: -1, lastModifiedDate: -1 }); // Compound index for polling queries
 OrderSchema.index({ dateSold: 1 }); // Index for date range searches
+OrderSchema.index({ subtotal: 1, dateSold: -1 }); // micro-orders range filter + sort
 OrderSchema.index({ sourcingStatus: 1, dateSold: 1 }); // Affiliate daily queue + carry-over
 OrderSchema.index({ dateSold: 1, sourcingStatus: 1 });
 OrderSchema.index({ seller: 1, dateSold: 1 });
 OrderSchema.index({ cancelState: 1, creationDate: -1 }); // Index for cancelled orders queries
 OrderSchema.index({ policyMessageSent: 1, policyMessageDisabled: 1, policyMessageEligibleAt: 1 }); // Index for policy message processing
+OrderSchema.index({ itemNumber: 1, dateSold: -1 });
+OrderSchema.index({ 'lineItems.legacyItemId': 1 });
+OrderSchema.index({ 'lineItems.sku': 1, dateSold: -1 });
+OrderSchema.index({ 'lineItems.SKU': 1, dateSold: -1 });
+OrderSchema.index({ 'lineItems.sellerSku': 1, dateSold: -1 });
 
 export default mongoose.model('Order', OrderSchema);

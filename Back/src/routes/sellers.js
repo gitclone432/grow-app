@@ -7,7 +7,7 @@ import User from '../models/User.js';
 import SellerSkuIndex from '../models/SellerSkuIndex.js';
 import Order from '../models/Order.js';
 import { getSellersMatchingAllRoute, getSellersForEbayApiPicker } from '../utils/sellersAllScope.js';
-import { getActiveUserIds } from '../utils/activeSellerScope.js';
+import { getActiveSellerIds, invalidateActiveSellerScopeCache } from '../utils/activeSellerScope.js';
 import {
   getSellerPermanentDeleteBlockers,
   permanentlyDeleteSeller,
@@ -61,20 +61,10 @@ router.get('/ebay-connected', requireAuth, async (req, res) => {
 // All authenticated users can see all sellers
 router.get('/all-unfiltered', requireAuth, async (req, res) => {
   try {
-    const activeUserIds = await getActiveUserIds();
-    const sellers = await Seller.find({
-      isStoreActive: { $ne: false },
-      $or: activeUserIds.length
-        ? [
-          { user: { $in: activeUserIds } },
-          { user: { $exists: false } },
-          { user: null },
-        ]
-        : [
-          { user: { $exists: false } },
-          { user: null },
-        ],
-    }).populate('user', 'username email active');
+    const activeSellerIds = await getActiveSellerIds();
+    const sellers = await Seller.find({ _id: { $in: activeSellerIds } })
+      .populate('user', 'username email active')
+      .lean();
     res.json(sellers);
   } catch (err) {
     console.error('Error fetching sellers:', err);
@@ -170,6 +160,7 @@ router.patch('/:id', requireAuth, requirePageAccess('StoresPage', ['superadmin',
 
     await seller.user.save();
     await seller.save();
+    invalidateActiveSellerScopeCache();
 
     const updated = await Seller.findById(id).populate('user', 'username email active');
     res.json(updated);
@@ -218,6 +209,7 @@ router.delete('/:id/permanent', requireAuth, requireRole('superadmin'), async (r
     }
 
     const result = await permanentlyDeleteSeller(id);
+    invalidateActiveSellerScopeCache();
     res.json({
       success: true,
       message: `Seller "${result.username}" permanently deleted`,
@@ -256,6 +248,7 @@ router.delete('/:id', requireAuth, requirePageAccess(['StoresPage', 'AddSeller']
       await seller.user.save();
     }
 
+    invalidateActiveSellerScopeCache();
     res.json({ success: true, message: 'Store archived successfully' });
   } catch (err) {
     console.error('Error deleting seller:', err);
@@ -274,6 +267,7 @@ router.delete('/disconnect-ebay', requireAuth, requireRole('seller'), async (req
     seller.isStoreActive = false;
     seller.disconnectedAt = new Date();
     await seller.save();
+    invalidateActiveSellerScopeCache();
     
     console.log(`eBay disconnected for seller ${seller._id}`);
     res.json({ message: 'eBay account disconnected successfully. You can now reconnect with updated permissions.' });

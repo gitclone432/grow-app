@@ -49,10 +49,7 @@ import { format, parseISO, isValid } from 'date-fns';
 import { Dialog, DialogTitle, DialogContent, DialogActions } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import CloseIcon from '@mui/icons-material/Close';
-
-
 import ChatIcon from '@mui/icons-material/Chat';
-
 import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
 import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -60,17 +57,14 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
 import NavigateNextIcon from '@mui/icons-material/NavigateNext';
-
-import PersonIcon from '@mui/icons-material/Person'; // <--- Add this
-import OpenInNewIcon from '@mui/icons-material/OpenInNew'; // <--- Add this
+import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import DeleteIcon from '@mui/icons-material/Delete';
 import SaveIcon from '@mui/icons-material/Save';
 import InfoIcon from '@mui/icons-material/Info';
 import SettingsIcon from '@mui/icons-material/Settings';
 import SyncIcon from '@mui/icons-material/Sync';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
-
-
+import HistoryIcon from '@mui/icons-material/History';
 import SearchIcon from '@mui/icons-material/Search';
 import DownloadIcon from '@mui/icons-material/Download';
 import UploadIcon from '@mui/icons-material/Upload';
@@ -84,8 +78,7 @@ import api from '../../lib/api';
 import { fetchAllPages } from '../../lib/fetchAllPages';
 import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderSyncEvents';
 import { sortSellersByName } from '../../lib/sellersSort';
-import TemplateManagementModal from '../../components/TemplateManagementModal';
-import { CHAT_TEMPLATES, personalizeTemplate } from '../../constants/chatTemplates';
+import ChatModal from '../../components/ChatModal';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
 import ResolutionOptionsModal from '../../components/ResolutionOptionsModal';
 import {
@@ -97,7 +90,8 @@ import {
 import ItemCategoryAssignDialog from '../../components/ItemCategoryAssignDialog.jsx';
 import FulfillmentSkeleton from '../../components/skeletons/FulfillmentSkeleton';
 import FulfillmentCsvImportDialog from '../../components/FulfillmentCsvImportDialog';
-
+import SectionCard from '../../components/SectionCard.jsx';
+import { tableHeaderCellSx, tableBodyRowSx, yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 
 // --- IMAGE VIEWER DIALOG ---
 function ImageDialog({ open, onClose, images }) {
@@ -270,597 +264,6 @@ function ImageDialog({ open, onClose, images }) {
   );
 }
 
-function cleanChatMessageBodyForDisplay(body = '') {
-  let text = String(body)
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&copy;/g, '(c)');
-
-  const lower = text.toLowerCase();
-  const markerIndex = [
-    '@media only screen',
-    '@-moz-document',
-    'body[yahoo]',
-    'td.wraptext',
-    '.externalclass',
-    '.readmsgbody',
-    'mso-table-lspace'
-  ]
-    .map((marker) => lower.indexOf(marker))
-    .filter((index) => index >= 0)
-    .sort((a, b) => a - b)[0];
-  if (markerIndex !== undefined) text = text.slice(0, markerIndex);
-
-  const footerIndex = [
-    'Order status:',
-    'We scan messages to enforce policies.',
-    'Email reference id:',
-    "We don't check this mailbox",
-    'eBay sent this message to',
-    'eBay is committed to your privacy'
-  ]
-    .map((marker) => text.toLowerCase().indexOf(marker.toLowerCase()))
-    .filter((index) => index >= 0)
-    .sort((a, b) => a - b)[0];
-  if (footerIndex !== undefined) text = text.slice(0, footerIndex);
-
-  text = text.replace(/\bNew message:\s*New message\b/gi, '').replace(/\s+/g, ' ').trim();
-  const cssSignalCount = ['!important', '{', '}', 'padding:', 'width:', 'font-family:', 'word-wrap:']
-    .filter((token) => text.toLowerCase().includes(token)).length;
-
-  return cssSignalCount >= 3 ? '' : text;
-}
-
-function getChatDisplaySender(msg) {
-  const body = String(msg?.body || '').toLowerCase();
-  const sellerTemplateSignals = [
-    "we're pleased to inform you that your order has been processed",
-    'your package has been successfully delivered',
-    'tracking number will be updated on your ebay order page',
-    'thank you for choosing us',
-    'customer support team',
-    'if you have any questions or concerns, please contact us directly through ebay messages',
-    'before opening any cases such as inr',
-    'thank you for your recent purchase',
-    'orders are typically shipped within',
-    'your return request has been approved',
-    'we have approved your return request'
-  ];
-
-  return sellerTemplateSignals.some((signal) => body.includes(signal)) ? 'SELLER' : msg?.sender;
-}
-
-// --- NEW COMPONENT: Chat Dialog (Visual Match with BuyerChatPage) ---
-function ChatDialog({ open, onClose, order }) {
-  const theme = useTheme();
-  const isMobileChat = useMediaQuery(theme.breakpoints.down('sm'));
-
-  const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [sending, setSending] = useState(false);
-  const messagesEndRef = useRef(null);
-  const pollingInterval = useRef(null);
-
-  // Load messages when dialog opens
-  useEffect(() => {
-    if (open && order) {
-      syncThreadAndLoad();
-      startPolling();
-    } else {
-      stopPolling();
-      setMessages([]);
-      setNewMessage('');
-    }
-    return () => stopPolling();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, order]);
-
-  // Scroll to bottom when messages change
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  const stopPolling = () => {
-    if (pollingInterval.current) clearInterval(pollingInterval.current);
-  };
-
-  const startPolling = () => {
-    stopPolling();
-    pollingInterval.current = setInterval(() => {
-      if (order) {
-        const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
-        const sellerId = order.seller?._id || order.seller;
-        const buyerUsername = order.buyer?.username;
-        if (!sellerId || !buyerUsername) return;
-        api.post('/ebay/sync-thread', {
-          sellerId,
-          buyerUsername,
-          itemId: itemId,
-          orderId: order.orderId || null,
-          lookbackDays: 365
-        }).then(res => {
-          if (res.data.newMessagesFound) {
-            loadMessages(false);
-          }
-        }).catch(err => console.error("Polling error", err));
-      }
-    }, 10000);
-  };
-
-  async function syncThreadAndLoad() {
-    const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
-    const sellerId = order.seller?._id || order.seller;
-    const buyerUsername = order.buyer?.username;
-
-    if (!sellerId || !buyerUsername) {
-      await loadMessages();
-      return;
-    }
-
-    try {
-      await api.post('/ebay/sync-thread', {
-        sellerId,
-        buyerUsername,
-        itemId,
-        orderId: order.orderId || null,
-        lookbackDays: 365
-      });
-    } catch (err) {
-      console.error('Initial thread sync failed', err);
-    }
-
-    await loadMessages();
-  }
-
-  async function loadMessages(showLoading = true) {
-    if (showLoading) setLoading(true);
-    try {
-      const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
-      const params = {
-        buyerUsername: order.buyer?.username,
-        sellerId: order.seller?._id || order.seller,
-      };
-      if (order.orderId) params.orderId = order.orderId;
-      if (itemId) params.itemId = itemId;
-
-      const { data } = await api.get('/ebay/chat/messages', { params });
-      setMessages((data || [])
-        .map((msg) => ({ ...msg, body: cleanChatMessageBodyForDisplay(msg.body) }))
-        .filter((msg) => msg.body));
-    } catch (e) {
-      console.error("Failed to load messages", e);
-    } finally {
-      if (showLoading) setLoading(false);
-    }
-  }
-
-  async function handleSendMessage() {
-    if (!newMessage.trim()) return;
-    setSending(true);
-    try {
-      const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
-      const { data } = await api.post('/ebay/send-message', {
-        orderId: order.orderId || null,
-        buyerUsername: order.buyer?.username,
-        itemId: itemId,
-        body: newMessage,
-        subject: order.orderId ? `Regarding Order #${order.orderId}` : 'Regarding your inquiry'
-      });
-
-      setMessages((prev) => [...prev, data.message]);
-      setNewMessage('');
-    } catch (e) {
-      alert('Failed to send: ' + (e.response?.data?.error || e.message));
-    } finally {
-      setSending(false);
-    }
-  }
-
-  // Helper to safely extract data from the Order object
-  const sellerName = order?.seller?.user?.username || 'Seller';
-  const buyerName = order?.buyer?.buyerRegistrationAddress?.fullName || '-';
-  const buyerUsername = order?.buyer?.username || '-';
-  const itemId = order?.itemNumber || order?.lineItems?.[0]?.legacyItemId || '';
-  let itemTitle = order?.productName || order?.lineItems?.[0]?.title || '';
-  const itemCount = order?.lineItems?.length || 0;
-  if (itemCount > 1) {
-    itemTitle = `${itemTitle} (+ ${itemCount - 1} other${itemCount - 1 > 1 ? 's' : ''})`;
-  }
-
-  // --- TEMPLATE MENU STATE ---
-  const [templateAnchorEl, setTemplateAnchorEl] = useState(null);
-  const [chatTemplates, setChatTemplates] = useState([]);
-  const [templatesLoading, setTemplatesLoading] = useState(false);
-  const [manageTemplatesOpen, setManageTemplatesOpen] = useState(false);
-
-  // Load chat templates on mount
-  useEffect(() => {
-    loadChatTemplates();
-  }, []);
-
-  async function loadChatTemplates() {
-    setTemplatesLoading(true);
-    try {
-      const { data } = await api.get('/chat-templates');
-      if (data.templates && data.templates.length > 0) {
-        setChatTemplates(data.templates);
-      }
-    } catch (e) {
-      console.error('Failed to load chat templates:', e);
-      // Fallback to hardcoded templates
-      setChatTemplates(CHAT_TEMPLATES);
-    } finally {
-      setTemplatesLoading(false);
-    }
-  }
-
-  const handleTemplateClick = (event) => {
-    setTemplateAnchorEl(event.currentTarget);
-  };
-
-  const handleTemplateClose = () => {
-    setTemplateAnchorEl(null);
-  };
-
-  const handleSelectTemplate = (templateText) => {
-    const nameToUse = order.shippingFullName || order.buyer?.username || 'Buyer';
-    const personalizedText = personalizeTemplate(templateText, nameToUse);
-
-    setNewMessage(personalizedText);
-    handleTemplateClose();
-  };
-
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      fullWidth
-      maxWidth="md"
-      fullScreen={isMobileChat}
-    >
-
-      {/* --- HEADER (MATCHING BUYER CHAT PAGE) --- */}
-      <Box sx={{ p: { xs: 1.5, sm: 2 }, borderBottom: 1, borderColor: 'divider', bgcolor: '#fff', position: 'relative' }}>
-
-        {/* Top Right: Seller Chip & Close & Templates */}
-        <Stack
-          direction="column"
-          spacing={1}
-          alignItems="flex-end"
-          sx={{ position: 'absolute', top: { xs: 8, sm: 12 }, right: { xs: 8, sm: 12 }, zIndex: 10 }}
-        >
-          <Stack direction="row" spacing={0.5} alignItems="center">
-            {!isMobileChat && (
-              <Chip
-                label={sellerName}
-                size="small"
-                icon={<PersonIcon style={{ fontSize: 16 }} />}
-                sx={{
-                  bgcolor: '#e3f2fd',
-                  color: '#1565c0',
-                  fontWeight: 'bold',
-                  height: 24,
-                  fontSize: '0.75rem'
-                }}
-              />
-            )}
-            <IconButton onClick={onClose} size="small" sx={{ color: 'text.disabled' }}>
-              <CloseIcon />
-            </IconButton>
-          </Stack>
-
-          <Tooltip title="Choose a response template">
-            <Button
-              variant="outlined"
-              size="small"
-              onClick={handleTemplateClick}
-              disabled={sending}
-              sx={{
-                minWidth: { xs: 'auto', sm: 100 },
-                px: { xs: 1, sm: 2 },
-                fontSize: { xs: '0.7rem', sm: '0.875rem' },
-                bgcolor: 'white'
-              }}
-              endIcon={<ExpandMoreIcon />}
-            >
-              Templates
-            </Button>
-          </Tooltip>
-        </Stack>
-
-        {/* Main Content: Buyer & Item */}
-        <Stack spacing={1} sx={{ pr: { xs: 6, sm: 12 } }}>
-
-          {/* 1. Buyer Info */}
-          <Stack
-            direction={{ xs: 'column', sm: 'row' }}
-            alignItems={{ xs: 'flex-start', sm: 'center' }}
-            spacing={{ xs: 0.5, sm: 3 }}
-            sx={{ mt: 0.5 }}
-          >
-            <Box>
-              <Typography variant="caption" display="block" color="text.secondary" sx={{ fontSize: '0.65rem', fontWeight: 'bold', textTransform: 'uppercase' }}>
-                Buyer
-              </Typography>
-              <Typography variant="subtitle1" sx={{ fontWeight: 600, lineHeight: 1.1, fontSize: { xs: '0.9rem', sm: '1rem' } }}>
-                {buyerName}
-              </Typography>
-            </Box>
-
-            {!isMobileChat && (
-              <Divider orientation="vertical" flexItem sx={{ height: 20, alignSelf: 'center', opacity: 0.5 }} />
-            )}
-
-            <Box>
-              <Typography variant="caption" display="block" color="text.secondary" sx={{ fontSize: '0.65rem', fontWeight: 'bold', textTransform: 'uppercase' }}>
-                Username
-              </Typography>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace', bgcolor: 'rgba(0,0,0,0.05)', px: 0.5, borderRadius: 0.5, fontSize: { xs: '0.75rem', sm: '0.875rem' } }}>
-                {buyerUsername}
-              </Typography>
-            </Box>
-          </Stack>
-
-          {/* 2. Item Link & Order ID */}
-          <Box>
-            <Link
-              href={`https://www.ebay.com/itm/${itemId}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              underline="hover"
-              sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, mb: 0.5 }}
-            >
-              <Typography
-                variant="subtitle2"
-                sx={{
-                  color: 'primary.main',
-                  fontWeight: 600,
-                  lineHeight: 1.3,
-                  fontSize: { xs: '0.8rem', sm: '0.875rem' },
-                  display: '-webkit-box',
-                  WebkitLineClamp: isMobileChat ? 1 : 2,
-                  WebkitBoxOrient: 'vertical',
-                  overflow: 'hidden'
-                }}
-              >
-                {itemTitle || `Item ID: ${itemId}`}
-              </Typography>
-              <OpenInNewIcon sx={{ fontSize: 14, color: 'primary.main', mt: 0.3, flexShrink: 0 }} />
-            </Link>
-
-            <Chip
-              label={`Order: ${order?.orderId || order?.legacyOrderId || 'N/A'}`}
-              size="small"
-              variant="outlined"
-              sx={{
-                borderRadius: 1,
-                height: 20,
-                fontSize: '0.65rem',
-                color: 'text.secondary',
-                borderColor: 'divider',
-                bgcolor: '#fafafa'
-              }}
-            />
-          </Box>
-        </Stack>
-      </Box>
-
-      {/* --- CHAT AREA (MATCHING BUYER CHAT PAGE) --- */}
-      <DialogContent sx={{ p: 0, bgcolor: '#f0f2f5', height: { xs: 'calc(100vh - 180px)', sm: '500px' }, display: 'flex', flexDirection: 'column' }}>
-        <Box sx={{ flex: 1, p: 2, overflowY: 'auto' }}>
-          {loading ? (
-            <Box display="flex" justifyContent="center" mt={4}><CircularProgress /></Box>
-          ) : (
-            <Stack spacing={2}>
-              {messages.length === 0 && (
-                <Alert severity="info" sx={{ mx: 'auto', width: 'fit-content' }}>
-                  No messages yet. Start the conversation below!
-                </Alert>
-              )}
-
-              {messages.map((msg) => {
-                const displaySender = getChatDisplaySender(msg);
-                return (
-                <Box
-                  key={msg._id}
-                  sx={{
-                    alignSelf: displaySender === 'SELLER' ? 'flex-end' : 'flex-start',
-                    maxWidth: '70%' // Constrain width like Buyer Chat
-                  }}
-                >
-                  <Paper
-                    elevation={1}
-                    sx={{
-                      p: 1.5,
-                      bgcolor: displaySender === 'SELLER' ? '#1976d2' : '#ffffff',
-                      color: displaySender === 'SELLER' ? '#fff' : 'text.primary',
-                      borderRadius: 2,
-                      position: 'relative'
-                    }}
-                  >
-                    <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>{msg.body}</Typography>
-
-                    {/* Images */}
-                    {msg.mediaUrls && msg.mediaUrls.length > 0 && (
-                      <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                        {msg.mediaUrls.map((url, idx) => (
-                          <Box
-                            key={idx}
-                            component="img"
-                            src={url}
-                            alt="Attachment"
-                            sx={{
-                              width: 100,
-                              height: 100,
-                              objectFit: 'cover',
-                              borderRadius: 1,
-                              cursor: 'pointer',
-                              border: '1px solid #ccc'
-                            }}
-                            onClick={() => window.open(url, '_blank')}
-                          />
-                        ))}
-                      </Box>
-                    )}
-                  </Paper>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, textAlign: displaySender === 'SELLER' ? 'right' : 'left', fontSize: '0.7rem' }}>
-                    {new Date(msg.messageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} PT
-                    {displaySender === 'SELLER' && (msg.read ? ' • Read' : ' • Sent')}
-                  </Typography>
-                </Box>
-                );
-              })}
-              <div ref={messagesEndRef} />
-            </Stack>
-          )}
-        </Box>
-
-        {/* --- INPUT AREA --- */}
-        <Box sx={{ p: { xs: 1, sm: 2 }, bgcolor: '#fff', borderTop: 1, borderColor: 'divider', display: 'flex', gap: 1 }}>
-          <TextField
-            fullWidth
-            multiline
-            maxRows={3}
-            placeholder="Type a message..."
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSendMessage();
-              }
-            }}
-            disabled={sending}
-            size="small"
-            sx={{
-              '& .MuiInputBase-input': {
-                fontSize: { xs: '0.875rem', sm: '1rem' }
-              }
-            }}
-          />
-          <Menu
-            anchorEl={templateAnchorEl}
-            open={Boolean(templateAnchorEl)}
-            onClose={handleTemplateClose}
-            anchorOrigin={{
-              vertical: 'bottom',
-              horizontal: 'right',
-            }}
-            transformOrigin={{
-              vertical: 'top',
-              horizontal: 'right',
-            }}
-            PaperProps={{
-              style: {
-                maxHeight: 400,
-                width: 320,
-              },
-            }}
-          >
-            {/* Manage Templates Button */}
-            <MenuItem
-              onClick={() => { handleTemplateClose(); setManageTemplatesOpen(true); }}
-              sx={{
-                borderBottom: '2px solid #e0e0e0',
-                bgcolor: '#f9f9ff',
-                py: 1.5
-              }}
-            >
-              <Stack direction="row" alignItems="center" spacing={1}>
-                <SettingsIcon fontSize="small" color="primary" />
-                <Typography variant="subtitle2" color="primary">Manage Templates</Typography>
-              </Stack>
-            </MenuItem>
-
-            {templatesLoading ? (
-              <Box sx={{ p: 2, textAlign: 'center' }}>
-                <CircularProgress size={20} />
-              </Box>
-            ) : chatTemplates.length === 0 ? (
-              <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>
-                No templates available. Click "Manage Templates" to add some.
-              </Typography>
-            ) : (
-              chatTemplates.map((group, index) => (
-                <Box key={index}>
-                  <ListSubheader
-                    sx={{
-                      bgcolor: '#f5f5f5',
-                      fontWeight: 'bold',
-                      lineHeight: '32px',
-                      color: 'primary.main',
-                      fontSize: '0.75rem'
-                    }}
-                  >
-                    {group.category}
-                  </ListSubheader>
-                  {group.items.map((item, idx) => (
-                    <MenuItem
-                      key={item._id || idx}
-                      onClick={() => handleSelectTemplate(item.text)}
-                      sx={{
-                        fontSize: '0.85rem',
-                        whiteSpace: 'normal',
-                        py: 1,
-                        borderBottom: '1px solid #f0f0f0',
-                        display: 'block'
-                      }}
-                    >
-                      <Typography variant="subtitle2" sx={{ fontWeight: 600, fontSize: '0.85rem' }}>
-                        {item.label}
-                      </Typography>
-                      <Typography
-                        variant="caption"
-                        color="text.secondary"
-                        sx={{
-                          display: '-webkit-box',
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: 'vertical',
-                          overflow: 'hidden',
-                          fontSize: '0.75rem'
-                        }}
-                      >
-                        {item.text}
-                      </Typography>
-                    </MenuItem>
-                  ))}
-                </Box>
-              ))
-            )}
-          </Menu>
-          <Button
-            variant="contained"
-            sx={{ px: { xs: 2, sm: 3 }, minWidth: { xs: 'auto', sm: 80 } }}
-            endIcon={!isMobileChat && (sending ? <CircularProgress size={20} color="inherit" /> : <SendIcon />)}
-            onClick={handleSendMessage}
-            disabled={sending || !newMessage.trim()}
-          >
-            {isMobileChat ? <SendIcon /> : 'Send'}
-          </Button>
-        </Box>
-      </DialogContent>
-
-      {/* Template Management Modal */}
-      <TemplateManagementModal
-        open={manageTemplatesOpen}
-        onClose={() => {
-          setManageTemplatesOpen(false);
-          loadChatTemplates();
-        }}
-      />
-    </Dialog>
-  );
-}
-
 // --- EARNINGS HELPER ---
 // Returns the stored orderEarnings value directly (calculated backend-side as totalDueSeller.value - adFeeGeneral)
 function getOrderEarnings(order) {
@@ -888,6 +291,87 @@ function formatOrderLocalAmount(order, value) {
 /** Ad fees and earnings are stored in USD for all marketplaces. */
 function formatOrderUsdAmount(order, value) {
   return formatMoneyAmount(value, '$');
+}
+
+function formatPTWordDate(dateStr) {
+  if (!dateStr) return '-';
+  const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return dateStr;
+
+  const [, y, m, d] = match;
+  const date = new Date(parseInt(y, 10), parseInt(m, 10) - 1, parseInt(d, 10));
+  if (isNaN(date.getTime())) return dateStr;
+
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric'
+    });
+    const parts = formatter.formatToParts(date);
+    const getPart = (type) => parts.find(p => p.type === type)?.value || '';
+
+    const day = parseInt(getPart('day'), 10);
+    const month = getPart('month');
+    const year = getPart('year');
+
+    const getOrdinal = (dVal) => {
+      if (dVal > 3 && dVal < 21) return 'th';
+      switch (dVal % 10) {
+        case 1: return 'st';
+        case 2: return 'nd';
+        case 3: return 'rd';
+        default: return 'th';
+      }
+    };
+
+    return `${day}${getOrdinal(day)} ${month} ${year}`;
+  } catch (e) {
+    return dateStr;
+  }
+}
+
+function formatISTWordDate(utcDateStr) {
+  if (!utcDateStr) return '-';
+  const date = new Date(utcDateStr);
+  if (isNaN(date.getTime())) return utcDateStr;
+
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Kolkata',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    });
+    const parts = formatter.formatToParts(date);
+    const getPart = (type) => parts.find(p => p.type === type)?.value || '';
+
+    const day = parseInt(getPart('day'), 10);
+    const month = getPart('month');
+    const year = getPart('year');
+    const hour = getPart('hour');
+    const minute = getPart('minute');
+    const second = getPart('second');
+    const dayPeriod = getPart('dayPeriod');
+
+    const getOrdinal = (dVal) => {
+      if (dVal > 3 && dVal < 21) return 'th';
+      switch (dVal % 10) {
+        case 1: return 'st';
+        case 2: return 'nd';
+        case 3: return 'rd';
+        default: return 'th';
+      }
+    };
+
+    return `${day}${getOrdinal(day)} ${month} ${year}, ${hour}:${minute}:${second} ${dayPeriod} IST`;
+  } catch (e) {
+    return utcDateStr;
+  }
 }
 
 function formatFullShippingAddress(order, options = {}) {
@@ -1162,9 +646,17 @@ const MobileOrderCard = memo(function MobileOrderCard({ order, index, onCopy, on
             <IconButton size="small" onClick={() => onCopy(order.orderId)} title="Copy Order ID">
               <ContentCopyIcon sx={{ fontSize: 18 }} />
             </IconButton>
-            <IconButton size="small" color="primary" onClick={() => onMessage(order)} title="Message Buyer">
-              <ChatIcon sx={{ fontSize: 18 }} />
-            </IconButton>
+            <Tooltip title="Open conversation">
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<ChatIcon fontSize="small" />}
+                onClick={() => onMessage(order)}
+                sx={{ ...yellowOutlinedButtonSx, minHeight: 28, px: 1, fontSize: '0.7rem' }}
+              >
+                Open
+              </Button>
+            </Tooltip>
           </Stack>
         </Stack>
       </Stack>
@@ -1306,7 +798,7 @@ const EditableCell = memo(function EditableCell({ value, type = 'text', onSave }
 });
 
 // Sticky header cell style — extracted to avoid re-creating per render
-const HEADER_CELL_SX = { backgroundColor: 'primary.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 100 };
+const HEADER_CELL_SX = { ...tableHeaderCellSx, position: 'sticky', top: 0, zIndex: 100 };
 const HEADER_CELL_RIGHT_SX = { ...HEADER_CELL_SX, textAlign: 'right' };
 const BODY_CELL_SX = { py: 0.5, fontSize: '0.8125rem' };
 const FILTER_SWITCH_SX = {
@@ -1527,6 +1019,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
   searchAzOrderId, setSearchAzOrderId,
   searchBuyerName, setSearchBuyerName,
   searchItemId, setSearchItemId,
+  searchSku, setSearchSku,
   searchProductName, setSearchProductName,
   setSearchPaymentStatus,
   dateFilter, setDateFilter,
@@ -1555,6 +1048,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
   const [localAzOrderId, setLocalAzOrderId] = useState(searchAzOrderId);
   const [localBuyerName, setLocalBuyerName] = useState(searchBuyerName);
   const [localItemId, setLocalItemId] = useState(searchItemId);
+  const [localSku, setLocalSku] = useState(searchSku);
   const [localProductName, setLocalProductName] = useState(searchProductName);
   const [localDateFilter, setLocalDateFilter] = useState(() => normalizeDateFilter(dateFilter));
 
@@ -1563,6 +1057,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
   useEffect(() => { setLocalAzOrderId(searchAzOrderId); }, [searchAzOrderId]);
   useEffect(() => { setLocalBuyerName(searchBuyerName); }, [searchBuyerName]);
   useEffect(() => { setLocalItemId(searchItemId); }, [searchItemId]);
+  useEffect(() => { setLocalSku(searchSku); }, [searchSku]);
   useEffect(() => { setLocalProductName(searchProductName); }, [searchProductName]);
   useEffect(() => { setLocalDateFilter(normalizeDateFilter(dateFilter)); }, [dateFilter]);
 
@@ -1572,6 +1067,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
     setSearchAzOrderId(localAzOrderId);
     setSearchBuyerName(localBuyerName);
     setSearchItemId(localItemId);
+    setSearchSku(localSku);
     setSearchProductName(localProductName);
     setDateFilter(normalizeDateFilter(localDateFilter));
   };
@@ -1583,6 +1079,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
     setLocalAzOrderId('');
     setLocalBuyerName('');
     setLocalItemId('');
+    setLocalSku('');
     setLocalProductName('');
     setLocalDateFilter(clearedDateFilter);
 
@@ -1590,6 +1087,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
     setSearchAzOrderId('');
     setSearchBuyerName('');
     setSearchItemId('');
+    setSearchSku('');
     setSearchProductName('');
     setDateFilter(clearedDateFilter);
   };
@@ -1650,6 +1148,16 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
               onChange={(e) => setLocalItemId(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Search by item ID..."
+              sx={{ flex: 1 }}
+              fullWidth
+            />
+            <TextField
+              size="small"
+              label="SKU"
+              value={localSku}
+              onChange={(e) => setLocalSku(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Search by SKU..."
               sx={{ flex: 1 }}
               fullWidth
             />
@@ -1725,7 +1233,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
               variant="contained"
               onClick={handleSearch}
               startIcon={<SearchIcon />}
-              sx={{ minWidth: { xs: '100%', sm: 90 }, height: 40, boxSizing: 'border-box' }}
+              sx={{ ...yellowFilledButtonSx, minWidth: { xs: '100%', sm: 90 }, height: 40 }}
             >
               Search
             </Button>
@@ -1735,7 +1243,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
               size="small"
               variant="outlined"
               onClick={handleClear}
-              sx={{ minWidth: { xs: '100%', sm: 80 }, height: 40, boxSizing: 'border-box' }}
+              sx={{ ...yellowOutlinedButtonSx, minWidth: { xs: '100%', sm: 80 }, height: 40 }}
             >
               Clear
             </Button>
@@ -1761,6 +1269,8 @@ function FulfillmentDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [pollResults, setPollResults] = useState(null);
+  const [pollRunStatus, setPollRunStatus] = useState({});
+  const [pollRunDetail, setPollRunDetail] = useState(null);
   const [copied, setCopied] = useState(false);
   const [copiedText, setCopiedText] = useState('');
 
@@ -1798,6 +1308,7 @@ function FulfillmentDashboard() {
   const [searchAzOrderId, setSearchAzOrderId] = useState(() => getInitialState('searchAzOrderId', ''));
   const [searchBuyerName, setSearchBuyerName] = useState(() => getInitialState('searchBuyerName', ''));
   const [searchItemId, setSearchItemId] = useState(() => getInitialState('searchItemId', ''));
+  const [searchSku, setSearchSku] = useState(() => getInitialState('searchSku', ''));
   const [searchProductName, setSearchProductName] = useState(() => getInitialState('searchProductName', ''));
   //const [searchSoldDate, setSearchSoldDate] = useState('');
   const [searchMarketplace, setSearchMarketplace] = useState(() => getInitialState('searchMarketplace', ''));
@@ -1847,6 +1358,19 @@ function FulfillmentDashboard() {
   const [resyncDays, setResyncDays] = useState(10);
   const [moreActionsAnchor, setMoreActionsAnchor] = useState(null);
 
+  // PT (Pacific Time) refresh state — refreshes existing orders created on a specific PT date/range
+  const todayUTC = new Date().toISOString().slice(0, 10);
+  const [utcRefreshMode, setUtcRefreshMode] = useState('single');
+  const [utcRefreshStartDate, setUtcRefreshStartDate] = useState(todayUTC);
+  const [utcRefreshEndDate, setUtcRefreshEndDate] = useState(todayUTC);
+  const [utcRefreshConfirmOpen, setUtcRefreshConfirmOpen] = useState(false);
+  const utcRefreshClickTimeRef = useRef(null);
+  const [ptRefreshPreview, setPtRefreshPreview] = useState(null);
+  const [ptRefreshPreviewLoading, setPtRefreshPreviewLoading] = useState(false);
+  const [historyDialogOpen, setHistoryDialogOpen] = useState(false);
+  const [historyLogs, setHistoryLogs] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
   // Editing item status
   const [editingItemStatus, setEditingItemStatus] = useState({});
 
@@ -1880,10 +1404,7 @@ function FulfillmentDashboard() {
   // Editing order earnings
   // (orderEarnings is now read-only, calculated server-side as totalDueSeller - adFeeGeneral)
 
-  const [messageModalOpen, setMessageModalOpen] = useState(false);
   const [selectedOrderForMessage, setSelectedOrderForMessage] = useState(null);
-  const [messageBody, setMessageBody] = useState('');
-  const [sendingMessage, setSendingMessage] = useState(false);
 
   const [searchStartDate, setSearchStartDate] = useState('');
   const [searchEndDate, setSearchEndDate] = useState('');
@@ -2276,6 +1797,7 @@ function FulfillmentDashboard() {
     searchAzOrderId,
     searchBuyerName,
     searchItemId,
+    searchSku,
     searchProductName,
     searchMarketplace,
     searchPaymentStatus,
@@ -2301,20 +1823,25 @@ function FulfillmentDashboard() {
     }
   }, [loadResolutionOptions]);
 
-  // Issues index is heavy — load after the table has had time to paint
+  // Issues index is heavy — load well after the table has painted (Grow does not load this at all)
   useEffect(() => {
     const timer = setTimeout(() => {
       api.get('/ebay/issues-by-order').then(({ data }) => setIssuesIndex(data?.index || {})).catch(console.error);
-    }, 400);
+    }, 2500);
     return () => clearTimeout(timer);
   }, []);
 
-  // Initial load - fetch sellers and orders once
+  // Initial load - fetch sellers and orders once (poll status is non-blocking secondary)
   useEffect(() => {
     if (!hasFetchedInitialData.current) {
       hasFetchedInitialData.current = true;
       fetchSellers();
       loadStoredOrders();
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(() => { fetchPollRunStatus(); }, { timeout: 2000 });
+      } else {
+        setTimeout(() => { fetchPollRunStatus(); }, 200);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -2351,6 +1878,7 @@ function FulfillmentDashboard() {
       prev.searchAzOrderId !== searchAzOrderId ||
       prev.searchBuyerName !== searchBuyerName ||
       prev.searchItemId !== searchItemId ||
+      prev.searchSku !== searchSku ||
       prev.searchProductName !== searchProductName ||
       prev.selectedSeller !== selectedSeller ||
       prev.searchMarketplace !== searchMarketplace ||
@@ -2367,6 +1895,7 @@ function FulfillmentDashboard() {
       searchAzOrderId,
       searchBuyerName,
       searchItemId,
+      searchSku,
       searchProductName,
       searchMarketplace,
       searchPaymentStatus,
@@ -2387,10 +1916,85 @@ function FulfillmentDashboard() {
       setCurrentPage(1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchProductName, searchMarketplace, searchPaymentStatus, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
+  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchProductName, searchMarketplace, searchPaymentStatus, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
 
   // orderEarnings is now read-only (auto-calculated server-side)
   // No manual editing handlers needed
+
+  const formatPollRunTime = useCallback((value) => {
+    if (!value) return 'Never';
+    try {
+      return new Date(value).toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        day: '2-digit',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      });
+    } catch {
+      return 'Unknown';
+    }
+  }, []);
+
+  const formatPollRunSummary = useCallback((run) => {
+    if (!run) return 'Never';
+    const pieces = [];
+    if (run.totalNewOrders) pieces.push(`${run.totalNewOrders} new`);
+    if (run.totalUpdatedOrders) pieces.push(`${run.totalUpdatedOrders} updated`);
+    if (run.totalNewMessages) pieces.push(`${run.totalNewMessages} messages`);
+    if (run.status && run.status !== 'completed') pieces.push(run.status);
+    return `${formatPollRunTime(run.completedAt || run.startedAt)}${pieces.length ? ` (${pieces.join(', ')})` : ''}`;
+  }, [formatPollRunTime]);
+
+  const getPollRunRows = useCallback((run) => {
+    if (!run?.results || !Array.isArray(run.results)) return [];
+
+    return run.results.flatMap((result) => {
+      const sellerName = result.sellerName || result.username || result.sellerId || 'Unknown seller';
+
+      if (Array.isArray(result.newOrders) && result.newOrders.length > 0) {
+        return result.newOrders.map((orderId) => ({
+          sellerName,
+          orderId,
+          detail: 'New order'
+        }));
+      }
+
+      if (Array.isArray(result.updatedOrders) && result.updatedOrders.length > 0) {
+        return result.updatedOrders.map((order) => ({
+          sellerName,
+          orderId: order.orderId,
+          detail: Array.isArray(order.changedFields) && order.changedFields.length > 0
+            ? order.changedFields.join(', ')
+            : 'Updated'
+        }));
+      }
+
+      if (Number(result.newMessages || 0) > 0) {
+        return [{
+          sellerName,
+          orderId: '-',
+          detail: `${result.newMessages} new message${result.newMessages > 1 ? 's' : ''}${result.fetched !== undefined ? ` (${result.fetched} fetched)` : ''}`
+        }];
+      }
+
+      if (result.error) {
+        return [{ sellerName, orderId: '-', detail: result.error }];
+      }
+
+      return [];
+    });
+  }, []);
+
+  async function fetchPollRunStatus() {
+    try {
+      const { data } = await api.get('/ebay/poll-runs/latest');
+      setPollRunStatus(data?.latest || {});
+    } catch (e) {
+      console.debug('Failed to load poll run status', e);
+    }
+  }
 
   async function fetchSellers() {
     setError('');
@@ -2418,6 +2022,7 @@ function FulfillmentDashboard() {
       if (searchAzOrderId.trim()) params.searchAzOrderId = searchAzOrderId.trim();
       if (searchBuyerName.trim()) params.searchBuyerName = searchBuyerName.trim();
       if (searchItemId.trim()) params.searchItemId = searchItemId.trim();
+      if (searchSku.trim()) params.searchSku = searchSku.trim();
       if (searchMarketplace) params.searchMarketplace = searchMarketplace;
       if (searchPaymentStatus) params.paymentStatus = searchPaymentStatus;
       params.excludeClient = excludeClient;
@@ -2608,45 +2213,10 @@ function FulfillmentDashboard() {
 
   const handleOpenMessageDialog = useCallback((order) => {
     setSelectedOrderForMessage(order);
-    setMessageBody('');
-    setMessageModalOpen(true);
   }, []);
 
   const handleCloseMessageDialog = () => {
-    setMessageModalOpen(false);
     setSelectedOrderForMessage(null);
-  };
-
-  const handleSendMessage = async () => {
-    if (!messageBody.trim() || !selectedOrderForMessage) return;
-
-    setSendingMessage(true);
-    try {
-      // Use the same endpoint as the BuyerChatPage
-      await api.post('/ebay/send-message', {
-        orderId: selectedOrderForMessage.orderId,
-        buyerUsername: selectedOrderForMessage.buyer?.username,
-        // Fallback for item ID if lineItems is missing
-        itemId: selectedOrderForMessage.itemNumber || selectedOrderForMessage.lineItems?.[0]?.legacyItemId,
-        body: messageBody,
-        subject: `Regarding Order #${selectedOrderForMessage.orderId}`
-      });
-
-      setSnackbarMsg('Message sent successfully!');
-      setSnackbarSeverity('success');
-      setSnackbarOpen(true);
-
-      // Auto update status to "Ongoing Conversation"
-      updateMessagingStatus(selectedOrderForMessage._id, 'Ongoing Conversation');
-
-      handleCloseMessageDialog();
-    } catch (e) {
-      setSnackbarMsg('Failed to send message: ' + (e.response?.data?.error || e.message));
-      setSnackbarSeverity('error');
-      setSnackbarOpen(true);
-    } finally {
-      setSendingMessage(false);
-    }
   };
 
 
@@ -2700,6 +2270,7 @@ function FulfillmentDashboard() {
     try {
       const { data } = await api.post('/ebay/poll-new-orders');
       setPollResults(data || null);
+      await fetchPollRunStatus();
 
       // Reset filters to show all sellers and go to page 1
       setSelectedSeller('');
@@ -2741,6 +2312,7 @@ function FulfillmentDashboard() {
       publishOrderSyncEvent('FulfillmentDashboard', 'poll-new-orders');
     } catch (e) {
       setError(e?.response?.data?.error || 'Failed to poll new orders');
+      await fetchPollRunStatus();
     } finally {
       setLoading(false);
     }
@@ -2756,6 +2328,7 @@ function FulfillmentDashboard() {
     try {
       const { data } = await api.post('/ebay/poll-order-updates');
       setPollResults(data || null);
+      await fetchPollRunStatus();
 
       // Reset filters to show all sellers and go to page 1
       setSelectedSeller('');
@@ -2788,6 +2361,7 @@ function FulfillmentDashboard() {
       publishOrderSyncEvent('FulfillmentDashboard', 'poll-order-updates');
     } catch (e) {
       setError(e?.response?.data?.error || 'Failed to poll order updates');
+      await fetchPollRunStatus();
     } finally {
       setLoading(false);
     }
@@ -2846,6 +2420,144 @@ function FulfillmentDashboard() {
       setLoading(false);
     }
   }
+
+  // PT (Pacific Time) refresh — refreshes EXISTING orders created on a specific PT date/range.
+  // New orders in the window are intentionally ignored (use "Poll New Orders" for those).
+  async function refreshExistingOrdersByUtcDate(clickedRefreshAt, clickedConfirmAt) {
+    const startDate = utcRefreshStartDate;
+    const endDate = utcRefreshMode === 'single'
+      ? utcRefreshStartDate
+      : (utcRefreshEndDate || utcRefreshStartDate);
+
+    if (!startDate || !endDate) {
+      setSnackbarMsg(utcRefreshMode === 'single' ? 'Select a PT date first.' : 'Select a PT start and end date first.');
+      setSnackbarSeverity('warning');
+      setSnackbarOpen(true);
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    setPollResults(null);
+    setSnackbarOrderIds([]);
+    setUpdatedOrderDetails([]);
+
+    try {
+      const payload = {
+        startDate,
+        endDate,
+        dateMode: utcRefreshMode,
+        clickedRefreshAt,
+        clickedConfirmAt,
+        ...(selectedSeller ? { sellerId: selectedSeller } : {})
+      };
+      const { data } = await api.post('/ebay/resync-existing-orders-by-utc-date', payload);
+      setPollResults(data || null);
+
+      setCurrentPage(1);
+      await loadStoredOrders();
+
+      if (data && data.totalUpdated > 0) {
+        const updatedDetails = data.pollResults
+          .filter(r => r.success && r.updatedOrders && r.updatedOrders.length > 0)
+          .flatMap(r => r.updatedOrders);
+
+        setSnackbarOrderIds(updatedDetails.map(u => u.orderId));
+        setUpdatedOrderDetails(updatedDetails);
+        const changedFieldSummary = Object.entries(data.changedFieldCounts || {})
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 6)
+          .map(([field, count]) => `${formatFieldName(field)} x${count}`)
+          .join(', ');
+        setSnackbarMsg(
+          `PT refresh complete! Fetched: ${data.totalFetched || 0}, Existing checked: ${data.totalExistingMatched || 0}, Updated: ${data.totalUpdated}, Ignored new: ${data.totalIgnoredNew || 0}${changedFieldSummary ? `. Fields: ${changedFieldSummary}` : ''}`
+        );
+        setSnackbarSeverity('success');
+        setSnackbarOpen(true);
+      } else if (data) {
+        setSnackbarMsg(`PT refresh complete. Fetched: ${data.totalFetched || 0}, Existing checked: ${data.totalExistingMatched || 0}, Updated: 0, Ignored new: ${data.totalIgnoredNew || 0}`);
+        setSnackbarSeverity('info');
+        setSnackbarOpen(true);
+      }
+      publishOrderSyncEvent('FulfillmentDashboard', 'pt-refresh');
+    } catch (e) {
+      const message = e?.response?.data?.error || 'Failed to refresh existing orders by PT date';
+      setError(message);
+      setSnackbarMsg(message);
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function fetchPtRefreshPreview() {
+    const endDate = utcRefreshMode === 'single'
+      ? utcRefreshStartDate
+      : (utcRefreshEndDate || utcRefreshStartDate);
+
+    setPtRefreshPreviewLoading(true);
+    setPtRefreshPreview(null);
+    try {
+      const { data } = await api.get('/ebay/pt-refresh-preview', {
+        params: {
+          startDate: utcRefreshStartDate,
+          endDate,
+          dateMode: utcRefreshMode,
+          ...(selectedSeller ? { sellerId: selectedSeller } : {})
+        }
+      });
+      setPtRefreshPreview(data || null);
+    } catch (e) {
+      const message = e?.response?.data?.error || 'Failed to check seller tokens and order count';
+      setPtRefreshPreview({ error: message });
+    } finally {
+      setPtRefreshPreviewLoading(false);
+    }
+  }
+
+  function handleOpenUtcRefreshConfirm() {
+    const endDate = utcRefreshMode === 'single'
+      ? utcRefreshStartDate
+      : (utcRefreshEndDate || utcRefreshStartDate);
+
+    if (!utcRefreshStartDate || !endDate) {
+      setSnackbarMsg(utcRefreshMode === 'single' ? 'Select a PT date first.' : 'Select a PT start and end date first.');
+      setSnackbarSeverity('warning');
+      setSnackbarOpen(true);
+      return;
+    }
+
+    utcRefreshClickTimeRef.current = new Date().toISOString();
+    setUtcRefreshConfirmOpen(true);
+    fetchPtRefreshPreview();
+  }
+
+  async function handleConfirmUtcRefresh() {
+    const confirmTime = new Date().toISOString();
+    setUtcRefreshConfirmOpen(false);
+    await refreshExistingOrdersByUtcDate(utcRefreshClickTimeRef.current, confirmTime);
+  }
+
+  const fetchPtRefreshHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const { data } = await api.get('/ebay/pt-refresh-history');
+      setHistoryLogs(data || []);
+    } catch (e) {
+      console.error('Failed to load refresh history:', e);
+      setSnackbarMsg('Failed to load refresh history.');
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const handleOpenHistoryDialog = () => {
+    setHistoryDialogOpen(true);
+    fetchPtRefreshHistory();
+  };
 
   const handleCopy = useCallback((text) => {
     const val = text || '-';
@@ -3409,6 +3121,7 @@ function FulfillmentDashboard() {
       if (searchAzOrderId.trim()) params.searchAzOrderId = searchAzOrderId.trim();
       if (searchBuyerName.trim()) params.searchBuyerName = searchBuyerName.trim();
       if (searchItemId.trim()) params.searchItemId = searchItemId.trim();
+      if (searchSku.trim()) params.searchSku = searchSku.trim();
       if (searchMarketplace) params.searchMarketplace = searchMarketplace;
       if (searchPaymentStatus) params.paymentStatus = searchPaymentStatus;
       params.excludeClient = excludeClient;
@@ -3579,6 +3292,63 @@ function FulfillmentDashboard() {
     }
   }, []);
 
+  const PollRunStatusStrip = () => {
+    const newOrders = pollRunStatus['poll-new-orders'] || {};
+    const updates = pollRunStatus['poll-order-updates'] || {};
+    const messages = pollRunStatus['buyer-chat-check-new'] || {};
+    const openRunDetail = (title, run) => {
+      if (!run) return;
+      setPollRunDetail({ title, run });
+    };
+
+    return (
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={0.75} sx={{ mt: 1 }} flexWrap="wrap">
+        <Chip
+          size="small"
+          variant="outlined"
+          label={`Cron new orders: ${formatPollRunSummary(newOrders.cron)}`}
+          onClick={() => openRunDetail('Cron New Orders', newOrders.cron)}
+          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: newOrders.cron ? 'pointer' : 'default' }}
+        />
+        <Chip
+          size="small"
+          variant="outlined"
+          label={`Cron updates: ${formatPollRunSummary(updates.cron)}`}
+          onClick={() => openRunDetail('Cron Order Updates', updates.cron)}
+          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: updates.cron ? 'pointer' : 'default' }}
+        />
+        <Chip
+          size="small"
+          variant="outlined"
+          label={`Manual new orders: ${formatPollRunSummary(newOrders.manual)}`}
+          onClick={() => openRunDetail('Manual New Orders', newOrders.manual)}
+          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: newOrders.manual ? 'pointer' : 'default' }}
+        />
+        <Chip
+          size="small"
+          variant="outlined"
+          label={`Manual updates: ${formatPollRunSummary(updates.manual)}`}
+          onClick={() => openRunDetail('Manual Order Updates', updates.manual)}
+          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: updates.manual ? 'pointer' : 'default' }}
+        />
+        <Chip
+          size="small"
+          variant="outlined"
+          label={`Cron messages: ${formatPollRunSummary(messages.cron)}`}
+          onClick={() => openRunDetail('Cron Buyer Messages', messages.cron)}
+          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: messages.cron ? 'pointer' : 'default' }}
+        />
+        <Chip
+          size="small"
+          variant="outlined"
+          label={`Manual messages: ${formatPollRunSummary(messages.manual)}`}
+          onClick={() => openRunDetail('Manual Buyer Messages', messages.manual)}
+          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: messages.manual ? 'pointer' : 'default' }}
+        />
+      </Stack>
+    );
+  };
+
   if (loading && orders.length === 0) return <FulfillmentSkeleton />;
 
   return (
@@ -3628,7 +3398,7 @@ function FulfillmentDashboard() {
         )}
 
         {/* HEADER SECTION - FIXED */}
-        <Paper sx={{ p: { xs: 1.5, sm: 2 }, mb: { xs: 1, sm: 2 }, flexShrink: 0 }}>
+        <SectionCard sx={{ p: { xs: 1.5, sm: 2 }, mb: { xs: 1, sm: 2 }, flexShrink: 0 }}>
           <Stack
             direction={{ xs: 'column', sm: 'row' }}
             alignItems={{ xs: 'flex-start', sm: 'center' }}
@@ -3650,9 +3420,9 @@ function FulfillmentDashboard() {
               {totalOrders > 0 && (
                 <Chip
                   label={`${totalOrders} orders`}
-                  color="primary"
                   variant="filled"
                   size={isSmallMobile ? 'small' : 'medium'}
+                  sx={{ bgcolor: '#f5c842', color: '#1a1a2e', fontWeight: 700 }}
                 />
               )}
               {orders.length > 0 && totalPages > 1 && (
@@ -3663,34 +3433,31 @@ function FulfillmentDashboard() {
               <Stack direction="row" spacing={1} alignItems="center">
                 <Button
                   variant="outlined"
-                  color="inherit"
                   size="small"
                   startIcon={<UploadIcon />}
                   onClick={() => setImportDialogOpen(true)}
-                  sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
+                  sx={{ ...yellowOutlinedButtonSx, fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
                 >
                   {isSmallMobile ? 'Import' : 'Import CSV'}
                 </Button>
                 {orders.length > 0 && (
                   <Button
                     variant="outlined"
-                    color="inherit"
                     size="small"
                     startIcon={<DownloadIcon />}
                     onClick={handleOpenExportDialog}
-                    sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
+                    sx={{ ...yellowOutlinedButtonSx, fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
                   >
                     {isSmallMobile ? 'CSV' : 'Download CSV'}
                   </Button>
                 )}
                 <Button
-                  variant="outlined"
-                  color="primary"
+                  variant="contained"
                   size="small"
                   startIcon={autoMessageLoading ? <CircularProgress size={16} color="inherit" /> : <SendIcon />}
                   onClick={handleSendAutoMessages}
                   disabled={autoMessageLoading}
-                  sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
+                  sx={{ ...yellowFilledButtonSx, fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
                 >
                   {isSmallMobile ? 'Auto Msg' : 'Send Auto Messages'}
                 </Button>
@@ -3728,13 +3495,13 @@ function FulfillmentDashboard() {
               <Stack direction="row" spacing={1}>
                 <Button
                   variant="contained"
-                  color="primary"
                   startIcon={!isSmallMobile && (loading ? <CircularProgress size={16} color="inherit" /> : <ShoppingCartIcon />)}
                   onClick={pollNewOrders}
                   disabled={loading}
                   size="small"
                   fullWidth
                   sx={{
+                    ...yellowFilledButtonSx,
                     fontSize: { xs: '0.7rem', sm: '0.8rem' },
                     px: { xs: 0.5, sm: 1 }
                   }}
@@ -3744,13 +3511,13 @@ function FulfillmentDashboard() {
 
                 <Button
                   variant="contained"
-                  color="secondary"
                   startIcon={!isSmallMobile && (loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />)}
                   onClick={pollOrderUpdates}
                   disabled={loading}
                   size="small"
                   fullWidth
                   sx={{
+                    ...yellowFilledButtonSx,
                     fontSize: { xs: '0.7rem', sm: '0.8rem' },
                     px: { xs: 0.5, sm: 1 }
                   }}
@@ -3821,6 +3588,83 @@ function FulfillmentDashboard() {
                   </>
                 )}
               </Stack>
+
+              <PollRunStatusStrip />
+
+              {isSuperAdmin && (
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+                  <FormControl size="small" sx={{ flex: '1 1 120px' }}>
+                    <InputLabel id="utc-refresh-mode-mobile-label">PT Mode</InputLabel>
+                    <Select
+                      labelId="utc-refresh-mode-mobile-label"
+                      label="PT Mode"
+                      value={utcRefreshMode}
+                      onChange={(e) => {
+                        setUtcRefreshMode(e.target.value);
+                        if (e.target.value === 'single') setUtcRefreshEndDate(utcRefreshStartDate);
+                      }}
+                    >
+                      <MenuItem value="single">Single Date</MenuItem>
+                      <MenuItem value="range">Date Range</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <TextField
+                    label={utcRefreshMode === 'single' ? 'PT Date' : 'PT Start'}
+                    type="date"
+                    size="small"
+                    value={utcRefreshStartDate}
+                    onChange={(e) => {
+                      const nextDate = e.target.value;
+                      setUtcRefreshStartDate(nextDate);
+                      if (!utcRefreshEndDate || utcRefreshEndDate === utcRefreshStartDate) setUtcRefreshEndDate(nextDate);
+                    }}
+                    InputLabelProps={{ shrink: true }}
+                    sx={{ flex: '1 1 135px' }}
+                  />
+                  {utcRefreshMode === 'range' && (
+                    <TextField
+                      label="PT End"
+                      type="date"
+                      size="small"
+                      value={utcRefreshEndDate}
+                      onChange={(e) => setUtcRefreshEndDate(e.target.value)}
+                      InputLabelProps={{ shrink: true }}
+                      sx={{ flex: '1 1 135px' }}
+                    />
+                  )}
+                  <Button
+                    variant="outlined"
+                    color="secondary"
+                    startIcon={!isSmallMobile && (loading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />)}
+                    onClick={handleOpenUtcRefreshConfirm}
+                    disabled={loading || !utcRefreshStartDate || (utcRefreshMode === 'range' && !utcRefreshEndDate)}
+                    size="small"
+                    fullWidth
+                    sx={{
+                      fontSize: { xs: '0.7rem', sm: '0.8rem' },
+                      px: { xs: 0.5, sm: 1 },
+                      flex: '1 1 180px'
+                    }}
+                  >
+                    {loading ? 'Refreshing...' : isSmallMobile ? 'PT Refresh' : utcRefreshMode === 'single' ? 'Refresh PT Date' : 'Refresh PT Range'}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="info"
+                    startIcon={<HistoryIcon />}
+                    onClick={handleOpenHistoryDialog}
+                    size="small"
+                    fullWidth
+                    sx={{
+                      fontSize: { xs: '0.7rem', sm: '0.8rem' },
+                      px: { xs: 0.5, sm: 1 },
+                      flex: '1 1 120px'
+                    }}
+                  >
+                    See History
+                  </Button>
+                </Stack>
+              )}
 
               {/* Row 3: Filters side by side */}
               <Stack direction="row" spacing={1}>
@@ -3937,24 +3781,22 @@ function FulfillmentDashboard() {
 
                 <Button
                   variant="contained"
-                  color="primary"
                   size="small"
                   startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <ShoppingCartIcon />}
                   onClick={pollNewOrders}
                   disabled={loading}
-                  sx={{ minWidth: 120 }}
+                  sx={{ ...yellowFilledButtonSx, minWidth: 120 }}
                 >
                   {loading ? 'Polling...' : 'Poll New Orders'}
                 </Button>
 
                 <Button
                   variant="contained"
-                  color="secondary"
                   size="small"
                   startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
                   onClick={pollOrderUpdates}
                   disabled={loading}
-                  sx={{ minWidth: 120 }}
+                  sx={{ ...yellowFilledButtonSx, minWidth: 120 }}
                 >
                   {loading ? 'Updating...' : 'Poll Order Updates'}
                 </Button>
@@ -4021,6 +3863,73 @@ function FulfillmentDashboard() {
                   </>
                 )}
               </Stack>
+
+              <PollRunStatusStrip />
+
+              {isSuperAdmin && (
+                <Stack direction="row" spacing={1.5} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+                  <FormControl size="small" sx={{ minWidth: 130 }}>
+                    <InputLabel id="utc-refresh-mode-label">PT Mode</InputLabel>
+                    <Select
+                      labelId="utc-refresh-mode-label"
+                      label="PT Mode"
+                      value={utcRefreshMode}
+                      onChange={(e) => {
+                        setUtcRefreshMode(e.target.value);
+                        if (e.target.value === 'single') setUtcRefreshEndDate(utcRefreshStartDate);
+                      }}
+                    >
+                      <MenuItem value="single">Single Date</MenuItem>
+                      <MenuItem value="range">Date Range</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <TextField
+                    label={utcRefreshMode === 'single' ? 'PT Date' : 'PT Start'}
+                    type="date"
+                    size="small"
+                    value={utcRefreshStartDate}
+                    onChange={(e) => {
+                      const nextDate = e.target.value;
+                      setUtcRefreshStartDate(nextDate);
+                      if (!utcRefreshEndDate || utcRefreshEndDate === utcRefreshStartDate) setUtcRefreshEndDate(nextDate);
+                    }}
+                    InputLabelProps={{ shrink: true }}
+                    sx={{ minWidth: 150 }}
+                  />
+                  {utcRefreshMode === 'range' && (
+                    <TextField
+                      label="PT End"
+                      type="date"
+                      size="small"
+                      value={utcRefreshEndDate}
+                      onChange={(e) => setUtcRefreshEndDate(e.target.value)}
+                      InputLabelProps={{ shrink: true }}
+                      sx={{ minWidth: 150 }}
+                    />
+                  )}
+                  <Button
+                    variant="outlined"
+                    color="secondary"
+                    size="small"
+                    startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+                    onClick={handleOpenUtcRefreshConfirm}
+                    disabled={loading || !utcRefreshStartDate || (utcRefreshMode === 'range' && !utcRefreshEndDate)}
+                    sx={{ minWidth: 150 }}
+                  >
+                    {loading ? 'Refreshing...' : utcRefreshMode === 'single' ? 'Refresh PT Date' : 'Refresh PT Range'}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="info"
+                    size="small"
+                    startIcon={<HistoryIcon />}
+                    onClick={handleOpenHistoryDialog}
+                    sx={{ minWidth: 120 }}
+                  >
+                    See History
+                  </Button>
+                </Stack>
+              )}
 
               {/* Row 2: Filters, Toggles, Column Selector */}
               <Stack direction="row" spacing={1.5} alignItems="center" sx={{ flexWrap: 'wrap' }}>
@@ -4129,6 +4038,8 @@ function FulfillmentDashboard() {
             setSearchBuyerName={setSearchBuyerName}
             searchItemId={searchItemId}
             setSearchItemId={setSearchItemId}
+            searchSku={searchSku}
+            setSearchSku={setSearchSku}
             searchProductName={searchProductName}
             setSearchProductName={setSearchProductName}
             setSearchPaymentStatus={setSearchPaymentStatus}
@@ -4139,7 +4050,7 @@ function FulfillmentDashboard() {
 
 
 
-        </Paper>
+        </SectionCard>
 
         {/* TABLE SECTION */}
         {
@@ -4260,8 +4171,7 @@ function FulfillmentDashboard() {
                         <TableRow
                           key={order._id}
                           sx={{
-                            '&:nth-of-type(odd)': { backgroundColor: 'action.hover' },
-                            '&:hover': { backgroundColor: 'action.selected' },
+                            ...tableBodyRowSx,
                             '& > .MuiTableCell-root': BODY_CELL_SX,
                           }}
                         >
@@ -4987,14 +4897,16 @@ function FulfillmentDashboard() {
                           {visibleColumnsSet.has('messagingStatus') && (
                             <TableCell align="center">
                               <Stack direction="row" spacing={0.5} justifyContent="center" alignItems="center">
-                                <Tooltip title="Message Buyer">
-                                  <IconButton
-                                    color="primary"
+                                <Tooltip title="Open conversation">
+                                  <Button
                                     size="small"
+                                    variant="outlined"
+                                    startIcon={<ChatIcon fontSize="small" />}
                                     onClick={() => handleOpenMessageDialog(order)}
+                                    sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
                                   >
-                                    <ChatIcon />
-                                  </IconButton>
+                                    Open
+                                  </Button>
                                 </Tooltip>
                                 {order.remarkMessageSent ? (
                                   <Tooltip title="Message was sent with last remark update">
@@ -5125,11 +5037,29 @@ function FulfillmentDashboard() {
         }
 
 
-        <ChatDialog
-          open={messageModalOpen}
-          onClose={handleCloseMessageDialog}
-          order={selectedOrderForMessage}
-        />
+        {selectedOrderForMessage && (
+          <ChatModal
+            open={Boolean(selectedOrderForMessage)}
+            onClose={handleCloseMessageDialog}
+            orderId={selectedOrderForMessage.orderId || selectedOrderForMessage.legacyOrderId}
+            buyerUsername={selectedOrderForMessage.buyer?.username || ''}
+            buyerName={selectedOrderForMessage.shippingFullName || selectedOrderForMessage.buyer?.buyerRegistrationAddress?.fullName || ''}
+            itemId={selectedOrderForMessage.itemNumber || selectedOrderForMessage.lineItems?.[0]?.legacyItemId || selectedOrderForMessage.lineItems?.[0]?.itemId || ''}
+            itemTitle={selectedOrderForMessage.productName || selectedOrderForMessage.lineItems?.[0]?.title || ''}
+            sellerId={
+              selectedOrderForMessage.seller?._id
+                ? String(selectedOrderForMessage.seller._id)
+                : (selectedOrderForMessage.sellerId
+                  ? String(selectedOrderForMessage.sellerId)
+                  : (typeof selectedOrderForMessage.seller === 'string'
+                    ? selectedOrderForMessage.seller
+                    : null))
+            }
+            sellerName={selectedOrderForMessage.seller?.user?.username || ''}
+            title="Chat"
+            showManageCase={false}
+          />
+        )}
 
         {/* Earnings Breakdown Dialog */}
         <EarningsBreakdownModal
@@ -5311,6 +5241,289 @@ function FulfillmentDashboard() {
               disabled={loading || selectedExportColumns.length === 0}
             >
               {loading ? 'Exporting...' : 'Export CSV'}
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        <Dialog
+          open={utcRefreshConfirmOpen}
+          onClose={() => setUtcRefreshConfirmOpen(false)}
+          maxWidth="xs"
+          fullWidth
+          PaperProps={{
+            sx: {
+              position: { sm: 'fixed' },
+              right: { sm: 24 },
+              top: { sm: 88 },
+              m: { sm: 0 },
+              width: { sm: 420 },
+              maxWidth: { sm: 'calc(100vw - 48px)' }
+            }
+          }}
+        >
+          <DialogTitle>Confirm PT Refresh</DialogTitle>
+          <DialogContent>
+            <Stack spacing={1.5}>
+              <Alert severity="warning" icon={<InfoIcon />}>
+                This will refresh existing DB orders from eBay for the selected Pacific Time {utcRefreshMode === 'single' ? 'date' : 'date range'}.
+              </Alert>
+              <Typography variant="body2" color="text.secondary">
+                {utcRefreshMode === 'single'
+                  ? `PT Date: ${utcRefreshStartDate}`
+                  : `PT Range: ${utcRefreshStartDate} to ${utcRefreshEndDate || utcRefreshStartDate}`}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Seller scope: {selectedSeller
+                  ? (sellers.find(s => s._id === selectedSeller)?.user?.username || sellers.find(s => s._id === selectedSeller)?.user?.email || 'Selected seller')
+                  : 'All connected sellers'}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                New eBay orders will be ignored. Existing matching orders may have eBay fields, totals, earnings, and profit-related values recalculated.
+              </Typography>
+
+              {ptRefreshPreviewLoading && (
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <CircularProgress size={16} />
+                  <Typography variant="body2" color="text.secondary">
+                    Checking seller tokens and order count...
+                  </Typography>
+                </Stack>
+              )}
+
+              {!ptRefreshPreviewLoading && ptRefreshPreview?.error && (
+                <Alert severity="error">{ptRefreshPreview.error}</Alert>
+              )}
+
+              {!ptRefreshPreviewLoading && ptRefreshPreview && !ptRefreshPreview.error && (
+                <>
+                  <Typography variant="body2" fontWeight={600}>
+                    This will fetch ~{ptRefreshPreview.totalPreviewCount} order{ptRefreshPreview.totalPreviewCount === 1 ? '' : 's'} from{' '}
+                    {ptRefreshPreview.sellers.filter(s => s.tokenStatus === 'active' || s.tokenStatus === 'refreshed').length} of{' '}
+                    {ptRefreshPreview.sellers.length} seller{ptRefreshPreview.sellers.length === 1 ? '' : 's'}.
+                  </Typography>
+                  <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                    {ptRefreshPreview.sellers.map(s => (
+                      <Tooltip key={s.sellerId} title={s.error || ''} disableHoverListener={!s.error}>
+                        <Chip
+                          size="small"
+                          icon={s.tokenStatus === 'active' || s.tokenStatus === 'refreshed' ? <CheckCircleIcon sx={{ fontSize: 14 }} /> : undefined}
+                          label={`${s.sellerName}${s.tokenStatus === 'refreshed' ? ' (refreshed)' : ''}${s.orderCountPreview != null ? `: ${s.orderCountPreview}` : ''}`}
+                          color={
+                            s.tokenStatus === 'active' || s.tokenStatus === 'refreshed'
+                              ? 'success'
+                              : 'error'
+                          }
+                          variant="outlined"
+                        />
+                      </Tooltip>
+                    ))}
+                  </Stack>
+                  {ptRefreshPreview.sellersNeedingAttention.length > 0 && (
+                    <Alert severity="warning">
+                      <Typography variant="body2" fontWeight={600}>
+                        {ptRefreshPreview.sellersNeedingAttention.length} seller{ptRefreshPreview.sellersNeedingAttention.length === 1 ? '' : 's'} will be skipped and won't have orders refreshed:
+                      </Typography>
+                      <Stack spacing={0.25} sx={{ mt: 0.5 }}>
+                        {ptRefreshPreview.sellersNeedingAttention.map(s => (
+                          <Typography key={s.sellerId} variant="caption" component="div">
+                            {s.sellerName} ({s.tokenStatus === 'needs_reconnect' ? 'needs eBay reconnect' : 'fetch failed'}){s.error ? `: ${s.error}` : ''}
+                          </Typography>
+                        ))}
+                      </Stack>
+                    </Alert>
+                  )}
+                </>
+              )}
+            </Stack>
+          </DialogContent>
+          <DialogActions sx={{ px: 3, pb: 2 }}>
+            <Button onClick={() => setUtcRefreshConfirmOpen(false)} color="inherit">
+              Cancel
+            </Button>
+            <Button
+              onClick={handleConfirmUtcRefresh}
+              variant="contained"
+              color="secondary"
+              disabled={loading}
+              startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <SyncIcon />}
+            >
+              {loading ? 'Refreshing...' : 'Confirm Refresh'}
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        <Dialog
+          open={historyDialogOpen}
+          onClose={() => setHistoryDialogOpen(false)}
+          maxWidth="md"
+          fullWidth
+        >
+          <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Typography variant="h6" fontWeight="bold">PT Refresh History</Typography>
+            <IconButton onClick={() => setHistoryDialogOpen(false)} size="small">
+              <CloseIcon />
+            </IconButton>
+          </DialogTitle>
+          <DialogContent dividers>
+            {historyLoading ? (
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+                <CircularProgress />
+              </Box>
+            ) : historyLogs.length === 0 ? (
+              <Typography variant="body2" color="text.secondary" align="center" sx={{ py: 4 }}>
+                No refresh history found.
+              </Typography>
+            ) : (
+              <TableContainer component={Paper} variant="outlined">
+                <Table size="small">
+                  <TableHead>
+                    <TableRow sx={{ backgroundColor: 'action.hover' }}>
+                      <TableCell>User</TableCell>
+                      <TableCell>Mode</TableCell>
+                      <TableCell>PT Dates</TableCell>
+                      <TableCell>Confirmed (IST)</TableCell>
+                      <TableCell>Status / Outcome</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {historyLogs.map((log) => (
+                      <TableRow key={log._id}>
+                        <TableCell>
+                          <Stack>
+                            <Typography variant="body2" fontWeight="medium">
+                              {log.user?.username || 'Unknown'}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {log.user?.email || ''}
+                            </Typography>
+                          </Stack>
+                        </TableCell>
+                        <TableCell>
+                          <Chip
+                            label={log.dateMode === 'single' ? 'Single' : 'Range'}
+                            size="small"
+                            color={log.dateMode === 'single' ? 'primary' : 'secondary'}
+                            variant="outlined"
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Typography variant="body2" fontWeight={600}>
+                            {log.dateMode === 'single'
+                              ? formatPTWordDate(log.startDate)
+                              : `${formatPTWordDate(log.startDate)} to ${formatPTWordDate(log.endDate)}`}
+                          </Typography>
+                          {log.sellerId && (
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              Seller: {log.sellerId?.user?.username || log.sellerId?.user?.email || 'Filtered'}
+                            </Typography>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <Typography variant="body2" fontWeight={600}>{formatISTWordDate(log.clickedConfirmAt)}</Typography>
+                        </TableCell>
+                        <TableCell>
+                          {log.status === 'processing' ? (
+                            <Stack spacing={0.5}>
+                              <Chip label="Processing" color="info" size="small" variant="filled" sx={{ width: 'fit-content' }} />
+                              <Typography variant="caption" color="text.secondary" display="block" sx={{ fontSize: '0.75rem' }}>
+                                Sync in progress...
+                              </Typography>
+                            </Stack>
+                          ) : log.status === 'completed' || log.success ? (
+                            <Stack spacing={0.5}>
+                              <Chip label="Success" color="success" size="small" variant="filled" sx={{ width: 'fit-content' }} />
+                              <Typography variant="caption" color="text.secondary" display="block" sx={{ fontSize: '0.75rem' }}>
+                                Fetch: {log.totalFetched} | Match: {log.totalExistingMatched} | Upd: {log.totalUpdated}
+                              </Typography>
+                            </Stack>
+                          ) : (
+                            <Stack spacing={0.5}>
+                              <Chip label="Failed" color="error" size="small" variant="filled" sx={{ width: 'fit-content' }} />
+                              {log.errorMessage && (
+                                <Tooltip title={log.errorMessage}>
+                                  <Typography variant="caption" color="error" sx={{ cursor: 'pointer', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.75rem' }}>
+                                    {log.errorMessage}
+                                  </Typography>
+                                </Tooltip>
+                              )}
+                            </Stack>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            )}
+          </DialogContent>
+          <DialogActions sx={{ p: 2 }}>
+            <Button onClick={() => setHistoryDialogOpen(false)} color="inherit">
+              Close
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        <Dialog
+          open={!!pollRunDetail}
+          onClose={() => setPollRunDetail(null)}
+          maxWidth="md"
+          fullWidth
+        >
+          <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Box>
+              <Typography variant="h6" fontWeight="bold">
+                {pollRunDetail?.title || 'Poll Run Details'}
+              </Typography>
+              {pollRunDetail?.run && (
+                <Typography variant="body2" color="text.secondary">
+                  {formatPollRunTime(pollRunDetail.run.completedAt || pollRunDetail.run.startedAt)}
+                </Typography>
+              )}
+            </Box>
+            <IconButton onClick={() => setPollRunDetail(null)} size="small">
+              <CloseIcon />
+            </IconButton>
+          </DialogTitle>
+          <DialogContent dividers>
+            {pollRunDetail?.run?.error && (
+              <Alert severity={pollRunDetail.run.status === 'skipped' ? 'warning' : 'error'} sx={{ mb: 2 }}>
+                {pollRunDetail.run.error}
+              </Alert>
+            )}
+            {pollRunDetail?.run && getPollRunRows(pollRunDetail.run).length > 0 ? (
+              <TableContainer component={Paper} variant="outlined">
+                <Table size="small">
+                  <TableHead>
+                    <TableRow sx={{ backgroundColor: 'action.hover' }}>
+                      <TableCell>Seller</TableCell>
+                      <TableCell>Order ID</TableCell>
+                      <TableCell>Details</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {getPollRunRows(pollRunDetail.run).map((row, index) => (
+                      <TableRow key={`${row.sellerName}-${row.orderId}-${index}`}>
+                        <TableCell>{row.sellerName}</TableCell>
+                        <TableCell>
+                          <Typography variant="body2" fontFamily="monospace">
+                            {row.orderId || '-'}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>{row.detail}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            ) : (
+              <Typography variant="body2" color="text.secondary" align="center" sx={{ py: 3 }}>
+                No order-level details were recorded for this run.
+              </Typography>
+            )}
+          </DialogContent>
+          <DialogActions sx={{ p: 2 }}>
+            <Button onClick={() => setPollRunDetail(null)} color="inherit">
+              Close
             </Button>
           </DialogActions>
         </Dialog>

@@ -34,5 +34,6 @@ const ListingSchema = new mongoose.Schema({
 // Optimizes: { seller: X, listingStatus: 'Active' } sorted by startTime
 ListingSchema.index({ seller: 1, listingStatus: 1, startTime: -1 });
 ListingSchema.index({ startTime: -1 }); // For listing stats date-range queries
+ListingSchema.index({ seller: 1, itemId: 1 }); // Supplier-link enrichment on Fulfillment
 
 export default mongoose.model('Listing', ListingSchema);

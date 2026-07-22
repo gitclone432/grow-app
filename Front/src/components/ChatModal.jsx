@@ -44,6 +44,7 @@ export default function ChatModal({
   onSave = null,
   entityId = null,
   entityType = null,
+  showManageCase = true,
 }) {
   const theme = useTheme();
   const isMobileChat = useMediaQuery(theme.breakpoints.down('sm'));
@@ -67,6 +68,7 @@ export default function ChatModal({
   const [resolvedBuyerName, setResolvedBuyerName] = useState('');
   const [resolvedConversationId, setResolvedConversationId] = useState('');
   const [resolvedOrderId, setResolvedOrderId] = useState('');
+  const [emptyThreadHint, setEmptyThreadHint] = useState('');
 
   const propBuyerName = String(buyerName || '').trim();
   const propBuyerId = String(buyerUsername || '').trim();
@@ -131,6 +133,7 @@ export default function ChatModal({
       setResolvedBuyerName('');
       setResolvedConversationId(conversationIdProp || '');
       setResolvedOrderId(orderId || '');
+      setEmptyThreadHint('');
       loadMessages();
     }
   }, [open, orderId, buyerUsername, itemId, sellerId, buyerName, conversationIdProp]);
@@ -163,24 +166,38 @@ export default function ChatModal({
   async function loadMessages() {
     setLoading(true);
 
+    const sellerIdStr = String(
+      (sellerId && typeof sellerId === 'object' ? sellerId._id : sellerId) || ''
+    ).trim();
+
     // 1) Resolve order for this buyer+seller (ignore mis-stamped case orderId)
     let effectiveOrderId = orderId || '';
     let effectiveItemId = itemId || '';
     let effectiveBuyer = buyerUsername || '';
     let effectiveConversationId = conversationIdProp || '';
 
-    if (sellerId && buyerUsername) {
+    if (sellerIdStr && (buyerUsername || orderId)) {
       try {
         const { data: orderData } = await api.get('/ebay/chat/search-order', {
           params: {
-            sellerId,
-            buyerUsername,
+            sellerId: sellerIdStr,
+            buyerUsername: buyerUsername || undefined,
             itemId: itemId || undefined,
             orderId: orderId || undefined
           }
         });
-        if (orderData?.orderId) effectiveOrderId = orderData.orderId;
-        if (orderData?.itemId) effectiveItemId = orderData.itemId || effectiveItemId;
+        // Keep the Open'd orderId when provided — only fill gaps from search
+        const propOid = String(orderId || '').trim();
+        const foundOid = String(orderData?.orderId || '').trim();
+        if (foundOid && (!propOid || foundOid === propOid)) {
+          effectiveOrderId = foundOid;
+        } else if (propOid) {
+          effectiveOrderId = propOid;
+        }
+        if (orderData?.itemId && !effectiveItemId) effectiveItemId = orderData.itemId;
+        else if (orderData?.itemId && propOid && foundOid === propOid) {
+          effectiveItemId = orderData.itemId || effectiveItemId;
+        }
         if (orderData?.buyerUsername) effectiveBuyer = orderData.buyerUsername;
         if (orderData?.buyerName) {
           const name = String(orderData.buyerName).trim();
@@ -194,84 +211,162 @@ export default function ChatModal({
       }
 
       // 2) Exact seller + buyerId + orderId → conversationId (Buyer Messages cache)
-      try {
-        const { data } = await api.get('/ebay/chat/resolve-conversation', {
-          params: {
-            sellerId,
-            buyerUsername: effectiveBuyer || buyerUsername,
-            itemId: effectiveItemId || undefined,
-            orderId: effectiveOrderId || undefined,
-            conversationId: conversationIdProp || undefined
+      if (sellerIdStr && (effectiveBuyer || effectiveOrderId)) {
+        try {
+          const { data } = await api.get('/ebay/chat/resolve-conversation', {
+            params: {
+              sellerId: sellerIdStr,
+              buyerUsername: effectiveBuyer || buyerUsername || undefined,
+              itemId: effectiveItemId || undefined,
+              orderId: effectiveOrderId || undefined,
+              conversationId: conversationIdProp || undefined
+            }
+          });
+          if (data?.conversationId) {
+            effectiveConversationId = data.conversationId;
+            setResolvedConversationId(data.conversationId);
           }
-        });
-        if (data?.conversationId) {
-          effectiveConversationId = data.conversationId;
-          setResolvedConversationId(data.conversationId);
-        }
-        if (data?.orderId) {
-          effectiveOrderId = data.orderId;
-          setResolvedOrderId(data.orderId);
-        } else if (effectiveOrderId) {
-          setResolvedOrderId(effectiveOrderId);
-        }
-        if (data?.itemId) effectiveItemId = data.itemId;
-        if (data?.buyerUsername) effectiveBuyer = data.buyerUsername;
-        if (data?.buyerName) {
-          const name = String(data.buyerName).trim();
-          const user = String(data.buyerUsername || buyerUsername || '').trim();
-          if (name && name.toLowerCase() !== user.toLowerCase()) {
-            setResolvedBuyerName(name);
+          if (data?.orderId) {
+            const resolvedOid = String(data.orderId).trim();
+            const propOid = String(orderId || '').trim();
+            if (!propOid || resolvedOid === propOid) {
+              effectiveOrderId = resolvedOid;
+              setResolvedOrderId(resolvedOid);
+            } else {
+              setResolvedOrderId(propOid || effectiveOrderId);
+            }
+          } else if (effectiveOrderId) {
+            setResolvedOrderId(effectiveOrderId);
           }
+          if (data?.itemId) effectiveItemId = data.itemId || effectiveItemId;
+          if (data?.buyerUsername) effectiveBuyer = data.buyerUsername;
+          if (data?.buyerName) {
+            const name = String(data.buyerName).trim();
+            const user = String(data.buyerUsername || buyerUsername || '').trim();
+            if (name && name.toLowerCase() !== user.toLowerCase()) {
+              setResolvedBuyerName(name);
+            }
+          }
+        } catch (e) {
+          if (effectiveOrderId) setResolvedOrderId(effectiveOrderId);
         }
-      } catch (e) {
-        if (effectiveOrderId) setResolvedOrderId(effectiveOrderId);
       }
+    } else if (effectiveOrderId) {
+      setResolvedOrderId(effectiveOrderId);
     }
 
-    // 3) Load that conversation only (conversationId is the key)
-    const params = { sellerId };
-    if (effectiveBuyer) params.buyerUsername = effectiveBuyer;
-    if (effectiveConversationId) {
-      params.conversationId = effectiveConversationId;
+    // 3) Load thread — always pass order/item/buyer so legacy Message rows still match
+    const buildParams = () => {
+      const params = {};
+      if (sellerIdStr) params.sellerId = sellerIdStr;
+      if (effectiveBuyer) params.buyerUsername = effectiveBuyer;
+      if (effectiveConversationId) params.conversationId = effectiveConversationId;
       if (effectiveOrderId) params.orderId = effectiveOrderId;
-    } else {
       if (effectiveItemId) params.itemId = effectiveItemId;
-      if (effectiveOrderId) params.orderId = effectiveOrderId;
-    }
+      return params;
+    };
+
+    const canSync =
+      Boolean(sellerIdStr) &&
+      Boolean(
+        effectiveConversationId
+        || effectiveOrderId
+        || (effectiveBuyer && effectiveItemId)
+      );
+
+    const syncThread = async () => {
+      return api.post(
+        '/ebay/sync-thread',
+        {
+          sellerId: sellerIdStr,
+          buyerUsername: effectiveBuyer || undefined,
+          itemId: effectiveItemId || undefined,
+          orderId: effectiveOrderId || undefined,
+          conversationId: effectiveConversationId || undefined,
+          // Always allow Trading fallback when opening from order pages
+          commerceOnly: false
+        },
+        { timeout: 90000 }
+      );
+    };
 
     try {
-      const { data } = await api.get('/ebay/chat/messages', { params });
-      setMessages(dedupeMessagesForDisplay(data));
+      const { data } = await api.get('/ebay/chat/messages', { params: buildParams() });
+      let loaded = dedupeMessagesForDisplay(data);
+      setMessages(loaded);
+      if (loaded.length > 0) setEmptyThreadHint('');
+
+      // Amazon Arrivals / fulfillment often have no conversationId in cache yet.
+      // If local load is empty, sync from eBay then reload before leaving the spinner.
+      if (canSync && loaded.length === 0) {
+        try {
+          const syncRes = await syncThread();
+          // Re-resolve conversationId after sync (may have been created/cached)
+          if (!effectiveConversationId && sellerIdStr && (effectiveBuyer || effectiveOrderId)) {
+            try {
+              const { data: resolved } = await api.get('/ebay/chat/resolve-conversation', {
+                params: {
+                  sellerId: sellerIdStr,
+                  buyerUsername: effectiveBuyer || undefined,
+                  itemId: effectiveItemId || undefined,
+                  orderId: effectiveOrderId || undefined
+                }
+              });
+              if (resolved?.conversationId) {
+                effectiveConversationId = resolved.conversationId;
+                setResolvedConversationId(resolved.conversationId);
+              }
+              if (resolved?.orderId) {
+                const resolvedOid = String(resolved.orderId).trim();
+                const propOid = String(orderId || '').trim();
+                if (!propOid || resolvedOid === propOid) {
+                  effectiveOrderId = resolvedOid;
+                  setResolvedOrderId(resolvedOid);
+                }
+              }
+            } catch (_) {
+              /* optional */
+            }
+          }
+          if (syncRes?.data?.conversationId && !effectiveConversationId) {
+            effectiveConversationId = String(syncRes.data.conversationId);
+            setResolvedConversationId(effectiveConversationId);
+          }
+          const { data: afterSync } = await api.get('/ebay/chat/messages', { params: buildParams() });
+          loaded = dedupeMessagesForDisplay(afterSync);
+          setMessages(loaded);
+          if (loaded.length === 0) {
+            setEmptyThreadHint(
+              `No eBay messages for buyer ${effectiveBuyer || buyerUsername || '—'} / order ${effectiveOrderId || orderId || '—'}. You can still send the first message.`
+            );
+          } else {
+            setEmptyThreadHint('');
+          }
+        } catch (e) {
+          if (e.response?.status !== 401 && e.response?.status !== 403) {
+            console.error('Thread sync failed', e);
+          }
+          setEmptyThreadHint('Could not sync messages from eBay. Check seller connection and try again.');
+        }
+      } else if (canSync) {
+        // Background refresh when we already have messages
+        (async () => {
+          try {
+            await syncThread();
+            const { data: refreshed } = await api.get('/ebay/chat/messages', { params: buildParams() });
+            setMessages(dedupeMessagesForDisplay(refreshed));
+          } catch (e) {
+            if (e.response?.status !== 401 && e.response?.status !== 403) {
+              console.error('Thread sync failed', e);
+            }
+          }
+        })();
+      }
     } catch (e) {
       console.error('Failed to load messages', e);
       setMessages([]);
     } finally {
       setLoading(false);
-    }
-
-    if (sellerId && effectiveConversationId) {
-      (async () => {
-        try {
-          await api.post(
-            '/ebay/sync-thread',
-            {
-              sellerId,
-              buyerUsername: effectiveBuyer || undefined,
-              itemId: effectiveItemId || undefined,
-              orderId: effectiveOrderId || undefined,
-              conversationId: effectiveConversationId,
-              commerceOnly: true
-            },
-            { timeout: 90000 }
-          );
-          const { data } = await api.get('/ebay/chat/messages', { params });
-          setMessages(dedupeMessagesForDisplay(data));
-        } catch (e) {
-          if (e.response?.status !== 401 && e.response?.status !== 403) {
-            console.error('Thread sync failed', e);
-          }
-        }
-      })();
     }
   }
 
@@ -416,7 +511,7 @@ export default function ChatModal({
     <Dialog
       open={open}
       onClose={onClose}
-      maxWidth="xl"
+      maxWidth={showManageCase ? 'xl' : 'md'}
       fullWidth
       fullScreen={isMobileChat}
       PaperProps={{
@@ -431,12 +526,12 @@ export default function ChatModal({
       <Box sx={{ display: 'flex', height: { xs: '100vh', sm: '82vh' }, flexDirection: { xs: 'column', sm: 'row' } }}>
         <Box
           sx={{
-            width: { xs: '100%', sm: '62%' },
-            borderRight: { xs: 0, sm: `1px solid ${alpha(BRAND_DARK, 0.1)}` },
-            borderBottom: { xs: `1px solid ${alpha(BRAND_DARK, 0.1)}`, sm: 0 },
+            width: { xs: '100%', sm: showManageCase ? '62%' : '100%' },
+            borderRight: { xs: 0, sm: showManageCase ? `1px solid ${alpha(BRAND_DARK, 0.1)}` : 0 },
+            borderBottom: { xs: showManageCase ? `1px solid ${alpha(BRAND_DARK, 0.1)}` : 0, sm: 0 },
             display: 'flex',
             flexDirection: 'column',
-            minHeight: { xs: '55%', sm: 0 }
+            minHeight: { xs: showManageCase ? '55%' : '100%', sm: 0 }
           }}
         >
           <Box sx={{ px: { xs: 1.5, sm: 2 }, py: 1.5, borderBottom: `1px solid ${alpha(BRAND_DARK, 0.1)}`, bgcolor: '#fff' }}>
@@ -485,9 +580,9 @@ export default function ChatModal({
                 >
                   Templates
                 </Button>
-                {isMobileChat && (
+                {isMobileChat || !showManageCase ? (
                   <IconButton onClick={onClose} size="small"><CloseIcon fontSize="small" /></IconButton>
-                )}
+                ) : null}
               </Stack>
             </Stack>
 
@@ -549,7 +644,7 @@ export default function ChatModal({
               <Stack spacing={1.5} sx={{ width: '100%' }}>
                 {messages.length === 0 && (
                   <Alert severity="info" sx={{ borderRadius: 2 }}>
-                    No messages in this thread yet.
+                    {emptyThreadHint || 'No messages in this thread yet.'}
                   </Alert>
                 )}
                 {messages.map((msg, i) => {
@@ -742,6 +837,7 @@ export default function ChatModal({
           </Box>
         </Box>
 
+        {showManageCase && (
         <Box
           sx={{
             width: { xs: '100%', sm: '38%' },
@@ -846,6 +942,7 @@ export default function ChatModal({
             </Button>
           </Box>
         </Box>
+        )}
       </Box>
 
       <TemplateManagementModal

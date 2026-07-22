@@ -23,10 +23,13 @@ const SellerSchema = new mongoose.Schema(
 
     // For Edit Listings: tracks last sync of ALL listings (not just Motors)
     lastAllListingsPolledAt: { type: Date, default: null },
-    isStoreActive: { type: Boolean, default: true },
+    isStoreActive: { type: Boolean, default: true, index: true },
     disconnectedAt: { type: Date, default: null },
     reconnectedAt: { type: Date, default: null },
-    lastConnectedAt: { type: Date, default: null }
+    lastConnectedAt: { type: Date, default: null },
+
+    // eBay UserID used in Message API sender/recipient (often differs from app username)
+    ebayUserId: { type: String, default: null, index: true }
 
   },
   { timestamps: true }

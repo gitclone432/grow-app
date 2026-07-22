@@ -75,7 +75,7 @@ router.get('/', requireAuth, requirePageAccess('StoresPage'), async (req, res) =
         region,
         lister: { ...DEFAULT_LISTER_SETTINGS },
         orders: { ...DEFAULT_ORDER_SETTINGS },
-        general: { descriptionTemplateId: '' },
+        general: { descriptionTemplateId: '', ebayUserId: '' },
       };
     }
 
@@ -86,6 +86,7 @@ router.get('/', requireAuth, requirePageAccess('StoresPage'), async (req, res) =
         email: seller.user?.email || '',
         isStoreActive: seller.isStoreActive !== false,
         ebayMarketplaces: seller.ebayMarketplaces || [],
+        ebayUserId: seller.ebayUserId || '',
       },
       settings: {
         sellerId,
@@ -95,6 +96,8 @@ router.get('/', requireAuth, requirePageAccess('StoresPage'), async (req, res) =
         orders: mergeOrderSettings(settings.orders),
         general: {
           descriptionTemplateId: settings.general?.descriptionTemplateId || '',
+          // Prefer Seller.ebayUserId (Buyer Messages source of truth)
+          ebayUserId: String(seller.ebayUserId || settings.general?.ebayUserId || '').trim(),
         },
       },
     });
@@ -141,9 +144,14 @@ router.put('/', requireAuth, requirePageAccess('StoresPage'), async (req, res) =
       });
     }
     if (general && typeof general === 'object') {
+      const ebayUserId = String(general.ebayUserId || '').trim();
       update.general = {
         descriptionTemplateId: String(general.descriptionTemplateId || '').trim(),
+        ebayUserId,
       };
+      // Keep Seller.ebayUserId in sync — Buyer Messages uses this to identify seller vs buyer
+      seller.ebayUserId = ebayUserId || null;
+      await seller.save();
     }
 
     const saved = await EbayStoreListerSettings.findOneAndUpdate(
@@ -169,6 +177,8 @@ router.put('/', requireAuth, requirePageAccess('StoresPage'), async (req, res) =
       }
     }
 
+    const refreshedSeller = await Seller.findById(sellerId).select('ebayUserId').lean();
+
     res.json({
       success: true,
       settings: {
@@ -179,6 +189,7 @@ router.put('/', requireAuth, requirePageAccess('StoresPage'), async (req, res) =
         orders: mergeOrderSettings(saved.orders),
         general: {
           descriptionTemplateId: saved.general?.descriptionTemplateId || '',
+          ebayUserId: String(refreshedSeller?.ebayUserId || saved.general?.ebayUserId || '').trim(),
         },
       },
     });
