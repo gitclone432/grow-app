@@ -35,6 +35,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import { format } from 'date-fns';
 import api from '../../lib/api';
 import AllOrdersChatDialog from '../../components/ChatDialog';
+import OrderDetailsModal from '../../components/OrderDetailsModal';
 
 const BOARD_CATEGORIES = [
   { value: 'order_fulfillment', label: 'Order Fulfillment' },
@@ -353,6 +354,7 @@ function ComplianceBoardPage() {
   // Activity logs modal state
   const [logsModalOpen, setLogsModalOpen] = useState(false);
   const [selectedOrderForLogs, setSelectedOrderForLogs] = useState(null);
+  const [selectedOrderDetailsId, setSelectedOrderDetailsId] = useState(null);
   const [orderActivityLogs, setOrderActivityLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [newNote, setNewNote] = useState('');
@@ -2008,6 +2010,10 @@ function ComplianceBoardPage() {
     setSnackbar({ open: true, message: 'Order ID copied!' });
   };
 
+  const handleOpenOrderDetails = (orderId) => {
+    if (orderId) setSelectedOrderDetailsId(orderId);
+  };
+
   const handleCopy = (text) => {
     if (text && navigator?.clipboard?.writeText) {
       navigator.clipboard.writeText(text);
@@ -2609,8 +2615,31 @@ function ComplianceBoardPage() {
             <Stack direction="row" alignItems="center" justifyContent="space-between">
               <Stack direction="row" alignItems="center" spacing={1}>
                 <ShoppingCartIcon sx={{ fontSize: 18, color: BRAND_YELLOW_DARK }} />
-                <Typography variant="body2" fontWeight={700} sx={{ color: BRAND_DARK, fontSize: '0.95rem' }}>
-                  {order.orderId}
+                <Typography
+                  component="button"
+                  type="button"
+                  variant="body2"
+                  fontWeight={700}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleOpenOrderDetails(order.orderId || order.legacyOrderId);
+                  }}
+                  sx={{
+                    color: BRAND_DARK,
+                    fontSize: '0.95rem',
+                    p: 0,
+                    border: 0,
+                    bgcolor: 'transparent',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    '&:hover': { textDecoration: 'underline' },
+                    '&:focus-visible': {
+                      outline: `2px solid ${BRAND_BLUE}`,
+                      outlineOffset: 2,
+                    }
+                  }}
+                >
+                  {order.orderId || order.legacyOrderId || '-'}
                 </Typography>
               </Stack>
               <Stack direction="row" spacing={0.5}>
@@ -3024,8 +3053,27 @@ function ComplianceBoardPage() {
               </Box>
             )}
             <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-              <Typography variant="body2" fontWeight={700} sx={{ color: BRAND_DARK }}>
-                {order.orderId}
+              <Typography
+                component="button"
+                type="button"
+                variant="body2"
+                fontWeight={700}
+                onClick={() => handleOpenOrderDetails(order.orderId || order.legacyOrderId)}
+                sx={{
+                  color: BRAND_DARK,
+                  p: 0,
+                  border: 0,
+                  bgcolor: 'transparent',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  '&:hover': { textDecoration: 'underline' },
+                  '&:focus-visible': {
+                    outline: `2px solid ${BRAND_BLUE}`,
+                    outlineOffset: 2,
+                  }
+                }}
+              >
+                {order.orderId || order.legacyOrderId || '-'}
               </Typography>
               <Stack direction="row" spacing={0.5}>
                 <IconButton size="small" onClick={() => handleCopyOrderId(order.orderId)} sx={{ p: 0.25 }}>
@@ -3710,6 +3758,12 @@ function ComplianceBoardPage() {
         open={messageModalOpen}
         onClose={handleCloseMessageDialog}
         order={selectedOrderForMessage}
+      />
+
+      <OrderDetailsModal
+        open={Boolean(selectedOrderDetailsId)}
+        onClose={() => setSelectedOrderDetailsId(null)}
+        orderId={selectedOrderDetailsId}
       />
 
       {/* Activity Logs Dialog */}
