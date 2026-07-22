@@ -35,6 +35,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import { format } from 'date-fns';
 import api from '../../lib/api';
 import AllOrdersChatDialog from '../../components/ChatDialog';
+import OrderDetailsModal from '../../components/OrderDetailsModal';
 
 const BOARD_CATEGORIES = [
   { value: 'order_fulfillment', label: 'Order Fulfillment' },
@@ -211,8 +212,16 @@ const ISSUE_HUB_OPTIONS = [
 const MAX_ITEMS_PER_COLUMN = 8;
 const INITIAL_LOAD_LIMIT = 50; // Only load first 50 items per fetch instead of 500
 const LOAD_MORE_STEP = 8;
-const MESSAGE_THREAD_LIMIT = 100;
-const MESSAGE_THREAD_MAX_AGE_DAYS = 30;
+const MESSAGE_THREAD_LIMIT = 500;
+const MESSAGE_THREAD_MAX_AGE_DAYS = 45;
+const BOARD_REQUEST_TIMEOUT_MS = 30000;
+const ALERT_REQUEST_TIMEOUT_MS = 12000;
+
+const ensureArray = (value) => (Array.isArray(value) ? value : []);
+
+const toDraggableId = (prefix, item, fallback = '') => (
+  String(item?._id || item?.orderObjectId || item?.orderId || item?.caseId || item?.returnId || fallback || `${prefix}-${Date.now()}`)
+);
 
 const formatDateSoldPT = (dateValue) => {
   if (!dateValue) return '';
@@ -345,6 +354,7 @@ function ComplianceBoardPage() {
   // Activity logs modal state
   const [logsModalOpen, setLogsModalOpen] = useState(false);
   const [selectedOrderForLogs, setSelectedOrderForLogs] = useState(null);
+  const [selectedOrderDetailsId, setSelectedOrderDetailsId] = useState(null);
   const [orderActivityLogs, setOrderActivityLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [newNote, setNewNote] = useState('');
@@ -405,12 +415,6 @@ function ComplianceBoardPage() {
     } else if (dateFilter.mode === 'range') {
       if (dateFilter.from) params.dateFrom = dateFilter.from;
       if (dateFilter.to) params.dateTo = dateFilter.to;
-    } else {
-      const to = new Date();
-      const from = new Date();
-      from.setDate(from.getDate() - MESSAGE_THREAD_MAX_AGE_DAYS);
-      params.dateFrom = format(from, 'yyyy-MM-dd');
-      params.dateTo = format(to, 'yyyy-MM-dd');
     }
     return params;
   };
@@ -457,15 +461,20 @@ function ComplianceBoardPage() {
         if (dateFilter.to) params.dateTo = dateFilter.to;
       }
 
-      const response = await api.get('/ebay/stored-inr-cases', { params });
-      const cases = response.data.cases || [];
+      const response = await api.get('/ebay/stored-inr-cases', {
+        params,
+        timeout: BOARD_REQUEST_TIMEOUT_MS,
+      });
+      const cases = ensureArray(response.data?.cases);
       
       // Transform INR cases to board format with proper field mapping for card display
       return cases.map(caseItem => ({
         ...caseItem,
-        _id: caseItem._id || caseItem.caseId,
+        _id: toDraggableId('inr', caseItem, caseItem.caseId),
+        originalOrderId: caseItem.orderId,
+        caseOrderId: caseItem.orderId,
         orderId: caseItem.caseId, // Map caseId to orderId for card display
-        dateSold: caseItem.createdDate || caseItem.created, // Map created date
+        dateSold: caseItem.creationDate || caseItem.createdDate || caseItem.created, // Map created date
         buyer: {
           username: caseItem.buyerUsername,
           buyerRegistrationAddress: { fullName: caseItem.buyerName }
@@ -494,13 +503,16 @@ function ComplianceBoardPage() {
         if (dateFilter.to) params.dateTo = dateFilter.to;
       }
 
-      const response = await api.get('/ebay/cancelled-orders', { params });
-      const cancelledOrders = response.data.orders || [];
+      const response = await api.get('/ebay/cancelled-orders', {
+        params,
+        timeout: BOARD_REQUEST_TIMEOUT_MS,
+      });
+      const cancelledOrders = ensureArray(response.data?.orders);
       
       // Transform cancelled orders to board format
       return cancelledOrders.map(order => ({
         ...order,
-        _id: order._id || order.orderId,
+        _id: toDraggableId('cancelled', order, order.orderId),
         status: COLUMN_STATUS.CANCELLATION_REQUEST,
         sourceType: 'cancelled-order' // Mark as cancelled order for display
       }));
@@ -527,21 +539,40 @@ function ComplianceBoardPage() {
       filterType: 'ALL',
       complianceBoardMode: true,
       maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
+      variant: 'v2',
       ...buildMessageDateParams(),
       ...buildBoardFilterParams(),
     };
 
-    const [ordersResponse, messagesResponse] = await Promise.all([
-      api.get('/orders/compliance-board', { params: orderParams }),
-      api.get('/ebay/chat/threads', { params: messageParams }),
+    const [ordersResult, messagesResult] = await Promise.allSettled([
+      api.get('/orders/compliance-board', {
+        params: orderParams,
+        timeout: BOARD_REQUEST_TIMEOUT_MS,
+      }),
+      api.get('/ebay/chat/threads', {
+        params: messageParams,
+        timeout: BOARD_REQUEST_TIMEOUT_MS,
+      }),
     ]);
+
+    if (ordersResult.status === 'rejected') {
+      throw ordersResult.reason;
+    }
+
+    const ordersResponse = ordersResult.value;
+    const messagesResponse = messagesResult.status === 'fulfilled'
+      ? messagesResult.value
+      : { data: { threads: [] } };
+    if (messagesResult.status === 'rejected') {
+      console.warn('Issue hub message source unavailable:', messagesResult.reason);
+    }
 
     const groupedOrders = {
       [COLUMN_STATUS.OUT_OF_STOCK]: [],
       [COLUMN_STATUS.ADDRESS_ISSUE]: [],
     };
 
-    (ordersResponse.data.orders || []).forEach((order) => {
+    ensureArray(ordersResponse.data?.orders).forEach((order) => {
       if (order.complianceBoardStatus === COLUMN_STATUS.OUT_OF_STOCK) {
         groupedOrders[COLUMN_STATUS.OUT_OF_STOCK].push(order);
       }
@@ -555,7 +586,7 @@ function ComplianceBoardPage() {
       [MESSAGE_CATEGORIES.INQUIRY]: [],
     };
 
-    const threads = messagesResponse.data.threads || [];
+    const threads = ensureArray(messagesResponse.data?.threads);
     const metaPromises = threads.map(async (thread) => {
       try {
         const params = {
@@ -564,7 +595,10 @@ function ComplianceBoardPage() {
           itemId: thread.itemId,
           orderId: thread.orderId || ''
         };
-        const { data } = await api.get('/ebay/conversation-meta/single', { params });
+        const { data } = await api.get('/ebay/conversation-meta/single', {
+          params,
+          timeout: ALERT_REQUEST_TIMEOUT_MS,
+        });
         return { thread, meta: data };
       } catch (err) {
         return { thread, meta: null };
@@ -581,7 +615,7 @@ function ComplianceBoardPage() {
       }
     });
 
-    return { groupedOrders, groupedMessages };
+    return { groupedOrders, groupedMessages, allThreads: threads };
   };
 
   const fetchOrders = useCallback(async () => {
@@ -595,7 +629,7 @@ function ComplianceBoardPage() {
       setLoading(true);
       setError('');
       try {
-        const { groupedOrders, groupedMessages } = await fetchIssueHubData();
+        const { groupedOrders, groupedMessages, allThreads } = await fetchIssueHubData();
         setOrders((prev) => ({ ...prev, ...groupedOrders }));
         setMessages((prev) => ({ ...prev, ...groupedMessages }));
         setPendingOrderMoves({});
@@ -604,8 +638,7 @@ function ComplianceBoardPage() {
         setVisibleMessageCounts((prev) => ({ ...prev, ...buildVisibleCountMap(groupedMessages) }));
         setPagination({ total: 0, page: 1, limit: 0, totalPages: 0 });
         // Store all messages for alert calculations
-        const allIssueHubMessages = Object.values(groupedMessages).flat();
-        setAllMessagesForAlerts(allIssueHubMessages);
+        setAllMessagesForAlerts(allThreads);
       } catch (err) {
         console.error('Failed to load issue hub:', err);
         setError(err.response?.data?.error || 'Failed to load issue hub');
@@ -632,7 +665,10 @@ function ComplianceBoardPage() {
       Object.assign(params, buildDateParams());
       
       const [response, inrCasesResult, cancelledOrdersResult] = await Promise.all([
-        api.get('/orders/compliance-board', { params }),
+        api.get('/orders/compliance-board', {
+          params,
+          timeout: BOARD_REQUEST_TIMEOUT_MS,
+        }),
         selectedCategory === 'inr'
           ? fetchINRCasesForBoard()
           : Promise.resolve(null),
@@ -674,7 +710,12 @@ function ComplianceBoardPage() {
         [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]: [],
       };
       
-      response.data.orders.forEach((order) => {
+      const boardOrders = ensureArray(response.data?.orders).map((order, index) => ({
+        ...order,
+        _id: toDraggableId('order', order, `${selectedCategory}-${index}`),
+      }));
+
+      boardOrders.forEach((order) => {
         const rawStatus = order.complianceBoardStatus || COLUMN_STATUS.TODO;
         const status = rawStatus === 'inr_case_closed'
           ? COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED
@@ -702,7 +743,7 @@ function ComplianceBoardPage() {
       // Merge INR cases from Issues & Resolutions into INR board's Case Opened column
       if (selectedCategory === 'inr') {
         grouped[COLUMN_STATUS.INR_CASE_OPENED] = (inrCasesResult ? [...inrCasesResult] : []).filter(matchesBoardOrderFilters);
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = response.data.orders.filter((order) => (
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => (
           order.complianceBoardSource === 'order_communication' &&
           (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED &&
           getOrderBoardCategories(order).includes('inr')
@@ -712,7 +753,7 @@ function ComplianceBoardPage() {
       // Merge cancelled orders from Issues & Resolutions into Cancellation board's Cancellation Request column
       if (selectedCategory === 'cancellation') {
         grouped[COLUMN_STATUS.CANCELLATION_REQUEST] = (cancelledOrdersResult ? [...cancelledOrdersResult] : []).filter(matchesBoardOrderFilters);
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = response.data.orders.filter((order) => (
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => (
           order.complianceBoardSource === 'order_communication' &&
           (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED &&
           getOrderBoardCategories(order).includes('cancellation')
@@ -720,7 +761,7 @@ function ComplianceBoardPage() {
       }
 
       if (selectedCategory === 'return_refund') {
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = response.data.orders.filter((order) => (
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => (
           (order.complianceBoardSource === 'order_communication' || isReturnConversationOrder(order)) &&
           (
             (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED ||
@@ -735,15 +776,15 @@ function ComplianceBoardPage() {
       
       setOrders(grouped);
       setPendingOrderMoves({});
-      setBoardSourceCounts(response.data.sourceCounts || {});
+      setBoardSourceCounts(response.data?.sourceCounts || {});
       setVisibleOrderCounts(buildVisibleCountMap(grouped));
-      if (response.data.pagination) {
+      if (response.data?.pagination) {
         setPagination(response.data.pagination);
       }
 
       // Calculate summary
       setSummary({
-        total: response.data.pagination?.total || 0,
+        total: response.data?.pagination?.total || boardOrders.length,
         todo: grouped[COLUMN_STATUS.TODO].length,
         outOfStock: grouped[COLUMN_STATUS.OUT_OF_STOCK].length,
         cancellation: grouped[COLUMN_STATUS.CANCELLATION].length,
@@ -753,8 +794,9 @@ function ComplianceBoardPage() {
         buyerConfirmation: grouped[COLUMN_STATUS.BUYER_CONFIRMATION].length
       });
 
-      // Fetch messages for alert system
-      await fetchMessagesForAlerts();
+      // Fetch alert messages separately so order boards render even if the
+      // message thread source is slow or temporarily unavailable.
+      fetchMessagesForAlerts();
     } catch (err) {
       console.error('Failed to fetch compliance board orders:', err);
       setError(err.response?.data?.error || 'Failed to load orders');
@@ -773,12 +815,16 @@ function ComplianceBoardPage() {
         filterType: 'ALL',
         complianceBoardMode: true,
         maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
+        variant: 'v2',
         ...buildMessageDateParams(),
         ...buildBoardFilterParams(),
       };
 
-      const response = await api.get('/ebay/chat/threads', { params });
-      const threads = response.data.threads || [];
+      const response = await api.get('/ebay/chat/threads', {
+        params,
+        timeout: ALERT_REQUEST_TIMEOUT_MS,
+      });
+      const threads = ensureArray(response.data?.threads);
       setAllMessagesForAlerts(threads);
     } catch (err) {
       console.warn('Failed to fetch messages for alerts:', err);
@@ -798,29 +844,51 @@ function ComplianceBoardPage() {
         filterType: 'ALL', // Get all message types
         complianceBoardMode: true,
         maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
+        variant: 'v2',
         ...buildMessageDateParams(),
         ...buildBoardFilterParams(),
       };
 
-      const [threadsResponse, assignedResponse] = await Promise.all([
-        api.get('/ebay/chat/threads', { params }),
+      const [threadsResult, assignedResult] = await Promise.allSettled([
+        api.get('/ebay/chat/threads', {
+          params,
+          timeout: BOARD_REQUEST_TIMEOUT_MS,
+        }),
         dateFilter.mode === 'none'
           ? api.get('/ebay/conversation-meta/assigned-board', {
               params: {
                 limit: 500,
                 ...buildBoardFilterParams(),
-              }
+              },
+              timeout: BOARD_REQUEST_TIMEOUT_MS,
             })
           : Promise.resolve({ data: { threads: [] } })
       ]);
+
+      const threadsResponse = threadsResult.status === 'fulfilled'
+        ? threadsResult.value
+        : { data: { threads: [] } };
+      const assignedResponse = assignedResult.status === 'fulfilled'
+        ? assignedResult.value
+        : { data: { threads: [] } };
+
+      if (threadsResult.status === 'rejected' && assignedResult.status === 'rejected') {
+        throw threadsResult.reason;
+      }
+      if (threadsResult.status === 'rejected') {
+        console.warn('Live message threads unavailable, using assigned board conversations only:', threadsResult.reason);
+      }
+      if (assignedResult.status === 'rejected') {
+        console.warn('Assigned board conversations unavailable, using live message threads only:', assignedResult.reason);
+      }
 
       // Fetch conversation metadata for all threads to get category assignments.
       // In "None" mode, also include already-assigned board threads that may be
       // outside the recent message window.
       const threadMap = new Map();
       [
-        ...(threadsResponse.data.threads || []),
-        ...(assignedResponse.data.threads || [])
+        ...ensureArray(threadsResponse.data?.threads),
+        ...ensureArray(assignedResponse.data?.threads)
       ].forEach((thread) => {
         threadMap.set(getMessageKey(thread), thread);
       });
@@ -878,7 +946,10 @@ function ComplianceBoardPage() {
             itemId: thread.itemId,
             orderId: thread.orderId || ''
           };
-          const { data } = await api.get('/ebay/conversation-meta/single', { params });
+          const { data } = await api.get('/ebay/conversation-meta/single', {
+            params,
+            timeout: ALERT_REQUEST_TIMEOUT_MS,
+          });
           return { thread, meta: data };
         } catch (err) {
           return { thread, meta: null };
@@ -1019,6 +1090,86 @@ function ComplianceBoardPage() {
       ? (messages[categoryId] || [])
       : (orders[categoryId] || [])
   );
+  const normalizeMatchValue = (value) => String(value || '').trim().toLowerCase();
+  const getSellerMatchId = (item) => String(
+    item?.seller?._id ||
+    item?.sellerId ||
+    item?.seller ||
+    item?.returnInfo?.sellerId ||
+    ''
+  ).trim();
+  const getBuyerMatchValues = (item) => new Set([
+    normalizeMatchValue(item?.buyer?.username),
+    normalizeMatchValue(item?.buyerUsername),
+    normalizeMatchValue(item?.buyer?.buyerRegistrationAddress?.fullName),
+    normalizeMatchValue(item?.buyerName),
+  ].filter(Boolean));
+  const getOrderMatchValues = (item) => new Set([
+    normalizeMatchValue(item?.orderId),
+    normalizeMatchValue(item?.originalOrderId),
+    normalizeMatchValue(item?.caseOrderId),
+    normalizeMatchValue(item?.caseId),
+    normalizeMatchValue(item?.returnId),
+    normalizeMatchValue(item?.returnInfo?.orderId),
+    normalizeMatchValue(item?.conversationInfo?.orderId),
+  ].filter(Boolean));
+  const getItemMatchValues = (item) => new Set([
+    normalizeMatchValue(item?.itemId),
+    normalizeMatchValue(item?.itemNumber),
+    normalizeMatchValue(item?.legacyItemId),
+    normalizeMatchValue(item?.returnInfo?.itemId),
+    normalizeMatchValue(item?.conversationInfo?.itemId),
+    ...ensureArray(item?.lineItems)
+      .flatMap((lineItem) => [
+        lineItem?.legacyItemId,
+        lineItem?.itemId,
+        lineItem?.sku,
+      ])
+      .map(normalizeMatchValue),
+  ].filter(Boolean));
+  const getDirectUnreadCount = (item) => Math.max(
+    Number(item?.unreadCount) || 0,
+    Number(item?.messageUnreadCount) || 0,
+    Number(item?.conversationInfo?.unreadCount) || 0,
+    Number(item?.returnInfo?.unreadCount) || 0,
+  );
+  const getUnreadMessageCountForOrder = (order) => {
+    const directUnreadCount = getDirectUnreadCount(order);
+    if (directUnreadCount > 0) return directUnreadCount;
+
+    const sellerId = getSellerMatchId(order);
+    const orderIds = getOrderMatchValues(order);
+    const itemIds = getItemMatchValues(order);
+    const buyerValues = getBuyerMatchValues(order);
+    const seenThreads = new Set();
+
+    return allMessagesForAlerts.reduce((total, thread) => {
+      const unreadCount = Number(thread?.unreadCount) || 0;
+      if (unreadCount <= 0) return total;
+
+      const threadKey = thread?.conversationId || thread?._id || getMessageKey(thread);
+      if (seenThreads.has(threadKey)) return total;
+      seenThreads.add(threadKey);
+
+      const threadSellerId = getSellerMatchId(thread);
+      if (sellerId && threadSellerId && sellerId !== threadSellerId) return total;
+
+      const threadOrderIds = getOrderMatchValues(thread);
+      const hasOrderMatch = [...threadOrderIds].some((orderId) => orderIds.has(orderId));
+      if (hasOrderMatch) return total + unreadCount;
+
+      const threadItemIds = getItemMatchValues(thread);
+      const hasItemMatch = [...threadItemIds].some((itemId) => itemIds.has(itemId));
+      if (!hasItemMatch) return total;
+
+      const threadBuyerValues = getBuyerMatchValues(thread);
+      const hasBuyerMatch = buyerValues.size === 0 ||
+        threadBuyerValues.size === 0 ||
+        [...threadBuyerValues].some((buyerValue) => buyerValues.has(buyerValue));
+
+      return hasBuyerMatch ? total + unreadCount : total;
+    }, 0);
+  };
   const parseTimeMs = (value) => {
     if (!value) return null;
     const ms = new Date(value).getTime();
@@ -1859,6 +2010,10 @@ function ComplianceBoardPage() {
     setSnackbar({ open: true, message: 'Order ID copied!' });
   };
 
+  const handleOpenOrderDetails = (orderId) => {
+    if (orderId) setSelectedOrderDetailsId(orderId);
+  };
+
   const handleCopy = (text) => {
     if (text && navigator?.clipboard?.writeText) {
       navigator.clipboard.writeText(text);
@@ -2436,6 +2591,7 @@ function ComplianceBoardPage() {
       order.complianceBoardSource === 'order_communication'
     );
     const trackingNumber = order.manualTrackingNumber || order.trackingNumber || '';
+    const unreadMessageCount = getUnreadMessageCountForOrder(order);
 
     return (
       <Card
@@ -2459,8 +2615,31 @@ function ComplianceBoardPage() {
             <Stack direction="row" alignItems="center" justifyContent="space-between">
               <Stack direction="row" alignItems="center" spacing={1}>
                 <ShoppingCartIcon sx={{ fontSize: 18, color: BRAND_YELLOW_DARK }} />
-                <Typography variant="body2" fontWeight={700} sx={{ color: BRAND_DARK, fontSize: '0.95rem' }}>
-                  {order.orderId}
+                <Typography
+                  component="button"
+                  type="button"
+                  variant="body2"
+                  fontWeight={700}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleOpenOrderDetails(order.orderId || order.legacyOrderId);
+                  }}
+                  sx={{
+                    color: BRAND_DARK,
+                    fontSize: '0.95rem',
+                    p: 0,
+                    border: 0,
+                    bgcolor: 'transparent',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    '&:hover': { textDecoration: 'underline' },
+                    '&:focus-visible': {
+                      outline: `2px solid ${BRAND_BLUE}`,
+                      outlineOffset: 2,
+                    }
+                  }}
+                >
+                  {order.orderId || order.legacyOrderId || '-'}
                 </Typography>
               </Stack>
               <Stack direction="row" spacing={0.5}>
@@ -2518,6 +2697,14 @@ function ComplianceBoardPage() {
 
                 {/* Additional Info */}
                 <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                  {unreadMessageCount > 0 && (
+                    <Chip
+                      icon={<ChatIcon sx={{ color: '#fff !important', fontSize: 14 }} />}
+                      label={`${unreadMessageCount} unread`}
+                      size="small"
+                      sx={{ bgcolor: '#dc2626', color: '#fff', fontSize: '0.75rem', height: 24, fontWeight: 800 }}
+                    />
+                  )}
                   {selectedCategory === 'inr' && trackingNumber && (
                     <Chip
                       label={`Tracking: ${trackingNumber}`}
@@ -2802,6 +2989,7 @@ function ComplianceBoardPage() {
       order.complianceBoardSource === 'order_communication'
     );
     const trackingNumber = order.manualTrackingNumber || order.trackingNumber || '';
+    const unreadMessageCount = getUnreadMessageCountForOrder(order);
     const sellerName = resolveOrderSellerName(order);
     const buyerName = order.buyer?.buyerRegistrationAddress?.fullName || order.buyer?.username || 'Unknown Buyer';
     const itemTitle = order.itemTitle || order.productName || order.lineItems?.[0]?.title || 'Item details unavailable';
@@ -2865,8 +3053,27 @@ function ComplianceBoardPage() {
               </Box>
             )}
             <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-              <Typography variant="body2" fontWeight={700} sx={{ color: BRAND_DARK }}>
-                {order.orderId}
+              <Typography
+                component="button"
+                type="button"
+                variant="body2"
+                fontWeight={700}
+                onClick={() => handleOpenOrderDetails(order.orderId || order.legacyOrderId)}
+                sx={{
+                  color: BRAND_DARK,
+                  p: 0,
+                  border: 0,
+                  bgcolor: 'transparent',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  '&:hover': { textDecoration: 'underline' },
+                  '&:focus-visible': {
+                    outline: `2px solid ${BRAND_BLUE}`,
+                    outlineOffset: 2,
+                  }
+                }}
+              >
+                {order.orderId || order.legacyOrderId || '-'}
               </Typography>
               <Stack direction="row" spacing={0.5}>
                 <IconButton size="small" onClick={() => handleCopyOrderId(order.orderId)} sx={{ p: 0.25 }}>
@@ -2929,6 +3136,14 @@ function ComplianceBoardPage() {
               </Box>
             )}
             <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+              {unreadMessageCount > 0 && (
+                <Chip
+                  icon={<ChatIcon sx={{ color: '#fff !important', fontSize: 14 }} />}
+                  label={`${unreadMessageCount} unread`}
+                  size="small"
+                  sx={{ bgcolor: '#dc2626', color: '#fff', fontSize: '0.75rem', height: 24, fontWeight: 800 }}
+                />
+              )}
               {selectedCategory === 'inr' && trackingNumber && (
                 <Chip
                   label={`Tracking: ${trackingNumber}`}
@@ -3543,6 +3758,12 @@ function ComplianceBoardPage() {
         open={messageModalOpen}
         onClose={handleCloseMessageDialog}
         order={selectedOrderForMessage}
+      />
+
+      <OrderDetailsModal
+        open={Boolean(selectedOrderDetailsId)}
+        onClose={() => setSelectedOrderDetailsId(null)}
+        orderId={selectedOrderDetailsId}
       />
 
       {/* Activity Logs Dialog */}

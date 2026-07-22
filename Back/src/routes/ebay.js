@@ -11856,6 +11856,185 @@ router.get('/conversation-meta/single', requireAuth, async (req, res) => {
   }
 });
 
+// Assigned compliance-board conversations that may be outside the live inbox window.
+router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) => {
+  try {
+    const {
+      sellerId = '',
+      searchOrderId = '',
+      searchBuyerName = '',
+      limit = 500
+    } = req.query;
+
+    const match = {
+      category: { $in: ['INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Inquiry'] }
+    };
+
+    if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+      match.seller = new mongoose.Types.ObjectId(sellerId);
+    }
+
+    if (searchOrderId?.trim()) {
+      match.orderId = new RegExp(searchOrderId.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    }
+
+    const pageLimit = Math.min(1000, Math.max(1, parseInt(limit, 10) || 500));
+    const buyerRegex = searchBuyerName?.trim()
+      ? new RegExp(searchBuyerName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      : null;
+
+    const pipeline = [
+      { $match: match },
+      { $sort: { updatedAt: -1 } },
+      {
+        $lookup: {
+          from: 'sellers',
+          localField: 'seller',
+          foreignField: '_id',
+          as: 'sellerDoc'
+        }
+      },
+      { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'sellerDoc.user',
+          foreignField: '_id',
+          as: 'userDoc'
+        }
+      },
+      { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: 'orders',
+          localField: 'orderId',
+          foreignField: 'orderId',
+          as: 'orderInfo'
+        }
+      },
+      {
+        $lookup: {
+          from: 'listings',
+          localField: 'itemId',
+          foreignField: 'itemId',
+          as: 'listingInfo'
+        }
+      },
+      {
+        $lookup: {
+          from: 'messages',
+          let: {
+            sellerId: '$seller',
+            metaOrderId: '$orderId',
+            metaBuyerUsername: '$buyerUsername',
+            metaItemId: '$itemId'
+          },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ['$seller', '$$sellerId'] },
+                    {
+                      $cond: [
+                        { $and: [{ $ne: ['$$metaOrderId', null] }, { $ne: ['$$metaOrderId', ''] }] },
+                        { $eq: ['$orderId', '$$metaOrderId'] },
+                        {
+                          $and: [
+                            { $eq: ['$buyerUsername', '$$metaBuyerUsername'] },
+                            { $eq: ['$itemId', '$$metaItemId'] },
+                            { $eq: [{ $ifNull: ['$orderId', null] }, null] }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            { $sort: { messageDate: -1 } },
+            {
+              $group: {
+                _id: null,
+                lastMessage: { $first: '$body' },
+                lastDate: { $first: '$messageDate' },
+                sender: { $first: '$sender' },
+                messageType: { $first: '$messageType' },
+                unreadCount: {
+                  $sum: { $cond: [{ $and: [{ $eq: ['$read', false] }, { $eq: ['$sender', 'BUYER'] }] }, 1, 0] }
+                }
+              }
+            }
+          ],
+          as: 'messageInfo'
+        }
+      },
+      { $unwind: { path: '$messageInfo', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          _id: 1,
+          sellerId: '$seller',
+          sellerName: { $ifNull: ['$userDoc.username', { $ifNull: ['$userDoc.email', 'Unknown'] }] },
+          buyerUsername: 1,
+          buyerName: {
+            $ifNull: [
+              { $arrayElemAt: ['$orderInfo.buyer.buyerRegistrationAddress.fullName', 0] },
+              '$buyerUsername'
+            ]
+          },
+          orderId: 1,
+          itemId: 1,
+          itemTitle: {
+            $ifNull: [
+              { $arrayElemAt: ['$orderInfo.productName', 0] },
+              { $arrayElemAt: ['$listingInfo.title', 0] }
+            ]
+          },
+          lastMessage: '$messageInfo.lastMessage',
+          lastDate: { $ifNull: ['$messageInfo.lastDate', '$updatedAt'] },
+          sender: '$messageInfo.sender',
+          messageType: '$messageInfo.messageType',
+          actualMessageType: {
+            $cond: [{ $ne: ['$orderId', null] }, 'ORDER', 'INQUIRY']
+          },
+          unreadCount: { $ifNull: ['$messageInfo.unreadCount', 0] },
+          status: 1,
+          caseStatus: 1,
+          pickedUpBy: 1,
+          updatedAt: 1,
+          _conversationMeta: {
+            _id: '$_id',
+            category: '$category',
+            caseStatus: '$caseStatus',
+            status: '$status',
+            pickedUpBy: '$pickedUpBy',
+            updatedAt: '$updatedAt'
+          }
+        }
+      }
+    ];
+
+    if (buyerRegex) {
+      pipeline.push({
+        $match: {
+          $or: [
+            { buyerUsername: buyerRegex },
+            { buyerName: buyerRegex }
+          ]
+        }
+      });
+    }
+
+    pipeline.push({ $limit: pageLimit });
+
+    const threads = await ConversationMeta.aggregate(pipeline);
+    res.json({ threads, total: threads.length });
+  } catch (err) {
+    console.error('Assigned Board Conversations Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- CONVERSATION MANAGEMENT LIST HELPERS (Grow-aligned) ---
 function parseConversationManagementDateRange(query) {
   const singleDate = query.creationDate || query.date;

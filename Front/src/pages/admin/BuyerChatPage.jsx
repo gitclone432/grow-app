@@ -3,7 +3,7 @@ import {
   Avatar, TextField, Button, Divider, Badge, Stack, CircularProgress,
   IconButton, Chip, Alert, FormControl, Select, MenuItem, InputLabel, Link,
   Snackbar, ListItemButton, Box, Paper, Typography, List, ListItem, ListItemText, ListItemAvatar,
-  useTheme, useMediaQuery, Menu, ListSubheader, Tooltip, Popover
+  useTheme, useMediaQuery, Menu, ListSubheader, Tooltip, Popover, Dialog, DialogTitle, DialogContent
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import PersonIcon from '@mui/icons-material/Person';
@@ -24,6 +24,8 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import FilterAltOffIcon from '@mui/icons-material/FilterAltOff';
 import SettingsIcon from '@mui/icons-material/Settings';
 import HistoryIcon from '@mui/icons-material/History';
+import KeyboardArrowLeftIcon from '@mui/icons-material/KeyboardArrowLeft';
+import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
 import api from '../../lib/api';
 import { sortSellersByName } from '../../lib/sellersSort';
 import TemplateManagementModal from '../../components/TemplateManagementModal';
@@ -68,6 +70,49 @@ const formatIST = (date) => {
     hour12: true
   }) + ' IST';
 };
+
+function isImageMediaAttachment(media) {
+  const url = String(media?.url || '');
+  const name = String(media?.name || '');
+  const type = String(media?.type || '').toUpperCase();
+
+  return (
+    type === 'IMAGE' ||
+    /\.(jpe?g|png|gif|webp|bmp)(\?|$)/i.test(url) ||
+    /\.(jpe?g|png|gif|webp|bmp)(\?|$)/i.test(name) ||
+    /i\.ebayimg\.com/i.test(url) ||
+    /\$_\d+\.(jpe?g|png|gif|webp)/i.test(url)
+  );
+}
+
+function getMessageMediaItems(msg) {
+  const rawItems = msg?.mediaUrls?.length
+    ? msg.mediaUrls.map((url) => ({ url, name: '' }))
+    : (msg?.messageMedia || []).map((media) => ({
+        url: media?.mediaUrl,
+        name: media?.mediaName || '',
+        type: media?.mediaType
+      }));
+
+  let imageIndex = -1;
+  return rawItems
+    .filter((media) => media?.url)
+    .map((media, idx) => {
+      const url = String(media.url);
+      const name = media.name || url.split('/').pop() || 'Attachment';
+      const isImage = isImageMediaAttachment({ ...media, url, name });
+      if (isImage) imageIndex += 1;
+
+      return {
+        ...media,
+        key: `${url}-${idx}`,
+        url,
+        name,
+        isImage,
+        imageIndex: isImage ? imageIndex : -1
+      };
+    });
+}
 // CHAT_TEMPLATES are now fetched from API - see chatTemplates state in component
 
 // Helper to get initial state from sessionStorage
@@ -423,6 +468,31 @@ export default function BuyerChatPage() {
   const [chatTemplates, setChatTemplates] = useState([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [manageTemplatesOpen, setManageTemplatesOpen] = useState(false);
+  const [imageViewer, setImageViewer] = useState({
+    open: false,
+    images: [],
+    index: 0,
+  });
+
+  const closeImageViewer = useCallback(() => {
+    setImageViewer((prev) => ({ ...prev, open: false }));
+  }, []);
+
+  const showPreviousImage = useCallback(() => {
+    setImageViewer((prev) => ({
+      ...prev,
+      index: prev.images.length > 0
+        ? (prev.index - 1 + prev.images.length) % prev.images.length
+        : 0
+    }));
+  }, []);
+
+  const showNextImage = useCallback(() => {
+    setImageViewer((prev) => ({
+      ...prev,
+      index: prev.images.length > 0 ? (prev.index + 1) % prev.images.length : 0
+    }));
+  }, []);
 
   // Responsive hooks
   const theme = useTheme();
@@ -431,6 +501,19 @@ export default function BuyerChatPage() {
   const isDesktop = !isMobile && !isTablet;
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const prevIsDesktopRef = useRef(null);
+
+  useEffect(() => {
+    if (!imageViewer.open) return undefined;
+
+    const handleImageViewerKeyDown = (event) => {
+      if (event.key === 'Escape') closeImageViewer();
+      if (event.key === 'ArrowLeft' && imageViewer.images.length > 1) showPreviousImage();
+      if (event.key === 'ArrowRight' && imageViewer.images.length > 1) showNextImage();
+    };
+
+    window.addEventListener('keydown', handleImageViewerKeyDown);
+    return () => window.removeEventListener('keydown', handleImageViewerKeyDown);
+  }, [closeImageViewer, imageViewer.images.length, imageViewer.open, showNextImage, showPreviousImage]);
 
   // Sync sidebar state with breakpoints - closed on mobile/tablet, open on desktop
   useEffect(() => {
@@ -1345,6 +1428,8 @@ export default function BuyerChatPage() {
     unreadThreads: threads.filter(t => t.unreadCount > 0).length,
     loaded: threads.length
   }), [threads]);
+  const activeViewerImage = imageViewer.images[imageViewer.index] || null;
+  const hasMultipleViewerImages = imageViewer.images.length > 1;
 
   return (
     <Box sx={{
@@ -2116,10 +2201,18 @@ export default function BuyerChatPage() {
                                     return (
                                       <Box
                                         key={idx}
-                                        component="a"
-                                        href={url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
+                                        component="button"
+                                        type="button"
+                                        onClick={() => {
+                                          const mediaItems = getMessageMediaItems(msg);
+                                          const imageItems = mediaItems.filter((item) => item.isImage);
+                                          const imageIndex = imageItems.findIndex((item) => item.url === url);
+                                          setImageViewer({
+                                            open: true,
+                                            images: imageItems.map((item) => ({ url: item.url, name: item.name })),
+                                            index: Math.max(0, imageIndex),
+                                          });
+                                        }}
                                         sx={{
                                           display: 'block',
                                           borderRadius: 1,
@@ -2127,7 +2220,17 @@ export default function BuyerChatPage() {
                                           border: '1px solid',
                                           borderColor: isSeller ? 'rgba(255,255,255,0.35)' : 'divider',
                                           lineHeight: 0,
-                                          maxWidth: '100%'
+                                          maxWidth: '100%',
+                                          p: 0,
+                                          cursor: 'zoom-in',
+                                          bgcolor: 'transparent',
+                                          '&:hover': {
+                                            boxShadow: 3,
+                                          },
+                                          '&:focus-visible': {
+                                            outline: '2px solid #1976d2',
+                                            outlineOffset: 2,
+                                          }
                                         }}
                                       >
                                         <Box
@@ -2240,6 +2343,98 @@ export default function BuyerChatPage() {
       </Box>
       </Box>
       </Paper>
+
+      <Dialog
+        open={imageViewer.open}
+        onClose={closeImageViewer}
+        maxWidth="lg"
+        fullWidth
+        PaperProps={{
+          sx: {
+            bgcolor: '#111827',
+            color: '#fff',
+            height: { xs: '92dvh', md: '90vh' },
+          }
+        }}
+      >
+        <DialogTitle sx={{ py: 1.25, pr: 7 }}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2}>
+            <Typography variant="subtitle1" fontWeight={700} noWrap>
+              {activeViewerImage?.name || 'Buyer image'}
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.72)', flexShrink: 0 }}>
+              {imageViewer.images.length > 0 ? `${imageViewer.index + 1} / ${imageViewer.images.length}` : ''}
+            </Typography>
+          </Stack>
+          <IconButton
+            aria-label="Close image viewer"
+            onClick={closeImageViewer}
+            sx={{ position: 'absolute', top: 8, right: 8, color: '#fff' }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent
+          sx={{
+            p: 0,
+            position: 'relative',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            overflow: 'hidden',
+          }}
+        >
+          {hasMultipleViewerImages && (
+            <IconButton
+              aria-label="Previous image"
+              onClick={showPreviousImage}
+              sx={{
+                position: 'absolute',
+                left: { xs: 8, md: 16 },
+                zIndex: 1,
+                color: '#fff',
+                bgcolor: 'rgba(0,0,0,0.45)',
+                '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' }
+              }}
+            >
+              <KeyboardArrowLeftIcon fontSize="large" />
+            </IconButton>
+          )}
+
+          {activeViewerImage && (
+            <Box
+              component="img"
+              src={activeViewerImage.url}
+              alt={activeViewerImage.name || 'Buyer attachment'}
+              sx={{
+                maxWidth: '100%',
+                maxHeight: '100%',
+                width: 'auto',
+                height: 'auto',
+                objectFit: 'contain',
+                display: 'block',
+              }}
+            />
+          )}
+
+          {hasMultipleViewerImages && (
+            <IconButton
+              aria-label="Next image"
+              onClick={showNextImage}
+              sx={{
+                position: 'absolute',
+                right: { xs: 8, md: 16 },
+                zIndex: 1,
+                color: '#fff',
+                bgcolor: 'rgba(0,0,0,0.45)',
+                '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' }
+              }}
+            >
+              <KeyboardArrowRightIcon fontSize="large" />
+            </IconButton>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Snackbar for sync results */}
       <Snackbar
