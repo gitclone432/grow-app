@@ -57,7 +57,10 @@ import {
   listBuyerChatThreadsFromCommerce,
   listBuyerChatThreadsFromCommerceV2,
   listBuyerChatMessagesFromCommerce,
-  enrichLegacyThreadsBuyerUsername
+  enrichLegacyThreadsBuyerUsername,
+  buyerDisplayNameFromOrder,
+  buyerShippingNameFromOrder,
+  resolveBuyerChatConversationFromCommerce
 } from '../utils/buyerChatCommerce.js';
 import {
   applyUsdFieldsSync,
@@ -7020,6 +7023,43 @@ router.get('/stored-returns', async (req, res) => {
 
 // ===== INR CASES ENDPOINTS =====
 
+/** Resolve missing INR orderId the same way Manage Case Open does (seller + buyer + item). */
+async function resolveInrCaseOrderId({ sellerId, buyerUsername, itemId }) {
+  const sellerOid =
+    sellerId && mongoose.Types.ObjectId.isValid(sellerId)
+      ? new mongoose.Types.ObjectId(sellerId)
+      : null;
+  const buyer = String(buyerUsername || '').trim();
+  const item = String(itemId || '').trim();
+  if (!sellerOid || !buyer) return '';
+
+  const buyerRe = new RegExp(`^${escapeRegexLiteral(buyer)}$`, 'i');
+
+  const orderQuery = { seller: sellerOid, 'buyer.username': buyerRe };
+  if (item && item !== 'DIRECT_MESSAGE') {
+    orderQuery['lineItems.legacyItemId'] = item;
+  }
+  let order = await Order.findOne(orderQuery)
+    .sort({ creationDate: -1 })
+    .select('orderId')
+    .lean();
+  if (!order?.orderId && item) {
+    order = await Order.findOne({ seller: sellerOid, 'buyer.username': buyerRe })
+      .sort({ creationDate: -1 })
+      .select('orderId')
+      .lean();
+  }
+  if (order?.orderId) return String(order.orderId);
+
+  const convQuery = { seller: sellerOid, otherPartyUsername: buyerRe, orderId: { $nin: [null, ''] } };
+  if (item && item !== 'DIRECT_MESSAGE') convQuery.referenceId = item;
+  const conv = await EbayMessageConversation.findOne(convQuery)
+    .sort({ ebayUpdatedDate: -1 })
+    .select('orderId')
+    .lean();
+  return String(conv?.orderId || '').trim();
+}
+
 // Fetch INR cases from eBay Post-Order API and store in DB
 router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
@@ -7101,25 +7141,18 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
 
             // Try to get orderId from eBay response, or look it up in Order collection
             let orderId = ebayCase.orderId || ebayCase.orderNumber;
+            const buyerUsername = ebayCase.buyer || ebayCase.buyerLoginName;
 
-            // If no orderId from eBay, try to find it using lineItemId or transactionId
-            if (!orderId && (ebayCase.lineItemId || ebayCase.transactionId || ebayCase.itemId)) {
+            // If no orderId from eBay, resolve like Manage Case Open (seller + buyer + item)
+            if (!orderId) {
               try {
-                // Try to find order with matching lineItem
-                const orderQuery = {};
-                if (ebayCase.lineItemId) {
-                  orderQuery['lineItems.lineItemId'] = ebayCase.lineItemId;
-                } else if (ebayCase.transactionId) {
-                  orderQuery['lineItems.legacyItemId'] = ebayCase.itemId;
-                }
-
-                if (Object.keys(orderQuery).length > 0) {
-                  orderQuery.seller = seller._id;
-                  const matchingOrder = await Order.findOne(orderQuery).select('orderId');
-                  if (matchingOrder) {
-                    orderId = matchingOrder.orderId;
-                    console.log(`[Fetch INR Cases] Found orderId ${orderId} for case ${ebayCase.inquiryId}`);
-                  }
+                orderId = await resolveInrCaseOrderId({
+                  sellerId: seller._id,
+                  buyerUsername,
+                  itemId: ebayCase.itemId
+                });
+                if (orderId) {
+                  console.log(`[Fetch INR Cases] Found orderId ${orderId} for case ${ebayCase.inquiryId}`);
                 }
               } catch (lookupErr) {
                 console.log(`[Fetch INR Cases] Could not lookup orderId for case ${ebayCase.inquiryId}:`, lookupErr.message);
@@ -7131,7 +7164,7 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
               caseId: ebayCase.inquiryId,
               caseType,
               orderId: orderId,
-              buyerUsername: ebayCase.buyer || ebayCase.buyerLoginName,
+              buyerUsername,
               // FIX: eBay returns 'inquiryStatusEnum' not 'state' or 'status'
               status: ebayCase.inquiryStatusEnum || ebayCase.state || ebayCase.status || 'OPEN',
 
@@ -7170,9 +7203,12 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
               const statusChanged = existing.status !== caseData.status;
               const dueDateChanged = (existing.sellerResponseDueDate?.getTime() || 0) !==
                 (caseData.sellerResponseDueDate?.getTime() || 0);
+              const orderIdFilled = !existing.orderId && caseData.orderId;
 
-              if (statusChanged || dueDateChanged) {
+              if (statusChanged || dueDateChanged || orderIdFilled) {
                 console.log(`[Update] Case ${ebayCase.inquiryId}: Status ${existing.status} -> ${caseData.status}`);
+                // Preserve existing orderId if new payload somehow blanks it
+                if (!caseData.orderId && existing.orderId) caseData.orderId = existing.orderId;
                 existing.set(caseData);
                 await existing.save();
                 updatedCases++;
@@ -7181,7 +7217,8 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
                   caseId: ebayCase.inquiryId,
                   orderId: caseData.orderId,
                   changes: {
-                    ...(statusChanged && { status: { from: existing.status, to: caseData.status } })
+                    ...(statusChanged && { status: { from: existing.status, to: caseData.status } }),
+                    ...(orderIdFilled && { orderId: caseData.orderId })
                   }
                 });
               }
@@ -7255,7 +7292,29 @@ router.get('/stored-inr-cases', async (req, res) => {
 
     const totalCount = await Case.countDocuments(query);
 
-    res.json({ cases, totalCases: cases.length, totalCount });
+    // Fill missing orderIds for the table (same lookup as Action → Open chat)
+    const enriched = await Promise.all(
+      cases.map(async (doc) => {
+        const c = doc.toObject();
+        if (c.orderId) return c;
+        try {
+          const resolved = await resolveInrCaseOrderId({
+            sellerId: c.seller?._id || c.seller,
+            buyerUsername: c.buyerUsername,
+            itemId: c.itemId
+          });
+          if (resolved) {
+            c.orderId = resolved;
+            Case.updateOne({ _id: c._id }, { $set: { orderId: resolved } }).catch(() => {});
+          }
+        } catch (_) {
+          // leave blank
+        }
+        return c;
+      })
+    );
+
+    res.json({ cases: enriched, totalCases: enriched.length, totalCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -7821,7 +7880,7 @@ export async function scheduledSyncBuyerInbox({
 //LIGHT SYNC: Active Thread Poll (Auto Interval)
 // Filters by SenderID to be lightweight
 // 2. LIGHT SYNC: Active Thread Poll
-router.post('/sync-thread', requireAuth, requirePageAccess(['BuyerMessages', 'BuyerMessagesTest']), async (req, res) => {
+router.post('/sync-thread', requireAuth, requirePageAccess(['BuyerMessages', 'BuyerMessagesTest', 'Disputes', 'ConversationManagement']), async (req, res) => {
   const {
     sellerId,
     buyerUsername,
@@ -8113,7 +8172,7 @@ async function uploadImageToEbay(token, filePath) {
 }
 
 // 3. SEND MESSAGE (Chat Window)
-router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'BuyerMessagesTest']), async (req, res) => {
+router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'BuyerMessagesTest', 'Disputes', 'ConversationManagement']), async (req, res) => {
   const {
     orderId,
     buyerUsername,
@@ -9107,55 +9166,159 @@ router.post('/chat/resolve-order', requireAuth, async (req, res) => {
 
 
 
+// Resolve Buyer Messages conversationId for INR / CM / case Open actions
+router.get('/chat/resolve-conversation', requireAuth, async (req, res) => {
+  try {
+    const { sellerId, buyerUsername, itemId, orderId, conversationId } = req.query;
+    if (!sellerId && !buyerUsername && !conversationId) {
+      return res.status(400).json({ error: 'sellerId and buyerUsername (or conversationId) required' });
+    }
+    const resolved = await resolveBuyerChatConversationFromCommerce({
+      sellerId,
+      buyerUsername,
+      itemId,
+      orderId,
+      conversationId
+    });
+    if (!resolved?.conversationId) {
+      return res.status(404).json({ error: 'Conversation not found in Buyer Messages cache' });
+    }
+    res.json(resolved);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 5. GET MESSAGES (Chat Window)
-// Prefer Commerce conversation message cache; fall back to Message collection.
+// Same identity as Buyer Messages: buyerUsername + item / verified orderId.
+// Never merge another buyer's legacy rows when orderId is mis-stamped.
 router.get('/chat/messages', requireAuth, async (req, res) => {
   const { orderId, buyerUsername, itemId, sellerId, conversationId } = req.query;
 
   try {
+    let oid = String(orderId || '').trim();
+    const buyer = String(buyerUsername || '').trim();
+    const item = String(itemId || '').trim();
+    const sellerOid =
+      sellerId && mongoose.Types.ObjectId.isValid(sellerId)
+        ? new mongoose.Types.ObjectId(sellerId)
+        : null;
+    const buyerRe = buyer
+      ? new RegExp(`^${escapeRegexLiteral(buyer)}$`, 'i')
+      : null;
+
+    // Drop mis-stamped orderIds that belong to a different buyer
+    if (oid && buyer) {
+      const order = await Order.findOne({ orderId: oid }).select('buyer.username').lean();
+      const orderBuyer = String(order?.buyer?.username || '').trim().toLowerCase();
+      if (orderBuyer && orderBuyer !== buyer.toLowerCase()) {
+        oid = '';
+      }
+    }
+
+    const legacyFilters = [];
+    if (oid) {
+      const q = { orderId: oid };
+      if (sellerOid) q.seller = sellerOid;
+      if (buyerRe) q.buyerUsername = buyerRe;
+      legacyFilters.push(q);
+    }
+    if (buyerRe && item && item !== 'DIRECT_MESSAGE') {
+      const q = { buyerUsername: buyerRe, itemId: item };
+      if (sellerOid) q.seller = sellerOid;
+      legacyFilters.push(q);
+    } else if (!oid && conversationId) {
+      const q = { conversationId: String(conversationId) };
+      if (sellerOid) q.seller = sellerOid;
+      if (buyerRe) q.buyerUsername = buyerRe;
+      legacyFilters.push(q);
+    }
+
     const commerce = await listBuyerChatMessagesFromCommerce({
-      orderId,
+      orderId: oid || undefined,
       buyerUsername,
       itemId,
       sellerId,
       conversationId
     });
+    const commerceMsgs = Array.isArray(commerce.messages) ? commerce.messages : [];
 
-    // Exact Grow scoping — do NOT widen with buyer+item when orderId exists.
-    let query = {};
-    if (orderId) {
-      query.orderId = orderId;
-    } else if (buyerUsername && itemId) {
-      query.buyerUsername = buyerUsername;
-      query.itemId = itemId;
-      query.$or = [{ orderId: null }, { orderId: '' }, { orderId: { $exists: false } }];
-      if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
-        query.seller = new mongoose.Types.ObjectId(sellerId);
-      }
-    } else if (conversationId) {
-      query.conversationId = String(conversationId);
-      if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
-        query.seller = new mongoose.Types.ObjectId(sellerId);
-      }
-    } else if (!commerce.messages) {
-      return res.status(400).json({ error: 'Invalid query params' });
+    // When we have a resolved Buyer Messages conversationId, show that thread only
+    // (do not merge legacy Message rows — they often contain other buyers' mail).
+    if (conversationId && commerceMsgs.length > 0) {
+      return res.json(commerceMsgs);
     }
 
     let legacy = [];
-    if (Object.keys(query).length > 0) {
-      legacy = await Message.find(query).sort({ messageDate: 1 });
+    if (legacyFilters.length > 0) {
+      legacy = await Message.find(
+        legacyFilters.length === 1 ? legacyFilters[0] : { $or: legacyFilters }
+      )
+        .sort({ messageDate: 1 })
+        .lean();
+      // Hard filter: never surface another buyer's legacy rows
+      if (buyerRe) {
+        legacy = legacy.filter((m) => buyerRe.test(String(m.buyerUsername || '')));
+      }
     }
 
-    // Prefer structured Commerce conversation cache whenever it has messages
-    // (same source as Message Conversations drawer). Fall back to legacy Message.
-    if (Array.isArray(commerce.messages) && commerce.messages.length > 0) {
-      return res.json(commerce.messages);
-    }
-    if (legacy.length > 0) {
-      return res.json(legacy);
+    if (!commerceMsgs.length && !legacy.length) {
+      if (!orderId && !buyerUsername && !itemId && !conversationId) {
+        return res.status(400).json({ error: 'Invalid query params' });
+      }
+      return res.json([]);
     }
 
-    res.json([]);
+    // Prefer Commerce when it has messages (authoritative sender roles).
+    // Only fill gaps from legacy for the same buyer — never replace a good
+    // commerce thread with polluted legacy from a wrong orderId.
+    const normalizeBody = (body) =>
+      String(body || '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+    const idsOf = (m) =>
+      [m.messageId, m.externalMessageId, m._id]
+        .map((x) => String(x || '').trim())
+        .filter(Boolean);
+
+    const isNearDuplicate = (a, b) => {
+      const aIds = new Set(idsOf(a));
+      for (const id of idsOf(b)) {
+        if (aIds.has(id)) return true;
+      }
+      const bodyA = normalizeBody(a.body);
+      const bodyB = normalizeBody(b.body);
+      if (!bodyA || bodyA !== bodyB) return false;
+      const senderA = String(a.sender || '').toUpperCase();
+      const senderB = String(b.sender || '').toUpperCase();
+      if (senderA && senderB && senderA !== senderB) return false;
+      const tA = new Date(a.messageDate || a.createdAt || 0).getTime();
+      const tB = new Date(b.messageDate || b.createdAt || 0).getTime();
+      if (!Number.isFinite(tA) || !Number.isFinite(tB) || tA <= 0 || tB <= 0) {
+        return true;
+      }
+      return Math.abs(tA - tB) <= 15 * 60 * 1000;
+    };
+
+    const messages = [];
+    const primary = commerceMsgs.length ? commerceMsgs : legacy;
+    const secondary = commerceMsgs.length ? legacy : [];
+    for (const m of primary) messages.push(m);
+    for (const m of secondary) {
+      if (!messages.some((existing) => isNearDuplicate(existing, m))) {
+        messages.push(m);
+      }
+    }
+
+    messages.sort(
+      (a, b) => new Date(a.messageDate || 0) - new Date(b.messageDate || 0)
+    );
+
+    res.json(messages);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -9164,21 +9327,80 @@ router.get('/chat/messages', requireAuth, async (req, res) => {
 // 6. SEARCH ORDER FOR NEW CHAT
 
 router.get('/chat/search-order', requireAuth, async (req, res) => {
-  const { orderId } = req.query;
+  const { orderId, sellerId, buyerUsername, itemId } = req.query;
   try {
-    const order = await Order.findOne({ orderId }).populate('seller');
+    let order = null;
+    const oid = String(orderId || '').trim();
+    const sid = String(sellerId || '').trim();
+    const buyer = String(buyerUsername || '').trim();
+    const item = String(itemId || '').trim();
+    const buyerLc = buyer.toLowerCase();
+    const buyerMatches = (doc) => {
+      if (!buyer) return true;
+      const orderBuyer = String(doc?.buyer?.username || '').trim().toLowerCase();
+      return Boolean(orderBuyer) && orderBuyer === buyerLc;
+    };
+
+    // 1) Prefer seller + buyer (+ item). Never trust a mis-stamped orderId alone —
+    // that is how a different buyer's shipping name (e.g. "Michael Bender") leaks in.
+    if (sid && mongoose.Types.ObjectId.isValid(sid) && buyer) {
+      const query = {
+        seller: sid,
+        'buyer.username': new RegExp(`^${escapeRegexLiteral(buyer)}$`, 'i')
+      };
+      if (item && item !== 'DIRECT_MESSAGE') {
+        query['lineItems.legacyItemId'] = item;
+      }
+      order = await Order.findOne(query).sort({ creationDate: -1 }).populate('seller');
+      // Same buyer, any item for this seller (if item-specific miss)
+      if (!order && item) {
+        order = await Order.findOne({
+          seller: sid,
+          'buyer.username': new RegExp(`^${escapeRegexLiteral(buyer)}$`, 'i')
+        })
+          .sort({ creationDate: -1 })
+          .populate('seller');
+      }
+    }
+
+    // 2) orderId / legacyOrderId — only accept if buyer matches when buyer is known
+    if (!order && oid) {
+      const byId = await Order.findOne({
+        $or: [{ orderId: oid }, { legacyOrderId: oid }]
+      }).populate('seller');
+      if (byId && buyerMatches(byId)) {
+        order = byId;
+      }
+    }
+
+    // 3) Last resort: seller + item with NO buyer filter (only when buyer unknown)
+    if (!order && !buyer && sid && mongoose.Types.ObjectId.isValid(sid) && item && item !== 'DIRECT_MESSAGE') {
+      order = await Order.findOne({
+        seller: sid,
+        'lineItems.legacyItemId': item
+      })
+        .sort({ creationDate: -1 })
+        .populate('seller');
+    }
+
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
-    // Get Full Name
-    const fullName = order.shippingFullName || order.buyer?.buyerRegistrationAddress?.fullName || order.buyer?.username;
+    const username = String(order.buyer?.username || buyer || '').trim();
+    // Final guard: never return another buyer's name for a requested buyerUsername
+    if (buyer && username && username.toLowerCase() !== buyerLc) {
+      return res.status(404).json({ error: 'Order buyer does not match' });
+    }
+
+    // Manage Case: shipping address name on the matched order
+    const fullName = buyerShippingNameFromOrder(order);
 
     const threadData = {
       orderId: order.orderId,
-      buyerUsername: order.buyer.username,
+      buyerUsername: username,
       buyerName: fullName,
-      itemId: order.lineItems?.[0]?.legacyItemId,
+      itemId: order.lineItems?.[0]?.legacyItemId || item || '',
       itemTitle: order.productName,
-      sellerId: order.seller._id,
+      sellerId: order.seller?._id || sid || null,
       lastMessage: 'Start a new conversation...',
       lastDate: new Date(),
       sender: 'SYSTEM',
@@ -11559,11 +11781,27 @@ router.post('/conversation-meta', requireAuth, async (req, res) => {
       query.orderId = null;
     }
 
+    // When an order exists, always take buyer ID from the Order — never trust a
+    // caller/UI value that may be the seller's eBay store id.
+    let resolvedBuyerUsername = buyerUsername;
+    let resolvedItemId = itemId;
+    if (orderId) {
+      const order = await Order.findOne({ orderId: String(orderId) })
+        .select('buyer.username lineItems.legacyItemId')
+        .lean();
+      if (order?.buyer?.username) {
+        resolvedBuyerUsername = String(order.buyer.username).trim();
+      }
+      if (!resolvedItemId && order?.lineItems?.[0]?.legacyItemId) {
+        resolvedItemId = String(order.lineItems[0].legacyItemId);
+      }
+    }
+
     const updateData = {
       seller: sellerId,
-      buyerUsername,
+      buyerUsername: resolvedBuyerUsername,
       orderId: orderId || null,
-      itemId,
+      itemId: resolvedItemId,
       category,
       caseStatus,
       // Use provided status if given; otherwise default to 'Open'
@@ -11618,160 +11856,331 @@ router.get('/conversation-meta/single', requireAuth, async (req, res) => {
   }
 });
 
-// --- NEW ROUTE 3: GET MANAGEMENT LIST (Called from ConversationManagementPage) ---
-// 
-router.get('/conversation-management/list', requireAuth, async (req, res) => {
-  const { status } = req.query;
+// --- CONVERSATION MANAGEMENT LIST HELPERS (Grow-aligned) ---
+function parseConversationManagementDateRange(query) {
+  const singleDate = query.creationDate || query.date;
+  const dateFrom = query.creationDateFrom || query.dateFrom || singleDate;
+  const dateTo = query.creationDateTo || query.dateTo || singleDate;
 
-  try {
-    let query = {};
-    if (status) {
-      const statuses = String(status)
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean);
-      if (statuses.length === 1) query.status = statuses[0];
-      else if (statuses.length > 1) query.status = { $in: statuses };
-    }
+  const range = {};
+  if (dateFrom) {
+    const { start } = getPTDayBoundsUTC(dateFrom);
+    range.$gte = start;
+  }
+  if (dateTo) {
+    const { end } = getPTDayBoundsUTC(dateTo);
+    range.$lte = end;
+  }
+  return range;
+}
 
-    const list = await ConversationMeta.aggregate([
-      { $match: query },
-      { $sort: { updatedAt: -1 } },
+function buildConversationManagementBasePipeline(query = {}) {
+  const {
+    status,
+    sellerId,
+    caseStatus,
+    pickedUpBy,
+    about,
+    search
+  } = query;
 
-      // 1. LOOKUP SELLER (ConversationMeta -> Seller)
-      {
-        $lookup: {
-          from: 'sellers',
-          localField: 'seller',
-          foreignField: '_id',
-          as: 'sellerDoc'
-        }
-      },
-      // Unwind allows us to access the fields inside sellerDoc directly
-      { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+  const metaMatch = {};
+  if (status) {
+    const statuses = String(status)
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (statuses.length === 1) metaMatch.status = statuses[0];
+    else if (statuses.length > 1) metaMatch.status = { $in: statuses };
+  }
+  if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+    metaMatch.seller = new mongoose.Types.ObjectId(sellerId);
+  }
+  if (caseStatus) {
+    const caseStatuses = String(caseStatus)
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (caseStatuses.length === 1) metaMatch.caseStatus = caseStatuses[0];
+    else if (caseStatuses.length > 1) metaMatch.caseStatus = { $in: caseStatuses };
+  }
+  if (pickedUpBy === '__UNASSIGNED__') {
+    metaMatch.$or = [
+      { pickedUpBy: '' },
+      { pickedUpBy: null },
+      { pickedUpBy: { $exists: false } }
+    ];
+  } else if (pickedUpBy) {
+    metaMatch.pickedUpBy = pickedUpBy;
+  }
 
-      // 2. LOOKUP USER (Seller -> User) - THIS WAS MISSING
-      {
-        $lookup: {
-          from: 'users', // The collection name for 'User' model is usually lowercase plural 'users'
-          localField: 'sellerDoc.user',
-          foreignField: '_id',
-          as: 'userDoc'
-        }
-      },
-      { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
-
-      // 3. LOOKUP ORDER (To get Buyer Real Name)
-      {
-        $lookup: {
-          from: 'orders',
-          localField: 'orderId',
-          foreignField: 'orderId',
-          as: 'orderInfo'
-        }
-      },
-
-      // 4. PROJECT FINAL SHAPE
-      {
-        $project: {
-          _id: 1,
-          sellerId: '$sellerDoc._id',
-          // NOW WE PULL USERNAME FROM THE USER DOC
-          sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
-          buyerUsername: 1,
-          orderId: 1,
-          itemId: 1,
-          category: 1,
-          caseStatus: 1,
-          status: 1,
-          notes: 1,
-          pickedUpBy: 1,
-          updatedAt: 1,
-          buyerName: {
-            $ifNull: [
-              { $arrayElemAt: ["$orderInfo.buyer.buyerRegistrationAddress.fullName", 0] },
-              "$buyerUsername"
-            ]
-          }
-        }
-      },
-
-      // 5. LOOKUP MESSAGE TIMESTAMPS FOR SLA / REPLY TIMERS
-      {
-        $lookup: {
-          from: 'messages',
-          let: {
-            sellerId: '$sellerId',
-            metaOrderId: '$orderId',
-            metaBuyerUsername: '$buyerUsername',
-            metaItemId: '$itemId'
-          },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
+  const pipeline = [
+    { $match: metaMatch },
+    { $sort: { updatedAt: -1 } },
+    {
+      $lookup: {
+        from: 'sellers',
+        localField: 'seller',
+        foreignField: '_id',
+        as: 'sellerDoc'
+      }
+    },
+    { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: 'users',
+        localField: 'sellerDoc.user',
+        foreignField: '_id',
+        as: 'userDoc'
+      }
+    },
+    { $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: 'orders',
+        localField: 'orderId',
+        foreignField: 'orderId',
+        as: 'orderInfo'
+      }
+    },
+    {
+      $project: {
+        _id: 1,
+        sellerId: '$sellerDoc._id',
+        sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
+        // Prefer Order.buyer.username — ConversationMeta.buyerUsername is sometimes
+        // wrongly stamped with the seller's eBay store id (e.g. "rolex_store").
+        buyerUsername: {
+          $ifNull: [
+            { $arrayElemAt: ['$orderInfo.buyer.username', 0] },
+            '$buyerUsername'
+          ]
+        },
+        orderId: 1,
+        itemId: 1,
+        category: 1,
+        caseStatus: 1,
+        status: 1,
+        notes: 1,
+        pickedUpBy: 1,
+        updatedAt: 1,
+        creationDate: {
+          $ifNull: [
+            { $arrayElemAt: ['$orderInfo.creationDate', 0] },
+            null
+          ]
+        },
+        buyerName: {
+          $let: {
+            vars: {
+              regName: { $ifNull: [{ $arrayElemAt: ['$orderInfo.buyer.buyerRegistrationAddress.fullName', 0] }, ''] },
+              shipName: { $ifNull: [{ $arrayElemAt: ['$orderInfo.shippingFullName', 0] }, ''] },
+              buyerUser: {
+                $ifNull: [
+                  { $arrayElemAt: ['$orderInfo.buyer.username', 0] },
+                  '$buyerUsername'
+                ]
+              }
+            },
+            in: {
+              // Prefer shipping address name, then registration fullName
+              $cond: [
+                {
                   $and: [
-                    { $eq: ['$seller', '$$sellerId'] },
+                    { $ne: ['$$shipName', null] },
+                    { $ne: ['$$shipName', ''] },
+                    { $ne: [{ $toLower: '$$shipName' }, { $toLower: { $ifNull: ['$$buyerUser', ''] } }] }
+                  ]
+                },
+                '$$shipName',
+                {
+                  $cond: [
                     {
-                      $cond: [
-                        { $ne: ['$$metaOrderId', null] },
-                        { $eq: ['$orderId', '$$metaOrderId'] },
-                        {
-                          $and: [
-                            { $eq: ['$buyerUsername', '$$metaBuyerUsername'] },
-                            { $eq: ['$itemId', '$$metaItemId'] },
-                            { $eq: [{ $ifNull: ['$orderId', null] }, null] }
-                          ]
-                        }
+                      $and: [
+                        { $ne: ['$$regName', null] },
+                        { $ne: ['$$regName', ''] },
+                        { $ne: [{ $toLower: '$$regName' }, { $toLower: { $ifNull: ['$$buyerUser', ''] } }] }
                       ]
-                    }
+                    },
+                    '$$regName',
+                    ''
                   ]
                 }
-              }
-            },
-            {
-              $group: {
-                _id: null,
-                lastBuyerMessageAt: {
-                  $max: {
-                    $cond: [{ $eq: ['$sender', 'BUYER'] }, '$messageDate', null]
+              ]
+            }
+          }
+        },
+        amazonAccount: { $ifNull: [{ $arrayElemAt: ['$orderInfo.amazonAccount', 0] }, null] },
+        azOrderId: { $ifNull: [{ $arrayElemAt: ['$orderInfo.azOrderId', 0] }, null] }
+      }
+    }
+  ];
+
+  const postLookupMatch = {};
+  if (about) {
+    const categories = String(about)
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (categories.length === 1) postLookupMatch.category = categories[0];
+    else if (categories.length > 1) postLookupMatch.category = { $in: categories };
+  }
+
+  const creationDateRange = parseConversationManagementDateRange(query);
+  if (creationDateRange.$gte || creationDateRange.$lte) {
+    postLookupMatch.creationDate = creationDateRange;
+  }
+
+  if (search && search.trim()) {
+    const regex = new RegExp(search.trim(), 'i');
+    postLookupMatch.$or = [
+      { orderId: regex },
+      { buyerUsername: regex },
+      { buyerName: regex },
+      { itemId: regex },
+      { sellerName: regex }
+    ];
+  }
+
+  if (Object.keys(postLookupMatch).length) {
+    pipeline.push({ $match: postLookupMatch });
+  }
+
+  return pipeline;
+}
+
+function buildConversationManagementMessageStages() {
+  return [
+    {
+      $lookup: {
+        from: 'messages',
+        let: {
+          sellerId: '$sellerId',
+          metaOrderId: '$orderId',
+          metaBuyerUsername: '$buyerUsername',
+          metaItemId: '$itemId'
+        },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$seller', '$$sellerId'] },
+                  {
+                    $cond: [
+                      { $ne: ['$$metaOrderId', null] },
+                      { $eq: ['$orderId', '$$metaOrderId'] },
+                      {
+                        $and: [
+                          { $eq: ['$buyerUsername', '$$metaBuyerUsername'] },
+                          { $eq: ['$itemId', '$$metaItemId'] },
+                          { $eq: [{ $ifNull: ['$orderId', null] }, null] }
+                        ]
+                      }
+                    ]
                   }
-                },
-                lastSellerMessageAt: {
-                  $max: {
-                    $cond: [{ $eq: ['$sender', 'SELLER'] }, '$messageDate', null]
-                  }
-                }
-              }
-            },
-            {
-              $project: {
-                _id: 0,
-                lastBuyerMessageAt: 1,
-                lastSellerMessageAt: 1
+                ]
               }
             }
+          },
+          {
+            $group: {
+              _id: null,
+              lastBuyerMessageAt: {
+                $max: {
+                  $cond: [{ $eq: ['$sender', 'BUYER'] }, '$messageDate', null]
+                }
+              },
+              lastSellerMessageAt: {
+                $max: {
+                  $cond: [{ $eq: ['$sender', 'SELLER'] }, '$messageDate', null]
+                }
+              }
+            }
+          },
+          {
+            $project: {
+              _id: 0,
+              lastBuyerMessageAt: 1,
+              lastSellerMessageAt: 1
+            }
+          }
+        ],
+        as: 'messageTimes'
+      }
+    },
+    {
+      $unwind: {
+        path: '$messageTimes',
+        preserveNullAndEmptyArrays: true
+      }
+    },
+    {
+      $addFields: {
+        lastBuyerMessageAt: '$messageTimes.lastBuyerMessageAt',
+        lastSellerMessageAt: '$messageTimes.lastSellerMessageAt'
+      }
+    },
+    {
+      $project: {
+        messageTimes: 0
+      }
+    }
+  ];
+}
+
+// --- NEW ROUTE 3: GET MANAGEMENT LIST (Called from ConversationManagementPage) ---
+router.get('/conversation-management/list', requireAuth, async (req, res) => {
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 250);
+  const skip = (page - 1) * limit;
+
+  try {
+    const basePipeline = buildConversationManagementBasePipeline(req.query);
+    const messageStages = buildConversationManagementMessageStages();
+
+    const [result] = await ConversationMeta.aggregate([
+      ...basePipeline,
+      {
+        $facet: {
+          records: [
+            { $sort: { updatedAt: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+            ...messageStages
           ],
-          as: 'messageTimes'
-        }
-      },
-      {
-        $unwind: {
-          path: '$messageTimes',
-          preserveNullAndEmptyArrays: true
-        }
-      },
-      {
-        $addFields: {
-          lastBuyerMessageAt: '$messageTimes.lastBuyerMessageAt',
-          lastSellerMessageAt: '$messageTimes.lastSellerMessageAt'
-        }
-      },
-      {
-        $project: {
-          messageTimes: 0
+          totalCount: [
+            { $count: 'total' }
+          ]
         }
       }
+    ]);
+
+    const records = result?.records || [];
+    const total = result?.totalCount?.[0]?.total || 0;
+
+    res.json({
+      records,
+      total,
+      pagination: {
+        page,
+        limit,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+        totalRecords: total
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/conversation-management/export', requireAuth, async (req, res) => {
+  try {
+    const list = await ConversationMeta.aggregate([
+      ...buildConversationManagementBasePipeline(req.query),
+      { $sort: { updatedAt: -1 } },
+      ...buildConversationManagementMessageStages()
     ]);
 
     res.json(list);

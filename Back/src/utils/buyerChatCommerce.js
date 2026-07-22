@@ -17,6 +17,50 @@ function escapeRegexLiteral(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * Buyer Messages inbox display name — eBay registration fullName.
+ */
+export function buyerDisplayNameFromOrder(order) {
+  const username = String(order?.buyer?.username || '').trim();
+  const registrationName = String(order?.buyer?.buyerRegistrationAddress?.fullName || '').trim();
+  if (registrationName && registrationName.toLowerCase() !== username.toLowerCase()) {
+    return registrationName;
+  }
+  const shippingName = String(order?.shippingFullName || '').trim();
+  if (shippingName && shippingName.toLowerCase() !== username.toLowerCase()) {
+    return shippingName;
+  }
+  const shipTo = String(
+    order?.fulfillmentStartInstructions?.[0]?.shippingStep?.shipTo?.fullName || ''
+  ).trim();
+  if (shipTo && shipTo.toLowerCase() !== username.toLowerCase()) {
+    return shipTo;
+  }
+  return '';
+}
+
+/**
+ * Manage Case / INR Open — prefer shipping address name on the order.
+ */
+export function buyerShippingNameFromOrder(order) {
+  const username = String(order?.buyer?.username || '').trim();
+  const shippingName = String(order?.shippingFullName || '').trim();
+  if (shippingName && shippingName.toLowerCase() !== username.toLowerCase()) {
+    return shippingName;
+  }
+  const shipTo = String(
+    order?.fulfillmentStartInstructions?.[0]?.shippingStep?.shipTo?.fullName || ''
+  ).trim();
+  if (shipTo && shipTo.toLowerCase() !== username.toLowerCase()) {
+    return shipTo;
+  }
+  const registrationName = String(order?.buyer?.buyerRegistrationAddress?.fullName || '').trim();
+  if (registrationName && registrationName.toLowerCase() !== username.toLowerCase()) {
+    return registrationName;
+  }
+  return '';
+}
+
 function stripHtml(html) {
   return String(html || '')
     .replace(/<br\s*\/?>/gi, '\n')
@@ -116,14 +160,26 @@ function resolveBuyerUsername(sellerNames = [], { senderUsername, recipientUsern
   return '';
 }
 
-function resolveSenderRole(senderUsername, buyerUsername, sellerNames = []) {
+function resolveSenderRole(senderUsername, buyerUsername, sellerNames = [], recipientUsername = '') {
   const sender = String(senderUsername || '').trim().toLowerCase();
+  const recipient = String(recipientUsername || '').trim().toLowerCase();
   const buyer = String(buyerUsername || '').trim().toLowerCase();
-  if (buyer && sender === buyer) return 'BUYER';
-  const sellerSet = new Set(sellerNames.map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+  const sellerSet = new Set(
+    sellerNames.map((s) => String(s).trim().toLowerCase()).filter(Boolean)
+  );
+
+  if (sender && buyer && sender === buyer) return 'BUYER';
   if (sender && sellerSet.has(sender)) return 'SELLER';
+
+  // Empty/unknown sender: infer from recipient
+  if (!sender) {
+    if (buyer && recipient === buyer) return 'SELLER';
+    if (recipient && sellerSet.has(recipient)) return 'BUYER';
+  }
+
   if (buyer && sender && sender !== buyer) return 'SELLER';
-  return 'BUYER';
+  if (buyer && recipient && recipient === buyer) return 'SELLER';
+  return sender ? 'BUYER' : 'SELLER';
 }
 
 function messageTypeFromThread({ orderId, itemId }) {
@@ -697,7 +753,12 @@ export async function listBuyerChatThreadsFromCommerce(query = {}) {
       continue;
     }
 
-    const senderRole = resolveSenderRole(latest.senderUsername, buyerUsername, sellerNames);
+      const senderRole = resolveSenderRole(
+        latest.senderUsername,
+        buyerUsername,
+        sellerNames,
+        latest.recipientUsername
+      );
     const sellerUsername = seller?.user?.username || '';
     const sellerEmail = seller?.user?.email || '';
     const buyerLooksLikeSeller =
@@ -712,7 +773,7 @@ export async function listBuyerChatThreadsFromCommerce(query = {}) {
       conversationId: row.conversationId,
       orderId: orderId || null,
       buyerUsername,
-      buyerName: order?.buyer?.buyerRegistrationAddress?.fullName || '',
+      buyerName: buyerDisplayNameFromOrder(order),
       buyerLooksLikeSeller,
       itemId: itemId || null,
       itemTitle:
@@ -1098,7 +1159,8 @@ export async function listBuyerChatThreadsFromCommerceV2(query = {}) {
       const senderRole = resolveSenderRole(
         c.latest.senderUsername,
         c.buyerUsername,
-        c.sellerNames
+        c.sellerNames,
+        c.latest.recipientUsername
       );
       const buyerLooksLikeSeller =
         Boolean(c.buyerUsername) &&
@@ -1108,7 +1170,7 @@ export async function listBuyerChatThreadsFromCommerceV2(query = {}) {
         conversationId: c.row.conversationId,
         orderId: orderId || null,
         buyerUsername: c.buyerUsername,
-        buyerName: order?.buyer?.buyerRegistrationAddress?.fullName || '',
+        buyerName: buyerDisplayNameFromOrder(order),
         buyerLooksLikeSeller,
         itemId: itemId || null,
         itemTitle:
@@ -1188,41 +1250,254 @@ export async function listBuyerChatThreadsFromCommerceV2(query = {}) {
  * Load chat messages for BuyerChat from conversation message cache.
  * Falls back to Message collection when no commerce conversation is found.
  */
-export async function listBuyerChatMessagesFromCommerce(query = {}) {
+/**
+ * Find the Buyer Messages Commerce conversation(s) for a case/thread identity.
+ * Prefer exact seller + buyerId + orderId (one specific chat), same as BM.
+ */
+export async function findBuyerChatConversationsFromCommerce(query = {}) {
   const { orderId, buyerUsername, itemId, sellerId, conversationId } = query;
 
   let conv = null;
+  let orderMatchedConversations = null;
+  let trustedOrderId = '';
+  let strictSingleConversation = false;
   const sellerOid =
     sellerId && mongoose.Types.ObjectId.isValid(sellerId)
       ? new mongoose.Types.ObjectId(sellerId)
       : null;
+  const oid = String(orderId || '').trim();
+  const requestedBuyer = String(buyerUsername || '').trim();
+  const requestedBuyerLc = requestedBuyer.toLowerCase();
+  const buyerRe = requestedBuyer
+    ? new RegExp(`^${escapeRegexLiteral(requestedBuyer)}$`, 'i')
+    : null;
 
+  // 0) Explicit conversationId — must still match buyer when buyer is known
   if (conversationId) {
     const convQuery = { conversationId: String(conversationId) };
     if (sellerOid) convQuery.seller = sellerOid;
     conv = await EbayMessageConversation.findOne(convQuery)
       .sort({ ebayUpdatedDate: -1 })
       .lean();
+    if (conv) {
+      const other = String(conv.otherPartyUsername || '').trim().toLowerCase();
+      if (!requestedBuyer || !other || other === requestedBuyerLc) {
+        return {
+          conv,
+          orderMatchedConversations: [conv],
+          trustedOrderId: String(conv.orderId || oid || '').trim(),
+          requestedBuyer,
+          strictSingleConversation: true
+        };
+      }
+      conv = null;
+    }
   }
 
-  if (!conv && orderId) {
-    const convQuery = { orderId: String(orderId) };
-    if (sellerOid) convQuery.seller = sellerOid;
-    conv = await EbayMessageConversation.findOne(convQuery)
-      .sort({ ebayUpdatedDate: -1 })
+  // 1) Exact trio: seller + buyerId + orderId (user-requested match for Manage Case)
+  if (sellerOid && buyerRe && oid) {
+    const order = await Order.findOne({
+      orderId: oid,
+      seller: sellerOid,
+      'buyer.username': buyerRe
+    })
+      .select('orderId buyer.username lineItems.legacyItemId')
       .lean();
+
+    if (order) {
+      trustedOrderId = oid;
+      let candidates = await EbayMessageConversation.find({
+        seller: sellerOid,
+        orderId: oid,
+        otherPartyUsername: buyerRe
+      })
+        .sort({ ebayUpdatedDate: -1 })
+        .lean();
+
+      // Order stamp missing on commerce rows — match buyer + listing from this order
+      if (!candidates.length) {
+        const orderItems = (order.lineItems || [])
+          .map((li) => String(li?.legacyItemId || '').trim())
+          .filter(Boolean);
+        const itemIds = [
+          ...new Set([
+            ...(itemId && itemId !== 'DIRECT_MESSAGE' ? [String(itemId)] : []),
+            ...orderItems
+          ])
+        ];
+        if (itemIds.length) {
+          candidates = await EbayMessageConversation.find({
+            seller: sellerOid,
+            otherPartyUsername: buyerRe,
+            referenceId: { $in: itemIds }
+          })
+            .sort({ ebayUpdatedDate: -1 })
+            .lean();
+          // Prefer rows already linked to this orderId when present
+          const stamped = candidates.filter((c) => String(c.orderId || '') === oid);
+          if (stamped.length) candidates = stamped;
+        }
+      }
+
+      // Confirm buyer appears in message usernames when otherParty was empty/wrong historically
+      if (!candidates.length) {
+        const involved = await EbayMessageConversationMessage.find({
+          seller: sellerOid,
+          $or: [{ senderUsername: buyerRe }, { recipientUsername: buyerRe }]
+        })
+          .select('conversationId')
+          .limit(200)
+          .lean();
+        const ids = [...new Set(involved.map((m) => String(m.conversationId || '')).filter(Boolean))];
+        if (ids.length) {
+          const linkQuery = {
+            seller: sellerOid,
+            conversationId: { $in: ids },
+            orderId: oid
+          };
+          candidates = await EbayMessageConversation.find(linkQuery)
+            .sort({ ebayUpdatedDate: -1 })
+            .lean();
+          if (!candidates.length && itemId && itemId !== 'DIRECT_MESSAGE') {
+            candidates = await EbayMessageConversation.find({
+              seller: sellerOid,
+              conversationId: { $in: ids },
+              referenceId: String(itemId)
+            })
+              .sort({ ebayUpdatedDate: -1 })
+              .lean();
+          }
+        }
+      }
+
+      if (candidates.length) {
+        orderMatchedConversations = candidates;
+        conv = candidates[0];
+        strictSingleConversation = true;
+        return {
+          conv,
+          orderMatchedConversations: [conv],
+          trustedOrderId,
+          requestedBuyer,
+          strictSingleConversation
+        };
+      }
+    }
   }
 
-  if (!conv && buyerUsername && itemId) {
-    const convQuery = {
-      otherPartyUsername: new RegExp(`^${escapeRegexLiteral(buyerUsername)}$`, 'i'),
+  // 2) Seller + buyer + item (no usable order match)
+  if (!conv && sellerOid && buyerRe && itemId && itemId !== 'DIRECT_MESSAGE') {
+    const buyerItemConvs = await EbayMessageConversation.find({
+      seller: sellerOid,
+      otherPartyUsername: buyerRe,
       referenceId: String(itemId)
-    };
-    if (sellerOid) convQuery.seller = sellerOid;
-    conv = await EbayMessageConversation.findOne(convQuery)
+    })
       .sort({ ebayUpdatedDate: -1 })
       .lean();
+    if (buyerItemConvs.length) {
+      // If orderId known, prefer the row for that order
+      const forOrder = oid
+        ? buyerItemConvs.filter((c) => String(c.orderId || '') === oid)
+        : [];
+      orderMatchedConversations = forOrder.length ? forOrder : [buyerItemConvs[0]];
+      conv = orderMatchedConversations[0];
+      trustedOrderId = String(conv.orderId || oid || '').trim();
+      strictSingleConversation = true;
+      return {
+        conv,
+        orderMatchedConversations: [conv],
+        trustedOrderId,
+        requestedBuyer,
+        strictSingleConversation
+      };
+    }
   }
+
+  // 3) Seller + buyer only when a single conversation exists
+  if (!conv && sellerOid && buyerRe) {
+    const buyerConvs = await EbayMessageConversation.find({
+      seller: sellerOid,
+      otherPartyUsername: buyerRe
+    })
+      .sort({ ebayUpdatedDate: -1 })
+      .limit(5)
+      .lean();
+    if (buyerConvs.length === 1) {
+      conv = buyerConvs[0];
+      orderMatchedConversations = [conv];
+      trustedOrderId = String(conv.orderId || oid || '').trim();
+      strictSingleConversation = true;
+    }
+  }
+
+  return {
+    conv,
+    orderMatchedConversations,
+    trustedOrderId,
+    requestedBuyer,
+    strictSingleConversation
+  };
+}
+
+/**
+ * Resolve the Buyer Messages conversationId for an INR/CM case Open action.
+ */
+export async function resolveBuyerChatConversationFromCommerce(query = {}) {
+  const { conv, trustedOrderId, requestedBuyer } = await findBuyerChatConversationsFromCommerce(query);
+  if (!conv?.conversationId) return null;
+
+  let order = null;
+  const oid = String(conv.orderId || trustedOrderId || query.orderId || '').trim();
+  if (oid) {
+    order = await Order.findOne({ orderId: oid })
+      .select('buyer.username buyer.buyerRegistrationAddress.fullName shippingFullName fulfillmentStartInstructions productName lineItems.legacyItemId')
+      .lean();
+  }
+  if (!order && requestedBuyer && query.sellerId && mongoose.Types.ObjectId.isValid(query.sellerId)) {
+    const q = {
+      seller: query.sellerId,
+      'buyer.username': new RegExp(`^${escapeRegexLiteral(requestedBuyer)}$`, 'i')
+    };
+    if (query.itemId) q['lineItems.legacyItemId'] = String(query.itemId);
+    order = await Order.findOne(q).sort({ creationDate: -1 }).lean();
+  }
+
+  const buyerUsername =
+    requestedBuyer ||
+    String(conv.otherPartyUsername || order?.buyer?.username || '').trim();
+
+  return {
+    conversationId: String(conv.conversationId),
+    orderId: String(conv.orderId || order?.orderId || trustedOrderId || '').trim() || null,
+    itemId: String(conv.referenceId || query.itemId || '').trim() || null,
+    itemTitle: conv.conversationTitle || order?.productName || '',
+    buyerUsername,
+    buyerName: buyerShippingNameFromOrder(order),
+    sellerId: conv.seller,
+    source: 'commerce'
+  };
+}
+
+/**
+ * Load chat messages for BuyerChat from conversation message cache.
+ * Falls back to Message collection when no commerce conversation is found.
+ */
+export async function listBuyerChatMessagesFromCommerce(query = {}) {
+  const { orderId, buyerUsername, itemId, sellerId, conversationId } = query;
+
+  const {
+    conv,
+    orderMatchedConversations,
+    trustedOrderId,
+    requestedBuyer,
+    strictSingleConversation
+  } = await findBuyerChatConversationsFromCommerce({
+    orderId,
+    buyerUsername,
+    itemId,
+    sellerId,
+    conversationId
+  });
 
   if (!conv) {
     return { messages: null, source: null };
@@ -1240,11 +1515,13 @@ export async function listBuyerChatMessagesFromCommerce(query = {}) {
   }
   const sellerNames = getSellerIdentityNames(seller, inferredEbay ? [inferredEbay] : []);
   const buyer =
+    requestedBuyer ||
     resolveBuyerUsername(sellerNames, {
       senderUsername: conv.latestMessage?.senderUsername,
       recipientUsername: conv.latestMessage?.recipientUsername,
       otherPartyUsername: conv.otherPartyUsername
-    }) || buyerUsername || '';
+    }) ||
+    '';
 
   if (buyer && conv.otherPartyUsername && String(conv.otherPartyUsername).toLowerCase() !== buyer.toLowerCase()) {
     EbayMessageConversation.updateOne(
@@ -1253,24 +1530,47 @@ export async function listBuyerChatMessagesFromCommerce(query = {}) {
     ).catch(() => {});
   }
 
-  // Same order+buyer can have multiple eBay conversationIds — load siblings
-  // so a merged inbox row shows full history. Always require buyer match so we
-  // never pull another buyer's inquiry that shares the same listing/order stamp.
+  // Manage Case Open: load ONLY the resolved conversationId (seller+buyer+order).
+  // Do not merge sibling/item conversations — that pulled unrelated "Hi Anthony" threads.
   let conversationIds = [String(conv.conversationId)].filter(Boolean);
-  const oid = String(conv.orderId || orderId || '').trim();
-  const buyerKey = String(buyer || buyerUsername || '').trim();
-  if (oid && buyerKey) {
+  const resolvedOid = String(conv.orderId || trustedOrderId || '').trim();
+  const buyerKey = String(buyer || requestedBuyer || '').trim();
+  if (!strictSingleConversation) {
+    if (Array.isArray(orderMatchedConversations) && orderMatchedConversations.length) {
+      conversationIds = [
+        ...new Set(
+          orderMatchedConversations
+            .map((s) => String(s.conversationId || '').trim())
+            .filter(Boolean)
+        )
+      ];
+    } else if (resolvedOid && buyerKey) {
+      const siblings = await EbayMessageConversation.find({
+        seller: conv.seller,
+        orderId: resolvedOid,
+        otherPartyUsername: new RegExp(`^${escapeRegexLiteral(buyerKey)}$`, 'i')
+      })
+        .select('conversationId')
+        .lean();
+      conversationIds = [
+        ...new Set(siblings.map((s) => String(s.conversationId || '').trim()).filter(Boolean))
+      ];
+      if (!conversationIds.length) conversationIds = [String(conv.conversationId)];
+    }
+  } else if (resolvedOid && buyerKey) {
+    // Still allow true same-order siblings for this buyer only
     const siblings = await EbayMessageConversation.find({
       seller: conv.seller,
-      orderId: oid,
+      orderId: resolvedOid,
       otherPartyUsername: new RegExp(`^${escapeRegexLiteral(buyerKey)}$`, 'i')
     })
       .select('conversationId')
       .lean();
-    conversationIds = [
-      ...new Set(siblings.map((s) => String(s.conversationId || '').trim()).filter(Boolean))
-    ];
-    if (!conversationIds.length) conversationIds = [String(conv.conversationId)];
+    if (siblings.length) {
+      conversationIds = [
+        ...new Set(siblings.map((s) => String(s.conversationId || '').trim()).filter(Boolean))
+      ];
+    }
   }
 
   const rows = await EbayMessageConversationMessage.find({
@@ -1290,9 +1590,35 @@ export async function listBuyerChatMessagesFromCommerce(query = {}) {
     uniqueRows.push(m);
   }
 
+  // Soft-dedupe: same body + sender within 15m across sibling conversationIds
+  const normalizeBody = (body) =>
+    String(body || '')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  const softUnique = [];
+  for (const m of uniqueRows) {
+    const body = normalizeBody(m.messageBody);
+    const when = new Date(m.createdDate || m.createdAt || 0).getTime();
+    const sender = String(m.senderUsername || '').trim().toLowerCase();
+    const dupIdx = softUnique.findIndex((x) => {
+      if (normalizeBody(x.messageBody) !== body || !body) return false;
+      if (String(x.senderUsername || '').trim().toLowerCase() !== sender) return false;
+      const t = new Date(x.createdDate || x.createdAt || 0).getTime();
+      return Math.abs(t - when) <= 15 * 60 * 1000;
+    });
+    if (dupIdx === -1) softUnique.push(m);
+  }
+
   // If cache only has summary seed, keep UI usable but signal thin cache
-  const messages = uniqueRows.map((m) => {
-    const sender = resolveSenderRole(m.senderUsername, buyer, sellerNames);
+  const messages = softUnique.map((m) => {
+    const sender = resolveSenderRole(
+      m.senderUsername,
+      buyer,
+      sellerNames,
+      m.recipientUsername
+    );
     const readStatus = String(m.readStatus ?? '').toUpperCase();
     const read =
       sender === 'SELLER' ||
@@ -1304,7 +1630,7 @@ export async function listBuyerChatMessagesFromCommerce(query = {}) {
       _id: m.messageId || String(m._id),
       messageId: m.messageId,
       seller: conv.seller,
-      orderId: conv.orderId || orderId || null,
+      orderId: conv.orderId || trustedOrderId || null,
       itemId: conv.referenceId || itemId || null,
       buyerUsername: buyer,
       conversationId: conv.conversationId,
@@ -1320,7 +1646,7 @@ export async function listBuyerChatMessagesFromCommerce(query = {}) {
       read,
       messageDate: m.createdDate || m.createdAt || new Date(),
       messageType: messageTypeFromThread({
-        orderId: conv.orderId || orderId,
+        orderId: conv.orderId || trustedOrderId,
         itemId: conv.referenceId || itemId
       }),
       source: 'commerce'
@@ -1514,7 +1840,7 @@ export async function resolveBuyerFromItemOrders({ sellerId, itemId, lastMessage
     if (match?.buyer?.username) {
       return {
         buyerUsername: String(match.buyer.username),
-        buyerName: match.buyer?.buyerRegistrationAddress?.fullName || '',
+        buyerName: buyerDisplayNameFromOrder(match),
         orderId: match.orderId || ''
       };
     }
@@ -1528,7 +1854,7 @@ export async function resolveBuyerFromItemOrders({ sellerId, itemId, lastMessage
     const o = orders.find((x) => String(x.buyer?.username || '') === distinct[0]) || orders[0];
     return {
       buyerUsername: distinct[0],
-      buyerName: o?.buyer?.buyerRegistrationAddress?.fullName || '',
+      buyerName: buyerDisplayNameFromOrder(o),
       orderId: o?.orderId || ''
     };
   }
@@ -1538,7 +1864,7 @@ export async function resolveBuyerFromItemOrders({ sellerId, itemId, lastMessage
   if (recent?.buyer?.username) {
     return {
       buyerUsername: String(recent.buyer.username),
-      buyerName: recent.buyer?.buyerRegistrationAddress?.fullName || '',
+      buyerName: buyerDisplayNameFromOrder(recent),
       orderId: recent.orderId || ''
     };
   }

@@ -1041,9 +1041,10 @@ export default function BuyerChatPage() {
       // Prefer Commerce conversation id when present (Message Conversations cache)
       if (thread.conversationId) params.conversationId = thread.conversationId;
       if (thread.sellerId) params.sellerId = thread.sellerId;
-      // Grow scoping: order threads load by orderId only; inquiries by buyer+item(+seller)
+      // OrderId first: load conversations for that order; pass buyer to disambiguate
       if (thread.orderId) {
         params.orderId = thread.orderId;
+        if (thread.buyerUsername) params.buyerUsername = thread.buyerUsername;
       } else {
         if (thread.buyerUsername) params.buyerUsername = thread.buyerUsername;
         if (thread.itemId) params.itemId = thread.itemId;

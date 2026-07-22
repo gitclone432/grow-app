@@ -44,6 +44,7 @@ import WorksheetPage from './WorksheetPage.jsx';
 import ColumnSelector from '../../components/ColumnSelector';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 import ChatModal from '../../components/ChatModal';
+import { yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 
 
 function TabPanel({ children, value, index }) {
@@ -136,6 +137,7 @@ export default function DisputesPage({ initialTab = 0 }) {
   // Column Selectors
   const ALL_INR_COLUMNS = [
     { id: 'caseId', label: 'Case ID' },
+    { id: 'orderId', label: 'Order ID' },
     { id: 'type', label: 'Type' },
     { id: 'seller', label: 'Seller' },
     { id: 'buyer', label: 'Buyer' },
@@ -145,7 +147,7 @@ export default function DisputesPage({ initialTab = 0 }) {
     { id: 'created', label: 'Created (PST)' },
     { id: 'responseDue', label: 'Response Due (PST)' },
     { id: 'logs', label: 'Logs' },
-    { id: 'chat', label: 'Chat' },
+    { id: 'action', label: 'Action' },
   ];
   const [inrVisibleColumns, setInrVisibleColumns] = useState(ALL_INR_COLUMNS.map(c => c.id));
 
@@ -159,7 +161,7 @@ export default function DisputesPage({ initialTab = 0 }) {
     { id: 'created', label: 'Created (PST)' },
     { id: 'responseDue', label: 'Response Due (PST)' },
     { id: 'logs', label: 'Logs' },
-    { id: 'chat', label: 'Chat' },
+    { id: 'action', label: 'Action' },
   ];
   const [disputeVisibleColumns, setDisputeVisibleColumns] = useState(ALL_DISPUTE_COLUMNS.map(c => c.id));
   
@@ -831,6 +833,7 @@ export default function DisputesPage({ initialTab = 0 }) {
               <TableHead>
                 <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
             {inrVisibleColumns.includes('caseId') && <TableCell><strong>Case ID</strong></TableCell>}
+            {inrVisibleColumns.includes('orderId') && <TableCell><strong>Order ID</strong></TableCell>}
             {inrVisibleColumns.includes('type') && <TableCell><strong>Type</strong></TableCell>}
             {inrVisibleColumns.includes('seller') && <TableCell><strong>Seller</strong></TableCell>}
             {inrVisibleColumns.includes('buyer') && <TableCell><strong>Buyer</strong></TableCell>}
@@ -840,13 +843,13 @@ export default function DisputesPage({ initialTab = 0 }) {
             {inrVisibleColumns.includes('created') && <TableCell><strong>Created (PST)</strong></TableCell>}
             {inrVisibleColumns.includes('responseDue') && <TableCell><strong>Response Due (PST)</strong></TableCell>}
             {inrVisibleColumns.includes('logs') && <TableCell><strong>Logs</strong></TableCell>}
-            {inrVisibleColumns.includes('chat') && <TableCell align="center"><strong>Chat</strong></TableCell>}
+            {inrVisibleColumns.includes('action') && <TableCell align="center"><strong>Action</strong></TableCell>}
                 </TableRow>
               </TableHead>
               <TableBody>
                 {filteredCases.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={11} align="center">
+                    <TableCell colSpan={12} align="center">
                       <Typography variant="body2" color="text.secondary" py={2}>
                         No INR cases found. Click "Fetch INR Cases from eBay" to load data.
                       </Typography>
@@ -863,6 +866,18 @@ export default function DisputesPage({ initialTab = 0 }) {
                           <IconButton size="small" onClick={() => handleCopy(c.caseId)}>
                             <ContentCopyIcon sx={{ fontSize: 14 }} />
                           </IconButton>
+                        </Stack>
+                      </TableCell>}
+                      {inrVisibleColumns.includes('orderId') && <TableCell>
+                        <Stack direction="row" alignItems="center" spacing={0.5}>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                            {c.orderId || '-'}
+                          </Typography>
+                          {c.orderId ? (
+                            <IconButton size="small" onClick={() => handleCopy(c.orderId)}>
+                              <ContentCopyIcon sx={{ fontSize: 14 }} />
+                            </IconButton>
+                          ) : null}
                         </Stack>
                       </TableCell>}
                       {inrVisibleColumns.includes('type') && <TableCell>
@@ -942,15 +957,17 @@ export default function DisputesPage({ initialTab = 0 }) {
                           onSave={handleSaveCaseLogs}
                         />
                       </TableCell>}
-                      {inrVisibleColumns.includes('chat') && <TableCell align="center">
-                        <Tooltip title="Chat with buyer">
-                          <IconButton 
-                            size="small" 
-                            color="primary"
+                      {inrVisibleColumns.includes('action') && <TableCell align="center">
+                        <Tooltip title="Open conversation">
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            startIcon={<ChatIcon fontSize="small" />}
                             onClick={() => setSelectedCase(c)}
+                            sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
                           >
-                            <ChatIcon fontSize="small" />
-                          </IconButton>
+                            Open
+                          </Button>
                         </Tooltip>
                       </TableCell>}
                     </TableRow>
@@ -1250,32 +1267,41 @@ export default function DisputesPage({ initialTab = 0 }) {
         <WorksheetPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
-      {/* Chat Modal for INR Cases */}
+      {/* Manage Case dialog for INR Cases */}
       {selectedCase && (
         <ChatModal
           open={Boolean(selectedCase)}
           onClose={() => setSelectedCase(null)}
           orderId={selectedCase.orderId}
           buyerUsername={selectedCase.buyerUsername}
-          buyerName={selectedCase.buyerUsername}
+          buyerName={selectedCase.buyerName || selectedCase.buyerFullName || ''}
           itemId={selectedCase.itemId}
-          title="INR Case Chat"
+          itemTitle={selectedCase.itemTitle || ''}
+          sellerId={selectedCase.seller?._id || selectedCase.seller || null}
+          sellerName={selectedCase.seller?.user?.username || ''}
+          title="Manage Case"
           category={selectedCase.caseType || 'INR'}
           caseStatus={selectedCase.status || 'Open'}
+          entityId={selectedCase.caseId || selectedCase._id}
+          entityType="inr"
         />
       )}
 
-      {/* Chat Modal for Payment Disputes */}
+      {/* Manage Case dialog for Payment Disputes */}
       {selectedDispute && (
         <ChatModal
           open={Boolean(selectedDispute)}
           onClose={() => setSelectedDispute(null)}
           orderId={selectedDispute.orderId}
           buyerUsername={selectedDispute.buyerUsername}
-          buyerName={selectedDispute.buyerUsername}
-          title="Payment Dispute Chat"
+          buyerName={selectedDispute.buyerName || selectedDispute.buyerFullName || ''}
+          sellerId={selectedDispute.seller?._id || selectedDispute.seller || null}
+          sellerName={selectedDispute.seller?.user?.username || ''}
+          title="Manage Case"
           category="Payment Dispute"
           caseStatus={selectedDispute.paymentDisputeStatus || 'Open'}
+          entityId={selectedDispute.paymentDisputeId || selectedDispute._id}
+          entityType="payment_dispute"
         />
       )}
 

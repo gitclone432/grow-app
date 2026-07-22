@@ -32,6 +32,7 @@ import api from '../../lib/api';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ChatModal from '../../components/ChatModal';
 import ColumnSelector from '../../components/ColumnSelector';
+import { yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 
 export default function CancelledStatusPage({
   dateFilter: dateFilterProp,
@@ -78,7 +79,7 @@ export default function CancelledStatusPage({
     { id: 'refunds', label: 'Refunds' },
     { id: 'worksheetStatus', label: 'Worksheet Status' },
     { id: 'logs', label: 'Logs' },
-    { id: 'chat', label: 'Chat' },
+    { id: 'action', label: 'Action' },
   ];
   const [visibleColumns, setVisibleColumns] = useState(ALL_COLUMNS.map(c => c.id));
   const [internalDateFilter, setInternalDateFilter] = useState({
@@ -469,7 +470,7 @@ export default function CancelledStatusPage({
                 {visibleColumns.includes('refunds') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }}>Refunds</TableCell>}
                 {visibleColumns.includes('worksheetStatus') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }}>Worksheet Status</TableCell>}
                 {visibleColumns.includes('logs') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }}>Logs</TableCell>}
-                {visibleColumns.includes('chat') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }} align="center">Chat</TableCell>}
+                {visibleColumns.includes('action') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }} align="center">Action</TableCell>}
               </TableRow>
             </TableHead>
             <TableBody>
@@ -652,15 +653,17 @@ export default function CancelledStatusPage({
                       onSave={handleSaveOrderLogs}
                     />
                   </TableCell>}
-                  {visibleColumns.includes('chat') && <TableCell align="center">
-                    <Tooltip title="Chat with buyer">
-                      <IconButton
+                  {visibleColumns.includes('action') && <TableCell align="center">
+                    <Tooltip title="Open conversation">
+                      <Button
                         size="small"
-                        color="primary"
+                        variant="outlined"
+                        startIcon={<ChatIcon fontSize="small" />}
                         onClick={() => setSelectedOrder(order)}
+                        sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
                       >
-                        <ChatIcon fontSize="small" />
-                      </IconButton>
+                        Open
+                      </Button>
                     </Tooltip>
                   </TableCell>}
                 </TableRow>
@@ -687,15 +690,23 @@ export default function CancelledStatusPage({
         </Box>
       )}
 
-      {/* Chat Modal */}
+      {/* Manage Case dialog */}
       {selectedOrder && (
         <ChatModal
           open={Boolean(selectedOrder)}
           onClose={() => setSelectedOrder(null)}
           orderId={selectedOrder.orderId || selectedOrder.legacyOrderId}
-          buyerUsername={selectedOrder.buyer?.username || selectedOrder.buyer?.buyerRegistrationAddress?.fullName}
-          buyerName={selectedOrder.buyer?.buyerRegistrationAddress?.fullName || selectedOrder.buyer?.username}
-          title="Cancellation Chat"
+          buyerUsername={selectedOrder.buyer?.username || ''}
+          buyerName={selectedOrder.shippingFullName || selectedOrder.buyer?.buyerRegistrationAddress?.fullName || ''}
+          itemId={selectedOrder.lineItems?.[0]?.legacyItemId || selectedOrder.lineItems?.[0]?.itemId || ''}
+          itemTitle={selectedOrder.lineItems?.[0]?.title || selectedOrder.productName || ''}
+          sellerId={selectedOrder.seller?._id || selectedOrder.seller || selectedOrder.sellerId || null}
+          sellerName={selectedOrder.seller?.user?.username || ''}
+          title="Manage Case"
+          category="Cancellation"
+          caseStatus={selectedOrder.cancelState || 'Open'}
+          entityId={selectedOrder.orderId || selectedOrder._id}
+          entityType="cancellation"
         />
       )}
     </Box>

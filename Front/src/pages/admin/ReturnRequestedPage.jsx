@@ -43,6 +43,7 @@ import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ChatModal from '../../components/ChatModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 import ColumnSelector from '../../components/ColumnSelector';
+import { yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 
 // LogsCell component for editable logs field with save functionality
 function LogsCell({ value, onSave, id }) {
@@ -137,7 +138,7 @@ export default function ReturnRequestedPage({
     { id: 'worksheetStatus', label: 'Worksheet Status' },
     { id: 'logs', label: 'Logs' },
     { id: 'snad', label: 'SNAD' },
-    { id: 'chat', label: 'Chat' },
+    { id: 'action', label: 'Action' },
   ];
   const [visibleColumns, setVisibleColumns] = useState(ALL_COLUMNS.map(c => c.id));
 
@@ -854,7 +855,7 @@ export default function ReturnRequestedPage({
                 {visibleColumns.includes('worksheetStatus') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Worksheet Status</strong></TableCell>}
                 {visibleColumns.includes('logs') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Logs</strong></TableCell>}
                 {visibleColumns.includes('snad') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }} align="center"><strong>SNAD</strong></TableCell>}
-                {visibleColumns.includes('chat') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }} align="center"><strong>Chat</strong></TableCell>}
+                {visibleColumns.includes('action') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }} align="center"><strong>Action</strong></TableCell>}
               </TableRow>
             </TableHead>
             <TableBody>
@@ -1094,15 +1095,17 @@ export default function ReturnRequestedPage({
                         </Button>
                       )}
                     </TableCell>}
-                    {visibleColumns.includes('chat') && <TableCell align="center">
-                      <Tooltip title="Chat with buyer">
-                        <IconButton
+                    {visibleColumns.includes('action') && <TableCell align="center">
+                      <Tooltip title="Open conversation">
+                        <Button
                           size="small"
-                          color="primary"
+                          variant="outlined"
+                          startIcon={<ChatIcon fontSize="small" />}
                           onClick={() => setSelectedReturn(ret)}
+                          sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
                         >
-                          <ChatIcon fontSize="small" />
-                        </IconButton>
+                          Open
+                        </Button>
                       </Tooltip>
                     </TableCell>}
                   </TableRow>
@@ -1130,16 +1133,23 @@ export default function ReturnRequestedPage({
         </Box>
       )}
 
-      {/* Chat Modal */}
+      {/* Manage Case dialog */}
       {selectedReturn && (
         <ChatModal
           open={Boolean(selectedReturn)}
           onClose={() => setSelectedReturn(null)}
           orderId={selectedReturn.orderId}
           buyerUsername={selectedReturn.buyerUsername}
-          buyerName={selectedReturn.buyerUsername}
+          buyerName={selectedReturn.buyerName || selectedReturn.buyerFullName || ''}
           itemId={selectedReturn.itemId}
-          title="Return Request Chat"
+          itemTitle={selectedReturn.itemTitle || ''}
+          sellerId={selectedReturn.seller?._id || selectedReturn.seller || null}
+          sellerName={selectedReturn.seller?.user?.username || ''}
+          title="Manage Case"
+          category="Return"
+          caseStatus={selectedReturn.status || 'Open'}
+          entityId={selectedReturn.returnId || selectedReturn._id}
+          entityType="return"
         />
       )}
 

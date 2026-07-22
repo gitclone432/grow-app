@@ -12,7 +12,7 @@ const ConversationMetaSchema = new mongoose.Schema(
     // The Workflow Dropdowns
     category: {
       type: String,
-      enum: ['', 'INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Inquiry'],
+      enum: ['', 'INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Issue with Delivery', 'Inquiry'],
       default: ''
     },
     caseStatus: {
