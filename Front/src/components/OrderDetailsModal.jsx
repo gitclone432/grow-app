@@ -14,13 +14,25 @@ import {
   Chip,
   Paper,
   Tooltip,
-  Collapse
+  Collapse,
+  TextField,
+  InputAdornment,
+  MenuItem
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ChatIcon from '@mui/icons-material/Chat';
+import InfoIcon from '@mui/icons-material/Info';
+import SendIcon from '@mui/icons-material/Send';
+import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import api from '../lib/api';
+import {
+  findRemarkTemplateText,
+  loadRemarkTemplates,
+  remarkOptionsFromTemplates
+} from '../constants/remarkTemplates';
 
 const formatDate = (dateStr) => {
   if (!dateStr) return '-';
@@ -101,6 +113,52 @@ const formatFullShippingAddress = (order, options = {}) => {
   }
 
   return lines.join('\n');
+};
+
+const parseCurrencyInput = (value) => {
+  if (value === null || value === undefined) return null;
+  const normalizedValue = String(value).trim().replace(/[$,\s]/g, '');
+  if (!normalizedValue) return null;
+  const parsedValue = Number(normalizedValue);
+  return Number.isNaN(parsedValue) ? null : parsedValue;
+};
+
+const formatDateInputValue = (value) => {
+  if (!value) return '';
+  const stringValue = String(value);
+  return /^\d{4}-\d{2}-\d{2}/.test(stringValue) ? stringValue.slice(0, 10) : '';
+};
+
+const replaceTemplateVariables = (template, order) => {
+  if (!template || !order) return template;
+
+  const buyerFullName = order.buyer?.buyerRegistrationAddress?.fullName || order.shippingFullName || 'Buyer';
+  const buyerFirstName = buyerFullName.split(' ')[0];
+  const itemTitle = order.lineItems?.[0]?.title || order.productName || `Item ${order.itemNumber || ''}`.trim() || 'item';
+  const trackingNumber = order.trackingNumber || '[tracking number]';
+  const shippingCarrier = order.shippingCarrier || 'the shipping carrier';
+  const hasBuyerNameToken = /\{\{\s*buyer_(first_)?name\s*\}\}|\{BUYER_NAME\}/i.test(template);
+
+  let personalizedTemplate = template
+    .replace(/\{\{buyer_first_name\}\}/g, buyerFirstName)
+    .replace(/\{\{buyer_name\}\}/gi, buyerFirstName)
+    .replace(/\{BUYER_NAME\}/g, buyerFirstName)
+    .replace(/\{\{item_title\}\}/g, itemTitle)
+    .replace(/\{\{tracking_number\}\}/g, trackingNumber)
+    .replace(/\{\{shipping_carrier\}\}/g, shippingCarrier);
+
+  if (!hasBuyerNameToken) {
+    personalizedTemplate = personalizedTemplate.replace(
+      /^(\s*["']?\s*)(hi|hello|hey)([!,.:;]?)(\s*)/i,
+      (match, leadingPrefix, greeting, punctuation, whitespaceAfterGreeting) => {
+        const separator = punctuation || ',';
+        const trailingWhitespace = whitespaceAfterGreeting || ' ';
+        return `${leadingPrefix}${greeting} ${buyerFirstName}${separator}${trailingWhitespace}`;
+      }
+    );
+  }
+
+  return personalizedTemplate;
 };
 
 function DetailCell({ label, value, copyable = false, onCopy, fullWidth = false }) {
@@ -276,6 +334,346 @@ function ShippingAddressSection({ order, onCopy }) {
   );
 }
 
+function EditableFulfillmentFields({ order, onOrderUpdate }) {
+  const orderMongoId = order?._id || order?.id;
+  const [values, setValues] = useState({
+    amazonAccount: '',
+    arrivingDate: '',
+    beforeTax: '',
+    estimatedTax: '',
+    azOrderId: '',
+    remark: ''
+  });
+  const [amazonAccounts, setAmazonAccounts] = useState([]);
+  const [remarkOptions, setRemarkOptions] = useState([]);
+  const [savingField, setSavingField] = useState('');
+  const [saveError, setSaveError] = useState('');
+  const [savedField, setSavedField] = useState('');
+  const [remarkTemplates, setRemarkTemplates] = useState([]);
+  const [pendingRemarkUpdate, setPendingRemarkUpdate] = useState(null);
+  const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
+
+  useEffect(() => {
+    if (!order) return;
+    setValues({
+      amazonAccount: order.amazonAccount || '',
+      arrivingDate: formatDateInputValue(order.arrivingDate),
+      beforeTax: order.beforeTax ?? '',
+      estimatedTax: order.estimatedTax ?? '',
+      azOrderId: order.azOrderId || '',
+      remark: order.remark || ''
+    });
+    setSaveError('');
+    setSavedField('');
+  }, [order]);
+
+  useEffect(() => {
+    let mounted = true;
+    api.get('/amazon-accounts')
+      .then(({ data }) => {
+        if (mounted) setAmazonAccounts(data || []);
+      })
+      .catch(() => {
+        if (mounted) setAmazonAccounts([]);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    loadRemarkTemplates()
+      .then((templates) => {
+        if (mounted) {
+          setRemarkTemplates(templates);
+          setRemarkOptions(remarkOptionsFromTemplates(templates));
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setRemarkTemplates([]);
+          setRemarkOptions([]);
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const normalizeValue = (field, value) => {
+    if (field === 'beforeTax' || field === 'estimatedTax') return parseCurrencyInput(value);
+    if (field === 'arrivingDate') return value || null;
+    if (field === 'remark') {
+      const normalized = String(value || '').trim();
+      return normalized.toLowerCase() === 'select' ? '' : normalized;
+    }
+    return value || '';
+  };
+
+  const saveField = async (field, nextValue, extraFields = {}) => {
+    if (!orderMongoId) {
+      setSaveError('Order id missing. Cannot save.');
+      return false;
+    }
+
+    const currentValue = field === 'arrivingDate' ? formatDateInputValue(order[field]) : (order[field] ?? '');
+    if (String(nextValue ?? '') === String(currentValue ?? '') && Object.keys(extraFields).length === 0) {
+      return true;
+    }
+
+    setSavingField(field);
+    setSaveError('');
+    setSavedField('');
+    try {
+      const valueToSave = normalizeValue(field, nextValue);
+      const payload = { [field]: valueToSave, ...extraFields };
+      const { data } = await api.patch(`/ebay/orders/${orderMongoId}/manual-fields`, payload);
+      if (data?.order) {
+        onOrderUpdate(data.order);
+      } else {
+        onOrderUpdate({ ...order, [field]: valueToSave, ...payload });
+      }
+      setValues((prev) => ({ ...prev, [field]: nextValue ?? '' }));
+      setSavedField(field);
+      return true;
+    } catch (err) {
+      setSaveError(err.response?.data?.error || err.message || 'Failed to update field');
+      return false;
+    } finally {
+      setSavingField('');
+    }
+  };
+
+  const sendAutoMessageForRemark = async (remarkValue) => {
+    const template = findRemarkTemplateText(remarkTemplates, remarkValue);
+    if (!template) return false;
+
+    const messageBody = replaceTemplateVariables(template, order);
+    await api.post('/ebay/send-message', {
+      orderId: order.orderId,
+      buyerUsername: order.buyer?.username,
+      itemId: order.itemNumber || order.lineItems?.[0]?.legacyItemId,
+      body: messageBody,
+      subject: `Regarding Order #${order.orderId}`
+    });
+    return true;
+  };
+
+  const handleRemarkSelect = (remarkValue) => {
+    handleLocalChange('remark', remarkValue);
+    const template = findRemarkTemplateText(remarkTemplates, remarkValue);
+    if (template) {
+      setPendingRemarkUpdate({ remarkValue, order });
+      return;
+    }
+    saveField('remark', remarkValue, { remarkMessageSent: false });
+  };
+
+  const handleSkipRemarkMessage = async () => {
+    if (!pendingRemarkUpdate) return;
+    const saved = await saveField('remark', pendingRemarkUpdate.remarkValue, { remarkMessageSent: false });
+    if (saved) setPendingRemarkUpdate(null);
+  };
+
+  const handleConfirmRemarkMessage = async () => {
+    if (!pendingRemarkUpdate) return;
+    setSendingRemarkMessage(true);
+    try {
+      const saved = await saveField('remark', pendingRemarkUpdate.remarkValue, { remarkMessageSent: true });
+      if (!saved) return;
+      await sendAutoMessageForRemark(pendingRemarkUpdate.remarkValue);
+      setPendingRemarkUpdate(null);
+    } catch (err) {
+      setSaveError(err.response?.data?.error || err.message || 'Failed to update remark or send message');
+    } finally {
+      setSendingRemarkMessage(false);
+    }
+  };
+
+  const handleLocalChange = (field, value) => {
+    setValues((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const fieldSx = {
+    '& .MuiInputBase-root': { bgcolor: '#fff', fontSize: '0.82rem' },
+    '& .MuiInputBase-input': { py: 0.75 },
+    '& .MuiInputLabel-root': { fontSize: '0.78rem' }
+  };
+
+  const renderTextField = (field, label, props = {}) => (
+    <TextField
+      label={label}
+      value={values[field]}
+      onChange={(event) => handleLocalChange(field, event.target.value)}
+      onBlur={() => saveField(field, values[field])}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') event.currentTarget.blur();
+      }}
+      size="small"
+      fullWidth
+      disabled={savingField === field}
+      {...props}
+      sx={{ ...fieldSx, ...(props.sx || {}) }}
+    />
+  );
+
+  return (
+    <Paper
+      variant="outlined"
+      sx={{
+        borderRadius: 1.5,
+        overflow: 'hidden',
+        height: '100%',
+        bgcolor: '#fbfcff',
+        borderColor: '#dfe5ef'
+      }}
+    >
+      <Box sx={{ px: 1.25, py: 1, bgcolor: '#15152a' }}>
+        <Typography variant="subtitle2" fontWeight={800} sx={{ color: '#fff', fontSize: '0.78rem' }}>
+          FULFILLMENT FIELDS
+        </Typography>
+      </Box>
+      <Box sx={{ p: 1.25 }}>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 1 }}>
+          <TextField
+            select
+            label="Amazon Acc"
+            value={values.amazonAccount}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              handleLocalChange('amazonAccount', nextValue);
+              saveField('amazonAccount', nextValue);
+            }}
+            size="small"
+            fullWidth
+            disabled={savingField === 'amazonAccount'}
+            sx={fieldSx}
+          >
+            <MenuItem value="">- Select -</MenuItem>
+            {amazonAccounts.map((account) => (
+              <MenuItem key={account._id || account.name} value={account.name}>
+                {account.name}
+              </MenuItem>
+            ))}
+          </TextField>
+          {renderTextField('arrivingDate', 'Arriving', {
+            type: 'date',
+            InputLabelProps: { shrink: true }
+          })}
+          {renderTextField('beforeTax', 'Before Tax', {
+            InputProps: { startAdornment: <InputAdornment position="start">$</InputAdornment> }
+          })}
+          {renderTextField('estimatedTax', 'Estimated Tax', {
+            InputProps: { startAdornment: <InputAdornment position="start">$</InputAdornment> }
+          })}
+          {renderTextField('azOrderId', 'Az OrderID')}
+          <TextField
+            select
+            label="Remark"
+            value={values.remark}
+            onChange={(event) => {
+              handleRemarkSelect(event.target.value);
+            }}
+            size="small"
+            fullWidth
+            disabled={savingField === 'remark'}
+            sx={fieldSx}
+          >
+            <MenuItem value="">- Select -</MenuItem>
+            {remarkOptions.map((option) => (
+              <MenuItem key={option._id || option.name} value={option.name}>
+                {option.name}
+              </MenuItem>
+            ))}
+          </TextField>
+        </Box>
+        <Stack direction="row" alignItems="center" spacing={1} sx={{ minHeight: 28, mt: 0.75 }}>
+          {savingField && <CircularProgress size={14} />}
+          {savingField && (
+            <Typography variant="caption" color="text.secondary">
+              Saving...
+            </Typography>
+          )}
+          {!savingField && savedField && (
+            <Typography variant="caption" color="success.main">
+              Updated
+            </Typography>
+          )}
+          {saveError && (
+            <Typography variant="caption" color="error.main">
+              {saveError}
+            </Typography>
+          )}
+        </Stack>
+      </Box>
+      <Dialog
+        open={Boolean(pendingRemarkUpdate)}
+        onClose={() => {
+          if (!sendingRemarkMessage) setPendingRemarkUpdate(null);
+        }}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <ChatIcon color="primary" />
+            <Typography variant="h6">Send Message to Buyer?</Typography>
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          <Stack spacing={2}>
+            <Alert severity="info" icon={<InfoIcon />}>
+              You're updating the remark to <strong>"{pendingRemarkUpdate?.remarkValue}"</strong>
+            </Alert>
+            <Box>
+              <Typography variant="body2" color="text.secondary" gutterBottom>
+                Would you like to automatically send this message to the buyer?
+              </Typography>
+              <Paper
+                elevation={0}
+                sx={{
+                  mt: 1.5,
+                  p: 2,
+                  bgcolor: 'grey.50',
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  borderRadius: 1
+                }}
+              >
+                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                  {pendingRemarkUpdate
+                    ? replaceTemplateVariables(
+                        findRemarkTemplateText(remarkTemplates, pendingRemarkUpdate.remarkValue),
+                        pendingRemarkUpdate.order
+                      )
+                    : ''}
+                </Typography>
+              </Paper>
+            </Box>
+            <Typography variant="caption" color="text.secondary">
+              Tip: The message will be sent through the eBay messaging system
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={handleSkipRemarkMessage} disabled={sendingRemarkMessage} color="inherit">
+            No, Skip
+          </Button>
+          <Button
+            onClick={handleConfirmRemarkMessage}
+            variant="contained"
+            disabled={sendingRemarkMessage}
+            startIcon={sendingRemarkMessage ? <CircularProgress size={20} /> : <SendIcon />}
+          >
+            {sendingRemarkMessage ? 'Sending...' : 'Yes, Send Message'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Paper>
+  );
+}
+
 export default function OrderDetailsModal({ open, onClose, orderId }) {
   const [order, setOrder] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -308,6 +706,25 @@ export default function OrderDetailsModal({ open, onClose, orderId }) {
     }
   };
 
+  const openEbayItemPopup = (nextItemId) => {
+    if (!nextItemId) return;
+    const itemUrl = `https://www.ebay.com/itm/${encodeURIComponent(nextItemId)}`;
+    const width = 1280;
+    const height = 850;
+    const left = Math.max(0, Math.round((window.screen.width - width) / 2));
+    const top = Math.max(0, Math.round((window.screen.height - height) / 2));
+    const popup = window.open(
+      itemUrl,
+      `ebay_item_${nextItemId}`,
+      `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
+    );
+    if (!popup) {
+      window.open(itemUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    popup.focus();
+  };
+
   const orderTotal = order
     ? formatCurrency(
         order.pricingSummary?.total?.value
@@ -318,6 +735,8 @@ export default function OrderDetailsModal({ open, onClose, orderId }) {
         'USD'
       )
     : '-';
+  const itemId = order?.itemNumber || order?.lineItems?.[0]?.legacyItemId || '';
+  const itemTitle = order?.productName || order?.lineItems?.[0]?.title || '';
 
   return (
     <Dialog
@@ -418,21 +837,46 @@ export default function OrderDetailsModal({ open, onClose, orderId }) {
               </Section>
             </Box>
 
-            <ShippingAddressSection order={order} onCopy={handleCopy} />
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 1.5 }}>
+              <ShippingAddressSection order={order} onCopy={handleCopy} />
+              <EditableFulfillmentFields order={order} onOrderUpdate={setOrder} />
+            </Box>
 
             {/* Item */}
             <Section title="Item">
               <DetailCell
                 label="Title"
-                value={order.productName || order.lineItems?.[0]?.title}
+                value={itemTitle}
                 fullWidth
               />
               <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, columnGap: 2 }}>
                 <DetailCell
                   label="Item #"
-                  value={order.itemNumber || order.lineItems?.[0]?.legacyItemId}
-                  copyable
-                  onCopy={handleCopy}
+                  value={
+                    itemId ? (
+                      <Stack direction="row" alignItems="center" spacing={0.25} sx={{ minWidth: 0 }}>
+                        <Button
+                          size="small"
+                          variant="text"
+                          onClick={() => openEbayItemPopup(itemId)}
+                          endIcon={<OpenInNewIcon sx={{ fontSize: 14 }} />}
+                          sx={{
+                            minWidth: 0,
+                            p: 0,
+                            fontSize: '0.8125rem',
+                            fontFamily: 'monospace',
+                            textTransform: 'none',
+                            justifyContent: 'flex-start'
+                          }}
+                        >
+                          {itemId}
+                        </Button>
+                        <IconButton size="small" onClick={() => handleCopy(itemId)} sx={{ p: 0.25 }}>
+                          <ContentCopyIcon sx={{ fontSize: 13 }} />
+                        </IconButton>
+                      </Stack>
+                    ) : '-'
+                  }
                 />
                 <DetailCell label="Qty" value={order.quantity ?? order.lineItems?.[0]?.quantity} />
                 <DetailCell label="SKU" value={order.lineItems?.[0]?.sku} />
