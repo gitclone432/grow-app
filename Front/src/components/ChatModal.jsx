@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
-  Dialog, Box, Typography, Stack, TextField, Button, Paper,
+  Dialog, DialogTitle, DialogContent, Box, Typography, Stack, TextField, Button, Paper,
   CircularProgress, IconButton, FormControl, InputLabel, Select, MenuItem, Chip,
   Menu, ListSubheader, Tooltip, Link, useMediaQuery, useTheme, Alert
 } from '@mui/material';
@@ -13,6 +13,8 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import PersonIcon from '@mui/icons-material/Person';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import KeyboardArrowLeftIcon from '@mui/icons-material/KeyboardArrowLeft';
+import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
 import api from '../lib/api';
 import { CHAT_TEMPLATES as FALLBACK_TEMPLATES, personalizeTemplate } from '../constants/chatTemplates';
 import TemplateManagementModal from './TemplateManagementModal';
@@ -63,6 +65,11 @@ export default function ChatModal({
   const [chatTemplates, setChatTemplates] = useState(FALLBACK_TEMPLATES);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [manageTemplatesOpen, setManageTemplatesOpen] = useState(false);
+  const [imageViewer, setImageViewer] = useState({
+    open: false,
+    images: [],
+    index: 0,
+  });
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const [resolvedBuyerName, setResolvedBuyerName] = useState('');
@@ -84,6 +91,64 @@ export default function ChatModal({
   const displayBuyerId = propBuyerId || '-';
   const displaySeller = sellerName || 'Seller';
   const displayOrder = resolvedOrderId || orderId || 'N/A';
+
+  const closeImageViewer = useCallback(() => {
+    setImageViewer((prev) => ({ ...prev, open: false }));
+  }, []);
+
+  const showPreviousImage = useCallback(() => {
+    setImageViewer((prev) => ({
+      ...prev,
+      index: prev.images.length > 0
+        ? (prev.index - 1 + prev.images.length) % prev.images.length
+        : 0
+    }));
+  }, []);
+
+  const showNextImage = useCallback(() => {
+    setImageViewer((prev) => ({
+      ...prev,
+      index: prev.images.length > 0 ? (prev.index + 1) % prev.images.length : 0
+    }));
+  }, []);
+
+  const getMessageMediaItems = useCallback((message) => {
+    const rawMedia = Array.isArray(message?.mediaUrls)
+      ? message.mediaUrls.map((url) => ({ url, name: '' }))
+      : (message?.messageMedia || []).map((m) => ({
+          url: m?.mediaUrl,
+          name: m?.mediaName || '',
+          type: m?.mediaType
+        }));
+
+    return rawMedia
+      .filter((item) => item?.url)
+      .map((item) => {
+        const url = String(item.url);
+        const name = item.name || url.split('/').pop() || 'Attachment';
+        const isImage =
+          String(item.type || '').toUpperCase() === 'IMAGE' ||
+          /\.(jpe?g|png|gif|webp|bmp)(\?|$)/i.test(url) ||
+          /\.(jpe?g|png|gif|webp|bmp)(\?|$)/i.test(name) ||
+          /i\.ebayimg\.com/i.test(url) ||
+          /\$_\d+\.(jpe?g|png|gif|webp)/i.test(url);
+
+        return { ...item, url, name, isImage };
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!imageViewer.open) return undefined;
+
+    const handleImageViewerKeyDown = (event) => {
+      if (event.key === 'Escape') closeImageViewer();
+      if (event.key === 'ArrowLeft' && imageViewer.images.length > 1) showPreviousImage();
+      if (event.key === 'ArrowRight' && imageViewer.images.length > 1) showNextImage();
+    };
+
+    window.addEventListener('keydown', handleImageViewerKeyDown);
+    return () => window.removeEventListener('keydown', handleImageViewerKeyDown);
+  }, [closeImageViewer, imageViewer.images.length, imageViewer.open, showNextImage, showPreviousImage]);
 
   function dedupeMessagesForDisplay(list) {
     const arr = Array.isArray(list) ? list : [];
@@ -506,8 +571,11 @@ export default function ChatModal({
   };
 
   const displayCaseStatus = caseStatusLabel();
+  const activeViewerImage = imageViewer.images[imageViewer.index] || null;
+  const hasMultipleViewerImages = imageViewer.images.length > 1;
 
   return (
+    <>
     <Dialog
       open={open}
       onClose={onClose}
@@ -664,13 +732,7 @@ export default function ChatModal({
                       : (msg.senderUsername && msg.senderUsername.toLowerCase() !== String(buyerUsername || '').toLowerCase()
                         ? msg.senderUsername
                         : (templateBuyerName || 'Buyer')));
-                  const media = msg.mediaUrls?.length
-                    ? msg.mediaUrls.map((url) => ({ url, name: '' }))
-                    : (msg.messageMedia || []).map((m) => ({
-                        url: m?.mediaUrl,
-                        name: m?.mediaName || '',
-                        type: m?.mediaType
-                      }));
+                  const media = getMessageMediaItems(msg);
 
                   return (
                     <Box
@@ -695,17 +757,42 @@ export default function ChatModal({
                           <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: { xs: '0.82rem', sm: '0.875rem' }, lineHeight: 1.5 }}>
                             {msg.body}
                           </Typography>
-                          {media.filter((m) => m?.url).length > 0 && (
+                          {media.length > 0 && (
                             <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                              {media.filter((m) => m?.url).map((attachment, index) => {
-                                const url = String(attachment.url);
-                                const name = attachment.name || url.split('/').pop() || 'Attachment';
-                                const isImage =
-                                  String(attachment.type || '').toUpperCase() === 'IMAGE' ||
-                                  /\.(jpe?g|png|gif|webp|bmp)(\?|$)/i.test(url) ||
-                                  /i\.ebayimg\.com/i.test(url);
+                              {media.map((attachment, index) => {
+                                const { url, name, isImage } = attachment;
                                 return isImage ? (
-                                  <Box key={index} component="a" href={url} target="_blank" rel="noopener noreferrer" sx={{ display: 'block', borderRadius: 1.5, overflow: 'hidden', lineHeight: 0 }}>
+                                  <Box
+                                    key={index}
+                                    component="button"
+                                    type="button"
+                                    onClick={() => {
+                                      const imageItems = media.filter((item) => item.isImage);
+                                      const imageIndex = imageItems.findIndex((item) => item.url === url);
+                                      setImageViewer({
+                                        open: true,
+                                        images: imageItems.map((item) => ({ url: item.url, name: item.name })),
+                                        index: Math.max(0, imageIndex),
+                                      });
+                                    }}
+                                    sx={{
+                                      display: 'block',
+                                      borderRadius: 1.5,
+                                      overflow: 'hidden',
+                                      border: '1px solid',
+                                      borderColor: isSeller ? 'rgba(255,255,255,0.35)' : 'divider',
+                                      lineHeight: 0,
+                                      maxWidth: '100%',
+                                      p: 0,
+                                      cursor: 'zoom-in',
+                                      bgcolor: 'transparent',
+                                      '&:hover': { boxShadow: 3 },
+                                      '&:focus-visible': {
+                                        outline: '2px solid #1976d2',
+                                        outlineOffset: 2,
+                                      }
+                                    }}
+                                  >
                                     <Box component="img" src={url} alt={name} loading="lazy" sx={{ display: 'block', maxWidth: { xs: 160, sm: 240 }, maxHeight: 180, objectFit: 'contain', bgcolor: '#fff' }} />
                                   </Box>
                                 ) : (
@@ -953,5 +1040,97 @@ export default function ChatModal({
         }}
       />
     </Dialog>
+    <Dialog
+      open={imageViewer.open}
+      onClose={closeImageViewer}
+      maxWidth="lg"
+      fullWidth
+      PaperProps={{
+        sx: {
+          bgcolor: '#111827',
+          color: '#fff',
+          height: { xs: '92dvh', md: '90vh' },
+        }
+      }}
+    >
+      <DialogTitle sx={{ py: 1.25, pr: 7 }}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2}>
+          <Typography variant="subtitle1" fontWeight={700} noWrap>
+            {activeViewerImage?.name || 'Buyer image'}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.72)', flexShrink: 0 }}>
+            {imageViewer.images.length > 0 ? `${imageViewer.index + 1} / ${imageViewer.images.length}` : ''}
+          </Typography>
+        </Stack>
+        <IconButton
+          aria-label="Close image viewer"
+          onClick={closeImageViewer}
+          sx={{ position: 'absolute', top: 8, right: 8, color: '#fff' }}
+        >
+          <CloseIcon />
+        </IconButton>
+      </DialogTitle>
+      <DialogContent
+        sx={{
+          p: 0,
+          position: 'relative',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          overflow: 'hidden',
+        }}
+      >
+        {hasMultipleViewerImages && (
+          <IconButton
+            aria-label="Previous image"
+            onClick={showPreviousImage}
+            sx={{
+              position: 'absolute',
+              left: { xs: 8, md: 16 },
+              zIndex: 1,
+              color: '#fff',
+              bgcolor: 'rgba(0,0,0,0.45)',
+              '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' }
+            }}
+          >
+            <KeyboardArrowLeftIcon fontSize="large" />
+          </IconButton>
+        )}
+
+        {activeViewerImage && (
+          <Box
+            component="img"
+            src={activeViewerImage.url}
+            alt={activeViewerImage.name || 'Buyer attachment'}
+            sx={{
+              maxWidth: '100%',
+              maxHeight: '100%',
+              width: 'auto',
+              height: 'auto',
+              objectFit: 'contain',
+              display: 'block',
+            }}
+          />
+        )}
+
+        {hasMultipleViewerImages && (
+          <IconButton
+            aria-label="Next image"
+            onClick={showNextImage}
+            sx={{
+              position: 'absolute',
+              right: { xs: 8, md: 16 },
+              zIndex: 1,
+              color: '#fff',
+              bgcolor: 'rgba(0,0,0,0.45)',
+              '&:hover': { bgcolor: 'rgba(0,0,0,0.7)' }
+            }}
+          >
+            <KeyboardArrowRightIcon fontSize="large" />
+          </IconButton>
+        )}
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }

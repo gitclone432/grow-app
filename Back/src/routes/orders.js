@@ -1861,7 +1861,11 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       excludeCancelled = true,
       sellerId = '',
       searchOrderId = '',
-      searchBuyerName = ''
+      searchBuyerName = '',
+      excludeClient = 'false',
+      excludeLowValue = 'false',
+      statusFilter = '',
+      overdueAlert = ''
     } = req.query;
 
     if (!category) {
@@ -1887,6 +1891,18 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     const sellerObjectId = sellerId && mongoose.Types.ObjectId.isValid(sellerId)
       ? new mongoose.Types.ObjectId(sellerId)
       : null;
+    const excludeClientEnabled = excludeClient === 'true' || excludeClient === true;
+    const excludeLowValueEnabled = excludeLowValue === 'true' || excludeLowValue === true;
+    const excludedSellerIds = excludeClientEnabled ? await getExcludedClientSellerIds() : [];
+    const isExcludedSeller = (seller) => {
+      const sellerIdValue = seller?._id || seller;
+      return excludedSellerIds.some((excludedId) => String(excludedId) === String(sellerIdValue));
+    };
+    const isLowValueOrder = (order) => {
+      const amount = Number(order?.subtotalUSD ?? order?.subtotal ?? 0);
+      return Number.isFinite(amount) && amount < 3;
+    };
+    const overdueCutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
     if (category === 'return_refund') {
       const pageNum = Math.max(1, parseInt(page) || 1);
@@ -1917,7 +1933,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           ],
           ...dateFilter
         })
-          .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+          .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
           .sort({ dateSold: -1 })
           .lean()
@@ -1936,7 +1952,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           { 'lineItems.legacyItemId': { $in: sourceOrderIds } },
         ]
       })
-        .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+        .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
         .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
         .lean();
 
@@ -1979,6 +1995,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         }],
         productName: baseOrder?.productName || fallback.itemTitle || fallback.productName || 'Item',
         subtotal: baseOrder?.subtotal,
+        subtotalUSD: baseOrder?.subtotalUSD,
         remark: baseOrder?.remark || fallback.buyerComments || fallback.notes || '',
         complianceBoardStatus: status,
         complianceBoardCategories: normalizeCategories(baseOrder),
@@ -2051,6 +2068,12 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       if (sellerObjectId) {
         returnBoardOrders = returnBoardOrders.filter((order) => String(order.seller?._id || order.seller) === String(sellerObjectId));
       }
+      if (excludedSellerIds.length > 0) {
+        returnBoardOrders = returnBoardOrders.filter((order) => !isExcludedSeller(order.seller));
+      }
+      if (excludeLowValueEnabled) {
+        returnBoardOrders = returnBoardOrders.filter((order) => !isLowValueOrder(order));
+      }
       if (orderIdRegex) {
         returnBoardOrders = returnBoardOrders.filter((order) => orderIdRegex.test(order.orderId || ''));
       }
@@ -2059,6 +2082,9 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           const buyerName = order.buyer?.buyerRegistrationAddress?.fullName || order.buyer?.username || '';
           return buyerNameRegex.test(buyerName);
         });
+      }
+      if (statusFilter) {
+        returnBoardOrders = returnBoardOrders.filter((order) => (order.complianceBoardStatus || 'todo') === statusFilter);
       }
 
       // Sort the mixed Return board feed by the freshest activity so recently
@@ -2075,11 +2101,45 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         return getSortTime(b) - getSortTime(a);
       });
 
-      const total = returnBoardOrders.length;
-      const pagedOrders = returnBoardOrders.slice(skip, skip + limitNum);
+      const statusCounts = returnBoardOrders.reduce((acc, order) => {
+        const status = order.complianceBoardStatus || 'todo';
+        acc[status] = (acc[status] || 0) + 1;
+        return acc;
+      }, {});
+      const isReturnLabelOverdue = (order) => {
+        if (order.complianceBoardStatus === 'case_opened') {
+          const startedAt = order.returnInfo?.createdDate || order.dateSold || null;
+          return Boolean(startedAt && new Date(startedAt) <= overdueCutoff);
+        }
+        if (order.complianceBoardStatus === 'case_not_opened') {
+          const startedAt = order.returnCaseNotOpenedAssignedAt || order.conversationInfo?.updatedAt || null;
+          return Boolean(startedAt && new Date(startedAt) <= overdueCutoff);
+        }
+        return false;
+      };
+      const isPaymentStatusOverdue = (order) => {
+        if (order.complianceBoardStatus !== 'item_delivered') return false;
+        const startedAt = order.returnItemDeliveredAssignedAt || null;
+        return Boolean(startedAt && new Date(startedAt) <= overdueCutoff);
+      };
+      const overdueCounts = returnBoardOrders.reduce((acc, order) => {
+        if (isReturnLabelOverdue(order)) acc.return_label_overdue = (acc.return_label_overdue || 0) + 1;
+        if (isPaymentStatusOverdue(order)) acc.payment_status_overdue = (acc.payment_status_overdue || 0) + 1;
+        return acc;
+      }, {});
+      let detailOrders = returnBoardOrders;
+      if (overdueAlert === 'return_label_overdue') {
+        detailOrders = detailOrders.filter(isReturnLabelOverdue);
+      } else if (overdueAlert === 'payment_status_overdue') {
+        detailOrders = detailOrders.filter(isPaymentStatusOverdue);
+      }
+      const total = detailOrders.length;
+      const pagedOrders = detailOrders.slice(skip, skip + limitNum);
 
       return res.json({
         orders: pagedOrders,
+        statusCounts,
+        overdueCounts,
         sourceCounts: {
           caseOpenedReturnRequests: returnRequests.length
         },
@@ -2154,6 +2214,21 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       query.seller = sellerObjectId;
     }
 
+    if (excludedSellerIds.length > 0) {
+      query.$and = query.$and || [];
+      query.$and.push({ seller: { $nin: excludedSellerIds } });
+    }
+
+    if (excludeLowValueEnabled) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } }
+        ]
+      });
+    }
+
     if (orderIdRegex) {
       query.orderId = orderIdRegex;
     }
@@ -2168,16 +2243,87 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       });
     }
 
-    // Count total for pagination
-    const total = await Order.countDocuments(query);
+    if (statusFilter) {
+      query.$and = query.$and || [];
+      if (statusFilter === 'todo') {
+        query.$and.push({
+          $or: [
+            { complianceBoardStatus: { $exists: false } },
+            { complianceBoardStatus: null },
+            { complianceBoardStatus: 'todo' }
+          ]
+        });
+      } else {
+        query.$and.push({ complianceBoardStatus: statusFilter });
+      }
+    }
+
+    // Count total for pagination and sidebar stats across the full filtered result.
+    const timedStatusQuery = (baseQuery, status, assignedAtField) => ({
+      $and: [
+        baseQuery,
+        { complianceBoardStatus: status },
+        {
+          $or: [
+            { [assignedAtField]: { $lte: overdueCutoff } },
+            {
+              $and: [
+                { [assignedAtField]: { $in: [null, ''] } },
+                { updatedAt: { $lte: overdueCutoff } }
+              ]
+            }
+          ]
+        }
+      ]
+    });
+    let detailQuery = query;
+    if (overdueAlert === 'fulfillment_out_of_stock_overdue') {
+      detailQuery = timedStatusQuery(query, 'out_of_stock', 'outOfStockAssignedAt');
+    } else if (overdueAlert === 'fulfillment_cancellation_overdue') {
+      detailQuery = timedStatusQuery(query, 'cancellation', 'cancellationAssignedAt');
+    } else if (overdueAlert === 'fulfillment_address_issue_overdue') {
+      detailQuery = timedStatusQuery(query, 'address_issue', 'addressIssueAssignedAt');
+    }
+
+    const [
+      total,
+      statusCountRows,
+      overdueOutOfStockCount,
+      overdueCancellationCount,
+      overdueAddressIssueCount
+    ] = await Promise.all([
+      Order.countDocuments(detailQuery),
+      Order.aggregate([
+        { $match: detailQuery },
+        {
+          $group: {
+            _id: { $ifNull: ['$complianceBoardStatus', 'todo'] },
+            count: { $sum: 1 }
+          }
+        }
+      ]),
+      Order.countDocuments(timedStatusQuery(query, 'out_of_stock', 'outOfStockAssignedAt')),
+      Order.countDocuments(timedStatusQuery(query, 'cancellation', 'cancellationAssignedAt')),
+      Order.countDocuments(timedStatusQuery(query, 'address_issue', 'addressIssueAssignedAt'))
+    ]);
+    const statusCounts = statusCountRows.reduce((acc, row) => {
+      const status = row._id || 'todo';
+      acc[status] = row.count || 0;
+      return acc;
+    }, {});
+    const overdueCounts = {
+      fulfillment_out_of_stock_overdue: overdueOutOfStockCount,
+      fulfillment_cancellation_overdue: overdueCancellationCount,
+      fulfillment_address_issue_overdue: overdueAddressIssueCount
+    };
 
     // Fetch orders with pagination
     const pageNum = Math.max(1, parseInt(page) || 1);
     const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 500));
     const skip = (pageNum - 1) * limitNum;
 
-    const orders = await Order.find(query)
-      .select('orderId dateSold buyer subtotal orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+    const orders = await Order.find(detailQuery)
+      .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
       .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
       .sort({ dateSold: -1 })
       .skip(skip)
@@ -2225,6 +2371,8 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
 
     res.json({
       orders: updatedOrders,
+      statusCounts,
+      overdueCounts,
       pagination: {
         total,
         page: pageNum,
