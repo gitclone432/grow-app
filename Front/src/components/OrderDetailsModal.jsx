@@ -12,10 +12,14 @@ import {
   IconButton,
   Stack,
   Chip,
-  Paper
+  Paper,
+  Tooltip,
+  Collapse
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import api from '../lib/api';
 
 const formatDate = (dateStr) => {
@@ -62,6 +66,41 @@ const getStatusColor = (status) => {
   if (s.includes('FULFILLED') || s.includes('SHIPPED')) return 'success';
   if (s.includes('PROGRESS') || s.includes('PROCESSING')) return 'info';
   return 'default';
+};
+
+const getShippingAddressFields = (order = {}) => {
+  const regAddress = order.buyer?.buyerRegistrationAddress || {};
+  return {
+    fullName: order.shippingFullName || regAddress.fullName || order.buyer?.username || '',
+    line1: order.shippingAddressLine1 || order.buyerAddress || regAddress.contactAddress?.addressLine1 || '',
+    line2: order.shippingAddressLine2 || regAddress.contactAddress?.addressLine2 || '',
+    city: order.shippingCity || regAddress.contactAddress?.city || '',
+    state: order.shippingState || regAddress.contactAddress?.stateOrProvince || '',
+    postalCode: order.shippingPostalCode || regAddress.contactAddress?.postalCode || '',
+    country: order.shippingCountry || regAddress.contactAddress?.country || '',
+    phone: '0000000000'
+  };
+};
+
+const formatFullShippingAddress = (order, options = {}) => {
+  const { includePhone = true } = options;
+  const fields = getShippingAddressFields(order);
+  const lines = [
+    fields.fullName,
+    fields.line1,
+    fields.line2,
+    [
+      [fields.city, fields.state].filter(Boolean).join(', '),
+      fields.postalCode
+    ].filter(Boolean).join(' '),
+    fields.country
+  ].filter((line) => Boolean(line && String(line).trim()));
+
+  if (includePhone) {
+    lines.push(`Phone: ${fields.phone}`);
+  }
+
+  return lines.join('\n');
 };
 
 function DetailCell({ label, value, copyable = false, onCopy, fullWidth = false }) {
@@ -125,6 +164,118 @@ function Section({ title, children, titleColor }) {
   );
 }
 
+function ShippingAddressSection({ order, onCopy }) {
+  const [expanded, setExpanded] = useState(true);
+  const fields = getShippingAddressFields(order);
+  const rows = [
+    { key: 'fullName', value: fields.fullName, label: 'copy name', primary: true },
+    { key: 'line1', value: fields.line1, label: 'copy address' },
+    { key: 'line2', value: fields.line2 || '-', copyValue: fields.line2, label: 'copy address line 2' },
+    { key: 'city', value: fields.city || '-', copyValue: fields.city, label: 'copy city' },
+    { key: 'state', value: fields.state || '-', copyValue: fields.state, label: 'copy state' },
+    { key: 'postalCode', value: fields.postalCode || '-', copyValue: fields.postalCode, label: 'copy postal code' },
+    { key: 'country', value: fields.country || '-', copyValue: fields.country, label: 'copy country' },
+    { key: 'phone', value: `Phone: ${fields.phone}`, copyValue: fields.phone, label: 'copy phone' },
+  ];
+
+  return (
+    <Paper
+      variant="outlined"
+      sx={{
+        borderRadius: 1.5,
+        overflow: 'hidden',
+        bgcolor: '#eaf7f7',
+        borderColor: '#d5eeee',
+        height: '100%'
+      }}
+    >
+      <Box
+        onClick={() => setExpanded((prev) => !prev)}
+        sx={{
+          px: 1.25,
+          py: 1,
+          bgcolor: '#15152a',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 1
+        }}
+      >
+        <Typography variant="subtitle2" fontWeight={800} sx={{ color: '#fff', fontSize: '0.78rem' }}>
+          SHIPPING ADDRESS
+        </Typography>
+        <IconButton size="small" sx={{ color: '#fff', p: 0.25 }} aria-label={expanded ? 'collapse shipping address' : 'expand shipping address'}>
+          {expanded ? <ExpandLessIcon sx={{ fontSize: 18 }} /> : <ExpandMoreIcon sx={{ fontSize: 18 }} />}
+        </IconButton>
+      </Box>
+      <Collapse in={expanded} timeout="auto">
+        <Stack spacing={0.5} sx={{ p: 1.25 }}>
+          {rows.map((row) => (
+            (() => {
+              const copyText = row.copyValue ?? row.value;
+              return (
+                <Box key={row.key} sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minHeight: 28 }}>
+                  <Tooltip title={row.value || '-'} arrow>
+                    <Typography
+                      variant={row.primary ? 'body2' : 'caption'}
+                      fontWeight={row.primary ? 500 : 400}
+                      sx={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        flex: 1,
+                        fontSize: row.primary ? '0.85rem' : '0.78rem'
+                      }}
+                    >
+                      {row.value || '-'}
+                    </Typography>
+                  </Tooltip>
+                  <IconButton
+                    size="small"
+                    onClick={() => onCopy(copyText)}
+                    aria-label={row.label}
+                    disabled={!String(copyText || '').trim() || row.value === '-'}
+                    sx={{ p: 0.25 }}
+                  >
+                    <ContentCopyIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Box>
+              );
+            })()
+          ))}
+          <Button
+            size="small"
+            onClick={() => onCopy(formatFullShippingAddress(order))}
+            startIcon={<ContentCopyIcon sx={{ fontSize: 16 }} />}
+            sx={{ mt: 0.5, alignSelf: 'flex-start', textTransform: 'none' }}
+          >
+            Copy Full Address
+          </Button>
+          <Button
+            size="small"
+            onClick={() => setExpanded(false)}
+            startIcon={<ExpandLessIcon sx={{ fontSize: 16 }} />}
+            sx={{ alignSelf: 'flex-start', textTransform: 'none' }}
+          >
+            Collapse
+          </Button>
+        </Stack>
+      </Collapse>
+      {!expanded && (
+        <Button
+          size="small"
+          onClick={() => setExpanded(true)}
+          startIcon={<ExpandMoreIcon sx={{ fontSize: 16 }} />}
+          sx={{ m: 1.25, textTransform: 'none' }}
+        >
+          Expand
+        </Button>
+      )}
+    </Paper>
+  );
+}
+
 export default function OrderDetailsModal({ open, onClose, orderId }) {
   const [order, setOrder] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -166,18 +317,6 @@ export default function OrderDetailsModal({ open, onClose, orderId }) {
             + parseFloat(order.discountUSD || order.discount || 0)),
         'USD'
       )
-    : '-';
-
-  const shippingAddress = order
-    ? (order.buyerAddress
-      || [
-        order.shippingAddressLine1,
-        order.shippingAddressLine2,
-        order.shippingCity,
-        order.shippingState,
-        order.shippingPostalCode,
-        order.shippingCountry
-      ].filter(Boolean).join(', '))
     : '-';
 
   return (
@@ -276,10 +415,10 @@ export default function OrderDetailsModal({ open, onClose, orderId }) {
                 />
                 <DetailCell label="Username" value={order.buyer?.username} copyable onCopy={handleCopy} />
                 <DetailCell label="Email" value={order.buyer?.email} />
-                <DetailCell label="Phone" value={order.shippingPhone} />
-                <DetailCell label="Address" value={shippingAddress} fullWidth />
               </Section>
             </Box>
+
+            <ShippingAddressSection order={order} onCopy={handleCopy} />
 
             {/* Item */}
             <Section title="Item">

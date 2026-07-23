@@ -22,6 +22,8 @@ import {
   DialogContent,
   DialogTitle,
   DialogActions,
+  FormControlLabel,
+  Switch,
 } from '@mui/material';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -34,7 +36,7 @@ import HistoryIcon from '@mui/icons-material/History';
 import CloseIcon from '@mui/icons-material/Close';
 import { format } from 'date-fns';
 import api from '../../lib/api';
-import AllOrdersChatDialog from '../../components/ChatDialog';
+import ChatModal from '../../components/ChatModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 
 const BOARD_CATEGORIES = [
@@ -186,6 +188,32 @@ const BRAND_RED = '#ef4444';
 const BRAND_ORANGE = '#f97316';
 const BRAND_BLUE = '#3b82f6';
 const BRAND_GREEN = '#10b981';
+const FILTER_SWITCH_SX = {
+  m: 0,
+  px: 1,
+  width: '100%',
+  minHeight: 56,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 0.5,
+  border: '1px solid',
+  borderColor: 'divider',
+  borderRadius: 1.5,
+  boxSizing: 'border-box',
+  '& .MuiFormControlLabel-label': { fontSize: '0.75rem' },
+  '& .MuiSwitch-root': { transform: 'scale(0.85)' },
+};
+const FILTER_CONTROL_SX = {
+  width: { xs: '100%', sm: 220, md: 220 },
+  '& .MuiInputBase-root': {
+    height: 56,
+  },
+};
+const FILTER_ACTION_SX = {
+  width: { xs: '100%', sm: 220, md: 220 },
+  height: 56,
+};
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
 const RETURN_LABEL_SLA_MS = 48 * ONE_HOUR_MS;
@@ -286,18 +314,29 @@ const cleanMessagePreviewText = (body = '') => {
   return cssSignalCount >= 3 ? '' : text;
 };
 
+const createEmptyDateFilter = () => ({
+  mode: 'none',
+  single: '',
+  from: '',
+  to: ''
+});
+
 function ComplianceBoardPage() {
   const [snackbar, setSnackbar] = useState({ open: false, message: '' });
   const [selectedCategory, setSelectedCategory] = useState('order_fulfillment');
-  const [dateFilter, setDateFilter] = useState({
-    mode: 'none',
-    single: '',
-    from: '',
-    to: ''
-  });
+  const [dateFilter, setDateFilter] = useState(createEmptyDateFilter);
+  const [draftDateFilter, setDraftDateFilter] = useState(createEmptyDateFilter);
   const [selectedSeller, setSelectedSeller] = useState('');
   const [searchOrderId, setSearchOrderId] = useState('');
+  const [draftSearchOrderId, setDraftSearchOrderId] = useState('');
   const [searchBuyerName, setSearchBuyerName] = useState('');
+  const [draftSearchBuyerName, setDraftSearchBuyerName] = useState('');
+  const [excludeClient, setExcludeClient] = useState(true);
+  const [draftExcludeClient, setDraftExcludeClient] = useState(true);
+  const [excludeLowValue, setExcludeLowValue] = useState(true);
+  const [draftExcludeLowValue, setDraftExcludeLowValue] = useState(true);
+  const [statusCounts, setStatusCounts] = useState({});
+  const [overdueCounts, setOverdueCounts] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [orders, setOrders] = useState({
@@ -393,6 +432,8 @@ function ComplianceBoardPage() {
   const [inrActionCategory, setInrActionCategory] = useState(COLUMN_STATUS.INR_FOLLOW_UP);
   const [inrRefundCategory, setInrRefundCategory] = useState(COLUMN_STATUS.INR_FULLY_REFUNDED);
   const [activeAlertPreviewId, setActiveAlertPreviewId] = useState(null);
+  const [alertPreviewItems, setAlertPreviewItems] = useState(null);
+  const [alertPreviewLoading, setAlertPreviewLoading] = useState(false);
   const [allMessagesForAlerts, setAllMessagesForAlerts] = useState([]);
 
   const buildDateParams = () => {
@@ -424,6 +465,8 @@ function ComplianceBoardPage() {
     if (selectedSeller) params.sellerId = selectedSeller;
     if (searchOrderId.trim()) params.searchOrderId = searchOrderId.trim();
     if (searchBuyerName.trim()) params.searchBuyerName = searchBuyerName.trim();
+    params.excludeClient = excludeClient;
+    params.excludeLowValue = excludeLowValue;
     return params;
   };
 
@@ -431,6 +474,16 @@ function ComplianceBoardPage() {
     if (selectedSeller) {
       const orderSellerId = String(order?.seller?._id || order?.seller || order?.sellerId || '');
       if (orderSellerId !== String(selectedSeller)) return false;
+    }
+
+    if (excludeClient) {
+      const sellerName = resolveOrderSellerName(order);
+      if (sellerName.toLowerCase() === 'vergo') return false;
+    }
+
+    if (excludeLowValue) {
+      const amount = Number(order?.subtotalUSD ?? order?.subtotal ?? 0);
+      if (Number.isFinite(amount) && amount < 3) return false;
     }
 
     if (searchOrderId.trim()) {
@@ -535,7 +588,7 @@ function ComplianceBoardPage() {
     const messageParams = {
       page: 1,
       limit: MESSAGE_THREAD_LIMIT,
-      excludeClient: false,
+      excludeClient,
       filterType: 'ALL',
       complianceBoardMode: true,
       maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
@@ -777,6 +830,8 @@ function ComplianceBoardPage() {
       setOrders(grouped);
       setPendingOrderMoves({});
       setBoardSourceCounts(response.data?.sourceCounts || {});
+      setStatusCounts(response.data?.statusCounts || {});
+      setOverdueCounts(response.data?.overdueCounts || {});
       setVisibleOrderCounts(buildVisibleCountMap(grouped));
       if (response.data?.pagination) {
         setPagination(response.data.pagination);
@@ -803,7 +858,7 @@ function ComplianceBoardPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedCategory, currentPage, dateFilter, selectedSeller, searchOrderId, searchBuyerName]);
+  }, [selectedCategory, currentPage, dateFilter, selectedSeller, searchOrderId, searchBuyerName, excludeClient, excludeLowValue]);
 
   // Fetch messages for alert system (all boards except order_communication)
   const fetchMessagesForAlerts = async () => {
@@ -811,7 +866,7 @@ function ComplianceBoardPage() {
       const params = {
         page: 1,
         limit: MESSAGE_THREAD_LIMIT,
-        excludeClient: false,
+        excludeClient,
         filterType: 'ALL',
         complianceBoardMode: true,
         maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
@@ -840,7 +895,7 @@ function ComplianceBoardPage() {
       const params = {
         page: 1,
         limit: MESSAGE_THREAD_LIMIT,
-        excludeClient: false, // Important: include all messages like BuyerChatPage does
+        excludeClient,
         filterType: 'ALL', // Get all message types
         complianceBoardMode: true,
         maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
@@ -1053,20 +1108,27 @@ function ComplianceBoardPage() {
   };
 
   const handleApplyFilters = () => {
+    setDateFilter(draftDateFilter);
+    setSearchOrderId(draftSearchOrderId);
+    setSearchBuyerName(draftSearchBuyerName);
+    setExcludeClient(draftExcludeClient);
+    setExcludeLowValue(draftExcludeLowValue);
     setCurrentPage(1);
-    fetchOrders();
   };
 
   const handleClearDateFilters = () => {
-    setDateFilter({
-      mode: 'none',
-      single: '',
-      from: '',
-      to: ''
-    });
+    const emptyDateFilter = createEmptyDateFilter();
+    setDateFilter(emptyDateFilter);
+    setDraftDateFilter(emptyDateFilter);
     setSelectedSeller('');
     setSearchOrderId('');
+    setDraftSearchOrderId('');
     setSearchBuyerName('');
+    setDraftSearchBuyerName('');
+    setExcludeClient(true);
+    setDraftExcludeClient(true);
+    setExcludeLowValue(true);
+    setDraftExcludeLowValue(true);
     setCurrentPage(1);
   };
 
@@ -1236,6 +1298,54 @@ function ComplianceBoardPage() {
             ? getOverduePaymentStatusOrders()
             : (orders[alertId] || []);
   };
+  const handleAlertPreviewSelect = async (alertId) => {
+    setActiveAlertPreviewId(alertId);
+    setAlertPreviewItems(null);
+
+    if (
+      selectedCategory === 'order_communication' ||
+      selectedCategory === 'issue_hub' ||
+      isMessageOverdueAlert(alertId)
+    ) {
+      return;
+    }
+
+    setAlertPreviewLoading(true);
+    try {
+      const params = {
+        category: selectedCategory,
+        page: 1,
+        limit: 500,
+        excludeCancelled: true,
+        ...buildDateParams(),
+        ...buildBoardFilterParams(),
+      };
+
+      if (
+        isFulfillmentIssueOverdueAlert(alertId) ||
+        isReturnOverdueAlert(alertId)
+      ) {
+        params.overdueAlert = alertId;
+      } else {
+        params.statusFilter = alertId;
+      }
+
+      const { data } = await api.get('/orders/compliance-board', {
+        params,
+        timeout: BOARD_REQUEST_TIMEOUT_MS,
+      });
+      setAlertPreviewItems(ensureArray(data?.orders));
+    } catch (err) {
+      console.error('Failed to load alert preview items:', err);
+      setAlertPreviewItems([]);
+      setSnackbar({
+        open: true,
+        message: err.response?.data?.error || 'Failed to load preview items'
+      });
+    } finally {
+      setAlertPreviewLoading(false);
+    }
+  };
   const getAlertPreviewVisibleCount = (boardCategory, alertId) => {
     if (isMessageOverdueAlert(alertId)) {
       return visibleMessageCounts[alertId] ?? LOAD_MORE_STEP;
@@ -1371,6 +1481,13 @@ function ComplianceBoardPage() {
     }, []);
   };
 
+  const getStatusCount = (status) => (
+    statusCounts[status] ?? orders[status]?.length ?? 0
+  );
+  const getOverdueCount = (alertId, fallbackCount) => (
+    overdueCounts[alertId] ?? fallbackCount
+  );
+
   const getAlertsForCurrentBoard = () => {
     const overdueMessages = getOverdueMessages();
     
@@ -1399,41 +1516,41 @@ function ComplianceBoardPage() {
       const overdueReturnLabelOrders = getOverdueReturnLabelOrders();
       const overduePaymentStatusOrders = getOverduePaymentStatusOrders();
       return [
-        { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.CASE_OPENED]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.RETURN_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6', count: orders[COLUMN_STATUS.RETURN_FOLLOW_UP]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: BRAND_BLUE, count: orders[COLUMN_STATUS.PROVIDE_RETURN_LABEL]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7', count: orders[COLUMN_STATUS.BUYER_DROP_OFF]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.ITEM_DELIVERED, label: 'Item Delivered', color: '#06b6d4', count: orders[COLUMN_STATUS.ITEM_DELIVERED]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.PARTIAL_REFUND]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.FULL_REFUND, label: 'Full Refund', color: BRAND_GREEN, count: orders[COLUMN_STATUS.FULL_REFUND]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.REPLACEMENT, label: 'Replacement', color: '#0f766e', count: orders[COLUMN_STATUS.REPLACEMENT]?.length || 0, type: 'stat' },
-        { id: RETURN_LABEL_OVERDUE_ALERT_ID, label: '48h Not Moved', color: '#dc2626', count: overdueReturnLabelOrders.length, type: 'alert' },
-        { id: PAYMENT_STATUS_OVERDUE_ALERT_ID, label: 'Payment Status', color: '#b91c1c', count: overduePaymentStatusOrders.length, type: 'alert' },
+        { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.CASE_OPENED), type: 'stat' },
+        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.CASE_NOT_OPENED), type: 'stat' },
+        { id: COLUMN_STATUS.RETURN_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6', count: getStatusCount(COLUMN_STATUS.RETURN_FOLLOW_UP), type: 'stat' },
+        { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: BRAND_BLUE, count: getStatusCount(COLUMN_STATUS.PROVIDE_RETURN_LABEL), type: 'stat' },
+        { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7', count: getStatusCount(COLUMN_STATUS.BUYER_DROP_OFF), type: 'stat' },
+        { id: COLUMN_STATUS.ITEM_DELIVERED, label: 'Item Delivered', color: '#06b6d4', count: getStatusCount(COLUMN_STATUS.ITEM_DELIVERED), type: 'stat' },
+        { id: COLUMN_STATUS.PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: getStatusCount(COLUMN_STATUS.PARTIAL_REFUND), type: 'stat' },
+        { id: COLUMN_STATUS.FULL_REFUND, label: 'Full Refund', color: BRAND_GREEN, count: getStatusCount(COLUMN_STATUS.FULL_REFUND), type: 'stat' },
+        { id: COLUMN_STATUS.REPLACEMENT, label: 'Replacement', color: '#0f766e', count: getStatusCount(COLUMN_STATUS.REPLACEMENT), type: 'stat' },
+        { id: RETURN_LABEL_OVERDUE_ALERT_ID, label: '48h Not Moved', color: '#dc2626', count: getOverdueCount(RETURN_LABEL_OVERDUE_ALERT_ID, overdueReturnLabelOrders.length), type: 'alert' },
+        { id: PAYMENT_STATUS_OVERDUE_ALERT_ID, label: 'Payment Status', color: '#b91c1c', count: getOverdueCount(PAYMENT_STATUS_OVERDUE_ALERT_ID, overduePaymentStatusOrders.length), type: 'alert' },
         { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#7f1d1d', count: overdueMessages.length, type: 'alert' },
       ];
     }
 
     if (selectedCategory === 'cancellation') {
       return [
-        { id: COLUMN_STATUS.CANCELLATION_REQUEST, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.CANCELLATION_REQUEST]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN, count: orders[COLUMN_STATUS.ACCEPTED]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.DECLINED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.CANCELLATION_REQUEST, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.CANCELLATION_REQUEST), type: 'stat' },
+        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.CASE_NOT_OPENED), type: 'stat' },
+        { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN, count: getStatusCount(COLUMN_STATUS.ACCEPTED), type: 'stat' },
+        { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.DECLINED), type: 'stat' },
         { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
       ];
     }
 
     if (selectedCategory === 'inr') {
       return [
-        { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: orders[COLUMN_STATUS.INR_CASE_OPENED]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.CASE_NOT_OPENED]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.INR_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6', count: orders[COLUMN_STATUS.INR_FOLLOW_UP]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.INR_TRACKING_ID_UPLOAD, label: 'Tracking ID Upload', color: '#06b6d4', count: orders[COLUMN_STATUS.INR_TRACKING_ID_UPLOAD]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN, label: 'Case Open (Ebay Step In)', color: BRAND_RED, count: orders[COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.INR_FULLY_REFUNDED, label: 'Fully Refunded', color: BRAND_GREEN, count: orders[COLUMN_STATUS.INR_FULLY_REFUNDED]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.INR_PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.INR_PARTIAL_REFUND]?.length || 0, type: 'stat' },
-        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Resolved', color: BRAND_BLUE, count: orders[COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]?.length || 0, type: 'stat' },
+        { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.INR_CASE_OPENED), type: 'stat' },
+        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.CASE_NOT_OPENED), type: 'stat' },
+        { id: COLUMN_STATUS.INR_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6', count: getStatusCount(COLUMN_STATUS.INR_FOLLOW_UP), type: 'stat' },
+        { id: COLUMN_STATUS.INR_TRACKING_ID_UPLOAD, label: 'Tracking ID Upload', color: '#06b6d4', count: getStatusCount(COLUMN_STATUS.INR_TRACKING_ID_UPLOAD), type: 'stat' },
+        { id: COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN, label: 'Case Open (Ebay Step In)', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN), type: 'stat' },
+        { id: COLUMN_STATUS.INR_FULLY_REFUNDED, label: 'Fully Refunded', color: BRAND_GREEN, count: getStatusCount(COLUMN_STATUS.INR_FULLY_REFUNDED), type: 'stat' },
+        { id: COLUMN_STATUS.INR_PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: getStatusCount(COLUMN_STATUS.INR_PARTIAL_REFUND), type: 'stat' },
+        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Resolved', color: BRAND_BLUE, count: getStatusCount(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED), type: 'stat' },
         { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
       ];
     }
@@ -1442,16 +1559,16 @@ function ComplianceBoardPage() {
     const overdueCancellationOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.CANCELLATION);
     const overdueAddressIssueOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.ADDRESS_ISSUE);
     return [
-      { id: COLUMN_STATUS.TODO, label: 'To Do', color: BRAND_RED, count: orders[COLUMN_STATUS.TODO]?.length || 0, type: 'stat' },
-      { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', color: BRAND_ORANGE, count: orders[COLUMN_STATUS.OUT_OF_STOCK]?.length || 0, type: 'stat' },
-      { id: COLUMN_STATUS.CANCELLATION, label: 'Cancellation', color: BRAND_BLUE, count: orders[COLUMN_STATUS.CANCELLATION]?.length || 0, type: 'stat' },
-      { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', color: '#a855f7', count: orders[COLUMN_STATUS.ADDRESS_ISSUE]?.length || 0, type: 'stat' },
-      { id: COLUMN_STATUS.NOT_FULFILLED, label: 'Not Fulfilled', color: BRAND_YELLOW_DARK, count: orders[COLUMN_STATUS.NOT_FULFILLED]?.length || 0, type: 'stat' },
-      { id: COLUMN_STATUS.FULFILLED, label: 'Fulfilled', color: BRAND_GREEN, count: orders[COLUMN_STATUS.FULFILLED]?.length || 0, type: 'stat' },
-      { id: COLUMN_STATUS.BUYER_CONFIRMATION, label: 'Buyer Confirmation', color: '#0f766e', count: orders[COLUMN_STATUS.BUYER_CONFIRMATION]?.length || 0, type: 'stat' },
-      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.OUT_OF_STOCK], label: 'Out of Stock 48h+', color: '#dc2626', count: overdueOutOfStockOrders.length, type: 'alert' },
-      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.CANCELLATION], label: 'Cancellation 48h+', color: '#b91c1c', count: overdueCancellationOrders.length, type: 'alert' },
-      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.ADDRESS_ISSUE], label: 'Address Issue 48h+', color: '#7f1d1d', count: overdueAddressIssueOrders.length, type: 'alert' },
+      { id: COLUMN_STATUS.TODO, label: 'To Do', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.TODO), type: 'stat' },
+      { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.OUT_OF_STOCK), type: 'stat' },
+      { id: COLUMN_STATUS.CANCELLATION, label: 'Cancellation', color: BRAND_BLUE, count: getStatusCount(COLUMN_STATUS.CANCELLATION), type: 'stat' },
+      { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', color: '#a855f7', count: getStatusCount(COLUMN_STATUS.ADDRESS_ISSUE), type: 'stat' },
+      { id: COLUMN_STATUS.NOT_FULFILLED, label: 'Not Fulfilled', color: BRAND_YELLOW_DARK, count: getStatusCount(COLUMN_STATUS.NOT_FULFILLED), type: 'stat' },
+      { id: COLUMN_STATUS.FULFILLED, label: 'Fulfilled', color: BRAND_GREEN, count: getStatusCount(COLUMN_STATUS.FULFILLED), type: 'stat' },
+      { id: COLUMN_STATUS.BUYER_CONFIRMATION, label: 'Buyer Confirmation', color: '#0f766e', count: getStatusCount(COLUMN_STATUS.BUYER_CONFIRMATION), type: 'stat' },
+      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.OUT_OF_STOCK], label: 'Out of Stock 48h+', color: '#dc2626', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.OUT_OF_STOCK], overdueOutOfStockOrders.length), type: 'alert' },
+      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.CANCELLATION], label: 'Cancellation 48h+', color: '#b91c1c', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.CANCELLATION], overdueCancellationOrders.length), type: 'alert' },
+      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.ADDRESS_ISSUE], label: 'Address Issue 48h+', color: '#7f1d1d', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.ADDRESS_ISSUE], overdueAddressIssueOrders.length), type: 'alert' },
       { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#991b1b', count: overdueMessages.length, type: 'alert' },
     ];
   };
@@ -2106,6 +2223,7 @@ function ComplianceBoardPage() {
       
       normalizedData = {
         orderId: orderOrThread.orderId || null,
+        conversationId: orderOrThread.conversationId || orderOrThread._id || null,
         itemNumber: orderOrThread.itemId || null,
         productName: orderOrThread.itemTitle || orderOrThread.productName || (isInquiry ? 'Inquiry Message' : 'Item'),
         seller: {
@@ -2458,6 +2576,7 @@ function ComplianceBoardPage() {
       || ORDER_COMMUNICATION_WORK_OPTIONS[0];
     const handleAlertSelect = (alertId) => {
       setActiveAlertPreviewId(alertId);
+      setAlertPreviewItems(null);
       if (ORDER_COMMUNICATION_WORK_OPTIONS.some((option) => option.id === alertId)) {
         setOrderCommunicationWorkCategory(alertId);
       }
@@ -3183,17 +3302,22 @@ function ComplianceBoardPage() {
 
   const renderAlertPreviewDialog = (alerts) => {
     const activeAlert = alerts.find((alert) => alert.id === activeAlertPreviewId);
-    const previewItems = activeAlert ? getAlertPreviewItems(selectedCategory, activeAlert.id) : [];
+    const previewItems = activeAlert
+      ? (alertPreviewItems !== null ? alertPreviewItems : getAlertPreviewItems(selectedCategory, activeAlert.id))
+      : [];
     const isMessageAlert = selectedCategory === 'order_communication' || (activeAlert && isMessageOverdueAlert(activeAlert.id));
     const visibleCount = activeAlert
-      ? getAlertPreviewVisibleCount(selectedCategory, activeAlert.id)
+      ? (alertPreviewItems !== null ? previewItems.length : getAlertPreviewVisibleCount(selectedCategory, activeAlert.id))
       : 0;
     const remainingCount = activeAlert ? Math.max(0, previewItems.length - visibleCount) : 0;
 
     return (
       <Dialog
         open={Boolean(activeAlert)}
-        onClose={() => setActiveAlertPreviewId(null)}
+        onClose={() => {
+          setActiveAlertPreviewId(null);
+          setAlertPreviewItems(null);
+        }}
         fullWidth
         maxWidth="md"
         PaperProps={{
@@ -3217,13 +3341,20 @@ function ComplianceBoardPage() {
                 </Typography>
               )}
             </Box>
-            <IconButton onClick={() => setActiveAlertPreviewId(null)} size="small" sx={{ color: 'text.disabled' }}>
+            <IconButton onClick={() => {
+              setActiveAlertPreviewId(null);
+              setAlertPreviewItems(null);
+            }} size="small" sx={{ color: 'text.disabled' }}>
               <CloseIcon />
             </IconButton>
           </Stack>
         </Box>
         <DialogContent sx={{ p: 2.5, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-          {!activeAlert ? (
+          {alertPreviewLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+              <CircularProgress size={28} />
+            </Box>
+          ) : !activeAlert ? (
             <Typography variant="body2" color="text.secondary">
               Click an alert above to preview the items for that category.
             </Typography>
@@ -3317,7 +3448,7 @@ function ComplianceBoardPage() {
   const renderBoardWithAlerts = (boardContent, alerts) => (
     <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', xl: 'minmax(0, 1fr) 280px' }, gap: 3, alignItems: 'start' }}>
       <Box sx={{ minWidth: 0, overflow: 'hidden' }}>{boardContent}</Box>
-      {renderAlertsTile(alerts, activeAlertPreviewId, setActiveAlertPreviewId)}
+      {renderAlertsTile(alerts, activeAlertPreviewId, handleAlertPreviewSelect)}
     </Box>
   );
 
@@ -3510,7 +3641,7 @@ function ComplianceBoardPage() {
 
         {/* Filters */}
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="flex-end" flexWrap="wrap">
-          <FormControl sx={{ minWidth: 250 }}>
+          <FormControl sx={FILTER_CONTROL_SX}>
             <InputLabel>Category</InputLabel>
             <Select
               value={selectedCategory}
@@ -3518,6 +3649,7 @@ function ComplianceBoardPage() {
                 setSelectedCategory(e.target.value);
                 setCurrentPage(1);
                 setActiveAlertPreviewId(null);
+                setAlertPreviewItems(null);
               }}
               label="Category"
             >
@@ -3529,12 +3661,17 @@ function ComplianceBoardPage() {
             </Select>
           </FormControl>
 
-          <FormControl sx={{ minWidth: 220 }}>
+          <FormControl sx={FILTER_CONTROL_SX}>
             <InputLabel>Seller Account</InputLabel>
             <Select
               value={selectedSeller}
               label="Seller Account"
-              onChange={(e) => setSelectedSeller(e.target.value)}
+              onChange={(e) => {
+                setSelectedSeller(e.target.value);
+                setCurrentPage(1);
+                setActiveAlertPreviewId(null);
+                setAlertPreviewItems(null);
+              }}
             >
               <MenuItem value="">
                 <em>All Sellers</em>
@@ -3550,28 +3687,28 @@ function ComplianceBoardPage() {
           <TextField
             size="small"
             label="Order ID"
-            value={searchOrderId}
-            onChange={(e) => setSearchOrderId(e.target.value)}
+            value={draftSearchOrderId}
+            onChange={(e) => setDraftSearchOrderId(e.target.value)}
             placeholder="Search by order ID..."
-            sx={{ minWidth: 220 }}
+            sx={FILTER_CONTROL_SX}
           />
 
           <TextField
             size="small"
             label="Buyer Name"
-            value={searchBuyerName}
-            onChange={(e) => setSearchBuyerName(e.target.value)}
+            value={draftSearchBuyerName}
+            onChange={(e) => setDraftSearchBuyerName(e.target.value)}
             placeholder="Search by buyer name..."
-            sx={{ minWidth: 220 }}
+            sx={FILTER_CONTROL_SX}
           />
 
           {/* Date Filter Mode */}
-          <FormControl sx={{ minWidth: 150 }}>
+          <FormControl sx={FILTER_CONTROL_SX}>
             <InputLabel>Date Mode</InputLabel>
             <Select
-              value={dateFilter.mode}
+              value={draftDateFilter.mode}
               label="Date Mode"
-              onChange={(e) => setDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+              onChange={(e) => setDraftDateFilter(prev => ({ ...prev, mode: e.target.value }))}
             >
               <MenuItem value="none">None</MenuItem>
               <MenuItem value="single">Single Day</MenuItem>
@@ -3580,47 +3717,78 @@ function ComplianceBoardPage() {
           </FormControl>
 
           {/* Single Date Input */}
-          {dateFilter.mode === 'single' && (
+          {draftDateFilter.mode === 'single' && (
             <TextField
               size="small"
               label="Date"
               type="date"
-              value={dateFilter.single}
-              onChange={(e) => setDateFilter(prev => ({ ...prev, single: e.target.value }))}
+              value={draftDateFilter.single}
+              onChange={(e) => setDraftDateFilter(prev => ({ ...prev, single: e.target.value }))}
               InputLabelProps={{ shrink: true }}
-              sx={{ width: 150 }}
+              sx={FILTER_CONTROL_SX}
             />
           )}
 
           {/* Range Inputs */}
-          {dateFilter.mode === 'range' && (
+          {draftDateFilter.mode === 'range' && (
             <>
               <TextField
                 size="small"
                 label="From"
                 type="date"
-                value={dateFilter.from}
-                onChange={(e) => setDateFilter(prev => ({ ...prev, from: e.target.value }))}
+                value={draftDateFilter.from}
+                onChange={(e) => setDraftDateFilter(prev => ({ ...prev, from: e.target.value }))}
                 InputLabelProps={{ shrink: true }}
-                sx={{ width: 150 }}
+                sx={FILTER_CONTROL_SX}
               />
               <TextField
                 size="small"
                 label="To"
                 type="date"
-                value={dateFilter.to}
-                onChange={(e) => setDateFilter(prev => ({ ...prev, to: e.target.value }))}
+                value={draftDateFilter.to}
+                onChange={(e) => setDraftDateFilter(prev => ({ ...prev, to: e.target.value }))}
                 InputLabelProps={{ shrink: true }}
-                sx={{ width: 150 }}
+                sx={FILTER_CONTROL_SX}
               />
             </>
           )}
 
-          <Stack direction="row" spacing={1}>
+          <Box sx={FILTER_ACTION_SX}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={draftExcludeClient}
+                  onChange={(e) => setDraftExcludeClient(e.target.checked)}
+                  color="primary"
+                  size="small"
+                />
+              }
+              label="Exclude Client"
+              sx={FILTER_SWITCH_SX}
+            />
+          </Box>
+
+          <Box sx={FILTER_ACTION_SX}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={draftExcludeLowValue}
+                  onChange={(e) => setDraftExcludeLowValue(e.target.checked)}
+                  color="primary"
+                  size="small"
+                />
+              }
+              label="Exclude <$3"
+              sx={FILTER_SWITCH_SX}
+            />
+          </Box>
+
+          <Stack direction="row" spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
             <Button
               variant="contained"
               onClick={handleApplyFilters}
               sx={{
+                ...FILTER_ACTION_SX,
                 bgcolor: BRAND_YELLOW_DARK,
                 color: BRAND_DARK,
                 fontWeight: 700,
@@ -3629,11 +3797,11 @@ function ComplianceBoardPage() {
             >
               Apply Filters
             </Button>
-            {(dateFilter.mode !== 'none' || selectedSeller || searchOrderId.trim() || searchBuyerName.trim()) && (
+            {(dateFilter.mode !== 'none' || draftDateFilter.mode !== 'none' || selectedSeller || searchOrderId.trim() || draftSearchOrderId.trim() || searchBuyerName.trim() || draftSearchBuyerName.trim() || !excludeClient || !draftExcludeClient || !excludeLowValue || !draftExcludeLowValue) && (
               <Button
                 variant="outlined"
                 onClick={handleClearDateFilters}
-                sx={{ color: BRAND_YELLOW_DARK, borderColor: BRAND_YELLOW_DARK }}
+                sx={{ ...FILTER_ACTION_SX, color: BRAND_YELLOW_DARK, borderColor: BRAND_YELLOW_DARK }}
               >
                 Clear Filters
               </Button>
@@ -3711,7 +3879,7 @@ function ComplianceBoardPage() {
                   </Box>
                 </Box>
                 <Stack spacing={2}>
-                  {renderAlertsTile(fulfillmentAlerts, activeAlertPreviewId, setActiveAlertPreviewId)}
+                  {renderAlertsTile(fulfillmentAlerts, activeAlertPreviewId, handleAlertPreviewSelect)}
                 </Stack>
               </Box>
             );
@@ -3753,12 +3921,30 @@ function ComplianceBoardPage() {
         </Stack>
       )}
 
-      {/* Chat Dialog for messaging */}
-      <AllOrdersChatDialog
-        open={messageModalOpen}
-        onClose={handleCloseMessageDialog}
-        order={selectedOrderForMessage}
-      />
+      {selectedOrderForMessage && (
+        <ChatModal
+          open={messageModalOpen}
+          onClose={handleCloseMessageDialog}
+          orderId={selectedOrderForMessage.orderId || selectedOrderForMessage.legacyOrderId}
+          buyerUsername={selectedOrderForMessage.buyer?.username || selectedOrderForMessage.buyerUsername || ''}
+          buyerName={selectedOrderForMessage.shippingFullName || selectedOrderForMessage.buyer?.buyerRegistrationAddress?.fullName || selectedOrderForMessage.buyerName || ''}
+          itemId={selectedOrderForMessage.itemNumber || selectedOrderForMessage.lineItems?.[0]?.legacyItemId || selectedOrderForMessage.lineItems?.[0]?.itemId || selectedOrderForMessage.itemId || ''}
+          itemTitle={selectedOrderForMessage.productName || selectedOrderForMessage.lineItems?.[0]?.title || selectedOrderForMessage.itemTitle || ''}
+          sellerId={
+            selectedOrderForMessage.seller?._id
+              ? String(selectedOrderForMessage.seller._id)
+              : (selectedOrderForMessage.sellerId
+                ? String(selectedOrderForMessage.sellerId)
+                : (typeof selectedOrderForMessage.seller === 'string'
+                  ? selectedOrderForMessage.seller
+                  : null))
+          }
+          sellerName={resolveOrderSellerName(selectedOrderForMessage)}
+          conversationId={selectedOrderForMessage.conversationId || null}
+          title="Chat"
+          showManageCase={false}
+        />
+      )}
 
       <OrderDetailsModal
         open={Boolean(selectedOrderDetailsId)}
