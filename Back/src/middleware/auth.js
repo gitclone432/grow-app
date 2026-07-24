@@ -133,6 +133,7 @@ export const PAGE_DEFAULT_ROLES = {
   'EbayAnalyticsHub': ['superadmin', 'listingadmin'],
   'EbayFeedback': ['superadmin', 'listingadmin'],
   'EbayApiTester': ['superadmin', 'listingadmin'],
+  'GetOrdersApi': ['superadmin', 'listingadmin'],
   'SkuIndexSync': ['superadmin', 'listingadmin'],
   'DuplicateSkus': ['superadmin', 'listingadmin'],
   'SkuIndexDashboard': ['superadmin', 'listingadmin'],
@@ -176,7 +177,6 @@ export const PAGE_DEFAULT_ROLES = {
   'TaskList': ['superadmin', 'listingadmin'],
   'Assignments': ['superadmin', 'listingadmin'],
   'RangeAnalyzer': ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'],
-  'ColumnCreator': ['superadmin', 'productadmin'],
   'ManageRanges': ['superadmin', 'productadmin'],
   'UserPerformance': ['superadmin'],
   // Etsy

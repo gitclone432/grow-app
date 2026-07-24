@@ -118,7 +118,7 @@ router.get('/performance', requireAuth, async (req, res) => {
         const isManager = ['hr', 'hradmin', 'superadmin'].includes(req.user.role);
 
         if (!isManager) {
-            query.user = req.user._id;
+            query.user = req.user.userId;
         }
 
         const records = await UserDailyQuantity.find(query)

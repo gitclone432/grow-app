@@ -43,7 +43,7 @@ import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ChatModal from '../../components/ChatModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 import ColumnSelector from '../../components/ColumnSelector';
-import { yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
+import { yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 
 // LogsCell component for editable logs field with save functionality
 function LogsCell({ value, onSave, id }) {
@@ -146,7 +146,7 @@ export default function ReturnRequestedPage({
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalReturns, setTotalReturns] = useState(0);
-  const limit = 50; // Items per page
+  const limit = 25; // Items per page
 
   // Snackbar state for sync results
   const [snackbarOpen, setSnackbarOpen] = useState(false);
@@ -552,16 +552,18 @@ export default function ReturnRequestedPage({
           })
       }}
     >
-      <Stack direction="row" alignItems="center" spacing={2} mb={3} sx={{ flexShrink: 0 }}>
-        <AssignmentReturnIcon sx={{ fontSize: 32, color: 'primary.main' }} />
-        <Typography variant="h4">Return Requests</Typography>
-        <Chip
-          label={`${totalReturns} total returns`}
-          color="info"
-          variant="outlined"
-          sx={{ ml: 'auto' }}
-        />
-      </Stack>
+      {!embedded && (
+        <Stack direction="row" alignItems="center" spacing={2} mb={1.5} sx={{ flexShrink: 0 }}>
+          <AssignmentReturnIcon sx={{ fontSize: 32, color: 'primary.main' }} />
+          <Typography variant="h4">Return Requests</Typography>
+          <Chip
+            label={`${totalReturns} total returns`}
+            color="info"
+            variant="outlined"
+            sx={{ ml: 'auto' }}
+          />
+        </Stack>
+      )}
 
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
@@ -585,46 +587,34 @@ export default function ReturnRequestedPage({
         </Alert>
       </Snackbar>
 
-      {/* Controls Row 1: Fetch Button & Info */}
-      <Stack direction="row" spacing={2} mb={2} alignItems="center" justifyContent="space-between">
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Button
-            variant="contained"
-            color="primary"
-            startIcon={fetching ? <CircularProgress size={20} color="inherit" /> : <RefreshIcon />}
-            onClick={fetchReturnsFromEbay}
-            disabled={fetching}
-          >
-            {fetching ? 'Fetching...' : 'Fetch Returns from eBay'}
-          </Button>
+      {/* Toolbar: Fetch, Filters, CSV, Columns */}
+      <Stack
+        direction="row"
+        spacing={1}
+        mb={1.5}
+        alignItems="center"
+        justifyContent="space-between"
+        flexWrap="wrap"
+        useFlexGap
+      >
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Tooltip title="Polls returns from the last 30 days via eBay's API">
+            <span>
+              <Button
+                size="small"
+                variant="contained"
+                sx={yellowFilledButtonSx}
+                startIcon={fetching ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+                onClick={fetchReturnsFromEbay}
+                disabled={fetching}
+              >
+                {fetching ? 'Fetching...' : 'Fetch from eBay'}
+              </Button>
+            </span>
+          </Tooltip>
 
-          <Typography variant="caption" color="text.secondary">
-            📅 Polls returns from <strong>last 30 days</strong> from eBay
-          </Typography>
-        </Stack>
-
-        <Button
-          variant="outlined"
-          color="success"
-          startIcon={<DownloadIcon />}
-          onClick={() => setExportDialogOpen(true)}
-        >
-          Export CSV
-        </Button>
-        <ColumnSelector
-          allColumns={ALL_COLUMNS}
-          visibleColumns={visibleColumns}
-          onColumnChange={setVisibleColumns}
-          onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
-          page="return-requested"
-        />
-      </Stack>
-
-      {/* Controls Row 2: Filters */}
-      <Paper sx={{ p: 2, mb: 3 }}>
-        <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
           {/* Seller Filter */}
-          <FormControl size="small" sx={{ minWidth: 150 }}>
+          <FormControl size="small" sx={{ minWidth: 130 }}>
             <InputLabel>Seller</InputLabel>
             <Select
               value={sellerFilter}
@@ -641,7 +631,7 @@ export default function ReturnRequestedPage({
           </FormControl>
 
           {/* Status Filter */}
-          <FormControl size="small" sx={{ minWidth: 180 }}>
+          <FormControl size="small" sx={{ minWidth: 150 }}>
             <InputLabel>Status</InputLabel>
             <Select
               value={statusFilter}
@@ -656,7 +646,7 @@ export default function ReturnRequestedPage({
           </FormControl>
 
           {/* Reason Filter - Multi-select */}
-          <FormControl size="small" sx={{ minWidth: 180 }}>
+          <FormControl size="small" sx={{ minWidth: 150 }}>
             <InputLabel>Reason</InputLabel>
             <Select
               multiple
@@ -700,7 +690,7 @@ export default function ReturnRequestedPage({
           {!hideDateFilter && (
             <>
               {/* Date Filter */}
-              <FormControl size="small" sx={{ minWidth: 160 }}>
+              <FormControl size="small" sx={{ minWidth: 130 }}>
                 <InputLabel>Date</InputLabel>
                 <Select
                   value={dateFilter.mode}
@@ -742,6 +732,7 @@ export default function ReturnRequestedPage({
                     setInternalDateFilter((prev) => ({ ...prev, single: e.target.value }))
                   }
                   InputLabelProps={{ shrink: true }}
+                  sx={{ width: 150 }}
                 />
               )}
 
@@ -756,6 +747,7 @@ export default function ReturnRequestedPage({
                       setInternalDateFilter((prev) => ({ ...prev, from: e.target.value }))
                     }
                     InputLabelProps={{ shrink: true }}
+                    sx={{ width: 150 }}
                   />
                   <TextField
                     size="small"
@@ -766,6 +758,7 @@ export default function ReturnRequestedPage({
                       setInternalDateFilter((prev) => ({ ...prev, to: e.target.value }))
                     }
                     InputLabelProps={{ shrink: true }}
+                    sx={{ width: 150 }}
                   />
                 </>
               )}
@@ -780,7 +773,7 @@ export default function ReturnRequestedPage({
               onClick={handleClearFilters}
               color="inherit"
             >
-              Clear Filters
+              Clear
             </Button>
           )}
 
@@ -788,19 +781,40 @@ export default function ReturnRequestedPage({
           <FormControlLabel
             control={
               <Switch
+                size="small"
                 checked={urgentOnly}
                 onChange={(e) => setUrgentOnly(e.target.checked)}
                 color="error"
               />
             }
             label={
-              <Typography variant="body2" sx={{ fontWeight: urgentOnly ? 'bold' : 'normal', color: urgentOnly ? 'error.main' : 'inherit' }}>
-                🔥 Urgent (Due in 48hrs)
+              <Typography variant="caption" sx={{ fontWeight: urgentOnly ? 'bold' : 'normal', color: urgentOnly ? 'error.main' : 'inherit' }}>
+                🔥 Urgent
               </Typography>
             }
+            sx={{ ml: 0 }}
           />
         </Stack>
-      </Paper>
+
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Button
+            size="small"
+            variant="outlined"
+            sx={yellowOutlinedButtonSx}
+            startIcon={<DownloadIcon />}
+            onClick={() => setExportDialogOpen(true)}
+          >
+            CSV
+          </Button>
+          <ColumnSelector
+            allColumns={ALL_COLUMNS}
+            visibleColumns={visibleColumns}
+            onColumnChange={setVisibleColumns}
+            onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
+            page="return-requested"
+          />
+        </Stack>
+      </Stack>
 
       {/* Table */}
       {loading ? (

@@ -36,7 +36,8 @@ import { yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 
 export default function CancelledStatusPage({
   dateFilter: dateFilterProp,
-  hideDateFilter = false
+  hideDateFilter = false,
+  embedded = false
 }) {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -53,7 +54,7 @@ export default function CancelledStatusPage({
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalOrders, setTotalOrders] = useState(0);
-  const limit = 50; // Items per page
+  const limit = 25; // Items per page
 
   const MARKETPLACES = [
     'EBAY_US',
@@ -261,59 +262,36 @@ export default function CancelledStatusPage({
 
   return (
     <Box>
-      {/* HEADER SECTION */}
-      <Paper sx={{ p: 2, mb: 2 }}>
-        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2}>
-          <Stack direction="row" alignItems="center" spacing={1}>
-            <CancelIcon color="error" />
-            <Typography variant="h5" fontWeight="bold">
-              Cancelled Status
-            </Typography>
-          </Stack>
+      {!embedded && (
+        <Stack direction="row" alignItems="center" spacing={1} mb={1.5}>
+          <CancelIcon color="error" />
+          <Typography variant="h5" fontWeight="bold">
+            Cancelled Status
+          </Typography>
           {orders.length > 0 && (
             <Chip
               icon={<CancelIcon />}
               label={`${orders.length} order(s) with cancellation`}
               color="error"
               variant="outlined"
+              sx={{ ml: 'auto' }}
             />
           )}
-
-          <Button
-            variant="outlined"
-            color="success"
-            startIcon={<DownloadIcon />}
-            onClick={() => {
-              const csvData = prepareCSVData(orders, {
-                'Order ID': 'orderId',
-                'Seller': (o) => o.seller?.user?.username || '',
-                'Buyer Name': 'shippingFullName',
-                'Product': 'productName',
-                'Cancel State': 'cancelState',
-                'Date Sold': (o) => o.dateSold ? new Date(o.dateSold).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }) : '',
-                'Marketplace': 'purchaseMarketplaceId',
-                'Total': (o) => o.pricingSummary?.total?.value || '',
-                'Worksheet Status': 'worksheetStatus',
-                'Logs': 'logs',
-              });
-              downloadCSV(csvData, 'Cancelled_Orders');
-            }}
-            disabled={orders.length === 0}
-          >
-            Download CSV ({orders.length})
-          </Button>
-          <ColumnSelector
-            allColumns={ALL_COLUMNS}
-            visibleColumns={visibleColumns}
-            onColumnChange={setVisibleColumns}
-            onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
-            page="cancelled-status"
-          />
         </Stack>
+      )}
 
-        {/* Filters Row */}
-        <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 2 }} flexWrap="wrap" useFlexGap>
-          <FormControl size="small" sx={{ minWidth: 150 }}>
+      {/* Toolbar: Filters, Refresh, CSV, Columns */}
+      <Stack
+        direction="row"
+        spacing={1}
+        mb={1.5}
+        alignItems="center"
+        justifyContent="space-between"
+        flexWrap="wrap"
+        useFlexGap
+      >
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <FormControl size="small" sx={{ minWidth: 130 }}>
             <InputLabel>Seller</InputLabel>
             <Select
               value={sellerFilter}
@@ -345,22 +323,9 @@ export default function CancelledStatusPage({
             </Select>
           </FormControl>
 
-          <Button
-            variant="outlined"
-            startIcon={<RefreshIcon />}
-            onClick={fetchCancelledOrders}
-            disabled={loading}
-            size="small"
-          >
-            Refresh
-          </Button>
-        </Stack>
-
-        {!hideDateFilter && (
-          <>
-            {/* Date Filter */}
-            <Stack direction="row" alignItems="center" spacing={2} flexWrap="wrap" useFlexGap sx={{ mt: 2 }}>
-              <FormControl size="small" sx={{ minWidth: 140 }}>
+          {!hideDateFilter && (
+            <>
+              <FormControl size="small" sx={{ minWidth: 130 }}>
                 <InputLabel>Date</InputLabel>
                 <Select
                   value={dateFilter.mode}
@@ -380,6 +345,7 @@ export default function CancelledStatusPage({
                   value={dateFilter.single}
                   onChange={(e) => setInternalDateFilter({ ...dateFilter, single: e.target.value })}
                   InputLabelProps={{ shrink: true }}
+                  sx={{ width: 150 }}
                 />
               )}
 
@@ -392,8 +358,8 @@ export default function CancelledStatusPage({
                     onChange={(e) => setInternalDateFilter({ ...dateFilter, from: e.target.value })}
                     label="From"
                     InputLabelProps={{ shrink: true }}
+                    sx={{ width: 150 }}
                   />
-                  <Typography variant="body2">to</Typography>
                   <TextField
                     type="date"
                     size="small"
@@ -401,19 +367,65 @@ export default function CancelledStatusPage({
                     onChange={(e) => setInternalDateFilter({ ...dateFilter, to: e.target.value })}
                     label="To"
                     InputLabelProps={{ shrink: true }}
+                    sx={{ width: 150 }}
                   />
                 </>
               )}
-            </Stack>
-          </>
-        )}
+            </>
+          )}
 
-        {error && (
-          <Alert severity="error" sx={{ mt: 2 }}>
-            {error}
-          </Alert>
-        )}
-      </Paper>
+          <Button
+            size="small"
+            variant="outlined"
+            sx={yellowOutlinedButtonSx}
+            startIcon={<RefreshIcon />}
+            onClick={fetchCancelledOrders}
+            disabled={loading}
+          >
+            Refresh
+          </Button>
+        </Stack>
+
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Button
+            size="small"
+            variant="outlined"
+            sx={yellowOutlinedButtonSx}
+            startIcon={<DownloadIcon />}
+            onClick={() => {
+              const csvData = prepareCSVData(orders, {
+                'Order ID': 'orderId',
+                'Seller': (o) => o.seller?.user?.username || '',
+                'Buyer Name': 'shippingFullName',
+                'Product': 'productName',
+                'Cancel State': 'cancelState',
+                'Date Sold': (o) => o.dateSold ? new Date(o.dateSold).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }) : '',
+                'Marketplace': 'purchaseMarketplaceId',
+                'Total': (o) => o.pricingSummary?.total?.value || '',
+                'Worksheet Status': 'worksheetStatus',
+                'Logs': 'logs',
+              });
+              downloadCSV(csvData, 'Cancelled_Orders');
+            }}
+            disabled={orders.length === 0}
+          >
+            CSV ({orders.length})
+          </Button>
+          <ColumnSelector
+            allColumns={ALL_COLUMNS}
+            visibleColumns={visibleColumns}
+            onColumnChange={setVisibleColumns}
+            onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
+            page="cancelled-status"
+          />
+        </Stack>
+      </Stack>
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 1.5 }}>
+          {error}
+        </Alert>
+      )}
 
       {/* TABLE SECTION */}
       {loading ? (

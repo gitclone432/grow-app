@@ -135,6 +135,7 @@ export const PAGE_REGISTRY = [
   { id: 'EbayAnalyticsHub', name: 'Analytics Hub', path: '/analytics-hub', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayFeedback', name: 'Feedback', path: '/feedback', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayApiTester', name: 'eBay API Tester', path: '/ebay-api-tester', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'GetOrdersApi', name: 'getOrders (Fulfillment)', path: '/get-orders-api', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'SkuIndexSync', name: 'SKU Index Sync', path: '/sku-index-sync', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'DuplicateSkus', name: 'Duplicate SKUs', path: '/duplicate-skus', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'SkuIndexDashboard', name: 'SKU Index Dashboard', path: '/sku-index-dashboard', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
@@ -171,7 +172,6 @@ export const PAGE_REGISTRY = [
   { id: 'ManagePlatforms', name: 'Manage Platforms', path: '/platforms', category: 'others', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ManageStores', name: 'Manage Stores', path: '/stores', category: 'others', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ProductTable', name: 'Product Table', path: '/listing', category: 'others', defaultRoles: ['superadmin', 'listingadmin'] },
-  { id: 'ColumnCreator', name: 'Column Creator', path: '/column-creator', category: 'others', defaultRoles: ['superadmin', 'productadmin'] },
   { id: 'ManageRanges', name: 'Manage Ranges', path: '/ranges', category: 'others', defaultRoles: ['superadmin', 'productadmin'] },
   { id: 'UserPerformance', name: 'User Performance Logs', path: '/user-performance', category: 'others', defaultRoles: ['superadmin'] },
 

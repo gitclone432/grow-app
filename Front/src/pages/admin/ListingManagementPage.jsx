@@ -6,8 +6,38 @@ import {
   TextField, Paper, Checkbox, Typography, Alert, Divider, Grid, CircularProgress,
   useMediaQuery, useTheme, Chip
 } from '@mui/material';
+import { alpha } from '@mui/material/styles';
 import AssignmentIcon from '@mui/icons-material/Assignment';
 import api from '../../lib/api.js';
+import SectionCard from '../../components/SectionCard.jsx';
+import { BRAND_DARK, BRAND_DARK_ALT, BRAND_YELLOW, BRAND_YELLOW_DARK } from '../../constants/brandTheme.js';
+import {
+  tableBodyCellSx,
+  tableBodyRowSx,
+  tableContainerSx,
+  tableHeaderCellSx,
+  yellowFilledButtonSx,
+  yellowOutlinedButtonSx,
+} from '../../theme/tableStyles.js';
+
+const inputSx = {
+  '& .MuiOutlinedInput-root': {
+    backgroundColor: '#fff',
+  },
+};
+
+const dialogPaperSx = {
+  borderRadius: 4,
+  border: `1px solid ${alpha(BRAND_DARK, 0.08)}`,
+  boxShadow: '0 24px 48px rgba(15, 23, 42, 0.16)',
+  overflow: 'hidden',
+};
+
+const compactChipSx = {
+  fontWeight: 600,
+  border: `1px solid ${alpha(BRAND_DARK, 0.08)}`,
+  backgroundColor: alpha(BRAND_DARK, 0.04),
+};
 
 export default function ListingManagementPage() {
   // Mobile responsiveness (same approach as FulfillmentDashboard)
@@ -17,22 +47,22 @@ export default function ListingManagementPage() {
 
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
-  
+
   // Single Assignment State
   const [assignOpen, setAssignOpen] = useState(false);
   const [assigning, setAssigning] = useState(null);
-  
+
   // Bulk Assignment State
   const [selectedTaskIds, setSelectedTaskIds] = useState([]);
   const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
   // bulkItems structure: { [taskId]: { quantity: number, storeId: string } }
-  const [bulkItems, setBulkItems] = useState({}); 
-  
+  const [bulkItems, setBulkItems] = useState({});
+
   // Common Data
   const [listers, setListers] = useState([]);
   const [listingPlatforms, setListingPlatforms] = useState([]);
   const [stores, setStores] = useState([]);
-  
+
   // Assignment Form (Shared by Single & Bulk)
   const [assignForm, setAssignForm] = useState({
     listerId: '',
@@ -40,7 +70,7 @@ export default function ListingManagementPage() {
     listingPlatformId: '',
     storeId: '', // Used for Single only, or as a "helper" for Bulk
     notes: '',
-    scheduledDate: new Date().toISOString().split('T')[0] 
+    scheduledDate: new Date().toISOString().split('T')[0]
   });
 
   // Load Data
@@ -78,11 +108,11 @@ export default function ListingManagementPage() {
   // --- SINGLE ASSIGNMENT HANDLERS ---
   const openAssign = (row) => {
     setAssigning(row);
-    setAssignForm({ 
-      listerId: '', 
-      quantity: row.quantity || '', 
-      listingPlatformId: '', 
-      storeId: '', 
+    setAssignForm({
+      listerId: '',
+      quantity: row.quantity || '',
+      listingPlatformId: '',
+      storeId: '',
       notes: '',
       scheduledDate: new Date().toISOString().split('T')[0]
     });
@@ -117,7 +147,7 @@ export default function ListingManagementPage() {
   };
 
   // --- BULK ASSIGNMENT HANDLERS ---
-  
+
   const handleSelectAllClick = (event) => {
     if (event.target.checked) {
       const newSelected = rows.map((n) => n._id);
@@ -148,7 +178,7 @@ export default function ListingManagementPage() {
 
   const openBulkAssign = () => {
     if (selectedTaskIds.length === 0) return;
-    
+
     // Initialize state for selected tasks
     const initialItems = {};
     selectedTaskIds.forEach(id => {
@@ -160,10 +190,10 @@ export default function ListingManagementPage() {
     });
     setBulkItems(initialItems);
 
-    setAssignForm({ 
-      listerId: '', 
-      quantity: '', 
-      listingPlatformId: '', 
+    setAssignForm({
+      listerId: '',
+      quantity: '',
+      listingPlatformId: '',
       storeId: '', // Acts as "Set All Stores" helper
       notes: '',
       scheduledDate: new Date().toISOString().split('T')[0]
@@ -191,16 +221,16 @@ export default function ListingManagementPage() {
       });
       return next;
     });
-    
+
     // If applying store, update the main dropdown for visual consistency
-    if(field === 'storeId') {
+    if (field === 'storeId') {
       setAssignForm(prev => ({ ...prev, storeId: val }));
     }
   };
 
   const handleBulkAssignSubmit = async () => {
     const { listerId, listingPlatformId, notes, scheduledDate } = assignForm;
-    
+
     // 1. Validate Common Fields
     if (!listerId || !listingPlatformId) {
       alert('Please select a Lister and Listing Platform.');
@@ -211,7 +241,7 @@ export default function ListingManagementPage() {
     const assignmentsPayload = [];
     for (const id of selectedTaskIds) {
       const item = bulkItems[id];
-      
+
       if (!item.quantity || Number(item.quantity) <= 0) {
         alert('Please ensure all tasks have a valid quantity greater than 0.');
         return;
@@ -258,41 +288,110 @@ export default function ListingManagementPage() {
   const formatMarketplace = (m) => (m ? m.replace('EBAY_', 'eBay ').replace('_', ' ') : '-');
 
   if (loading) {
-    return <Box display="flex" justifyContent="center" p={4}><CircularProgress /></Box>;
+    return (
+      <Box display="flex" justifyContent="center" p={6}>
+        <CircularProgress sx={{ color: BRAND_YELLOW_DARK }} />
+      </Box>
+    );
   }
 
   return (
-    <Box>
-      {/* Action Bar */}
-      <Stack
-        direction={{ xs: 'column', lg: 'row' }}
-        justifyContent="space-between"
-        alignItems={{ xs: 'stretch', lg: 'center' }}
-        spacing={1.5}
-        sx={{ mb: 2, p: 1 }}
+    <Box sx={{ maxWidth: 1600, mx: 'auto' }}>
+      <SectionCard
+        emphasized
+        sx={{
+          mb: 3,
+          overflow: 'hidden',
+          background: `linear-gradient(135deg, ${BRAND_DARK} 0%, ${BRAND_DARK_ALT} 55%, #31577d 100%)`,
+          border: `1px solid ${alpha(BRAND_YELLOW, 0.18)}`,
+          color: '#fffdf0',
+          position: 'relative',
+        }}
       >
-        <Typography variant="h6">Listing Management</Typography>
+        <Box sx={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }}>
+          <Box sx={{ position: 'absolute', top: -96, right: -68, width: 280, height: 280, borderRadius: '50%', background: `radial-gradient(circle, ${alpha(BRAND_YELLOW, 0.22)} 0%, transparent 70%)` }} />
+          <Box sx={{ position: 'absolute', bottom: -88, left: '24%', width: 240, height: 240, borderRadius: '50%', background: 'radial-gradient(circle, rgba(37, 99, 235, 0.2) 0%, transparent 70%)' }} />
+        </Box>
 
-        {selectedTaskIds.length > 0 && (
-          <Button
-            variant="contained"
-            color="primary"
-            startIcon={<AssignmentIcon />}
-            onClick={openBulkAssign}
-            fullWidth={isMobile}
-          >
-            Assign {selectedTaskIds.length} Selected Tasks
-          </Button>
-        )}
-      </Stack>
+        <Stack
+          direction={{ xs: 'column', md: 'row' }}
+          spacing={3}
+          justifyContent="space-between"
+          sx={{ position: 'relative', p: { xs: 3, md: 4 } }}
+        >
+          <Box sx={{ maxWidth: 840 }}>
+            <Chip
+              label="Task Assignment"
+              size="small"
+              sx={{
+                mb: 1.5,
+                bgcolor: alpha(BRAND_YELLOW, 0.14),
+                color: BRAND_YELLOW,
+                border: `1px solid ${alpha(BRAND_YELLOW, 0.24)}`,
+                fontWeight: 700,
+                letterSpacing: '0.05em',
+                textTransform: 'uppercase',
+              }}
+            />
+            <Typography variant="h4" sx={{ fontWeight: 900, lineHeight: 1.1, mb: 1 }}>
+              Listing Management
+            </Typography>
+            <Typography sx={{ color: 'rgba(255, 253, 240, 0.76)', maxWidth: 700 }}>
+              Review pending listing tasks, assign them individually or in bulk, and keep platform and store routing consistent inside the refreshed admin dashboard layout.
+            </Typography>
+          </Box>
 
-      {/* MOBILE/TABLET: Card view */}
+          <Stack direction={{ xs: 'row', md: 'column' }} spacing={1.25} flexWrap="wrap" useFlexGap>
+            <Chip label={`${rows.length} Tasks`} sx={{ bgcolor: alpha('#fff', 0.08), color: '#fffdf0', border: '1px solid rgba(255,255,255,0.1)', fontWeight: 700 }} />
+            <Chip label={`${selectedTaskIds.length} Selected`} sx={{ bgcolor: alpha('#fff', 0.08), color: '#fffdf0', border: '1px solid rgba(255,255,255,0.1)', fontWeight: 700 }} />
+            <Chip label={`${listingPlatforms.length} Listing Platforms`} sx={{ bgcolor: alpha('#fff', 0.08), color: '#fffdf0', border: '1px solid rgba(255,255,255,0.1)', fontWeight: 700 }} />
+          </Stack>
+        </Stack>
+      </SectionCard>
+
+      <SectionCard sx={{ p: { xs: 2, md: 2.5 }, mb: 3 }}>
+        <Stack
+          direction={{ xs: 'column', lg: 'row' }}
+          justifyContent="space-between"
+          alignItems={{ xs: 'stretch', lg: 'center' }}
+          spacing={1.5}
+        >
+          <Box>
+            <Typography variant="h6" sx={{ fontWeight: 800, color: BRAND_DARK, mb: 0.5 }}>
+              Assignment Queue
+            </Typography>
+            <Typography variant="body2" sx={{ color: alpha(BRAND_DARK, 0.64) }}>
+              Select one or more tasks to share with listers and assign the correct listing store.
+            </Typography>
+          </Box>
+
+          {selectedTaskIds.length > 0 && (
+            <Button
+              variant="contained"
+              startIcon={<AssignmentIcon />}
+              onClick={openBulkAssign}
+              fullWidth={isMobile}
+              sx={yellowFilledButtonSx}
+            >
+              Assign {selectedTaskIds.length} Selected Tasks
+            </Button>
+          )}
+        </Stack>
+      </SectionCard>
+
       <Box sx={{ display: { xs: 'block', md: 'none' } }}>
         <Stack spacing={1.5}>
           {rows.map((r, idx) => {
             const checked = isSelected(r._id);
             return (
-              <Paper key={r._id} elevation={2} sx={{ p: 2, borderRadius: 2 }}>
+              <SectionCard
+                key={r._id}
+                sx={{
+                  p: 2,
+                  borderColor: checked ? alpha(BRAND_YELLOW_DARK, 0.3) : alpha(BRAND_DARK, 0.08),
+                  boxShadow: checked ? '0 18px 32px rgba(245, 200, 66, 0.14)' : undefined,
+                }}
+              >
                 <Stack spacing={1}>
                   <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
                     <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ minWidth: 0 }}>
@@ -318,7 +417,7 @@ export default function ListingManagementPage() {
                             href={r.supplierLink}
                             target="_blank"
                             rel="noreferrer"
-                            sx={{ mt: 1 }}
+                            sx={{ mt: 1, ...yellowOutlinedButtonSx }}
                           >
                             Supplier Link
                           </Button>
@@ -326,102 +425,130 @@ export default function ListingManagementPage() {
                       </Box>
                     </Stack>
 
-                    <Button size="small" variant="outlined" onClick={() => openAssign(r)} sx={{ flexShrink: 0 }}>
+                    <Button size="small" variant="outlined" onClick={() => openAssign(r)} sx={{ flexShrink: 0, ...yellowOutlinedButtonSx }}>
                       Share
                     </Button>
                   </Stack>
 
                   <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    <Chip size="small" label={`Source: ${r.sourcePlatform?.name || '-'}`} />
-                    <Chip size="small" label={`Marketplace: ${formatMarketplace(r.marketplace)}`} />
+                    <Chip size="small" label={`Source: ${r.sourcePlatform?.name || '-'}`} sx={compactChipSx} />
+                    <Chip size="small" label={`Marketplace: ${formatMarketplace(r.marketplace)}`} sx={compactChipSx} />
                     <Chip
                       size="small"
                       label={`Category: ${r.category?.name || '-'}${r.subcategory ? ` / ${r.subcategory.name}` : ''}`}
+                      sx={compactChipSx}
                     />
-                    <Chip size="small" label={`Created: ${r.createdBy?.username || '-'}`} />
+                    <Chip size="small" label={`Created: ${r.createdBy?.username || '-'}`} sx={compactChipSx} />
                   </Stack>
                 </Stack>
-              </Paper>
+              </SectionCard>
             );
           })}
         </Stack>
       </Box>
 
-      {/* DESKTOP: Table view */}
-      <TableContainer component={Paper} sx={{ display: { xs: 'none', md: 'block' }, overflowX: 'auto' }}>
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell padding="checkbox">
-                <Checkbox
-                  color="primary"
-                  indeterminate={selectedTaskIds.length > 0 && selectedTaskIds.length < rows.length}
-                  checked={rows.length > 0 && selectedTaskIds.length === rows.length}
-                  onChange={handleSelectAllClick}
-                />
-              </TableCell>
-              <TableCell>SL No</TableCell>
-              <TableCell>Date</TableCell>
-              <TableCell>Product</TableCell>
-              <TableCell>Source Platform</TableCell>
-              <TableCell>Marketplace</TableCell>
-              <TableCell>Category</TableCell>
-              <TableCell>Created By</TableCell>
-              <TableCell>Actions</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {rows.map((r, idx) => {
-              const isItemSelected = isSelected(r._id);
-              return (
-                <TableRow 
-                  key={r._id}
-                  hover
-                  role="checkbox"
-                  aria-checked={isItemSelected}
-                  selected={isItemSelected}
-                >
-                  <TableCell padding="checkbox">
-                    <Checkbox
-                      color="primary"
-                      checked={isItemSelected}
-                      onChange={(event) => handleClick(event, r._id)}
-                    />
-                  </TableCell>
-                  <TableCell>{idx + 1}</TableCell>
-                  <TableCell>{new Date(r.date).toLocaleDateString()}</TableCell>
-                  <TableCell>
-                    {r.productTitle} <br/>
-                    <Typography variant="caption" component="a" href={r.supplierLink} target="_blank">
-                      Supplier Link
-                    </Typography>
-                  </TableCell>
-                  <TableCell>{r.sourcePlatform?.name || '-'}</TableCell>
-                  <TableCell>{r.marketplace?.replace('EBAY_', 'eBay ').replace('_', ' ') || '-'}</TableCell>
-                  <TableCell>
-                    {r.category?.name || '-'} 
-                    {r.subcategory ? ` / ${r.subcategory.name}` : ''}
-                  </TableCell>
-                  <TableCell>{r.createdBy?.username || '-'}</TableCell>
-                  <TableCell>
-                    <Button size="small" variant="outlined" onClick={() => openAssign(r)}>
-                      Share
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </TableContainer>
+      <SectionCard sx={{ p: { xs: 2, md: 2.5 }, display: { xs: 'none', md: 'block' } }}>
+        <Box sx={{ mb: 2.5, p: { xs: 2, md: 2.5 }, borderRadius: 3, border: `1px solid ${alpha(BRAND_DARK, 0.08)}`, background: 'linear-gradient(135deg, rgba(15,23,42,0.04) 0%, rgba(37,99,235,0.04) 100%)' }}>
+          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1.5} justifyContent="space-between">
+            <Box>
+              <Typography variant="h6" sx={{ fontWeight: 800, color: BRAND_DARK }}>
+                Pending Tasks
+              </Typography>
+              <Typography variant="body2" sx={{ color: alpha(BRAND_DARK, 0.64) }}>
+                Review task details, supplier links, and listing metadata before sharing to a lister.
+              </Typography>
+            </Box>
+            <Chip label={`${rows.length} visible`} sx={{ alignSelf: { xs: 'flex-start', lg: 'center' }, bgcolor: alpha(BRAND_DARK, 0.06), color: BRAND_DARK, fontWeight: 700, border: `1px solid ${alpha(BRAND_DARK, 0.1)}` }} />
+          </Stack>
+        </Box>
 
-      {/* --- SINGLE ASSIGN DIALOG --- */}
-      <Dialog open={assignOpen} onClose={() => setAssignOpen(false)} maxWidth="sm" fullWidth fullScreen={isMobile}>
-        <DialogTitle>Share Task</DialogTitle>
+        <TableContainer sx={{ ...tableContainerSx, overflowX: 'auto' }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell padding="checkbox" sx={tableHeaderCellSx}>
+                  <Checkbox
+                    color="default"
+                    indeterminate={selectedTaskIds.length > 0 && selectedTaskIds.length < rows.length}
+                    checked={rows.length > 0 && selectedTaskIds.length === rows.length}
+                    onChange={handleSelectAllClick}
+                    sx={{ color: 'rgba(255,255,255,0.78)', '&.Mui-checked': { color: '#fff' }, '&.MuiCheckbox-indeterminate': { color: '#fff' } }}
+                  />
+                </TableCell>
+                <TableCell sx={tableHeaderCellSx}>SL No</TableCell>
+                <TableCell sx={tableHeaderCellSx}>Date</TableCell>
+                <TableCell sx={tableHeaderCellSx}>Product</TableCell>
+                <TableCell sx={tableHeaderCellSx}>Source Platform</TableCell>
+                <TableCell sx={tableHeaderCellSx}>Marketplace</TableCell>
+                <TableCell sx={tableHeaderCellSx}>Category</TableCell>
+                <TableCell sx={tableHeaderCellSx}>Created By</TableCell>
+                <TableCell sx={tableHeaderCellSx}>Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {rows.map((r, idx) => {
+                const isItemSelected = isSelected(r._id);
+                return (
+                  <TableRow
+                    key={r._id}
+                    hover
+                    role="checkbox"
+                    aria-checked={isItemSelected}
+                    selected={isItemSelected}
+                    sx={tableBodyRowSx}
+                  >
+                    <TableCell padding="checkbox" sx={tableBodyCellSx}>
+                      <Checkbox
+                        color="primary"
+                        checked={isItemSelected}
+                        onChange={(event) => handleClick(event, r._id)}
+                      />
+                    </TableCell>
+                    <TableCell sx={tableBodyCellSx}>{idx + 1}</TableCell>
+                    <TableCell sx={tableBodyCellSx}>{r.date ? new Date(r.date).toLocaleDateString() : '-'}</TableCell>
+                    <TableCell sx={tableBodyCellSx}>
+                      <Typography sx={{ fontWeight: 600, color: BRAND_DARK, mb: 0.5 }}>{r.productTitle || '-'}</Typography>
+                      {r.supplierLink ? (
+                        <Typography
+                          variant="caption"
+                          component="a"
+                          href={r.supplierLink}
+                          target="_blank"
+                          rel="noreferrer"
+                          sx={{ color: '#2563eb', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } }}
+                        >
+                          Supplier Link
+                        </Typography>
+                      ) : '-'}
+                    </TableCell>
+                    <TableCell sx={tableBodyCellSx}>{r.sourcePlatform?.name || '-'}</TableCell>
+                    <TableCell sx={tableBodyCellSx}>{formatMarketplace(r.marketplace)}</TableCell>
+                    <TableCell sx={tableBodyCellSx}>
+                      {r.category?.name || '-'}
+                      {r.subcategory ? ` / ${r.subcategory.name}` : ''}
+                    </TableCell>
+                    <TableCell sx={tableBodyCellSx}>{r.createdBy?.username || '-'}</TableCell>
+                    <TableCell sx={tableBodyCellSx}>
+                      <Button size="small" variant="outlined" onClick={() => openAssign(r)} sx={yellowOutlinedButtonSx}>
+                        Share
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </SectionCard>
+
+      <Dialog open={assignOpen} onClose={() => setAssignOpen(false)} maxWidth="sm" fullWidth fullScreen={isMobile} PaperProps={{ sx: dialogPaperSx }}>
+        <DialogTitle sx={{ background: `linear-gradient(135deg, ${BRAND_DARK} 0%, ${BRAND_DARK_ALT} 100%)`, color: '#fffdf0', fontWeight: 800 }}>
+          Share Task
+        </DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             {assigning && (
-              <Alert severity="info">
+              <Alert severity="info" sx={{ borderRadius: 2 }}>
                 Assigning: <strong>{assigning.productTitle}</strong>
               </Alert>
             )}
@@ -444,6 +571,7 @@ export default function ListingManagementPage() {
               size="small"
               value={assignForm.quantity}
               onChange={(e) => setAssignForm({ ...assignForm, quantity: Number(e.target.value) })}
+              sx={inputSx}
             />
 
             <TextField
@@ -453,6 +581,7 @@ export default function ListingManagementPage() {
               value={assignForm.scheduledDate}
               onChange={(e) => setAssignForm({ ...assignForm, scheduledDate: e.target.value })}
               InputLabelProps={{ shrink: true }}
+              sx={inputSx}
             />
 
             <FormControl fullWidth size="small">
@@ -488,29 +617,31 @@ export default function ListingManagementPage() {
               size="small"
               value={assignForm.notes}
               onChange={(e) => setAssignForm({ ...assignForm, notes: e.target.value })}
+              sx={inputSx}
             />
           </Stack>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setAssignOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleAssign}>Share</Button>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button onClick={() => setAssignOpen(false)} sx={yellowOutlinedButtonSx}>Cancel</Button>
+          <Button variant="contained" onClick={handleAssign} sx={yellowFilledButtonSx}>Share</Button>
         </DialogActions>
       </Dialog>
 
-      {/* --- BULK ASSIGN DIALOG --- */}
-      <Dialog open={bulkAssignOpen} onClose={() => setBulkAssignOpen(false)} maxWidth="md" fullWidth fullScreen={isMobile}>
-        <DialogTitle>Bulk Assign Tasks</DialogTitle>
+      <Dialog open={bulkAssignOpen} onClose={() => setBulkAssignOpen(false)} maxWidth="md" fullWidth fullScreen={isMobile} PaperProps={{ sx: dialogPaperSx }}>
+        <DialogTitle sx={{ background: `linear-gradient(135deg, ${BRAND_DARK} 0%, ${BRAND_DARK_ALT} 100%)`, color: '#fffdf0', fontWeight: 800 }}>
+          Bulk Assign Tasks
+        </DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <Alert severity="info">
-              You are assigning <strong>{selectedTaskIds.length}</strong> tasks. 
+            <Alert severity="info" sx={{ borderRadius: 2 }}>
+              You are assigning <strong>{selectedTaskIds.length}</strong> tasks.
               Set common details below, then specify quantities and stores for each task.
             </Alert>
 
             {/* Common Fields: stack on mobile, 2-col on desktop */}
             <Grid container spacing={2}>
               <Grid item xs={12} md={6}>
-                 <FormControl fullWidth size="small">
+                <FormControl fullWidth size="small">
                   <InputLabel>Lister</InputLabel>
                   <Select
                     label="Lister"
@@ -532,6 +663,7 @@ export default function ListingManagementPage() {
                   value={assignForm.scheduledDate}
                   onChange={(e) => setAssignForm({ ...assignForm, scheduledDate: e.target.value })}
                   InputLabelProps={{ shrink: true }}
+                  sx={inputSx}
                 />
               </Grid>
               <Grid item xs={12} md={6}>
@@ -572,65 +704,65 @@ export default function ListingManagementPage() {
                   size="small"
                   value={assignForm.notes}
                   onChange={(e) => setAssignForm({ ...assignForm, notes: e.target.value })}
+                  sx={inputSx}
                 />
               </Grid>
             </Grid>
 
-            <Divider>TASK DETAILS</Divider>
+            <Divider sx={{ color: alpha(BRAND_DARK, 0.54), fontWeight: 700 }}>TASK DETAILS</Divider>
 
-            {/* Helper for Quantity */}
             <Box display="flex" gap={2} alignItems="center" justifyContent="flex-end">
-               <Typography variant="caption">Set all quantities:</Typography>
-               <TextField 
-                  size="small" 
-                  type="number" 
-                  sx={{ width: 80 }} 
-                  onChange={(e) => applyToAll('quantity', e.target.value)}
-                  placeholder="0"
-               />
+              <Typography variant="caption">Set all quantities:</Typography>
+              <TextField
+                size="small"
+                type="number"
+                sx={{ width: 80 }}
+                onChange={(e) => applyToAll('quantity', e.target.value)}
+                placeholder="0"
+              />
             </Box>
 
-            {/* Task List Table */}
-            <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 300, overflowX: 'auto' }}>
+            <TableContainer component={Paper} variant="outlined" sx={{ ...tableContainerSx, maxHeight: 300, overflowX: 'auto' }}>
               <Table size="small" stickyHeader>
                 <TableHead>
                   <TableRow>
-                    <TableCell>Product Title</TableCell>
-                    <TableCell width={220}>Store</TableCell>
-                    <TableCell width={120}>Quantity</TableCell>
+                    <TableCell sx={tableHeaderCellSx}>Product Title</TableCell>
+                    <TableCell width={220} sx={tableHeaderCellSx}>Store</TableCell>
+                    <TableCell width={120} sx={tableHeaderCellSx}>Quantity</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {selectedTaskIds.map(id => {
                     const task = rows.find(r => r._id === id);
                     const itemState = bulkItems[id] || {};
-                    
+
                     if (!task) return null;
                     return (
-                      <TableRow key={id}>
-                        <TableCell>{task.productTitle}</TableCell>
-                        <TableCell>
-                            <FormControl fullWidth size="small">
-                              <Select
-                                value={itemState.storeId || ''}
-                                onChange={(e) => handleBulkItemChange(id, 'storeId', e.target.value)}
-                                displayEmpty
-                                disabled={!assignForm.listingPlatformId}
-                              >
-                                 <MenuItem value="" disabled><em>Select Store</em></MenuItem>
-                                {stores.map((s) => (
-                                  <MenuItem key={s._id} value={s._id}>{s.name}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
+                      <TableRow key={id} sx={tableBodyRowSx}>
+                        <TableCell sx={tableBodyCellSx}>{task.productTitle}</TableCell>
+                        <TableCell sx={tableBodyCellSx}>
+                          <FormControl fullWidth size="small">
+                            <Select
+                              value={itemState.storeId || ''}
+                              onChange={(e) => handleBulkItemChange(id, 'storeId', e.target.value)}
+                              displayEmpty
+                              disabled={!assignForm.listingPlatformId}
+                            >
+                              <MenuItem value="" disabled><em>Select Store</em></MenuItem>
+                              {stores.map((s) => (
+                                <MenuItem key={s._id} value={s._id}>{s.name}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
                         </TableCell>
-                        <TableCell>
+                        <TableCell sx={tableBodyCellSx}>
                           <TextField
                             size="small"
                             type="number"
                             value={itemState.quantity || ''}
                             onChange={(e) => handleBulkItemChange(id, 'quantity', e.target.value)}
                             placeholder="Qty"
+                            sx={inputSx}
                           />
                         </TableCell>
                       </TableRow>
@@ -642,9 +774,9 @@ export default function ListingManagementPage() {
 
           </Stack>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setBulkAssignOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleBulkAssignSubmit} fullWidth={isSmallMobile}>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button onClick={() => setBulkAssignOpen(false)} sx={yellowOutlinedButtonSx}>Cancel</Button>
+          <Button variant="contained" onClick={handleBulkAssignSubmit} fullWidth={isSmallMobile} sx={yellowFilledButtonSx}>
             Assign All
           </Button>
         </DialogActions>

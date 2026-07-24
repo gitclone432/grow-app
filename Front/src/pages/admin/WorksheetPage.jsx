@@ -24,6 +24,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import ListAltIcon from '@mui/icons-material/ListAlt';
 import api from '../../lib/api';
 import ColumnSelector from '../../components/ColumnSelector';
+import { yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 
 const CATEGORIES = [
   { key: 'cancellations', label: 'Cancellations' },
@@ -244,30 +245,40 @@ export default function WorksheetPage({
 
   return (
     <Box sx={embedded ? {} : { p: 3 }}>
-      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 2 }}>
-        <Box>
-          <Typography variant="h4" gutterBottom>
-            Worksheet
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Daily overview of cancellations, returns, INR & disputes, and inquiries. Dates and filters are based on Pacific Time.
-          </Typography>
-        </Box>
-        <Chip
-          icon={<ListAltIcon />}
-          label={`${totalCount} Total Items`}
-          color="primary"
-          sx={{ fontSize: '1rem', px: 1, py: 2.5 }}
-        />
-      </Stack>
+      {!embedded && (
+        <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 2 }}>
+          <Box>
+            <Typography variant="h4" gutterBottom>
+              Worksheet
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Daily overview of cancellations, returns, INR & disputes, and inquiries. Dates and filters are based on Pacific Time.
+            </Typography>
+          </Box>
+          <Chip
+            icon={<ListAltIcon />}
+            label={`${totalCount} Total Items`}
+            color="primary"
+            sx={{ fontSize: '1rem', px: 1, py: 2.5 }}
+          />
+        </Stack>
+      )}
 
-      {hideDateFilter && (
-        <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
-          {/* Seller Filter */}
-          <FormControl size="small" sx={{ minWidth: 150 }}>
-            <InputLabel id="seller-filter-label-embedded">Seller</InputLabel>
+      {/* Toolbar: Seller/Date filters, Refresh, Columns */}
+      <Stack
+        direction="row"
+        spacing={1}
+        mb={1.5}
+        alignItems="center"
+        justifyContent="space-between"
+        flexWrap="wrap"
+        useFlexGap
+      >
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <FormControl size="small" sx={{ minWidth: 130 }}>
+            <InputLabel id="seller-filter-label">Seller</InputLabel>
             <Select
-              labelId="seller-filter-label-embedded"
+              labelId="seller-filter-label"
               value={sellerFilter}
               label="Seller"
               onChange={(e) => setSellerFilter(e.target.value)}
@@ -280,121 +291,89 @@ export default function WorksheetPage({
               ))}
             </Select>
           </FormControl>
+
+          {!hideDateFilter && (
+            <>
+              <FormControl size="small" sx={{ minWidth: 130 }}>
+                <InputLabel id="date-mode-label">Date Mode</InputLabel>
+                <Select
+                  labelId="date-mode-label"
+                  value={dateFilter.mode}
+                  label="Date Mode"
+                  onChange={(e) => setInternalDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+                >
+                  <MenuItem value="all">All</MenuItem>
+                  <MenuItem value="single">Single Day</MenuItem>
+                  <MenuItem value="range">Date Range</MenuItem>
+                </Select>
+              </FormControl>
+
+              {dateFilter.mode === 'single' && (
+                <TextField
+                  label="Date"
+                  type="date"
+                  value={dateFilter.single}
+                  onChange={(e) => setInternalDateFilter(prev => ({ ...prev, single: e.target.value }))}
+                  InputLabelProps={{ shrink: true }}
+                  size="small"
+                  sx={{ width: 150 }}
+                />
+              )}
+
+              {dateFilter.mode === 'range' && (
+                <>
+                  <TextField
+                    label="From"
+                    type="date"
+                    value={dateFilter.from}
+                    onChange={(e) => setInternalDateFilter(prev => ({ ...prev, from: e.target.value }))}
+                    InputLabelProps={{ shrink: true }}
+                    size="small"
+                    sx={{ width: 150 }}
+                  />
+                  <TextField
+                    label="To"
+                    type="date"
+                    value={dateFilter.to}
+                    onChange={(e) => setInternalDateFilter(prev => ({ ...prev, to: e.target.value }))}
+                    InputLabelProps={{ shrink: true }}
+                    size="small"
+                    sx={{ width: 150 }}
+                  />
+                </>
+              )}
+            </>
+          )}
+
           <Button
+            size="small"
             variant="outlined"
+            sx={yellowOutlinedButtonSx}
             startIcon={<RefreshIcon />}
             onClick={fetchStatistics}
             disabled={loading}
-            size="small"
           >
             Refresh
           </Button>
+        </Stack>
+
+        <Stack direction="row" spacing={1} alignItems="center">
           <ColumnSelector
-              allColumns={ALL_COLUMNS}
-              visibleColumns={visibleColumns}
-              onColumnChange={setVisibleColumns}
-              onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
-              page="worksheet"
+            allColumns={ALL_COLUMNS}
+            visibleColumns={visibleColumns}
+            onColumnChange={setVisibleColumns}
+            onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
+            page="worksheet"
           />
         </Stack>
-      )}
-
-      {!hideDateFilter && (
-        <Paper sx={{ p: 2, mb: 3 }}>
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="center" flexWrap="wrap">
-            <FormControl size="small" sx={{ minWidth: 150 }}>
-              <InputLabel id="date-mode-label">Date Mode</InputLabel>
-              <Select
-                labelId="date-mode-label"
-                value={dateFilter.mode}
-                label="Date Mode"
-                onChange={(e) => setInternalDateFilter(prev => ({ ...prev, mode: e.target.value }))}
-              >
-                <MenuItem value="all">All</MenuItem>
-                <MenuItem value="single">Single Day</MenuItem>
-                <MenuItem value="range">Date Range</MenuItem>
-              </Select>
-            </FormControl>
-
-            {/* Seller Filter */}
-            <FormControl size="small" sx={{ minWidth: 150 }}>
-              <InputLabel id="seller-filter-label">Seller</InputLabel>
-              <Select
-                labelId="seller-filter-label"
-                value={sellerFilter}
-                label="Seller"
-                onChange={(e) => setSellerFilter(e.target.value)}
-              >
-                <MenuItem value="">All Sellers</MenuItem>
-                {sellers.map((s) => (
-                  <MenuItem key={s._id} value={s._id}>
-                    {s.user?.username || s._id}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            {dateFilter.mode === 'single' && (
-              <TextField
-                label="Date"
-                type="date"
-                value={dateFilter.single}
-                onChange={(e) => setInternalDateFilter(prev => ({ ...prev, single: e.target.value }))}
-                InputLabelProps={{ shrink: true }}
-                size="small"
-                sx={{ minWidth: 200 }}
-              />
-            )}
-
-            {dateFilter.mode === 'range' && (
-              <>
-                <TextField
-                  label="From"
-                  type="date"
-                  value={dateFilter.from}
-                  onChange={(e) => setInternalDateFilter(prev => ({ ...prev, from: e.target.value }))}
-                  InputLabelProps={{ shrink: true }}
-                  size="small"
-                  sx={{ minWidth: 200 }}
-                />
-                <TextField
-                  label="To"
-                  type="date"
-                  value={dateFilter.to}
-                  onChange={(e) => setInternalDateFilter(prev => ({ ...prev, to: e.target.value }))}
-                  InputLabelProps={{ shrink: true }}
-                  size="small"
-                  sx={{ minWidth: 200 }}
-                />
-              </>
-            )}
-
-            <Button
-              variant="outlined"
-              startIcon={<RefreshIcon />}
-              onClick={fetchStatistics}
-              disabled={loading}
-              size="small"
-            >
-              Refresh
-            </Button>
-            <ColumnSelector
-                allColumns={ALL_COLUMNS}
-                visibleColumns={visibleColumns}
-                onColumnChange={setVisibleColumns}
-                onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
-                page="worksheet"
-            />
-          </Stack>
-        </Paper>
-      )}
+      </Stack>
 
       {/* Summary Cards */}
       {summary && (
         <Stack
           direction={{ xs: 'column', md: 'row' }}
           spacing={2}
-          sx={{ mb: 3 }}
+          sx={{ mb: 1.5 }}
         >
           <SummaryCard
             title="Cancellations"

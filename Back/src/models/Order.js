@@ -104,6 +104,10 @@ const OrderSchema = new mongoose.Schema(
       type: String,
       default: null
     },
+    allOrdersUsdRemark: {
+      type: String,
+      default: ''
+    },
     orderTotal: Number, // Stored order total for sheet editing; defaults to pricingSummary.total.value + salesTax
     // Financial calculations (All Orders Sheet)
     tds: Number, // Tax Deducted at Source (1% of (pricingSummary.total.value + salesTax))

@@ -1095,7 +1095,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
   const handleKeyDown = (e) => { if (e.key === 'Enter') handleSearch(); };
 
   return (
-    <Box sx={{ mt: { xs: 1.5, sm: 2 }, p: { xs: 1.5, sm: 2 }, backgroundColor: 'action.hover', borderRadius: 1 }}>
+    <Box sx={{ mt: 1, p: { xs: 1, sm: 1.25 }, backgroundColor: 'action.hover', borderRadius: 1 }}>
       <Box
         sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
         onClick={() => setFiltersExpanded(prev => !prev)}
@@ -1108,7 +1108,7 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
         </IconButton>
       </Box>
       <Collapse in={filtersExpanded}>
-        <Stack spacing={{ xs: 1.5, sm: 2 }} sx={{ mt: 1.5 }}>
+        <Stack spacing={{ xs: 1, sm: 1.25 }} sx={{ mt: 1 }}>
           {/* Row 1: Text searches */}
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={{ xs: 1, sm: 2 }}>
             <TextField
@@ -2795,7 +2795,7 @@ function FulfillmentDashboard() {
   }, []);
 
   // helpers
-  const formatDate = (dateStr, marketplaceId) => {
+  const formatDate = (dateStr, marketplaceId, { showIst = false } = {}) => {
     if (!dateStr) return '-';
     try {
       const date = new Date(dateStr);
@@ -2833,13 +2833,42 @@ function FulfillmentDashboard() {
         timeZone: timeZone,
       });
 
-      return (
+      const primaryLine = (
         <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.8125rem', lineHeight: 1.25 }}>
           {formattedDate}{' '}
           <Box component="span" sx={{ color: 'text.secondary', fontSize: '0.7rem' }}>
             {formattedTime} ({timeZoneLabel})
           </Box>
         </Typography>
+      );
+
+      if (!showIst) return primaryLine;
+
+      const istDate = date.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        timeZone: 'Asia/Kolkata',
+      });
+      const istTime = date.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'Asia/Kolkata',
+      });
+
+      return (
+        <Stack spacing={0.15}>
+          {primaryLine}
+          <Typography
+            variant="caption"
+            sx={{ whiteSpace: 'nowrap', fontSize: '0.68rem', lineHeight: 1.2, color: 'text.secondary' }}
+          >
+            {istDate}{' '}
+            <Box component="span" sx={{ fontSize: '0.65rem' }}>
+              {istTime} (IST)
+            </Box>
+          </Typography>
+        </Stack>
       );
     } catch {
       return '-';
@@ -3292,7 +3321,9 @@ function FulfillmentDashboard() {
     }
   }, []);
 
-  const PollRunStatusStrip = () => {
+  const [pollStatusAnchor, setPollStatusAnchor] = useState(null);
+
+  const PollStatusControl = () => {
     const newOrders = pollRunStatus['poll-new-orders'] || {};
     const updates = pollRunStatus['poll-order-updates'] || {};
     const messages = pollRunStatus['buyer-chat-check-new'] || {};
@@ -3300,52 +3331,49 @@ function FulfillmentDashboard() {
       if (!run) return;
       setPollRunDetail({ title, run });
     };
+    const items = [
+      { label: 'Cron new orders', title: 'Cron New Orders', run: newOrders.cron },
+      { label: 'Cron updates', title: 'Cron Order Updates', run: updates.cron },
+      { label: 'Manual new orders', title: 'Manual New Orders', run: newOrders.manual },
+      { label: 'Manual updates', title: 'Manual Order Updates', run: updates.manual },
+      { label: 'Cron messages', title: 'Cron Buyer Messages', run: messages.cron },
+      { label: 'Manual messages', title: 'Manual Buyer Messages', run: messages.manual },
+    ];
 
     return (
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={0.75} sx={{ mt: 1 }} flexWrap="wrap">
+      <>
         <Chip
           size="small"
           variant="outlined"
-          label={`Cron new orders: ${formatPollRunSummary(newOrders.cron)}`}
-          onClick={() => openRunDetail('Cron New Orders', newOrders.cron)}
-          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: newOrders.cron ? 'pointer' : 'default' }}
+          icon={<HistoryIcon sx={{ fontSize: '0.9rem !important' }} />}
+          label="Poll Status"
+          onClick={(e) => setPollStatusAnchor(e.currentTarget)}
+          sx={{ height: 24, fontSize: '0.7rem', cursor: 'pointer' }}
         />
-        <Chip
-          size="small"
-          variant="outlined"
-          label={`Cron updates: ${formatPollRunSummary(updates.cron)}`}
-          onClick={() => openRunDetail('Cron Order Updates', updates.cron)}
-          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: updates.cron ? 'pointer' : 'default' }}
-        />
-        <Chip
-          size="small"
-          variant="outlined"
-          label={`Manual new orders: ${formatPollRunSummary(newOrders.manual)}`}
-          onClick={() => openRunDetail('Manual New Orders', newOrders.manual)}
-          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: newOrders.manual ? 'pointer' : 'default' }}
-        />
-        <Chip
-          size="small"
-          variant="outlined"
-          label={`Manual updates: ${formatPollRunSummary(updates.manual)}`}
-          onClick={() => openRunDetail('Manual Order Updates', updates.manual)}
-          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: updates.manual ? 'pointer' : 'default' }}
-        />
-        <Chip
-          size="small"
-          variant="outlined"
-          label={`Cron messages: ${formatPollRunSummary(messages.cron)}`}
-          onClick={() => openRunDetail('Cron Buyer Messages', messages.cron)}
-          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: messages.cron ? 'pointer' : 'default' }}
-        />
-        <Chip
-          size="small"
-          variant="outlined"
-          label={`Manual messages: ${formatPollRunSummary(messages.manual)}`}
-          onClick={() => openRunDetail('Manual Buyer Messages', messages.manual)}
-          sx={{ maxWidth: '100%', justifyContent: 'flex-start', cursor: messages.manual ? 'pointer' : 'default' }}
-        />
-      </Stack>
+        <Menu
+          anchorEl={pollStatusAnchor}
+          open={Boolean(pollStatusAnchor)}
+          onClose={() => setPollStatusAnchor(null)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+          transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+        >
+          {items.map((item) => (
+            <MenuItem
+              key={item.label}
+              onClick={() => { setPollStatusAnchor(null); openRunDetail(item.title, item.run); }}
+              disabled={!item.run}
+              sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', minWidth: 220 }}
+            >
+              <Typography variant="caption" fontWeight={700} sx={{ fontSize: '0.72rem' }}>
+                {item.label}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.68rem' }}>
+                {formatPollRunSummary(item.run)}
+              </Typography>
+            </MenuItem>
+          ))}
+        </Menu>
+      </>
     );
   };
 
@@ -3398,74 +3426,70 @@ function FulfillmentDashboard() {
         )}
 
         {/* HEADER SECTION - FIXED */}
-        <SectionCard sx={{ p: { xs: 1.5, sm: 2 }, mb: { xs: 1, sm: 2 }, flexShrink: 0 }}>
+        <SectionCard sx={{ p: { xs: 1, sm: 1.25 }, mb: 1, flexShrink: 0 }}>
           <Stack
             direction={{ xs: 'column', sm: 'row' }}
             alignItems={{ xs: 'flex-start', sm: 'center' }}
             justifyContent="space-between"
-            spacing={{ xs: 1, sm: 2 }}
-            sx={{ mb: 2 }}
+            spacing={1}
+            sx={{ mb: 1, pb: 1, borderBottom: '1px solid', borderColor: 'divider' }}
           >
-            <Stack direction="row" alignItems="center" spacing={1}>
-              <LocalShippingIcon color="primary" sx={{ fontSize: { xs: 20, sm: 24 } }} />
+            <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
+              <LocalShippingIcon color="primary" sx={{ fontSize: { xs: 18, sm: 20 } }} />
               <Typography
-                variant="h5"
+                variant="h6"
                 fontWeight="bold"
-                sx={{ fontSize: { xs: '1.1rem', sm: '1.25rem', md: '1.5rem' } }}
+                sx={{ fontSize: { xs: '1rem', sm: '1.05rem', md: '1.15rem' } }}
               >
                 Fulfillment Dashboard
               </Typography>
-            </Stack>
-            <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
               {totalOrders > 0 && (
                 <Chip
                   label={`${totalOrders} orders`}
                   variant="filled"
-                  size={isSmallMobile ? 'small' : 'medium'}
-                  sx={{ bgcolor: '#f5c842', color: '#1a1a2e', fontWeight: 700 }}
+                  size="small"
+                  sx={{ bgcolor: '#f5c842', color: '#1a1a2e', fontWeight: 700, height: 22, fontSize: '0.7rem' }}
                 />
               )}
               {orders.length > 0 && totalPages > 1 && (
-                <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: '0.75rem', sm: '0.875rem' } }}>
+                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
                   (Page {currentPage}/{totalPages})
                 </Typography>
               )}
-              <Stack direction="row" spacing={1} alignItems="center">
+            </Stack>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<UploadIcon />}
+                onClick={() => setImportDialogOpen(true)}
+                sx={{ ...yellowOutlinedButtonSx, fontSize: { xs: '0.7rem', sm: '0.75rem' }, py: 0.25, minHeight: 28 }}
+              >
+                {isSmallMobile ? 'Import' : 'Import CSV'}
+              </Button>
+              {orders.length > 0 && (
                 <Button
                   variant="outlined"
                   size="small"
-                  startIcon={<UploadIcon />}
-                  onClick={() => setImportDialogOpen(true)}
-                  sx={{ ...yellowOutlinedButtonSx, fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
+                  startIcon={<DownloadIcon />}
+                  onClick={handleOpenExportDialog}
+                  sx={{ ...yellowOutlinedButtonSx, fontSize: { xs: '0.7rem', sm: '0.75rem' }, py: 0.25, minHeight: 28 }}
                 >
-                  {isSmallMobile ? 'Import' : 'Import CSV'}
+                  {isSmallMobile ? 'CSV' : 'Download CSV'}
                 </Button>
-                {orders.length > 0 && (
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<DownloadIcon />}
-                    onClick={handleOpenExportDialog}
-                    sx={{ ...yellowOutlinedButtonSx, fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
-                  >
-                    {isSmallMobile ? 'CSV' : 'Download CSV'}
-                  </Button>
-                )}
-                <Button
-                  variant="contained"
-                  size="small"
-                  startIcon={autoMessageLoading ? <CircularProgress size={16} color="inherit" /> : <SendIcon />}
-                  onClick={handleSendAutoMessages}
-                  disabled={autoMessageLoading}
-                  sx={{ ...yellowFilledButtonSx, fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
-                >
-                  {isSmallMobile ? 'Auto Msg' : 'Send Auto Messages'}
-                </Button>
-              </Stack>
+              )}
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={autoMessageLoading ? <CircularProgress size={14} color="inherit" /> : <SendIcon />}
+                onClick={handleSendAutoMessages}
+                disabled={autoMessageLoading}
+                sx={{ ...yellowFilledButtonSx, fontSize: { xs: '0.7rem', sm: '0.75rem' }, py: 0.25, minHeight: 28 }}
+              >
+                {isSmallMobile ? 'Auto Msg' : 'Send Auto Messages'}
+              </Button>
             </Stack>
           </Stack>
-
-          <Divider sx={{ my: 2 }} />
 
           {/* CONTROLS */}
           {isMobile ? (
@@ -3589,10 +3613,9 @@ function FulfillmentDashboard() {
                 )}
               </Stack>
 
-              <PollRunStatusStrip />
-
               {isSuperAdmin && (
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+                  <PollStatusControl />
                   <FormControl size="small" sx={{ flex: '1 1 120px' }}>
                     <InputLabel id="utc-refresh-mode-mobile-label">PT Mode</InputLabel>
                     <Select
@@ -3704,7 +3727,7 @@ function FulfillmentDashboard() {
               </Stack>
 
               {/* Row 3.5: Exclude Low Value & Missing Amazon Account Toggles */}
-              <Stack direction="row" spacing={1} sx={{ mt: 1, mb: 1, flexWrap: 'wrap' }}>
+              <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
                 <FormControlLabel
                   control={
                     <Switch
@@ -3757,273 +3780,288 @@ function FulfillmentDashboard() {
               </Stack>
             </Stack>
           ) : (
-            /* DESKTOP LAYOUT - Two-row layout for better spacing */
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-              {/* Row 1: Seller, Poll/Sync Actions, Recalc */}
-              <Stack direction="row" spacing={1.5} alignItems="center" sx={{ flexWrap: 'wrap' }}>
-                <Select
-                  value={selectedSeller}
-                  onChange={(e) => setSelectedSeller(e.target.value)}
-                  displayEmpty
-                  size="small"
-                  renderValue={(val) => val ? (sellers.find(s => s._id === val)?.user?.username || sellers.find(s => s._id === val)?.user?.email || val) : 'Select Seller'}
-                  sx={{ minWidth: 150, fontSize: '0.85rem', color: selectedSeller ? 'inherit' : 'text.secondary' }}
-                >
-                  <MenuItem value="">
-                    <em>All Sellers</em>
-                  </MenuItem>
-                  {sellers.map((s) => (
-                    <MenuItem key={s._id} value={s._id}>
-                      {s.user?.username || s.user?.email || s._id}
+            /* DESKTOP LAYOUT - Dense rows */
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              {/* Row 1: Seller + Poll actions (left) | Filters, Toggles, Column Selector (right) */}
+              <Stack
+                direction="row"
+                spacing={1.5}
+                alignItems="center"
+                justifyContent="space-between"
+                sx={{ flexWrap: 'wrap', rowGap: 1 }}
+              >
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+                  <Select
+                    value={selectedSeller}
+                    onChange={(e) => setSelectedSeller(e.target.value)}
+                    displayEmpty
+                    size="small"
+                    renderValue={(val) => val ? (sellers.find(s => s._id === val)?.user?.username || sellers.find(s => s._id === val)?.user?.email || val) : 'Select Seller'}
+                    sx={{ minWidth: 140, fontSize: '0.8rem', color: selectedSeller ? 'inherit' : 'text.secondary' }}
+                  >
+                    <MenuItem value="">
+                      <em>All Sellers</em>
                     </MenuItem>
-                  ))}
-                </Select>
+                    {sellers.map((s) => (
+                      <MenuItem key={s._id} value={s._id}>
+                        {s.user?.username || s.user?.email || s._id}
+                      </MenuItem>
+                    ))}
+                  </Select>
 
-                <Button
-                  variant="contained"
-                  size="small"
-                  startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <ShoppingCartIcon />}
-                  onClick={pollNewOrders}
-                  disabled={loading}
-                  sx={{ ...yellowFilledButtonSx, minWidth: 120 }}
-                >
-                  {loading ? 'Polling...' : 'Poll New Orders'}
-                </Button>
+                  <Button
+                    variant="contained"
+                    size="small"
+                    startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <ShoppingCartIcon />}
+                    onClick={pollNewOrders}
+                    disabled={loading}
+                    sx={{ ...yellowFilledButtonSx, minWidth: 'auto' }}
+                  >
+                    {loading ? 'Polling...' : 'Poll New Orders'}
+                  </Button>
 
-                <Button
-                  variant="contained"
-                  size="small"
-                  startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
-                  onClick={pollOrderUpdates}
-                  disabled={loading}
-                  sx={{ ...yellowFilledButtonSx, minWidth: 120 }}
-                >
-                  {loading ? 'Updating...' : 'Poll Order Updates'}
-                </Button>
+                  <Button
+                    variant="contained"
+                    size="small"
+                    startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+                    onClick={pollOrderUpdates}
+                    disabled={loading}
+                    sx={{ ...yellowFilledButtonSx, minWidth: 'auto' }}
+                  >
+                    {loading ? 'Updating...' : 'Poll Order Updates'}
+                  </Button>
 
-                {isSuperAdmin && (
-                  <>
-                    <Button
-                      variant="outlined"
-                      color="inherit"
-                      size="small"
-                      endIcon={<MoreVertIcon />}
-                      onClick={(e) => setMoreActionsAnchor(e.currentTarget)}
-                    >
-                      More actions
-                    </Button>
-                    <Menu
-                      anchorEl={moreActionsAnchor}
-                      open={Boolean(moreActionsAnchor)}
-                      onClose={() => setMoreActionsAnchor(null)}
-                      anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
-                      transformOrigin={{ vertical: 'top', horizontal: 'left' }}
-                    >
-                      <ListSubheader sx={{ lineHeight: 2, fontSize: '0.75rem' }}>Resync window</ListSubheader>
-                      <Box sx={{ px: 2, pb: 1 }}>
-                        <Select
-                          value={resyncDays}
-                          onChange={(e) => setResyncDays(e.target.value)}
-                          size="small"
-                          fullWidth
-                          sx={{ height: 36, fontSize: '0.85rem' }}
+                  {isSuperAdmin && (
+                    <>
+                      <Button
+                        variant="outlined"
+                        color="inherit"
+                        size="small"
+                        endIcon={<MoreVertIcon />}
+                        onClick={(e) => setMoreActionsAnchor(e.currentTarget)}
+                      >
+                        More actions
+                      </Button>
+                      <Menu
+                        anchorEl={moreActionsAnchor}
+                        open={Boolean(moreActionsAnchor)}
+                        onClose={() => setMoreActionsAnchor(null)}
+                        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+                        transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                      >
+                        <ListSubheader sx={{ lineHeight: 2, fontSize: '0.75rem' }}>Resync window</ListSubheader>
+                        <Box sx={{ px: 2, pb: 1 }}>
+                          <Select
+                            value={resyncDays}
+                            onChange={(e) => setResyncDays(e.target.value)}
+                            size="small"
+                            fullWidth
+                            sx={{ height: 36, fontSize: '0.85rem' }}
+                          >
+                            <MenuItem value={3}>3 Days</MenuItem>
+                            <MenuItem value={7}>7 Days</MenuItem>
+                            <MenuItem value={10}>10 Days</MenuItem>
+                            <MenuItem value={15}>15 Days</MenuItem>
+                            <MenuItem value={30}>30 Days</MenuItem>
+                          </Select>
+                        </Box>
+                        <MenuItem
+                          onClick={() => { setMoreActionsAnchor(null); resyncRecent(); }}
+                          disabled={loading}
                         >
-                          <MenuItem value={3}>3 Days</MenuItem>
-                          <MenuItem value={7}>7 Days</MenuItem>
-                          <MenuItem value={10}>10 Days</MenuItem>
-                          <MenuItem value={15}>15 Days</MenuItem>
-                          <MenuItem value={30}>30 Days</MenuItem>
-                        </Select>
-                      </Box>
-                      <MenuItem
-                        onClick={() => { setMoreActionsAnchor(null); resyncRecent(); }}
-                        disabled={loading}
-                      >
-                        {loading ? 'Syncing...' : `Resync ${resyncDays} Days`}
-                      </MenuItem>
-                      <MenuItem
-                        onClick={() => { setMoreActionsAnchor(null); recalculateEarnings(); }}
-                        disabled={recalcEarningsLoading}
-                      >
-                        {recalcEarningsLoading ? 'Recalculating...' : 'Recalc Earnings'}
-                      </MenuItem>
-                      <MenuItem
-                        onClick={() => { setMoreActionsAnchor(null); recalculateAmazonFinancials(); }}
-                        disabled={recalcAmazonLoading}
-                      >
-                        {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
-                      </MenuItem>
-                      <MenuItem
-                        onClick={() => { setMoreActionsAnchor(null); backfillEverythingAllStores(); }}
-                        disabled={backfillEverythingLoading}
-                      >
-                        {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
-                      </MenuItem>
-                    </Menu>
-                  </>
-                )}
+                          {loading ? 'Syncing...' : `Resync ${resyncDays} Days`}
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => { setMoreActionsAnchor(null); recalculateEarnings(); }}
+                          disabled={recalcEarningsLoading}
+                        >
+                          {recalcEarningsLoading ? 'Recalculating...' : 'Recalc Earnings'}
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => { setMoreActionsAnchor(null); recalculateAmazonFinancials(); }}
+                          disabled={recalcAmazonLoading}
+                        >
+                          {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => { setMoreActionsAnchor(null); backfillEverythingAllStores(); }}
+                          disabled={backfillEverythingLoading}
+                        >
+                          {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
+                        </MenuItem>
+                      </Menu>
+                    </>
+                  )}
+                </Stack>
+
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+                  <Select
+                    value={searchMarketplace}
+                    onChange={(e) => setSearchMarketplace(e.target.value)}
+                    displayEmpty
+                    size="small"
+                    renderValue={(val) => {
+                      if (!val) return 'Marketplace';
+                      const labels = { EBAY_US: 'USA', EBAY_ENCA: 'CA', EBAY_AU: 'AUS', EBAY_GB: 'UK' };
+                      return labels[val] || val;
+                    }}
+                    sx={{ minWidth: 110, fontSize: '0.8rem', color: searchMarketplace ? 'inherit' : 'text.secondary' }}
+                  >
+                    <MenuItem value=""><em>All</em></MenuItem>
+                    <MenuItem value="EBAY_US">USA</MenuItem>
+                    <MenuItem value="EBAY_ENCA">CA</MenuItem>
+                    <MenuItem value="EBAY_AU">AUS</MenuItem>
+                    <MenuItem value="EBAY_GB">UK</MenuItem>
+                  </Select>
+
+                  <Select
+                    value={searchPaymentStatus}
+                    onChange={(e) => setSearchPaymentStatus(e.target.value)}
+                    displayEmpty
+                    size="small"
+                    renderValue={(val) => val ? val : 'Payment Status'}
+                    sx={{ minWidth: 140, fontSize: '0.8rem', color: searchPaymentStatus ? 'inherit' : 'text.secondary' }}
+                  >
+                    <MenuItem value=""><em>All</em></MenuItem>
+                    <MenuItem value="FULLY_REFUNDED">FULLY_REFUNDED</MenuItem>
+                    <MenuItem value="PARTIALLY_REFUNDED">PARTIALLY_REFUNDED</MenuItem>
+                  </Select>
+
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={excludeClient}
+                        onChange={(e) => setExcludeClient(e.target.checked)}
+                        color="primary"
+                        size="small"
+                      />
+                    }
+                    label="Exclude Client"
+                    sx={FILTER_SWITCH_SX}
+                  />
+
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={excludeLowValue}
+                        onChange={(e) => setExcludeLowValue(e.target.checked)}
+                        color="primary"
+                        size="small"
+                      />
+                    }
+                    label="Exclude <$3"
+                    sx={FILTER_SWITCH_SX}
+                  />
+
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={missingAmazonAccount}
+                        onChange={(e) => setMissingAmazonAccount(e.target.checked)}
+                        color="primary"
+                        size="small"
+                      />
+                    }
+                    label="Missing Amazon Acc"
+                    sx={FILTER_SWITCH_SX}
+                  />
+
+                  <ColumnSelector
+                    allColumns={ALL_COLUMNS}
+                    visibleColumns={visibleColumns}
+                    onColumnChange={setVisibleColumns}
+                    onReset={() => setVisibleColumns(DEFAULT_VISIBLE_COLUMNS)}
+                    page="dashboard"
+                  />
+                </Stack>
               </Stack>
 
-              <PollRunStatusStrip />
-
+              {/* Row 2 (superadmin only): PT refresh controls (left) | compact poll status (right) */}
               {isSuperAdmin && (
-                <Stack direction="row" spacing={1.5} alignItems="center" sx={{ flexWrap: 'wrap' }}>
-                  <FormControl size="small" sx={{ minWidth: 130 }}>
-                    <InputLabel id="utc-refresh-mode-label">PT Mode</InputLabel>
-                    <Select
-                      labelId="utc-refresh-mode-label"
-                      label="PT Mode"
-                      value={utcRefreshMode}
-                      onChange={(e) => {
-                        setUtcRefreshMode(e.target.value);
-                        if (e.target.value === 'single') setUtcRefreshEndDate(utcRefreshStartDate);
-                      }}
-                    >
-                      <MenuItem value="single">Single Date</MenuItem>
-                      <MenuItem value="range">Date Range</MenuItem>
-                    </Select>
-                  </FormControl>
-                  <TextField
-                    label={utcRefreshMode === 'single' ? 'PT Date' : 'PT Start'}
-                    type="date"
-                    size="small"
-                    value={utcRefreshStartDate}
-                    onChange={(e) => {
-                      const nextDate = e.target.value;
-                      setUtcRefreshStartDate(nextDate);
-                      if (!utcRefreshEndDate || utcRefreshEndDate === utcRefreshStartDate) setUtcRefreshEndDate(nextDate);
-                    }}
-                    InputLabelProps={{ shrink: true }}
-                    sx={{ minWidth: 150 }}
-                  />
-                  {utcRefreshMode === 'range' && (
+                <Stack
+                  direction="row"
+                  spacing={1.5}
+                  alignItems="center"
+                  justifyContent="space-between"
+                  sx={{ flexWrap: 'wrap', rowGap: 1 }}
+                >
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+                    <FormControl size="small" sx={{ minWidth: 120 }}>
+                      <InputLabel id="utc-refresh-mode-label">PT Mode</InputLabel>
+                      <Select
+                        labelId="utc-refresh-mode-label"
+                        label="PT Mode"
+                        value={utcRefreshMode}
+                        onChange={(e) => {
+                          setUtcRefreshMode(e.target.value);
+                          if (e.target.value === 'single') setUtcRefreshEndDate(utcRefreshStartDate);
+                        }}
+                      >
+                        <MenuItem value="single">Single Date</MenuItem>
+                        <MenuItem value="range">Date Range</MenuItem>
+                      </Select>
+                    </FormControl>
                     <TextField
-                      label="PT End"
+                      label={utcRefreshMode === 'single' ? 'PT Date' : 'PT Start'}
                       type="date"
                       size="small"
-                      value={utcRefreshEndDate}
-                      onChange={(e) => setUtcRefreshEndDate(e.target.value)}
+                      value={utcRefreshStartDate}
+                      onChange={(e) => {
+                        const nextDate = e.target.value;
+                        setUtcRefreshStartDate(nextDate);
+                        if (!utcRefreshEndDate || utcRefreshEndDate === utcRefreshStartDate) setUtcRefreshEndDate(nextDate);
+                      }}
                       InputLabelProps={{ shrink: true }}
-                      sx={{ minWidth: 150 }}
+                      sx={{ minWidth: 140 }}
                     />
-                  )}
-                  <Button
-                    variant="outlined"
-                    color="secondary"
-                    size="small"
-                    startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
-                    onClick={handleOpenUtcRefreshConfirm}
-                    disabled={loading || !utcRefreshStartDate || (utcRefreshMode === 'range' && !utcRefreshEndDate)}
-                    sx={{ minWidth: 150 }}
-                  >
-                    {loading ? 'Refreshing...' : utcRefreshMode === 'single' ? 'Refresh PT Date' : 'Refresh PT Range'}
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    color="info"
-                    size="small"
-                    startIcon={<HistoryIcon />}
-                    onClick={handleOpenHistoryDialog}
-                    sx={{ minWidth: 120 }}
-                  >
-                    See History
-                  </Button>
+                    {utcRefreshMode === 'range' && (
+                      <TextField
+                        label="PT End"
+                        type="date"
+                        size="small"
+                        value={utcRefreshEndDate}
+                        onChange={(e) => setUtcRefreshEndDate(e.target.value)}
+                        InputLabelProps={{ shrink: true }}
+                        sx={{ minWidth: 140 }}
+                      />
+                    )}
+                    <Button
+                      variant="outlined"
+                      color="secondary"
+                      size="small"
+                      startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+                      onClick={handleOpenUtcRefreshConfirm}
+                      disabled={loading || !utcRefreshStartDate || (utcRefreshMode === 'range' && !utcRefreshEndDate)}
+                      sx={{ minWidth: 'auto' }}
+                    >
+                      {loading ? 'Refreshing...' : utcRefreshMode === 'single' ? 'Refresh PT Date' : 'Refresh PT Range'}
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      color="info"
+                      size="small"
+                      startIcon={<HistoryIcon />}
+                      onClick={handleOpenHistoryDialog}
+                      sx={{ minWidth: 'auto' }}
+                    >
+                      See History
+                    </Button>
+                  </Stack>
+
+                  <PollStatusControl />
                 </Stack>
               )}
-
-              {/* Row 2: Filters, Toggles, Column Selector */}
-              <Stack direction="row" spacing={1.5} alignItems="center" sx={{ flexWrap: 'wrap' }}>
-                <Select
-                  value={searchMarketplace}
-                  onChange={(e) => setSearchMarketplace(e.target.value)}
-                  displayEmpty
-                  size="small"
-                  renderValue={(val) => {
-                    if (!val) return 'Marketplace';
-                    const labels = { EBAY_US: 'USA', EBAY_ENCA: 'CA', EBAY_AU: 'AUS', EBAY_GB: 'UK' };
-                    return labels[val] || val;
-                  }}
-                  sx={{ minWidth: 120, fontSize: '0.8rem', color: searchMarketplace ? 'inherit' : 'text.secondary' }}
-                >
-                  <MenuItem value=""><em>All</em></MenuItem>
-                  <MenuItem value="EBAY_US">USA</MenuItem>
-                  <MenuItem value="EBAY_ENCA">CA</MenuItem>
-                  <MenuItem value="EBAY_AU">AUS</MenuItem>
-                  <MenuItem value="EBAY_GB">UK</MenuItem>
-                </Select>
-
-                <Select
-                  value={searchPaymentStatus}
-                  onChange={(e) => setSearchPaymentStatus(e.target.value)}
-                  displayEmpty
-                  size="small"
-                  renderValue={(val) => val ? val : 'Payment Status'}
-                  sx={{ minWidth: 150, fontSize: '0.8rem', color: searchPaymentStatus ? 'inherit' : 'text.secondary' }}
-                >
-                  <MenuItem value=""><em>All</em></MenuItem>
-                  <MenuItem value="FULLY_REFUNDED">FULLY_REFUNDED</MenuItem>
-                  <MenuItem value="PARTIALLY_REFUNDED">PARTIALLY_REFUNDED</MenuItem>
-                </Select>
-
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={excludeClient}
-                      onChange={(e) => setExcludeClient(e.target.checked)}
-                      color="primary"
-                      size="small"
-                    />
-                  }
-                  label="Exclude Client"
-                  sx={FILTER_SWITCH_SX}
-                />
-
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={excludeLowValue}
-                      onChange={(e) => setExcludeLowValue(e.target.checked)}
-                      color="primary"
-                      size="small"
-                    />
-                  }
-                  label="Exclude <$3"
-                  sx={FILTER_SWITCH_SX}
-                />
-
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={missingAmazonAccount}
-                      onChange={(e) => setMissingAmazonAccount(e.target.checked)}
-                      color="primary"
-                      size="small"
-                    />
-                  }
-                  label="Missing Amazon Acc"
-                  sx={FILTER_SWITCH_SX}
-                />
-
-                {/* Column Selector Button */}
-                <ColumnSelector
-                  allColumns={ALL_COLUMNS}
-                  visibleColumns={visibleColumns}
-                  onColumnChange={setVisibleColumns}
-                  onReset={() => setVisibleColumns(DEFAULT_VISIBLE_COLUMNS)}
-                  page="dashboard"
-                />
-              </Stack>
             </Box>
           )}
 
           {error && (
-            <Alert severity="error" sx={{ mt: 2 }}>
+            <Alert severity="error" sx={{ mt: 1 }}>
               {error}
             </Alert>
           )}
 
           {scopeWarning && !error && (
-            <Alert severity="warning" sx={{ mt: 2 }}>
+            <Alert severity="warning" sx={{ mt: 1 }}>
               {scopeWarning}
             </Alert>
           )}
@@ -4219,8 +4257,16 @@ function FulfillmentDashboard() {
                               </Stack>
                             </TableCell>
                           )}
-                          {visibleColumnsSet.has('dateSold') && <TableCell>{formatDate(order.dateSold, order.purchaseMarketplaceId)}</TableCell>}
-                          {visibleColumnsSet.has('shipBy') && <TableCell>{formatDate(order.shipByDate, order.purchaseMarketplaceId)}</TableCell>}
+                          {visibleColumnsSet.has('dateSold') && (
+                            <TableCell>
+                              {formatDate(order.dateSold, order.purchaseMarketplaceId, { showIst: true })}
+                            </TableCell>
+                          )}
+                          {visibleColumnsSet.has('shipBy') && (
+                            <TableCell>
+                              {formatDate(order.shipByDate, order.purchaseMarketplaceId, { showIst: true })}
+                            </TableCell>
+                          )}
                           {visibleColumnsSet.has('deliveryDate') && <TableCell>{formatDeliveryDate(order)}</TableCell>}
                           {visibleColumnsSet.has('productName') && (
                             <FulfillmentOrderRow

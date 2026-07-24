@@ -77,7 +77,8 @@ const UserSellerAssignmentPage = () => {
         try {
             const [usersRes, sellersRes] = await Promise.all([
                 api.get('/users'),
-                api.get('/sellers/all')
+                // Same store list as Fulfillment (all active stores), not assignment-scoped /sellers/all
+                api.get('/sellers/all-unfiltered')
             ]);
             // Filter out users with role 'seller'
             const filteredUsers = usersRes.data.filter(u => u.role !== 'seller');

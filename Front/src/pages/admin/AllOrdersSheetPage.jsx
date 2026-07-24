@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useRef } from 'react';
 import {
   Box,
   Paper,
@@ -31,16 +31,50 @@ import {
   List,
   ListItem,
   ListItemText,
+  Collapse,
   Fade
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import api from '../../lib/api';
 import { fetchAllPages } from '../../lib/fetchAllPages';
 import AllOrdersSheetSkeleton from '../../components/skeletons/AllOrdersSheetSkeleton';
+import AdminPageShell from '../../components/AdminPageShell.jsx';
+import SectionCard from '../../components/SectionCard.jsx';
+import StatMetricCard from '../../components/StatMetricCard.jsx';
+import PageHeader from '../../components/PageHeader.jsx';
+import { dashboardSignatureTokens } from '../../theme/appTheme.js';
+import { tableHeaderCellSx, tableBodyRowSx, tableContainerSx, yellowOutlinedButtonSx, yellowFilledButtonSx } from '../../theme/tableStyles.js';
+import { BRAND_DARK, BRAND_YELLOW } from '../../constants/brandTheme.js';
+import { alpha } from '@mui/material/styles';
 
+/** Toolbar section toggles — highlighted when open or filters from that section are active */
+const filterSectionToggleSx = (active) => ({
+  fontSize: '0.75rem',
+  minWidth: 'auto',
+  px: 1,
+  borderRadius: 1,
+  border: '1px solid transparent',
+  ...(active
+    ? {
+        fontWeight: 700,
+        color: BRAND_DARK,
+        backgroundColor: alpha(BRAND_YELLOW, 0.45),
+        borderColor: BRAND_YELLOW,
+        boxShadow: `inset 0 -2px 0 ${BRAND_YELLOW}`,
+        '&:hover': {
+          backgroundColor: alpha(BRAND_YELLOW, 0.6),
+        },
+      }
+    : {
+        '&:hover': {
+          backgroundColor: alpha(BRAND_DARK, 0.04),
+        },
+      }),
+});
 const EXCHANGE_RATE_OPTIONS = [
   { value: 'EBAY_US', label: 'eBay US', channel: 'EBAY' },
   { value: 'EBAY_AU', label: 'eBay AU', channel: 'EBAY' },
@@ -67,6 +101,70 @@ const EXCHANGE_RATE_DEFAULTS = {
   AMAZON_GB: 87,
   AMAZON_CA: 87
 };
+
+/**
+ * Dual-row sticky header.
+ * MUI stickyHeader defaults every th to top:0 — row 2 must override that or
+ * Subtotal…Total_CC slides up under the section band when scrolling.
+ */
+const stickyHeaderTableSx = {
+  '& thead tr:nth-of-type(1) .MuiTableCell-stickyHeader': {
+    top: 0,
+    zIndex: 5,
+    backgroundColor: BRAND_DARK,
+    backgroundImage: 'none',
+  },
+  '& thead tr:nth-of-type(2) .MuiTableCell-stickyHeader': {
+    top: 'var(--all-orders-header-row1-height, 47px) !important',
+    zIndex: 4,
+    backgroundColor: BRAND_DARK,
+    backgroundImage: 'none',
+  },
+};
+
+const AllOrdersUsdRemarkCell = React.memo(function AllOrdersUsdRemarkCell({ order, saving, onSave }) {
+  const savedValue = order.allOrdersUsdRemark || '';
+  const [draft, setDraft] = useState(savedValue);
+
+  useEffect(() => {
+    setDraft(savedValue);
+  }, [order._id, savedValue]);
+
+  const hasChanges = draft !== savedValue;
+
+  return (
+    <Stack direction="row" spacing={0.75} alignItems="center">
+      <Tooltip title={draft || savedValue || ''} arrow placement="top">
+        <TextField
+          size="small"
+          multiline
+          maxRows={2}
+          placeholder="Add remark"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          disabled={saving}
+          sx={{
+            minWidth: 190,
+            '& .MuiInputBase-input': {
+              fontSize: '0.78rem',
+              lineHeight: 1.3
+            }
+          }}
+        />
+      </Tooltip>
+      <Button
+        size="small"
+        variant="outlined"
+        onClick={() => onSave(order, draft)}
+        disabled={saving || !hasChanges}
+        sx={{ fontSize: '0.72rem', whiteSpace: 'nowrap', minWidth: 58 }}
+      >
+        Save
+      </Button>
+      {saving && <CircularProgress size={16} />}
+    </Stack>
+  );
+});
 
 export default function AllOrdersSheetPage() {
   const [sellers, setSellers] = useState([]);
@@ -109,6 +207,7 @@ export default function AllOrdersSheetPage() {
   const [updatedOrderIds, setUpdatedOrderIds] = useState(new Set()); // Track orders with price updates
   const [orderTotalUpdates, setOrderTotalUpdates] = useState({}); // { orderId: value }
   const [updatingOrderTotals, setUpdatingOrderTotals] = useState({}); // { orderId: boolean }
+  const [savingAllOrdersUsdRemarks, setSavingAllOrdersUsdRemarks] = useState({}); // { order._id: boolean }
 
   // Session storage key for persisting state
   const STORAGE_KEY = 'all_orders_sheet_state';
@@ -143,6 +242,8 @@ export default function AllOrdersSheetPage() {
   const [totalPages, setTotalPages] = useState(1);
   const [totalOrders, setTotalOrders] = useState(0);
   const [ordersPerPage] = useState(50);
+  const [rawCount, setRawCount] = useState(null);
+  const [filteredTotals, setFilteredTotals] = useState(null);
 
   // Date filter
   const [dateFilter, setDateFilter] = useState(() => getInitialState('dateFilter', {
@@ -168,10 +269,10 @@ export default function AllOrdersSheetPage() {
     to: ''
   }));
 
-  // Toggle states for card sections
-  const [showProfitCards, setShowProfitCards] = useState(() => getInitialState('showProfitCards', true));
-  const [showSubtotalCards, setShowSubtotalCards] = useState(() => getInitialState('showSubtotalCards', true));
-  const [showExchangeRate, setShowExchangeRate] = useState(() => getInitialState('showExchangeRate', true));
+  // Toggle states for card sections — collapsed by default to save vertical space
+  const [showProfitCards, setShowProfitCards] = useState(() => getInitialState('showProfitCards', false));
+  const [showSubtotalCards, setShowSubtotalCards] = useState(() => getInitialState('showSubtotalCards', false));
+  const [showExchangeRate, setShowExchangeRate] = useState(() => getInitialState('showExchangeRate', false));
 
   // Modal state for showing category/range/product names
   const [namesModal, setNamesModal] = useState({
@@ -183,18 +284,8 @@ export default function AllOrdersSheetPage() {
 
   const isInitialMount = useRef(true);
   const hasFetchedInitialData = useRef(false);
-  
-  const prevFilters = useRef({
-    selectedSeller,
-    searchOrderId,
-    searchBuyerName,
-    searchItemNumber,
-    searchProductName,
-    searchMarketplace,
-    dateFilter,
-    profitFilter,
-    subtotalFilter
-  });
+  const headerBandRef = useRef(null);
+  const [headerRow1Height, setHeaderRow1Height] = useState(47);
 
   // Persist filter state to sessionStorage
   useEffect(() => {
@@ -223,6 +314,20 @@ export default function AllOrdersSheetPage() {
     }
   }, [selectedSeller, searchOrderId, searchBuyerName, searchItemNumber, searchProductName, searchMarketplace, filtersExpanded, currentPage, dateFilter, profitFilter, subtotalFilter, excludeLowValue, excludeNoAmazonAccount, showProfitCards, showSubtotalCards, showExchangeRate]);
 
+  // Keep Subtotal…Total_CC stuck just under the eBay/Amazon/CC band (not at top:0).
+  useLayoutEffect(() => {
+    const el = headerBandRef.current;
+    if (!el) return undefined;
+    const update = () => {
+      const next = Math.ceil(el.getBoundingClientRect().height);
+      if (next > 0) setHeaderRow1Height(next);
+    };
+    update();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, [orders.length, loading]);
+
   // Initial load
   useEffect(() => {
     if (!hasFetchedInitialData.current) {
@@ -250,45 +355,23 @@ export default function AllOrdersSheetPage() {
     loadOrders();
   }, [currentPage]);
 
-  // When filters change, reset to page 1
-  useEffect(() => {
-    const filtersChanged = 
-      prevFilters.current.selectedSeller !== selectedSeller ||
-      prevFilters.current.searchOrderId !== searchOrderId ||
-      prevFilters.current.searchBuyerName !== searchBuyerName ||
-      prevFilters.current.searchItemNumber !== searchItemNumber ||
-      prevFilters.current.searchProductName !== searchProductName ||
-      prevFilters.current.searchMarketplace !== searchMarketplace ||
-      prevFilters.current.excludeLowValue !== excludeLowValue ||
-      prevFilters.current.excludeNoAmazonAccount !== excludeNoAmazonAccount ||
-      JSON.stringify(prevFilters.current.dateFilter) !== JSON.stringify(dateFilter) ||
-      JSON.stringify(prevFilters.current.profitFilter) !== JSON.stringify(profitFilter) ||
-      JSON.stringify(prevFilters.current.subtotalFilter) !== JSON.stringify(subtotalFilter);
-    
-    prevFilters.current = {
-      selectedSeller,
-      searchOrderId,
-      searchBuyerName,
-      searchItemNumber,
-      searchProductName,
-      searchMarketplace,
-      excludeLowValue,
-      excludeNoAmazonAccount,
-      dateFilter,
-      profitFilter,
-      subtotalFilter
-    };
-
-    if (!hasFetchedInitialData.current) return;
-
-    if (filtersChanged) {
-      if (currentPage === 1) {
-        loadOrders();
-      } else {
-        setCurrentPage(1);
-      }
+  function handleApplyFilters() {
+    if (currentPage === 1) {
+      loadOrders();
+    } else {
+      setCurrentPage(1);
     }
-  }, [selectedSeller, searchOrderId, searchBuyerName, searchItemNumber, searchMarketplace, excludeLowValue, excludeNoAmazonAccount, dateFilter, profitFilter, subtotalFilter]);
+  }
+
+  function handleClearFilters() {
+    setSearchOrderId('');
+    setSearchBuyerName('');
+    setSearchItemNumber('');
+    setSearchProductName('');
+    setDateFilter({ mode: 'none', single: '', from: '', to: '' });
+    setProfitFilter({ mode: 'none', single: '', from: '', to: '' });
+    setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
+  }
 
   async function fetchSellers() {
     setError('');
@@ -419,6 +502,7 @@ export default function AllOrdersSheetPage() {
         'PROFIT (INR)',
         'Amazon Acc',
         'Order ID',
+        'All Orders USD Remark',
         'Buyer Name',
         'Arriving'
       ];
@@ -492,6 +576,7 @@ export default function AllOrdersSheetPage() {
           profit.toFixed(2),
           order.amazonAccount || '-',
           order.orderId || '-',
+          order.allOrdersUsdRemark || '-',
           order.buyer?.buyerRegistrationAddress?.fullName || '-',
           order.arrivingDate || '-'
         ];
@@ -538,11 +623,13 @@ export default function AllOrdersSheetPage() {
     setError('');
     
     try {
+      // For single date, fetch all orders without pagination (mirrors Grow's behavior)
+      const isSingleDate = dateFilter.mode === 'single' && dateFilter.single;
+
       const params = {
-        page: currentPage,
-        limit: ordersPerPage,
+        page: isSingleDate ? 1 : currentPage,
+        limit: isSingleDate ? 10000 : ordersPerPage, // High limit for single date to get all
         excludeCancelled: true, // Exclude cancelled orders
-        includeCounts: false, // Count aggregations are slow on large datasets; load table first
       };
       
       if (selectedSeller) params.sellerId = selectedSeller;
@@ -584,14 +671,19 @@ export default function AllOrdersSheetPage() {
       if (data?.pagination) {
         setTotalPages(data.pagination.totalPages);
         setTotalOrders(data.pagination.totalOrders);
+        setRawCount(data.pagination.rawCount ?? null);
       }
 
       if (data?.counts) {
         setCounts(data.counts);
       }
+
+      setFilteredTotals(data?.filteredTotals || null);
     } catch (e) {
       setOrders([]);
       setCounts({ uniqueCategories: 0, uniqueRanges: 0, uniqueProducts: 0, categoryData: [], rangeData: [], productData: [] });
+      setRawCount(null);
+      setFilteredTotals(null);
       const status = e.response?.status;
       const detail = e.response?.data?.error || e.message || 'Failed to load orders';
       setError(status ? `Failed to load orders (${status}): ${detail}` : detail);
@@ -612,6 +704,18 @@ export default function AllOrdersSheetPage() {
     setPriceUpdateModal({ open: true, order });
     setTryPricing('');
     setItemPriceUpdates({});
+  }
+
+  function getPriceChangeHistoryUrl(orderId) {
+    return `/admin/price-change-history?orderId=${encodeURIComponent(orderId || '')}`;
+  }
+
+  function getFirstLegacyItemId(order) {
+    return order.lineItems?.find(item => item?.legacyItemId)?.legacyItemId || '';
+  }
+
+  function getPriceChangeHistoryItemUrl(itemId) {
+    return `/admin/price-change-history?legacyItemId=${encodeURIComponent(itemId || '')}`;
   }
 
   function getOrderTotalInputValue(order) {
@@ -663,6 +767,32 @@ export default function AllOrdersSheetPage() {
       alert('Failed to update order total: ' + (err?.response?.data?.error || err.message));
     } finally {
       setUpdatingOrderTotals(prev => ({ ...prev, [order._id]: false }));
+    }
+  }
+
+  async function handleSaveAllOrdersUsdRemark(order, overrideValue) {
+    const nextValue = overrideValue !== undefined ? overrideValue : order.allOrdersUsdRemark;
+    const normalizedValue = nextValue == null ? '' : String(nextValue);
+    const currentValue = order.allOrdersUsdRemark || '';
+
+    if (normalizedValue === currentValue) return;
+
+    setSavingAllOrdersUsdRemarks(prev => ({ ...prev, [order._id]: true }));
+
+    try {
+      const { data } = await api.patch(`/ebay/orders/${order._id}/all-orders-usd-remark`, {
+        allOrdersUsdRemark: normalizedValue
+      });
+
+      setOrders(prev => prev.map(existingOrder => (
+        existingOrder._id === order._id
+          ? { ...existingOrder, allOrdersUsdRemark: data.order?.allOrdersUsdRemark || '' }
+          : existingOrder
+      )));
+    } catch (err) {
+      alert('Failed to update All Orders USD remark: ' + (err?.response?.data?.error || err.message));
+    } finally {
+      setSavingAllOrdersUsdRemarks(prev => ({ ...prev, [order._id]: false }));
     }
   }
 
@@ -803,9 +933,20 @@ export default function AllOrdersSheetPage() {
 
   if (loading && orders.length === 0) return <AllOrdersSheetSkeleton />;
 
+  const searchFiltersInUse = Boolean(
+    searchOrderId.trim()
+    || searchBuyerName.trim()
+    || searchItemNumber.trim()
+    || searchProductName.trim()
+    || dateFilter.mode !== 'none'
+    || profitFilter.mode !== 'none'
+  );
+  const profitFiltersInUse = profitFilter.mode !== 'none';
+  const subtotalFiltersInUse = subtotalFilter.mode !== 'none';
+
   return (
     <Fade in timeout={600}>
-    <Box sx={{ p: 3, background: 'linear-gradient(135deg, #f0f9ff 0%, #ecfdf5 100%)' }}>
+    <AdminPageShell>
       {/* CSV Export Modal */}
       <Dialog open={showExportModal} onClose={() => setShowExportModal(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Export Orders by Date Range</DialogTitle>
@@ -858,44 +999,50 @@ export default function AllOrdersSheetPage() {
         </DialogActions>
       </Dialog>
 
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
-        <Typography variant="h4">All Orders Sheet (USD)</Typography>
-        <Stack direction="row" spacing={2}>
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={() => exportToCSV(false)}
-            disabled={exportingCSV || orders.length === 0}
-          >
-            {exportingCSV ? 'Exporting...' : 'Download Current Page'}
-          </Button>
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={() => setShowExportModal(true)}
-            disabled={exportingCSV}
-          >
-            Download by Date Range
-          </Button>
-          <Button
-            variant="outlined"
-            color="primary"
-            size="small"
-            startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
-            onClick={loadOrders}
-            disabled={loading}
-          >
-            Refresh
-          </Button>
-        </Stack>
-      </Stack>
+      <SectionCard sx={{ p: { xs: 1, sm: 1.25 }, mb: 1, background: dashboardSignatureTokens.surfaces.pageCard }}>
+        <PageHeader
+          title="All Orders Sheet (USD)"
+          subtitle="Financial summary of all eBay orders in USD with INR conversions."
+          sx={{ pt: 0, pb: 1, mb: 1, borderBottom: '1px solid', borderColor: 'divider' }}
+          actions={
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => exportToCSV(false)}
+                disabled={exportingCSV || orders.length === 0}
+                sx={yellowOutlinedButtonSx}
+              >
+                {exportingCSV ? 'Exporting...' : 'Download Page'}
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => setShowExportModal(true)}
+                disabled={exportingCSV}
+                sx={yellowOutlinedButtonSx}
+              >
+                Download by Date
+              </Button>
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <RefreshIcon />}
+                onClick={loadOrders}
+                disabled={loading}
+                sx={yellowFilledButtonSx}
+              >
+                Refresh
+              </Button>
+            </Stack>
+          }
+        />
 
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        {error && <Alert severity="error" sx={{ mb: 1 }}>{error}</Alert>}
 
-      {/* Top Controls: Seller & Marketplace */}
-      <Paper sx={{ p: 2, mb: 2 }}>
-        <Stack direction="row" spacing={2} alignItems="center">
-          <FormControl size="small" sx={{ minWidth: 200 }}>
+        {/* Compact toolbar: Seller, Marketplace, toggles, filter triggers */}
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap', rowGap: 1 }}>
+          <FormControl size="small" sx={{ minWidth: 160 }}>
             <InputLabel>Select Seller</InputLabel>
             <Select
               value={selectedSeller}
@@ -911,7 +1058,7 @@ export default function AllOrdersSheetPage() {
             </Select>
           </FormControl>
 
-          <FormControl size="small" sx={{ minWidth: 180 }}>
+          <FormControl size="small" sx={{ minWidth: 150 }}>
             <InputLabel>Marketplace</InputLabel>
             <Select
               value={searchMarketplace}
@@ -935,7 +1082,8 @@ export default function AllOrdersSheetPage() {
                 color="warning"
               />
             }
-            label={<Typography variant="body2" sx={{ fontSize: '0.8rem' }}>Hide &lt;$3</Typography>}
+            label={<Typography variant="caption">Hide &lt;$3</Typography>}
+            sx={{ mr: 0.5 }}
           />
           <FormControlLabel
             control={
@@ -946,58 +1094,99 @@ export default function AllOrdersSheetPage() {
                 color="info"
               />
             }
-            label={<Typography variant="body2" sx={{ fontSize: '0.8rem' }}>Hide No Amazon Account</Typography>}
+            label={<Typography variant="caption">Hide No Amazon Acc</Typography>}
+            sx={{ mr: 0.5 }}
           />
-        </Stack>
-      </Paper>
 
-      {/* Search Filters */}
-      <Paper sx={{ p: 2, mb: 3 }}>
-        <Box sx={{ mt: 2, p: 2, backgroundColor: 'action.hover', borderRadius: 1 }}>
-          <Box 
-            sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+          <Button
+            size="small"
+            variant="text"
+            aria-pressed={filtersExpanded || searchFiltersInUse}
             onClick={() => setFiltersExpanded(!filtersExpanded)}
+            endIcon={filtersExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+            sx={filterSectionToggleSx(filtersExpanded || searchFiltersInUse)}
           >
-            <Typography variant="subtitle2" fontWeight="bold">
-              Search Filters
-            </Typography>
-            <IconButton size="small">
-              {filtersExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-            </IconButton>
-          </Box>
-          {filtersExpanded && (
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mt: 1.5 }}>
+            Search Filters
+          </Button>
+          <Button
+            size="small"
+            variant="text"
+            aria-pressed={showProfitCards || profitFiltersInUse}
+            onClick={() => setShowProfitCards(!showProfitCards)}
+            endIcon={showProfitCards ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+            sx={filterSectionToggleSx(showProfitCards || profitFiltersInUse)}
+          >
+            Profit Filters
+          </Button>
+          <Button
+            size="small"
+            variant="text"
+            aria-pressed={showSubtotalCards || subtotalFiltersInUse}
+            onClick={() => setShowSubtotalCards(!showSubtotalCards)}
+            endIcon={showSubtotalCards ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+            sx={filterSectionToggleSx(showSubtotalCards || subtotalFiltersInUse)}
+          >
+            Subtotal Filters
+          </Button>
+          <Button
+            size="small"
+            variant="text"
+            aria-pressed={showExchangeRate}
+            onClick={() => setShowExchangeRate(!showExchangeRate)}
+            endIcon={showExchangeRate ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+            sx={filterSectionToggleSx(showExchangeRate)}
+          >
+            Exchange Rate
+          </Button>
+          <Button
+            size="small"
+            variant="contained"
+            onClick={handleApplyFilters}
+            disabled={loading}
+            sx={{ ...yellowFilledButtonSx, ml: { sm: 'auto' }, height: 32 }}
+          >
+            Apply Filters
+          </Button>
+        </Stack>
+
+        {/* Search Filters (collapsible) */}
+        <Collapse in={filtersExpanded}>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mt: 1, pt: 1, borderTop: '1px dashed', borderColor: 'divider', flexWrap: 'wrap', rowGap: 1 }}>
               <TextField
                 size="small"
                 label="Order ID"
                 value={searchOrderId}
                 onChange={(e) => setSearchOrderId(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleApplyFilters(); }}
                 placeholder="Search by order ID..."
-                sx={{ flex: 1 }}
+                sx={{ flex: 1, minWidth: 140 }}
               />
               <TextField
                 size="small"
                 label="Buyer Name"
                 value={searchBuyerName}
                 onChange={(e) => setSearchBuyerName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleApplyFilters(); }}
                 placeholder="Search by buyer name..."
-                sx={{ flex: 1 }}
+                sx={{ flex: 1, minWidth: 140 }}
               />
               <TextField
                 size="small"
                 label="Item Number"
                 value={searchItemNumber}
                 onChange={(e) => setSearchItemNumber(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleApplyFilters(); }}
                 placeholder="Search by legacy item ID..."
-                sx={{ flex: 1 }}
+                sx={{ flex: 1, minWidth: 140 }}
               />
               <TextField
                 size="small"
                 label="Product Name"
                 value={searchProductName}
                 onChange={(e) => setSearchProductName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleApplyFilters(); }}
                 placeholder="Search by product name..."
-                sx={{ flex: 1 }}
+                sx={{ flex: 1, minWidth: 140 }}
               />
               
               {/* Date Mode Selector */}
@@ -1105,488 +1294,292 @@ export default function AllOrdersSheetPage() {
                 </>
               )}
 
-              {/* Clear Button */}
+              {/* Clear / Apply */}
               <Button
                 size="small"
                 variant="outlined"
-                onClick={() => {
-                  setSearchOrderId('');
-                  setSearchBuyerName('');
-                  setSearchItemNumber('');
-                  setSearchProductName('');
-                  setDateFilter({ mode: 'none', single: '', from: '', to: '' });
-                  setProfitFilter({ mode: 'none', single: '', from: '', to: '' });
-                  setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
-                }}
-                sx={{ minWidth: 80 }}
+                onClick={handleClearFilters}
+                sx={{ ...yellowOutlinedButtonSx, minWidth: 80 }}
               >
                 CLEAR
               </Button>
+              <Button
+                size="small"
+                variant="contained"
+                onClick={handleApplyFilters}
+                disabled={loading}
+                sx={yellowFilledButtonSx}
+              >
+                Apply Filters
+              </Button>
+          </Stack>
+        </Collapse>
+      </SectionCard>
+
+      {/* Quick Filters: Profit / Subtotal ranges as compact chips */}
+      <Collapse in={showProfitCards || showSubtotalCards}>
+        <SectionCard sx={{ p: { xs: 1, sm: 1.25 }, mb: 1, background: dashboardSignatureTokens.surfaces.pageCard }}>
+          <Collapse in={showProfitCards}>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" sx={{ rowGap: 1, mb: showSubtotalCards ? 1 : 0 }}>
+              <Tooltip title="Filters orders based on profit (calculated field) from the database" arrow>
+                <Typography variant="caption" sx={{ fontWeight: 'bold', color: 'text.secondary' }}>
+                  Profit (INR):
+                </Typography>
+              </Tooltip>
+              <Chip
+                label="₹200 - ₹300"
+                size="small"
+                color={profitFilter.mode === 'range' && profitFilter.from === '200' && profitFilter.to === '300' ? 'success' : 'default'}
+                variant={profitFilter.mode === 'range' && profitFilter.from === '200' && profitFilter.to === '300' ? 'filled' : 'outlined'}
+                onClick={() => {
+                  if (profitFilter.mode === 'range' && profitFilter.from === '200' && profitFilter.to === '300') {
+                    setProfitFilter({ mode: 'none', single: '', from: '', to: '' });
+                  } else {
+                    setProfitFilter({ mode: 'range', single: '', from: '200', to: '300' });
+                  }
+                }}
+              />
+              <Chip
+                label="₹500 - ₹600"
+                size="small"
+                color={profitFilter.mode === 'range' && profitFilter.from === '500' && profitFilter.to === '600' ? 'success' : 'default'}
+                variant={profitFilter.mode === 'range' && profitFilter.from === '500' && profitFilter.to === '600' ? 'filled' : 'outlined'}
+                onClick={() => {
+                  if (profitFilter.mode === 'range' && profitFilter.from === '500' && profitFilter.to === '600') {
+                    setProfitFilter({ mode: 'none', single: '', from: '', to: '' });
+                  } else {
+                    setProfitFilter({ mode: 'range', single: '', from: '500', to: '600' });
+                  }
+                }}
+              />
+              <Chip
+                label="₹900+"
+                size="small"
+                color={profitFilter.mode === 'range' && profitFilter.from === '900' && profitFilter.to === '' ? 'success' : 'default'}
+                variant={profitFilter.mode === 'range' && profitFilter.from === '900' && profitFilter.to === '' ? 'filled' : 'outlined'}
+                onClick={() => {
+                  if (profitFilter.mode === 'range' && profitFilter.from === '900' && profitFilter.to === '') {
+                    setProfitFilter({ mode: 'none', single: '', from: '', to: '' });
+                  } else {
+                    setProfitFilter({ mode: 'range', single: '', from: '900', to: '' });
+                  }
+                }}
+              />
             </Stack>
-          )}
-        </Box>
-      </Paper>
+          </Collapse>
 
-      {/* Quick Filter Cards */}
-      <Paper sx={{ p: 2, mb: 3 }}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-          <Typography variant="h6" sx={{ fontWeight: 'bold' }}>Quick Filters</Typography>
-          <Typography variant="caption" color="text.secondary">
-            Filters orders based on <strong>profit</strong> (calculated field) and <strong>subtotal</strong> (order subtotal) from the database
-          </Typography>
-        </Stack>
-        
-        {/* Profit Range Cards */}
-        <Box sx={{ mb: 3 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
-            <Typography variant="subtitle2" sx={{ color: 'text.secondary', fontWeight: 'bold' }}>
-              Filter by Profit (INR)
-            </Typography>
-            <Button
-              size="small"
-              variant="text"
-              onClick={() => setShowProfitCards(!showProfitCards)}
-              endIcon={showProfitCards ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-            >
-              {showProfitCards ? 'Hide' : 'Show'}
-            </Button>
-          </Box>
-          {showProfitCards && (
-          <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
-            <Paper
-              elevation={profitFilter.mode === 'range' && profitFilter.from === '200' && profitFilter.to === '300' ? 8 : 2}
-              sx={{
-                p: 2,
-                cursor: 'pointer',
-                minWidth: 140,
-                textAlign: 'center',
-                border: profitFilter.mode === 'range' && profitFilter.from === '200' && profitFilter.to === '300' 
-                  ? '2px solid #1976d2' 
-                  : '2px solid transparent',
-                backgroundColor: profitFilter.mode === 'range' && profitFilter.from === '200' && profitFilter.to === '300' 
-                  ? '#e3f2fd' 
-                  : 'background.paper',
-                transition: 'all 0.2s',
-                '&:hover': {
-                  transform: 'translateY(-2px)',
-                  boxShadow: 4
-                }
-              }}
-              onClick={() => {
-                // Toggle: if already selected, deselect
-                if (profitFilter.mode === 'range' && profitFilter.from === '200' && profitFilter.to === '300') {
-                  setProfitFilter({ mode: 'none', single: '', from: '', to: '' });
-                } else {
-                  setProfitFilter({ mode: 'range', single: '', from: '200', to: '300' });
-                }
-              }}
-            >
-              <Typography variant="h6" sx={{ fontWeight: 'bold', color: 'success.main' }}>
-                ₹200 - ₹300
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                Profit Range
-              </Typography>
-            </Paper>
+          <Collapse in={showSubtotalCards}>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" sx={{ rowGap: 1 }}>
+              <Tooltip title="Filters orders based on subtotal (order subtotal) from the database" arrow>
+                <Typography variant="caption" sx={{ fontWeight: 'bold', color: 'text.secondary' }}>
+                  Subtotal (USD):
+                </Typography>
+              </Tooltip>
+              <Chip
+                label="$0 - $15"
+                size="small"
+                color={subtotalFilter.mode === 'range' && subtotalFilter.from === '0' && subtotalFilter.to === '15' ? 'primary' : 'default'}
+                variant={subtotalFilter.mode === 'range' && subtotalFilter.from === '0' && subtotalFilter.to === '15' ? 'filled' : 'outlined'}
+                onClick={() => {
+                  if (subtotalFilter.mode === 'range' && subtotalFilter.from === '0' && subtotalFilter.to === '15') {
+                    setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
+                  } else {
+                    setSubtotalFilter({ mode: 'range', single: '', from: '0', to: '15' });
+                  }
+                }}
+              />
+              <Chip
+                label="$15 - $30"
+                size="small"
+                color={subtotalFilter.mode === 'range' && subtotalFilter.from === '15' && subtotalFilter.to === '30' ? 'primary' : 'default'}
+                variant={subtotalFilter.mode === 'range' && subtotalFilter.from === '15' && subtotalFilter.to === '30' ? 'filled' : 'outlined'}
+                onClick={() => {
+                  if (subtotalFilter.mode === 'range' && subtotalFilter.from === '15' && subtotalFilter.to === '30') {
+                    setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
+                  } else {
+                    setSubtotalFilter({ mode: 'range', single: '', from: '15', to: '30' });
+                  }
+                }}
+              />
+              <Chip
+                label="$30 - $90"
+                size="small"
+                color={subtotalFilter.mode === 'range' && subtotalFilter.from === '30' && subtotalFilter.to === '90' ? 'primary' : 'default'}
+                variant={subtotalFilter.mode === 'range' && subtotalFilter.from === '30' && subtotalFilter.to === '90' ? 'filled' : 'outlined'}
+                onClick={() => {
+                  if (subtotalFilter.mode === 'range' && subtotalFilter.from === '30' && subtotalFilter.to === '90') {
+                    setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
+                  } else {
+                    setSubtotalFilter({ mode: 'range', single: '', from: '30', to: '90' });
+                  }
+                }}
+              />
+              <Chip
+                label="$90+"
+                size="small"
+                color={subtotalFilter.mode === 'range' && subtotalFilter.from === '90' && subtotalFilter.to === '' ? 'primary' : 'default'}
+                variant={subtotalFilter.mode === 'range' && subtotalFilter.from === '90' && subtotalFilter.to === '' ? 'filled' : 'outlined'}
+                onClick={() => {
+                  if (subtotalFilter.mode === 'range' && subtotalFilter.from === '90' && subtotalFilter.to === '') {
+                    setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
+                  } else {
+                    setSubtotalFilter({ mode: 'range', single: '', from: '90', to: '' });
+                  }
+                }}
+              />
+            </Stack>
+          </Collapse>
+        </SectionCard>
+      </Collapse>
 
-            <Paper
-              elevation={profitFilter.mode === 'range' && profitFilter.from === '500' && profitFilter.to === '600' ? 8 : 2}
-              sx={{
-                p: 2,
-                cursor: 'pointer',
-                minWidth: 140,
-                textAlign: 'center',
-                border: profitFilter.mode === 'range' && profitFilter.from === '500' && profitFilter.to === '600' 
-                  ? '2px solid #1976d2' 
-                  : '2px solid transparent',
-                backgroundColor: profitFilter.mode === 'range' && profitFilter.from === '500' && profitFilter.to === '600' 
-                  ? '#e3f2fd' 
-                  : 'background.paper',
-                transition: 'all 0.2s',
-                '&:hover': {
-                  transform: 'translateY(-2px)',
-                  boxShadow: 4
-                }
-              }}
-              onClick={() => {
-                // Toggle: if already selected, deselect
-                if (profitFilter.mode === 'range' && profitFilter.from === '500' && profitFilter.to === '600') {
-                  setProfitFilter({ mode: 'none', single: '', from: '', to: '' });
-                } else {
-                  setProfitFilter({ mode: 'range', single: '', from: '500', to: '600' });
-                }
-              }}
-            >
-              <Typography variant="h6" sx={{ fontWeight: 'bold', color: 'success.main' }}>
-                ₹500 - ₹600
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                Profit Range
-              </Typography>
-            </Paper>
-
-            <Paper
-              elevation={profitFilter.mode === 'range' && profitFilter.from === '900' && profitFilter.to === '' ? 8 : 2}
-              sx={{
-                p: 2,
-                cursor: 'pointer',
-                minWidth: 140,
-                textAlign: 'center',
-                border: profitFilter.mode === 'range' && profitFilter.from === '900' && profitFilter.to === '' 
-                  ? '2px solid #1976d2' 
-                  : '2px solid transparent',
-                backgroundColor: profitFilter.mode === 'range' && profitFilter.from === '900' && profitFilter.to === '' 
-                  ? '#e3f2fd' 
-                  : 'background.paper',
-                transition: 'all 0.2s',
-                '&:hover': {
-                  transform: 'translateY(-2px)',
-                  boxShadow: 4
-                }
-              }}
-              onClick={() => {
-                // Toggle: if already selected, deselect
-                if (profitFilter.mode === 'range' && profitFilter.from === '900' && profitFilter.to === '') {
-                  setProfitFilter({ mode: 'none', single: '', from: '', to: '' });
-                } else {
-                  setProfitFilter({ mode: 'range', single: '', from: '900', to: '' });
-                }
-              }}
-            >
-              <Typography variant="h6" sx={{ fontWeight: 'bold', color: 'success.main' }}>
-                ₹900+
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                Profit Range
-              </Typography>
-            </Paper>
-          </Stack>
-          )}
-        </Box>
-
-        {/* Subtotal Range Cards */}
-        <Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
-            <Typography variant="subtitle2" sx={{ color: 'text.secondary', fontWeight: 'bold' }}>
-              Filter by Subtotal (USD)
-            </Typography>
-            <Button
-              size="small"
-              variant="text"
-              onClick={() => setShowSubtotalCards(!showSubtotalCards)}
-              endIcon={showSubtotalCards ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-            >
-              {showSubtotalCards ? 'Hide' : 'Show'}
-            </Button>
-          </Box>
-          {showSubtotalCards && (
-          <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
-            <Paper
-              elevation={subtotalFilter.mode === 'range' && subtotalFilter.from === '0' && subtotalFilter.to === '15' ? 8 : 2}
-              sx={{
-                p: 2,
-                cursor: 'pointer',
-                minWidth: 140,
-                textAlign: 'center',
-                border: subtotalFilter.mode === 'range' && subtotalFilter.from === '0' && subtotalFilter.to === '15' 
-                  ? '2px solid #1976d2' 
-                  : '2px solid transparent',
-                backgroundColor: subtotalFilter.mode === 'range' && subtotalFilter.from === '0' && subtotalFilter.to === '15' 
-                  ? '#e3f2fd' 
-                  : 'background.paper',
-                transition: 'all 0.2s',
-                '&:hover': {
-                  transform: 'translateY(-2px)',
-                  boxShadow: 4
-                }
-              }}
-              onClick={() => {
-                // Toggle: if already selected, deselect
-                if (subtotalFilter.mode === 'range' && subtotalFilter.from === '0' && subtotalFilter.to === '15') {
-                  setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
-                } else {
-                  setSubtotalFilter({ mode: 'range', single: '', from: '0', to: '15' });
-                }
-              }}
-            >
-              <Typography variant="h6" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                $0 - $15
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                Subtotal Range
-              </Typography>
-            </Paper>
-
-            <Paper
-              elevation={subtotalFilter.mode === 'range' && subtotalFilter.from === '15' && subtotalFilter.to === '30' ? 8 : 2}
-              sx={{
-                p: 2,
-                cursor: 'pointer',
-                minWidth: 140,
-                textAlign: 'center',
-                border: subtotalFilter.mode === 'range' && subtotalFilter.from === '15' && subtotalFilter.to === '30' 
-                  ? '2px solid #1976d2' 
-                  : '2px solid transparent',
-                backgroundColor: subtotalFilter.mode === 'range' && subtotalFilter.from === '15' && subtotalFilter.to === '30' 
-                  ? '#e3f2fd' 
-                  : 'background.paper',
-                transition: 'all 0.2s',
-                '&:hover': {
-                  transform: 'translateY(-2px)',
-                  boxShadow: 4
-                }
-              }}
-              onClick={() => {
-                // Toggle: if already selected, deselect
-                if (subtotalFilter.mode === 'range' && subtotalFilter.from === '15' && subtotalFilter.to === '30') {
-                  setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
-                } else {
-                  setSubtotalFilter({ mode: 'range', single: '', from: '15', to: '30' });
-                }
-              }}
-            >
-              <Typography variant="h6" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                $15 - $30
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                Subtotal Range
-              </Typography>
-            </Paper>
-
-            <Paper
-              elevation={subtotalFilter.mode === 'range' && subtotalFilter.from === '30' && subtotalFilter.to === '90' ? 8 : 2}
-              sx={{
-                p: 2,
-                cursor: 'pointer',
-                minWidth: 140,
-                textAlign: 'center',
-                border: subtotalFilter.mode === 'range' && subtotalFilter.from === '30' && subtotalFilter.to === '90' 
-                  ? '2px solid #1976d2' 
-                  : '2px solid transparent',
-                backgroundColor: subtotalFilter.mode === 'range' && subtotalFilter.from === '30' && subtotalFilter.to === '90' 
-                  ? '#e3f2fd' 
-                  : 'background.paper',
-                transition: 'all 0.2s',
-                '&:hover': {
-                  transform: 'translateY(-2px)',
-                  boxShadow: 4
-                }
-              }}
-              onClick={() => {
-                // Toggle: if already selected, deselect
-                if (subtotalFilter.mode === 'range' && subtotalFilter.from === '30' && subtotalFilter.to === '90') {
-                  setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
-                } else {
-                  setSubtotalFilter({ mode: 'range', single: '', from: '30', to: '90' });
-                }
-              }}
-            >
-              <Typography variant="h6" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                $30 - $90
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                Subtotal Range
-              </Typography>
-            </Paper>
-
-            <Paper
-              elevation={subtotalFilter.mode === 'range' && subtotalFilter.from === '90' && subtotalFilter.to === '' ? 8 : 2}
-              sx={{
-                p: 2,
-                cursor: 'pointer',
-                minWidth: 140,
-                textAlign: 'center',
-                border: subtotalFilter.mode === 'range' && subtotalFilter.from === '90' && subtotalFilter.to === '' 
-                  ? '2px solid #1976d2' 
-                  : '2px solid transparent',
-                backgroundColor: subtotalFilter.mode === 'range' && subtotalFilter.from === '90' && subtotalFilter.to === '' 
-                  ? '#e3f2fd' 
-                  : 'background.paper',
-                transition: 'all 0.2s',
-                '&:hover': {
-                  transform: 'translateY(-2px)',
-                  boxShadow: 4
-                }
-              }}
-              onClick={() => {
-                // Toggle: if already selected, deselect
-                if (subtotalFilter.mode === 'range' && subtotalFilter.from === '90' && subtotalFilter.to === '') {
-                  setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
-                } else {
-                  setSubtotalFilter({ mode: 'range', single: '', from: '90', to: '' });
-                }
-              }}
-            >
-              <Typography variant="h6" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                $90+
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                Subtotal Range
-              </Typography>
-            </Paper>
-          </Stack>
-          )}
-        </Box>
-      </Paper>
-
-      {/* Exchange Rate Management */}
-      <Paper sx={{ p: 2, mb: 2, position: 'relative', overflow: 'hidden' }}>
-        <Stack spacing={2}>
-          <Stack direction="row" spacing={2} alignItems="center">
-            <Typography variant="h6" sx={{ flexGrow: 1 }}>
+      {/* Exchange Rate Management (collapsible via "Exchange Rate" toolbar toggle) */}
+      <Collapse in={showExchangeRate}>
+        <SectionCard sx={{ p: { xs: 1, sm: 1.25 }, mb: 1, background: dashboardSignatureTokens.surfaces.pageCard }}>
+          <Stack spacing={1}>
+            <Typography variant="subtitle2" fontWeight="bold">
               Exchange Rate (USD to INR)
             </Typography>
-            <Button
-              size="small"
-              variant="text"
-              onClick={() => setShowExchangeRate(!showExchangeRate)}
-              endIcon={showExchangeRate ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-            >
-              {showExchangeRate ? 'Hide' : 'Show'}
-            </Button>
-          </Stack>
 
-          {updatingExchangeRates && (
-            <Alert
-              severity="info"
-              icon={<CircularProgress size={18} color="inherit" />}
-            >
-              Recalculating affected orders. P.Balance (INR), A_total-inr, and Profit are being refreshed.
-            </Alert>
-          )}
-
-          {showExchangeRate && (
-          <>
-          <Stack direction="row" spacing={2} alignItems="stretch" flexWrap="wrap">
-            {EXCHANGE_RATE_OPTIONS.map((option) => {
-              const rateInfo = exchangeRatesByMarketplace[option.value];
-              const accentColor = option.channel === 'AMAZON' ? 'success.main' : 'primary.main';
-
-              return (
-                <Paper key={option.value} variant="outlined" sx={{ p: 1.5, minWidth: 150 }}>
-                  <Typography variant="body2" color="text.secondary">{option.label}</Typography>
-                  <Typography variant="h6" sx={{ fontWeight: 'bold', color: accentColor }}>
-                    {rateInfo?.rate || EXCHANGE_RATE_DEFAULTS[option.value]} INR
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                    {rateInfo?.applicationMode === 'specific-date' ? 'Specific Date' : 'Effective'}
-                  </Typography>
-                  {rateInfo?.effectiveDate && (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                      {new Date(rateInfo.effectiveDate).toLocaleDateString()}
-                    </Typography>
-                  )}
-                </Paper>
-              );
-            })}
-          </Stack>
-
-          <Stack direction="row" spacing={2} alignItems="center">
-            <FormControl size="small" sx={{ minWidth: 140 }}>
-              <InputLabel>Rate For</InputLabel>
-              <Select
-                value={selectedRateMarketplace}
-                label="Rate For"
-                onChange={(e) => setSelectedRateMarketplace(e.target.value)}
-                disabled={updatingExchangeRates}
+            {updatingExchangeRates && (
+              <Alert
+                severity="info"
+                icon={<CircularProgress size={18} color="inherit" />}
               >
-                {EXCHANGE_RATE_OPTIONS.map((option) => (
-                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <FormControl size="small" sx={{ minWidth: 160 }}>
-              <InputLabel>Apply As</InputLabel>
-              <Select
-                value={rateApplicationMode}
-                label="Apply As"
-                onChange={(e) => setRateApplicationMode(e.target.value)}
-                disabled={updatingExchangeRates}
-              >
-                <MenuItem value="effective">Effective From</MenuItem>
-                <MenuItem value="specific-date">Specific Date Only</MenuItem>
-              </Select>
-            </FormControl>
-            <TextField
-              size="small"
-              label="New Rate"
-              type="number"
-              value={newRate}
-              onChange={(e) => setNewRate(e.target.value)}
-              sx={{ width: 150 }}
-              placeholder="e.g. 84"
-              disabled={updatingExchangeRates}
-            />
-            <TextField
-              size="small"
-              label={rateApplicationMode === 'specific-date' ? 'Specific Date' : 'Effective From'}
-              type="date"
-              value={newRateDate}
-              onChange={(e) => setNewRateDate(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              helperText={rateApplicationMode === 'specific-date' ? 'Uses the same PST/PDT day pattern as the All Orders Sheet search date filter.' : 'Starts from this PST/PDT day, matching the All Orders Sheet search date filter.'}
-              sx={{ width: 180 }}
-              disabled={updatingExchangeRates}
-            />
-            <Button
-              variant="contained"
-              onClick={handleSetExchangeRate}
-              disabled={!newRate || !newRateDate || updatingExchangeRates}
-              startIcon={updatingExchangeRates ? <CircularProgress size={16} color="inherit" /> : null}
-            >
-              {updatingExchangeRates ? 'Recalculating...' : `Set ${EXCHANGE_RATE_LABELS[selectedRateMarketplace]} Rate`}
-            </Button>
-            <Button
-              size="small"
-              variant="outlined"
-              onClick={() => setShowRateHistory(!showRateHistory)}
-              endIcon={showRateHistory ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-              disabled={updatingExchangeRates}
-            >
-              {showRateHistory ? 'Hide' : 'Show'} History
-            </Button>
-          </Stack>
+                Recalculating affected orders. P.Balance (INR), A_total-inr, and Profit are being refreshed.
+              </Alert>
+            )}
 
-          {showRateHistory && rateHistory.length > 0 && (
-            <Box sx={{ mt: 2 }}>
-              <Typography variant="subtitle2" sx={{ mb: 1 }}>{EXCHANGE_RATE_LABELS[selectedRateMarketplace]} Rate History</Typography>
-              <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 200 }}>
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Effective Date</TableCell>
-                      <TableCell>Mode</TableCell>
-                      <TableCell>Rate (INR)</TableCell>
-                      <TableCell>Created</TableCell>
-                      <TableCell>Notes</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {rateHistory.map((rate) => (
-                      <TableRow key={rate._id}>
-                        <TableCell>{new Date(rate.effectiveDate).toLocaleDateString()}</TableCell>
-                        <TableCell>{rate.applicationMode === 'specific-date' ? 'Specific Date' : 'Effective'}</TableCell>
-                        <TableCell><strong>{rate.rate}</strong></TableCell>
-                        <TableCell>{new Date(rate.createdAt).toLocaleDateString()}</TableCell>
-                        <TableCell>{rate.notes || '-'}</TableCell>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" sx={{ rowGap: 1 }}>
+              {EXCHANGE_RATE_OPTIONS.map((option) => {
+                const rateInfo = exchangeRatesByMarketplace[option.value];
+                const rateLabel = `${option.label}: ${rateInfo?.rate || EXCHANGE_RATE_DEFAULTS[option.value]} INR`;
+                const tooltipDetail = [
+                  rateInfo?.applicationMode === 'specific-date' ? 'Specific Date' : 'Effective',
+                  rateInfo?.effectiveDate ? new Date(rateInfo.effectiveDate).toLocaleDateString() : null
+                ].filter(Boolean).join(' • ');
+
+                return (
+                  <Tooltip key={option.value} title={tooltipDetail} arrow>
+                    <Chip
+                      label={rateLabel}
+                      size="small"
+                      variant="outlined"
+                      color={option.channel === 'AMAZON' ? 'success' : 'primary'}
+                    />
+                  </Tooltip>
+                );
+              })}
+            </Stack>
+
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" sx={{ rowGap: 1 }}>
+              <FormControl size="small" sx={{ minWidth: 130 }}>
+                <InputLabel>Rate For</InputLabel>
+                <Select
+                  value={selectedRateMarketplace}
+                  label="Rate For"
+                  onChange={(e) => setSelectedRateMarketplace(e.target.value)}
+                  disabled={updatingExchangeRates}
+                >
+                  {EXCHANGE_RATE_OPTIONS.map((option) => (
+                    <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <FormControl size="small" sx={{ minWidth: 150 }}>
+                <InputLabel>Apply As</InputLabel>
+                <Select
+                  value={rateApplicationMode}
+                  label="Apply As"
+                  onChange={(e) => setRateApplicationMode(e.target.value)}
+                  disabled={updatingExchangeRates}
+                >
+                  <MenuItem value="effective">Effective From</MenuItem>
+                  <MenuItem value="specific-date">Specific Date Only</MenuItem>
+                </Select>
+              </FormControl>
+              <TextField
+                size="small"
+                label="New Rate"
+                type="number"
+                value={newRate}
+                onChange={(e) => setNewRate(e.target.value)}
+                sx={{ width: 130 }}
+                placeholder="e.g. 84"
+                disabled={updatingExchangeRates}
+              />
+              <Tooltip title={rateApplicationMode === 'specific-date' ? 'Uses the same PST/PDT day pattern as the All Orders Sheet search date filter.' : 'Starts from this PST/PDT day, matching the All Orders Sheet search date filter.'} arrow>
+                <TextField
+                  size="small"
+                  label={rateApplicationMode === 'specific-date' ? 'Specific Date' : 'Effective From'}
+                  type="date"
+                  value={newRateDate}
+                  onChange={(e) => setNewRateDate(e.target.value)}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ width: 170 }}
+                  disabled={updatingExchangeRates}
+                />
+              </Tooltip>
+              <Button
+                variant="contained"
+                size="small"
+                onClick={handleSetExchangeRate}
+                disabled={!newRate || !newRateDate || updatingExchangeRates}
+                startIcon={updatingExchangeRates ? <CircularProgress size={16} color="inherit" /> : null}
+                sx={yellowFilledButtonSx}
+              >
+                {updatingExchangeRates ? 'Recalculating...' : `Set ${EXCHANGE_RATE_LABELS[selectedRateMarketplace]} Rate`}
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => setShowRateHistory(!showRateHistory)}
+                endIcon={showRateHistory ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                disabled={updatingExchangeRates}
+                sx={{ minWidth: 'auto' }}
+              >
+                History
+              </Button>
+            </Stack>
+
+            <Collapse in={showRateHistory && rateHistory.length > 0}>
+              <Box sx={{ mt: 0.5 }}>
+                <Typography variant="caption" fontWeight="bold" sx={{ mb: 0.5, display: 'block' }}>{EXCHANGE_RATE_LABELS[selectedRateMarketplace]} Rate History</Typography>
+                <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 200 }}>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Effective Date</TableCell>
+                        <TableCell>Mode</TableCell>
+                        <TableCell>Rate (INR)</TableCell>
+                        <TableCell>Created</TableCell>
+                        <TableCell>Notes</TableCell>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-            </Box>
-          )}
-          </>
-          )}
-        </Stack>
-      </Paper>
+                    </TableHead>
+                    <TableBody>
+                      {rateHistory.map((rate) => (
+                        <TableRow key={rate._id}>
+                          <TableCell>{new Date(rate.effectiveDate).toLocaleDateString()}</TableCell>
+                          <TableCell>{rate.applicationMode === 'specific-date' ? 'Specific Date' : 'Effective'}</TableCell>
+                          <TableCell><strong>{rate.rate}</strong></TableCell>
+                          <TableCell>{new Date(rate.createdAt).toLocaleDateString()}</TableCell>
+                          <TableCell>{rate.notes || '-'}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Box>
+            </Collapse>
+          </Stack>
+        </SectionCard>
+      </Collapse>
 
-      {/* Orders Count & Pagination - Enhanced visibility */}
+      {/* Orders Count & Pagination - compact single row */}
       {!loading && (
-        <Paper sx={{ p: 2, mb: 2, backgroundColor: '#f5f5f5' }}>
-          <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" spacing={2}>
-            <Box>
-              <Typography variant="h6" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+        <SectionCard sx={{ p: { xs: 1, sm: 1 }, mb: 1, background: dashboardSignatureTokens.surfaces.pageCard }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" sx={{ rowGap: 1 }} spacing={1}>
+            <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
+              <Typography variant="body2" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
                 {dateFilter.mode === 'single' ? (
                   <>Total Results: {orders.length} order{orders.length !== 1 ? 's' : ''}</>
                 ) : (
@@ -1595,101 +1588,78 @@ export default function AllOrdersSheetPage() {
                   </>
                 )}
               </Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                {selectedSeller && 'Seller filter active • '}
-                {searchMarketplace && 'Marketplace filter active • '}
-                {(dateFilter.mode !== 'none') && 'Date filter active • '}
-                {(profitFilter.mode !== 'none') && 'Profit filter active • '}
-                {(subtotalFilter.mode !== 'none') && 'Subtotal filter active • '}
-                {excludeLowValue && 'Hiding <$3 • '}
-                {excludeNoAmazonAccount && 'Hiding no Amazon account • '}
-                {searchOrderId && 'Order ID search active • '}
-                {searchBuyerName && 'Buyer name search active • '}
-                {searchItemNumber && 'Item number search active • '}
-                {searchProductName && 'Product name search active'}
-              </Typography>
-            </Box>
-            
+              {rawCount !== null && (
+                <Tooltip title="Total orders in this date/seller/marketplace scope before any exclusion filters (matches Fulfillment Dashboard count)" arrow>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: 'text.secondary',
+                      borderLeft: '1px solid rgba(0,0,0,0.15)',
+                      pl: 1,
+                      fontStyle: 'italic'
+                    }}
+                  >
+                    Raw total: {rawCount}
+                    {rawCount !== totalOrders && (
+                      <Typography component="span" sx={{ ml: 0.5, color: 'warning.main', fontWeight: 'bold', fontStyle: 'normal' }}>
+                        (−{rawCount - totalOrders} excluded)
+                      </Typography>
+                    )}
+                  </Typography>
+                </Tooltip>
+              )}
+              {(() => {
+                const activeFilters = [
+                  selectedSeller && 'Seller',
+                  searchMarketplace && 'Marketplace',
+                  dateFilter.mode !== 'none' && 'Date',
+                  profitFilter.mode !== 'none' && 'Profit',
+                  subtotalFilter.mode !== 'none' && 'Subtotal',
+                  excludeLowValue && 'Hiding <$3',
+                  excludeNoAmazonAccount && 'Hiding no Amazon account',
+                  searchOrderId && 'Order ID',
+                  searchBuyerName && 'Buyer name',
+                  searchItemNumber && 'Item number',
+                  searchProductName && 'Product name'
+                ].filter(Boolean);
+                if (activeFilters.length === 0) return null;
+                return (
+                  <Tooltip title={`Active: ${activeFilters.join(', ')}`} arrow>
+                    <Chip label={`${activeFilters.length} filter${activeFilters.length !== 1 ? 's' : ''} active`} size="small" color="info" variant="outlined" sx={{ height: 20, fontSize: '0.65rem' }} />
+                  </Tooltip>
+                );
+              })()}
+            </Stack>
+
             {/* Category, Range, Product Counts */}
-            <Stack direction="row" spacing={2} alignItems="center">
-              <Box 
-                sx={{ 
-                  textAlign: 'center', 
-                  px: 2, 
-                  borderLeft: '2px solid #1976d2', 
-                  cursor: 'pointer',
-                  transition: 'all 0.2s',
-                  '&:hover': {
-                    backgroundColor: 'rgba(25, 118, 210, 0.08)',
-                    transform: 'translateY(-2px)'
-                  }
-                }}
-                onClick={() => setNamesModal({
-                  open: true,
-                  type: 'categories',
-                  title: 'Categories',
-                  items: counts.categoryData
-                })}
-              >
-                <Typography variant="h5" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                  {counts.uniqueCategories}
-                </Typography>
-                <Typography variant="caption" color="text.secondary">
-                  Categories
-                </Typography>
-              </Box>
-              <Box 
-                sx={{ 
-                  textAlign: 'center', 
-                  px: 2, 
-                  borderLeft: '2px solid #1976d2', 
-                  cursor: 'pointer',
-                  transition: 'all 0.2s',
-                  '&:hover': {
-                    backgroundColor: 'rgba(46, 125, 50, 0.08)',
-                    transform: 'translateY(-2px)'
-                  }
-                }}
-                onClick={() => setNamesModal({
-                  open: true,
-                  type: 'ranges',
-                  title: 'Ranges',
-                  items: counts.rangeData
-                })}
-              >
-                <Typography variant="h5" sx={{ fontWeight: 'bold', color: 'success.main' }}>
-                  {counts.uniqueRanges}
-                </Typography>
-                <Typography variant="caption" color="text.secondary">
-                  Ranges
-                </Typography>
-              </Box>
-              <Box 
-                sx={{ 
-                  textAlign: 'center', 
-                  px: 2, 
-                  borderLeft: '2px solid #1976d2', 
-                  cursor: 'pointer',
-                  transition: 'all 0.2s',
-                  '&:hover': {
-                    backgroundColor: 'rgba(237, 108, 2, 0.08)',
-                    transform: 'translateY(-2px)'
-                  }
-                }}
-                onClick={() => setNamesModal({
-                  open: true,
-                  type: 'products',
-                  title: 'Products',
-                  items: counts.productData
-                })}
-              >
-                <Typography variant="h5" sx={{ fontWeight: 'bold', color: 'warning.main' }}>
-                  {counts.uniqueProducts}
-                </Typography>
-                <Typography variant="caption" color="text.secondary">
-                  Products
-                </Typography>
-              </Box>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Tooltip title="View categories" arrow>
+                <Chip
+                  label={`${counts.uniqueCategories} Categories`}
+                  size="small"
+                  variant="outlined"
+                  color="primary"
+                  onClick={() => setNamesModal({ open: true, type: 'categories', title: 'Categories', items: counts.categoryData })}
+                />
+              </Tooltip>
+              <Tooltip title="View ranges" arrow>
+                <Chip
+                  label={`${counts.uniqueRanges} Ranges`}
+                  size="small"
+                  variant="outlined"
+                  color="success"
+                  onClick={() => setNamesModal({ open: true, type: 'ranges', title: 'Ranges', items: counts.rangeData })}
+                />
+              </Tooltip>
+              <Tooltip title="View products" arrow>
+                <Chip
+                  label={`${counts.uniqueProducts} Products`}
+                  size="small"
+                  variant="outlined"
+                  color="warning"
+                  onClick={() => setNamesModal({ open: true, type: 'products', title: 'Products', items: counts.productData })}
+                />
+              </Tooltip>
             </Stack>
 
             {dateFilter.mode !== 'single' && orders.length > 0 && (
@@ -1698,112 +1668,268 @@ export default function AllOrdersSheetPage() {
                 page={currentPage}
                 onChange={(e, page) => setCurrentPage(page)}
                 color="primary"
+                size="small"
               />
             )}
           </Stack>
-        </Paper>
+        </SectionCard>
+      )}
+
+      {/* Cross-page Filtered Totals — shown when a date filter is active */}
+      {filteredTotals && dateFilter.mode !== 'none' && (
+        <SectionCard sx={{ p: { xs: 1, sm: 1.25 }, mb: 1, background: dashboardSignatureTokens.surfaces.pageCard }}>
+          <Typography variant="caption" sx={{ fontWeight: 'bold', mb: 1, display: 'block', color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            Totals for all {totalOrders} filtered order{totalOrders !== 1 ? 's' : ''} across {totalPages} page{totalPages !== 1 ? 's' : ''}
+          </Typography>
+          <Stack direction="row" flexWrap="nowrap" spacing={1.5} sx={{ overflowX: 'auto', pb: 0.5 }}>
+            <StatMetricCard
+              label="PROFIT (INR)"
+              value={`₹${(filteredTotals.profit ?? 0).toFixed(2)}`}
+              tone={filteredTotals.profit >= 0 ? 'success' : 'danger'}
+              sx={{ minWidth: 130, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="P.Balance (INR)"
+              value={`₹${(filteredTotals.pBalanceINR ?? 0).toFixed(2)}`}
+              tone="info"
+              sx={{ minWidth: 130, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="Amazon Total (INR)"
+              value={`₹${(filteredTotals.amazonTotalINR ?? 0).toFixed(2)}`}
+              tone="amazon"
+              sx={{ minWidth: 130, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="Total CC (INR)"
+              value={`₹${(filteredTotals.totalCC ?? 0).toFixed(2)}`}
+              tone="warning"
+              sx={{ minWidth: 120, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="Mktplace Fee (INR)"
+              value={`₹${(filteredTotals.marketplaceFee ?? 0).toFixed(2)}`}
+              tone="neutral"
+              sx={{ minWidth: 130, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="IGST (INR)"
+              value={`₹${(filteredTotals.igst ?? 0).toFixed(2)}`}
+              tone="neutral"
+              sx={{ minWidth: 110, flexShrink: 0 }}
+            />
+            <Box sx={{ width: '1px', bgcolor: 'divider', alignSelf: 'stretch', flexShrink: 0 }} />
+            <StatMetricCard
+              label="Subtotal ($)"
+              value={`$${(filteredTotals.subtotal ?? 0).toFixed(2)}`}
+              tone="neutral"
+              sx={{ minWidth: 110, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="Shipping ($)"
+              value={`$${(filteredTotals.shipping ?? 0).toFixed(2)}`}
+              tone="shipping"
+              sx={{ minWidth: 110, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="Sales Tax ($)"
+              value={`$${(filteredTotals.salesTax ?? 0).toFixed(2)}`}
+              tone="neutral"
+              sx={{ minWidth: 110, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="Earnings ($)"
+              value={`$${(filteredTotals.orderEarnings ?? 0).toFixed(2)}`}
+              tone="success"
+              sx={{ minWidth: 120, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="TDS ($)"
+              value={`$${(filteredTotals.tds ?? 0).toFixed(2)}`}
+              tone="neutral"
+              sx={{ minWidth: 90, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="NET ($)"
+              value={`$${(filteredTotals.net ?? 0).toFixed(2)}`}
+              tone="info"
+              sx={{ minWidth: 100, flexShrink: 0 }}
+            />
+            <StatMetricCard
+              label="Amazon Total ($)"
+              value={`$${(filteredTotals.amazonTotal ?? 0).toFixed(2)}`}
+              tone="amazon"
+              sx={{ minWidth: 120, flexShrink: 0 }}
+            />
+          </Stack>
+        </SectionCard>
       )}
 
       {/* Orders Table */}
       {orders.length === 0 ? (
         <Alert severity="info">No orders found{(selectedSeller || searchMarketplace || dateFilter.mode !== 'none' || profitFilter.mode !== 'none' || subtotalFilter.mode !== 'none' || excludeLowValue || excludeNoAmazonAccount || searchOrderId || searchBuyerName) ? ' with current filters' : ''}</Alert>
       ) : (
-        <TableContainer component={Paper} sx={{ overflowX: 'auto', maxHeight: 'calc(100vh - 260px)' }}>
-          <Table size="small" stickyHeader sx={{ '& thead tr:nth-of-type(2) th': { top: 37, zIndex: 3 } }}>
+        <TableContainer
+          component={Paper}
+          sx={{
+            ...tableContainerSx,
+            overflowX: 'auto',
+            overflowY: 'auto',
+            maxHeight: 'calc(100vh - 260px)',
+          }}
+        >
+          <Table
+            size="small"
+            stickyHeader
+            sx={{
+              ...stickyHeaderTableSx,
+              '--all-orders-header-row1-height': `${headerRow1Height}px`,
+            }}
+          >
             <TableHead>
               {/* First row: Section headers */}
               <TableRow>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', borderRight: '2px solid #90caf9', position: 'sticky', left: 0, zIndex: 4, minWidth: 100 }}>Seller</TableCell>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', borderRight: '2px solid #90caf9', position: 'sticky', left: 100, zIndex: 4, minWidth: 110 }}>Date Sold</TableCell>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', borderRight: '2px solid #90caf9', position: 'sticky', left: 210, zIndex: 4, minWidth: 350 }}>Product Name</TableCell>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', borderRight: '2px solid #90caf9', position: 'sticky', left: 560, zIndex: 4, minWidth: 120, boxShadow: '4px 0 5px rgba(0,0,0,0.12)' }}>Marketplace</TableCell>
-                <TableCell colSpan={13} align="center" sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', borderBottom: '2px solid #ffb74d', borderRight: '2px solid #90caf9' }}>eBay Side</TableCell>
-                <TableCell colSpan={5} align="center" sx={{ fontWeight: 'bold', bgcolor: '#e8f5e9', borderBottom: '2px solid #81c784', borderRight: '2px solid #90caf9' }}>Amazon Side</TableCell>
-                <TableCell colSpan={3} align="center" sx={{ fontWeight: 'bold', bgcolor: '#fce4ec', borderBottom: '2px solid #f48fb1', borderRight: '2px solid #90caf9' }}>Credit Card</TableCell>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#fff9c4', borderRight: '2px solid #90caf9' }} align="right">PROFIT<br />(INR)</TableCell>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', borderRight: '2px solid #90caf9' }}>Amazon<br />Acc</TableCell>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', borderRight: '2px solid #90caf9' }}>Order ID</TableCell>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', borderRight: '2px solid #90caf9' }}>Buyer<br />Name</TableCell>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#e3f2fd', borderRight: '2px solid #90caf9' }}>Arriving</TableCell>
-                <TableCell rowSpan={2} sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', borderRight: '2px solid #90caf9', minWidth: 180 }}>Update Price</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 100 }}>Seller</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 110 }}>Date Sold</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 350 }}>Product Name</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 120 }}>Marketplace</TableCell>
+                <TableCell
+                  ref={headerBandRef}
+                  colSpan={13}
+                  align="center"
+                  sx={{ ...tableHeaderCellSx, borderBottom: `3px solid ${BRAND_YELLOW}`, borderRight: `2px solid ${BRAND_DARK}` }}
+                >
+                  eBay Side
+                </TableCell>
+                <TableCell colSpan={5} align="center" sx={{ ...tableHeaderCellSx, borderBottom: '3px solid #10b981', borderRight: `2px solid ${BRAND_DARK}` }}>Amazon Side</TableCell>
+                <TableCell colSpan={3} align="center" sx={{ ...tableHeaderCellSx, borderBottom: '3px solid #f43f5e', borderRight: `2px solid ${BRAND_DARK}` }}>Credit Card</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderBottom: `3px solid ${BRAND_YELLOW}`, borderRight: `2px solid ${BRAND_DARK}` }} align="right">PROFIT<br />(INR)</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}` }}>Amazon<br />Acc</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}` }}>Order ID</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 220 }}>All Orders USD<br />Remark</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}` }}>Buyer<br />Name</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}` }}>Arriving</TableCell>
+                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 180 }}>Actions</TableCell>
               </TableRow>
               {/* Second row: eBay Side and Amazon Side column headers */}
               <TableRow>
-                <Tooltip title="Product price (excluding tax and shipping)" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">Subtotal</TableCell>
-                </Tooltip>
-                <Tooltip title="Shipping cost" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">Shipping</TableCell>
-                </Tooltip>
-                <Tooltip title="Sales tax collected" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">Sales Tax</TableCell>
-                </Tooltip>
-                <Tooltip title="Discount applied" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">Discount</TableCell>
-                </Tooltip>
-                <Tooltip title="eBay marketplace transaction fees" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">Transaction Fees</TableCell>
-                </Tooltip>
-                <Tooltip title="eBay advertising fees" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">Ad Fee</TableCell>
-                </Tooltip>
-                <Tooltip title="Earnings = Subtotal + Discount - Sales Tax - Transaction Fees - Ad Fee - Shipping" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">Earnings</TableCell>
-                </Tooltip>
-                <Tooltip title="Order total = pricingSummary.total.value + salesTax" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">Order total</TableCell>
-                </Tooltip>
-                <Tooltip title="TDS = 1% of (pricingSummary.total.value + salesTax)" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">TDS</TableCell>
-                </Tooltip>
-                <Tooltip title="T.ID = $0.24 (fixed transaction ID fee)" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">T.ID</TableCell>
-                </Tooltip>
-                <Tooltip title="NET = Earnings - TDS - T.ID" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">NET</TableCell>
-                </Tooltip>
-                <Tooltip title="Exchange Rate (USD to INR) based on order date" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', cursor: 'help' }} align="right">Exchange Rate</TableCell>
-                </Tooltip>
-                <Tooltip title="P.Balance = NET × Exchange Rate (in INR)" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', borderRight: '2px solid #90caf9', cursor: 'help' }} align="right">P.Balance (INR)</TableCell>
-                </Tooltip>
-                <Tooltip title="Amazon order cost before tax" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#e8f5e9', cursor: 'help' }} align="right">Before Tax</TableCell>
-                </Tooltip>
-                <Tooltip title="Amazon estimated tax" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#e8f5e9', cursor: 'help' }} align="right">Estimated Tax</TableCell>
-                </Tooltip>
-                <Tooltip title="Amazon Total = Before Tax + Estimated Tax" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#e8f5e9', cursor: 'help' }} align="right">Amazon_total</TableCell>
-                </Tooltip>
-                <Tooltip title="Amazon Exchange Rate (USD to INR)" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#e8f5e9', cursor: 'help' }} align="right">Amazon Exch Rate</TableCell>
-                </Tooltip>
-                <Tooltip title="A_total-inr = Amazon_total × Amazon Exchange Rate" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#e8f5e9', borderRight: '2px solid #90caf9', cursor: 'help' }} align="right">A_total-inr</TableCell>
-                </Tooltip>
-                <Tooltip title="Marketplace Fee = 4% of A_total-inr" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fce4ec', cursor: 'help' }} align="right">Marketplace Fee</TableCell>
-                </Tooltip>
-                <Tooltip title="IGST = 18% of Marketplace Fee" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fce4ec', cursor: 'help' }} align="right">IGST</TableCell>
-                </Tooltip>
-                <Tooltip title="Total_CC = Marketplace Fee + IGST" arrow placement="top">
-                  <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fce4ec', borderRight: '2px solid #90caf9', cursor: 'help' }} align="right">Total_CC</TableCell>
-                </Tooltip>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Product price (excluding tax and shipping)" arrow placement="top">
+                    <Box component="span">Subtotal</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Shipping cost" arrow placement="top">
+                    <Box component="span">Shipping</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Sales tax collected" arrow placement="top">
+                    <Box component="span">Sales Tax</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Discount applied" arrow placement="top">
+                    <Box component="span">Discount</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="eBay marketplace transaction fees" arrow placement="top">
+                    <Box component="span">Transaction Fees</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="eBay advertising fees" arrow placement="top">
+                    <Box component="span">Ad Fee</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Earnings = Subtotal + Discount - Sales Tax - Transaction Fees - Ad Fee - Shipping" arrow placement="top">
+                    <Box component="span">Earnings</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Order total = pricingSummary.total.value + salesTax" arrow placement="top">
+                    <Box component="span">Order total</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="TDS = 1% of (pricingSummary.total.value + salesTax)" arrow placement="top">
+                    <Box component="span">TDS</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="T.ID = $0.24 (fixed transaction ID fee)" arrow placement="top">
+                    <Box component="span">T.ID</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="NET = Earnings - TDS - T.ID" arrow placement="top">
+                    <Box component="span">NET</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Exchange Rate (USD to INR) based on order date" arrow placement="top">
+                    <Box component="span">Exchange Rate</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, cursor: 'help' }} align="right">
+                  <Tooltip title="P.Balance = NET × Exchange Rate (in INR)" arrow placement="top">
+                    <Box component="span">P.Balance (INR)</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Amazon order cost before tax" arrow placement="top">
+                    <Box component="span">Before Tax</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Amazon estimated tax" arrow placement="top">
+                    <Box component="span">Estimated Tax</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Amazon Total = Before Tax + Estimated Tax" arrow placement="top">
+                    <Box component="span">Amazon_total</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Amazon Exchange Rate (USD to INR)" arrow placement="top">
+                    <Box component="span">Amazon Exch Rate</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, cursor: 'help' }} align="right">
+                  <Tooltip title="A_total-inr = Amazon_total × Amazon Exchange Rate" arrow placement="top">
+                    <Box component="span">A_total-inr</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="Marketplace Fee = 4% of A_total-inr" arrow placement="top">
+                    <Box component="span">Marketplace Fee</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
+                  <Tooltip title="IGST = 18% of Marketplace Fee" arrow placement="top">
+                    <Box component="span">IGST</Box>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, cursor: 'help' }} align="right">
+                  <Tooltip title="Total_CC = Marketplace Fee + IGST" arrow placement="top">
+                    <Box component="span">Total_CC</Box>
+                  </Tooltip>
+                </TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {orders.map((order) => (
-                <TableRow key={order._id} hover>
-                  <TableCell sx={{ position: 'sticky', left: 0, zIndex: 1, bgcolor: 'background.paper' }}>{order.seller?.user?.username || '-'}</TableCell>
-                  <TableCell sx={{ position: 'sticky', left: 100, zIndex: 1, bgcolor: 'background.paper' }}>
+                <TableRow key={order._id} hover sx={tableBodyRowSx}>
+                  <TableCell>{order.seller?.user?.username || '-'}</TableCell>
+                  <TableCell>
                     <Typography variant="body2" sx={{ whiteSpace: 'pre-line', lineHeight: 1.4, fontSize: '0.8rem' }}>
                       {formatDate(order.dateSold, order.purchaseMarketplaceId)}
                     </Typography>
                   </TableCell>
-                  <TableCell sx={{ minWidth: 350, maxWidth: 500, position: 'sticky', left: 210, zIndex: 1, bgcolor: 'background.paper' }}>
+                  <TableCell sx={{ minWidth: 350, maxWidth: 500 }}>
                     <Stack spacing={0.5}>
                       {order.lineItems && order.lineItems.length > 0 ? (
                         order.lineItems.map((item, i) => (
@@ -1853,7 +1979,7 @@ export default function AllOrdersSheetPage() {
                       )}
                     </Stack>
                   </TableCell>
-                  <TableCell sx={{ position: 'sticky', left: 560, zIndex: 1, bgcolor: 'background.paper', boxShadow: '4px 0 5px rgba(0,0,0,0.12)' }}>
+                  <TableCell>
                     <Chip 
                       label={order.purchaseMarketplaceId?.replace('EBAY_', '') || '-'} 
                       size="small"
@@ -2137,18 +2263,67 @@ export default function AllOrdersSheetPage() {
                       )}
                     </Stack>
                   </TableCell>
+                  <TableCell>
+                    <AllOrdersUsdRemarkCell
+                      order={order}
+                      saving={Boolean(savingAllOrdersUsdRemarks[order._id])}
+                      onSave={handleSaveAllOrdersUsdRemark}
+                    />
+                  </TableCell>
                   <TableCell>{order.buyer?.buyerRegistrationAddress?.fullName || '-'}</TableCell>
                   <TableCell>{order.arrivingDate || '-'}</TableCell>
-                  {/* Update Price Column */}
+                  {/* Actions Column */}
                   <TableCell>
-                    <Button
-                      size="small"
-                      variant="contained"
-                      onClick={() => openPriceUpdateModal(order)}
-                      sx={{ fontSize: '0.75rem', whiteSpace: 'nowrap' }}
-                    >
-                      Change Price
-                    </Button>
+                    {(() => {
+                      const legacyItemId = getFirstLegacyItemId(order);
+
+                      return (
+                        <Stack direction="row" spacing={1} alignItems="center">
+                          <Button
+                            size="small"
+                            variant="contained"
+                            onClick={() => openPriceUpdateModal(order)}
+                            sx={{ fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                          >
+                            Change Price
+                          </Button>
+                          <Tooltip title="Open price change history for this order" arrow placement="top">
+                            <span>
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                component="a"
+                                href={getPriceChangeHistoryUrl(order.orderId)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                disabled={!order.orderId}
+                                endIcon={<OpenInNewIcon sx={{ fontSize: '0.875rem' }} />}
+                                sx={{ fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                              >
+                                History
+                              </Button>
+                            </span>
+                          </Tooltip>
+                          <Tooltip title={legacyItemId ? `Open price change history for item ${legacyItemId}` : 'No item ID found for this order'} arrow placement="top">
+                            <span>
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                component="a"
+                                href={getPriceChangeHistoryItemUrl(legacyItemId)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                disabled={!legacyItemId}
+                                endIcon={<OpenInNewIcon sx={{ fontSize: '0.875rem' }} />}
+                                sx={{ fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                              >
+                                Open Item
+                              </Button>
+                            </span>
+                          </Tooltip>
+                        </Stack>
+                      );
+                    })()}
                   </TableCell>
                 </TableRow>
               ))}
@@ -2204,10 +2379,10 @@ export default function AllOrdersSheetPage() {
                 
                 return (
                   <TableRow sx={{ bgcolor: theme => theme.palette.primary.main, '& td': { fontWeight: 'bold', borderTop: '2px solid rgba(0,0,0,0.12)', color: 'white' } }}>
-                    <TableCell sx={{ position: 'sticky', left: 0, zIndex: 1, bgcolor: theme => theme.palette.primary.main, color: 'white' }}>TOTALS</TableCell>
-                    <TableCell sx={{ position: 'sticky', left: 100, zIndex: 1, bgcolor: theme => theme.palette.primary.main, color: 'white' }} />
-                    <TableCell sx={{ position: 'sticky', left: 210, zIndex: 1, bgcolor: theme => theme.palette.primary.main, color: 'white', minWidth: 350 }} />
-                    <TableCell sx={{ position: 'sticky', left: 560, zIndex: 1, bgcolor: theme => theme.palette.primary.main, color: 'white', boxShadow: '4px 0 5px rgba(0,0,0,0.12)' }} />
+                    <TableCell>TOTALS</TableCell>
+                    <TableCell />
+                    <TableCell sx={{ minWidth: 350 }} />
+                    <TableCell />
                     <TableCell align="right">${totals.subtotal.toFixed(2)}</TableCell>
                     <TableCell align="right">${totals.shipping.toFixed(2)}</TableCell>
                     <TableCell align="right">${totals.salesTax.toFixed(2)}</TableCell>
@@ -2232,6 +2407,7 @@ export default function AllOrdersSheetPage() {
                     <TableCell align="right" sx={{ color: totals.profit < 0 ? 'error.main' : 'success.main' }}>
                       ₹{totals.profit.toFixed(2)}
                     </TableCell>
+                    <TableCell></TableCell>
                     <TableCell></TableCell>
                     <TableCell></TableCell>
                     <TableCell></TableCell>
@@ -2646,7 +2822,7 @@ export default function AllOrdersSheetPage() {
           </Button>
         </DialogActions>
       </Dialog>
-    </Box>
+    </AdminPageShell>
     </Fade>
   );
 }

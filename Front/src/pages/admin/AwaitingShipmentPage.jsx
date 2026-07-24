@@ -32,6 +32,7 @@ import {
   DialogActions,
   Fade,
   Switch,
+  TableSortLabel,
 } from '@mui/material';
 import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -44,10 +45,13 @@ import InfoIcon from '@mui/icons-material/Info';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
+import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import api from '../../lib/api';
 import ColumnSelector from '../../components/ColumnSelector';
-import { sortSellersByName } from '../../lib/sellersSort';
 import ChatModal from '../../components/ChatModal';
+import SectionCard from '../../components/SectionCard.jsx';
+import { tableContainerSx, tableHeaderCellSx, tableBodyRowSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
 import {
   findRemarkTemplateText,
@@ -55,6 +59,7 @@ import {
   saveRemarkTemplates
 } from '../../constants/remarkTemplates';
 import AwaitingShipmentSkeleton from '../../components/skeletons/AwaitingShipmentSkeleton';
+import { sortSellersByName } from '../../lib/sellersSort';
 
 const ALL_COLUMNS = [
   { id: 'seller', label: 'Seller' },
@@ -92,11 +97,82 @@ const ALL_COLUMNS = [
   { id: 'cardName', label: 'Card Name' },
   { id: 'notes', label: 'Notes' },
   { id: 'messagingStatus', label: 'Messaging' },
+  { id: 'buyerSla', label: 'Buyer SLA' },
   { id: 'remark', label: 'Remark' },
   { id: 'alreadyInUse', label: 'Already in use' }
 ];
 
-// ... (Rest of the file remains unchanged until ManualTrackingCell)
+/** Columns that support server/client sort (Grow: default Ship By oldest-first). */
+const SORTABLE_COLUMN_IDS = new Set([
+  'seller',
+  'orderId',
+  'dateSold',
+  'shipBy',
+  'deliveryDate',
+  'marketplace',
+  'productName',
+  'arriving',
+  'buyerSla',
+]);
+
+function SortableHeaderCell({ field, label, sortBy, sortDir, onSort, sx }) {
+  const active = sortBy === field;
+  return (
+    <TableCell
+      sortDirection={active ? sortDir : false}
+      sx={sx}
+    >
+      <TableSortLabel
+        active={active}
+        direction={active ? sortDir : 'asc'}
+        onClick={() => onSort(field)}
+        sx={{
+          color: 'inherit !important',
+          '& .MuiTableSortLabel-icon': { color: 'inherit !important' },
+          '&.Mui-active': { color: 'inherit' },
+          fontWeight: 700,
+        }}
+      >
+        {label}
+      </TableSortLabel>
+    </TableCell>
+  );
+}
+
+// Buyer SLA: same 24h reply-window logic as ConversationManagementPage, based on
+// the last buyer/seller message timestamps the backend attaches per order.
+const SLA_ONE_HOUR_MS = 60 * 60 * 1000;
+const SLA_ONE_DAY_MS = 24 * SLA_ONE_HOUR_MS;
+
+function slaParseTimeMs(value) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function slaFormatElapsed(ms) {
+  if (ms < SLA_ONE_HOUR_MS) return '<1 hr';
+  if (ms < SLA_ONE_DAY_MS) return `${Math.floor(ms / SLA_ONE_HOUR_MS)} hr(s)`;
+  return `${Math.floor(ms / SLA_ONE_DAY_MS)} day(s)`;
+}
+
+function getBuyerSlaLabel(order, nowMs) {
+  const buyerMs = slaParseTimeMs(order.lastBuyerMessageAt);
+  const sellerMs = slaParseTimeMs(order.lastSellerMessageAt);
+
+  if (!buyerMs) return { label: 'No buyer message', color: 'default' };
+
+  if (sellerMs && sellerMs >= buyerMs) {
+    return { label: `Replied ${slaFormatElapsed(nowMs - sellerMs)} ago`, color: 'success' };
+  }
+
+  const remainingMs = SLA_ONE_DAY_MS - (nowMs - buyerMs);
+  if (remainingMs > 0) {
+    return { label: `${slaFormatElapsed(remainingMs)} left`, color: 'warning' };
+  }
+
+  return { label: `Overdue ${slaFormatElapsed(Math.abs(remainingMs))}`, color: 'error' };
+}
 
 // Helper to get unique item IDs from order
 function getUniqueItemIds(order) {
@@ -390,6 +466,7 @@ function ManualTrackingCell({ order, onSaved, onCopy, onNotify }) {
                           <MenuItem value="AUSTRALIA_POST">Australia Post</MenuItem>
                           <MenuItem value="AUSTRALIA_POST_GLOBAL">Australia Post Global</MenuItem>
                           <MenuItem value="ARAMEX_AUSTRALIA">Aramex Australia</MenuItem>
+                          <MenuItem value="TNT_AUSTRALIA">TNT Australia</MenuItem>
                           <MenuItem value="OTHER">Other</MenuItem>
                         </Select>
                       </FormControl>
@@ -416,6 +493,7 @@ function ManualTrackingCell({ order, onSaved, onCopy, onNotify }) {
                 <MenuItem value="AUSTRALIA_POST">Australia Post</MenuItem>
                 <MenuItem value="AUSTRALIA_POST_GLOBAL">Australia Post Global</MenuItem>
                 <MenuItem value="ARAMEX_AUSTRALIA">Aramex Australia</MenuItem>
+                <MenuItem value="TNT_AUSTRALIA">TNT Australia</MenuItem>
                 <MenuItem value="OTHER">Other</MenuItem>
               </Select>
             </FormControl>
@@ -451,6 +529,12 @@ export default function AwaitingShipmentPage() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
   const [expandedShipping, setExpandedShipping] = useState({});
   const [snack, setSnack] = useState({ open: false, message: '', severity: 'success' });
   const [selectedOrderForMessage, setSelectedOrderForMessage] = useState(null);
@@ -485,6 +569,9 @@ export default function AwaitingShipmentPage() {
   const [excludeClient, setExcludeClient] = useState(true);
   const [amazonAccounts, setAmazonAccounts] = useState([]);
   const [selectedAmazonAccount, setSelectedAmazonAccount] = useState('');
+  // Grow default: Ship By oldest-first
+  const [sortBy, setSortBy] = useState('shipBy');
+  const [sortDir, setSortDir] = useState('asc');
 
   const [visibleColumns, setVisibleColumns] = useState([
     'seller', 'orderId', 'marketplace', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'buyerName', 'shippingAddress', 'trackingNumber', 'trackingId', 'arriving', 'notes'
@@ -565,11 +652,28 @@ export default function AwaitingShipmentPage() {
   useEffect(() => {
     fetchAwaitingOrders();
     // eslint-disable-next-line
-  }, [page, debouncedOrderId, debouncedBuyerName, selectedSeller, searchMarketplace, shipByDate, dateSold, arrivalDateFrom, arrivalDateTo, excludeClient, selectedAmazonAccount]);
+  }, [page, debouncedOrderId, debouncedBuyerName, selectedSeller, searchMarketplace, shipByDate, dateSold, arrivalDateFrom, arrivalDateTo, excludeClient, selectedAmazonAccount, sortBy, sortDir]);
 
   // Handlers
   const handleSellerChange = (e) => {
     setSelectedSeller(e.target.value);
+    setPage(1);
+  };
+
+  const handleSort = (field) => {
+    if (!SORTABLE_COLUMN_IDS.has(field)) return;
+    if (sortBy === field) {
+      setSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(field);
+      setSortDir(field === 'shipBy' || field === 'dateSold' || field === 'arriving' ? 'asc' : 'asc');
+    }
+    setPage(1);
+  };
+
+  const handleToggleShipBySort = () => {
+    setSortBy('shipBy');
+    setSortDir((prev) => (sortBy === 'shipBy' && prev === 'asc' ? 'desc' : 'asc'));
     setPage(1);
   };
 
@@ -586,6 +690,8 @@ export default function AwaitingShipmentPage() {
     setArrivalDateTo('');
     setExcludeClient(true);
     setSelectedAmazonAccount('');
+    setSortBy('shipBy');
+    setSortDir('asc');
     setPage(1);
   };
 
@@ -596,7 +702,9 @@ export default function AwaitingShipmentPage() {
     const params = {
       awaitingShipment: true,
       page: page,
-      limit: 50
+      limit: 50,
+      sortBy,
+      sortDir,
     };
 
     if (debouncedOrderId) params.searchOrderId = debouncedOrderId;
@@ -622,7 +730,21 @@ export default function AwaitingShipmentPage() {
 
       const { data } = await api.get('/ebay/stored-orders', { params });
 
-      setOrders(data?.orders || []);
+      let nextOrders = data?.orders || [];
+      // Buyer SLA is enriched after the DB query — sort the current page locally.
+      if (sortBy === 'buyerSla') {
+        const dir = sortDir === 'desc' ? -1 : 1;
+        const rank = (order) => {
+          const buyerMs = slaParseTimeMs(order.lastBuyerMessageAt);
+          const sellerMs = slaParseTimeMs(order.lastSellerMessageAt);
+          if (!buyerMs) return Number.POSITIVE_INFINITY;
+          if (sellerMs && sellerMs >= buyerMs) return Number.POSITIVE_INFINITY - 1;
+          return Date.now() - buyerMs;
+        };
+        nextOrders = [...nextOrders].sort((a, b) => (rank(a) - rank(b)) * dir);
+      }
+
+      setOrders(nextOrders);
 
       if (data?.pagination) {
         setTotalPages(data.pagination.totalPages);
@@ -834,7 +956,7 @@ export default function AwaitingShipmentPage() {
     }));
   };
 
-  const formatDate = (dateStr, marketplaceId) => {
+  const formatDate = (dateStr, marketplaceId, { showIst = false } = {}) => {
     if (!dateStr) return '-';
     try {
       const date = new Date(dateStr);
@@ -850,26 +972,58 @@ export default function AwaitingShipmentPage() {
       } else if (marketplaceId === 'EBAY_AU') {
         timeZone = 'Australia/Sydney';
         timeZoneLabel = 'AET';
+      } else if (marketplaceId === 'EBAY_GB') {
+        timeZone = 'Europe/London';
+        timeZoneLabel = 'GMT';
       }
 
       const formattedDate = date.toLocaleDateString('en-US', {
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
-        timeZone: timeZone,
+        timeZone,
       });
 
       const formattedTime = date.toLocaleTimeString('en-US', {
         hour: '2-digit',
         minute: '2-digit',
-        timeZone: timeZone,
+        timeZone,
+      });
+
+      const primaryLine = (
+        <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.8125rem', lineHeight: 1.25 }}>
+          {formattedDate}{' '}
+          <Box component="span" sx={{ color: 'text.secondary', fontSize: '0.7rem' }}>
+            {formattedTime} ({timeZoneLabel})
+          </Box>
+        </Typography>
+      );
+
+      if (!showIst) return primaryLine;
+
+      const istDate = date.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        timeZone: 'Asia/Kolkata',
+      });
+      const istTime = date.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'Asia/Kolkata',
       });
 
       return (
-        <Stack spacing={0}>
-          <Typography variant="body2">{formattedDate}</Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
-            {formattedTime} ({timeZoneLabel})
+        <Stack spacing={0.15}>
+          {primaryLine}
+          <Typography
+            variant="caption"
+            sx={{ whiteSpace: 'nowrap', fontSize: '0.68rem', lineHeight: 1.2, color: 'text.secondary' }}
+          >
+            {istDate}{' '}
+            <Box component="span" sx={{ fontSize: '0.65rem' }}>
+              {istTime} (IST)
+            </Box>
           </Typography>
         </Stack>
       );
@@ -882,12 +1036,28 @@ export default function AwaitingShipmentPage() {
     switch (columnId) {
       case 'seller':
         return order.seller?.user?.username || order.seller?.user?.email || order.sellerId || '-';
-      case 'orderId':
-        return (
-          <Typography variant="body2" fontWeight="medium" sx={{ color: 'primary.main' }}>
-            {order.orderId || order.legacyOrderId || '-'}
-          </Typography>
+      case 'orderId': {
+        const orderIdValue = order.orderId || order.legacyOrderId || '';
+        return orderIdValue ? (
+          <Stack direction="row" alignItems="center" spacing={0.5}>
+            <Typography variant="body2" fontWeight="medium" sx={{ color: 'primary.main' }}>
+              {orderIdValue}
+            </Typography>
+            <IconButton
+              size="small"
+              onClick={() => {
+                handleCopy(orderIdValue);
+                showSnack('success', 'Order ID copied');
+              }}
+              sx={{ p: 0.5 }}
+            >
+              <ContentCopyIcon fontSize="small" sx={{ fontSize: 14 }} />
+            </IconButton>
+          </Stack>
+        ) : (
+          <Typography variant="body2" color="text.secondary">-</Typography>
         );
+      }
       case 'marketplace':
         return (
           <Chip
@@ -902,7 +1072,7 @@ export default function AwaitingShipmentPage() {
           />
         );
       case 'dateSold':
-        return formatDate(order.dateSold, order.purchaseMarketplaceId);
+        return formatDate(order.dateSold, order.purchaseMarketplaceId, { showIst: true });
       case 'shipBy': {
         const shipByDateStr = order.shipByDate || order.lineItems?.[0]?.lineItemFulfillmentInstructions?.shipByDate;
         if (!shipByDateStr) {
@@ -924,17 +1094,29 @@ export default function AwaitingShipmentPage() {
           );
         }
 
-        // Check if ship-by date is within 24 hours of current IST time
-        const shipByDate = new Date(shipByDateStr);
-        const nowIST = new Date(); // Current time (system already in IST)
-        const twentyFourHoursFromNow = new Date(nowIST.getTime() + 24 * 60 * 60 * 1000);
-
-        // Highlight in red if: ship-by date is in the future AND within 24 hours
-        const isUrgent = shipByDate > nowIST && shipByDate <= twentyFourHoursFromNow;
+        // Red when Ship By falls on India's calendar "today" (IST)
+        const toIstDateKey = (value) =>
+          new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Kolkata',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).format(new Date(value));
+        const isIndiaToday = toIstDateKey(shipByDateStr) === toIstDateKey(new Date());
 
         return (
-          <Box sx={isUrgent ? { color: 'error.main', fontWeight: 'bold' } : {}}>
-            {formatDate(shipByDateStr, order.purchaseMarketplaceId)}
+          <Box
+            sx={
+              isIndiaToday
+                ? {
+                    color: 'error.main',
+                    fontWeight: 'bold',
+                    '& .MuiTypography-root, & span': { color: 'inherit !important' },
+                  }
+                : {}
+            }
+          >
+            {formatDate(shipByDateStr, order.purchaseMarketplaceId, { showIst: true })}
           </Box>
         );
       }
@@ -1144,6 +1326,17 @@ export default function AwaitingShipmentPage() {
             </Tooltip>
           </Box>
         );
+      case 'buyerSla': {
+        const buyerSla = getBuyerSlaLabel(order, nowMs);
+        return (
+          <Chip
+            label={buyerSla.label}
+            color={buyerSla.color}
+            size="small"
+            variant={buyerSla.color === 'default' ? 'outlined' : 'filled'}
+          />
+        );
+      }
       case 'remark':
         return (
           <FormControl size="small" sx={{ minWidth: 150 }}>
@@ -1208,356 +1401,403 @@ export default function AwaitingShipmentPage() {
 
   return (
     <Fade in timeout={600}>
-    <Box sx={{
-      display: 'flex',
-      flexDirection: 'column',
-      height: 'calc(100vh - 100px)',
-      overflow: 'hidden',
-      width: '100%',
-      maxWidth: '100%',
-      p: 3
-    }}>
-      <Paper sx={{ p: 2, mb: 2, flexShrink: 0 }}>
-        {/* HEADER - Refresh button removed as requested */}
-        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2} sx={{ mb: 2 }}>
-          <Stack direction="row" spacing={2} alignItems="center">
-            <Typography variant="h5" fontWeight="bold">Awaiting Shipment</Typography>
+      <Box sx={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: 'calc(100vh - 100px)',
+        overflow: 'hidden',
+        width: '100%',
+        maxWidth: '100%',
+        p: 3
+      }}>
+        <SectionCard sx={{ p: 2, mb: 2, flexShrink: 0 }}>
+          {/* HEADER - Refresh button removed as requested */}
+          <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2} sx={{ mb: 2 }}>
+            <Stack direction="row" spacing={2} alignItems="center">
+              <Typography variant="h5" fontWeight="bold">Awaiting Shipment</Typography>
+            </Stack>
+            <Chip label={`${totalOrders} awaiting`} variant="filled" size="small" sx={{ bgcolor: '#f5c842', color: '#1a1a2e', fontWeight: 700 }} />
           </Stack>
-          <Chip label={`${totalOrders} awaiting`} color="primary" variant="filled" size="small" />
-        </Stack>
 
-        <Divider sx={{ my: 2 }} />
+          <Divider sx={{ my: 2 }} />
 
-        {/* --- FILTERS SECTION --- */}
-        <Box sx={{ mb: 3, p: 2, bgcolor: 'action.hover', borderRadius: 1 }}>
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
+          {/* --- FILTERS SECTION --- */}
+          <Box sx={{ mb: 3, p: 2, bgcolor: 'action.hover', borderRadius: 1 }}>
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
 
-            {/* 1. SELLER FILTER */}
-            <FormControl size="small" sx={{ minWidth: 200 }}>
-              <InputLabel id="seller-select-label">Select Seller</InputLabel>
-              <Select
-                labelId="seller-select-label"
-                value={selectedSeller}
-                label="Select Seller"
-                onChange={handleSellerChange}
-              >
-                <MenuItem value=""><em>All Sellers</em></MenuItem>
-                {sellers.map((s) => (
-                  <MenuItem key={s._id} value={s._id}>
-                    {s.user?.username || s.user?.email || s._id}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+              {/* 1. SELLER FILTER */}
+              <FormControl size="small" sx={{ minWidth: 200 }}>
+                <InputLabel id="seller-select-label">Select Seller</InputLabel>
+                <Select
+                  labelId="seller-select-label"
+                  value={selectedSeller}
+                  label="Select Seller"
+                  onChange={handleSellerChange}
+                >
+                  <MenuItem value=""><em>All Sellers</em></MenuItem>
+                  {sellers.map((s) => (
+                    <MenuItem key={s._id} value={s._id}>
+                      {s.user?.username || s.user?.email || s._id}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
 
-            {/* 2. ORDER ID (Auto-debounced) */}
-            <TextField
-              size="small"
-              label="Order ID"
-              value={searchOrderId}
-              onChange={(e) => setSearchOrderId(e.target.value)}
-              placeholder="Search ID..."
-            />
+              {/* 2. ORDER ID (Auto-debounced) */}
+              <TextField
+                size="small"
+                label="Order ID"
+                value={searchOrderId}
+                onChange={(e) => setSearchOrderId(e.target.value)}
+                placeholder="Search ID..."
+              />
 
-            {/* 3. BUYER NAME (Auto-debounced) */}
-            <TextField
-              size="small"
-              label="Buyer Name"
-              value={searchBuyerName}
-              onChange={(e) => setSearchBuyerName(e.target.value)}
-              placeholder="Search Buyer..."
-            />
+              {/* 3. BUYER NAME (Auto-debounced) */}
+              <TextField
+                size="small"
+                label="Buyer Name"
+                value={searchBuyerName}
+                onChange={(e) => setSearchBuyerName(e.target.value)}
+                placeholder="Search Buyer..."
+              />
 
-            {/* 4. MARKETPLACE FILTER */}
-            <FormControl size="small" sx={{ minWidth: 150 }}>
-              <InputLabel id="marketplace-select-label">Marketplace</InputLabel>
-              <Select
-                labelId="marketplace-select-label"
-                value={searchMarketplace}
-                label="Marketplace"
-                onChange={(e) => {
-                  setSearchMarketplace(e.target.value);
-                  setPage(1);
-                }}
-              >
-                <MenuItem value=""><em>All</em></MenuItem>
-                <MenuItem value="EBAY_US">EBAY_US</MenuItem>
-                <MenuItem value="EBAY_AU">EBAY_AU</MenuItem>
-                <MenuItem value="EBAY_ENCA">EBAY_CA</MenuItem>
-                <MenuItem value="EBAY_GB">EBAY_GB</MenuItem>
-              </Select>
-            </FormControl>
-
-            {/* 5. SHIP BY DATE FILTER */}
-            <TextField
-              type="date"
-              size="small"
-              label="Ship By Date"
-              value={shipByDate}
-              onChange={(e) => {
-                setShipByDate(e.target.value);
-                setPage(1);
-              }}
-              InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: 160 }}
-            />
-
-            {/* 6. DATE SOLD FILTER */}
-            <TextField
-              type="date"
-              size="small"
-              label="Date Sold"
-              value={dateSold}
-              onChange={(e) => {
-                setDateSold(e.target.value);
-                setPage(1);
-              }}
-              InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: 160 }}
-            />
-
-            {/* 7. ARRIVAL DATE FROM FILTER */}
-            <TextField
-              type="date"
-              size="small"
-              label="Arrival From"
-              value={arrivalDateFrom}
-              onChange={(e) => {
-                setArrivalDateFrom(e.target.value);
-                setPage(1);
-              }}
-              InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: 160 }}
-            />
-
-            {/* 8. ARRIVAL DATE TO FILTER */}
-            <TextField
-              type="date"
-              size="small"
-              label="Arrival To"
-              value={arrivalDateTo}
-              onChange={(e) => {
-                setArrivalDateTo(e.target.value);
-                setPage(1);
-              }}
-              InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: 160 }}
-            />
-
-            {/* 9. AMAZON ACCOUNT FILTER */}
-            <FormControl size="small" sx={{ minWidth: 180 }}>
-              <InputLabel id="amazon-account-select-label">Amazon Account</InputLabel>
-              <Select
-                labelId="amazon-account-select-label"
-                value={selectedAmazonAccount}
-                label="Amazon Account"
-                onChange={(e) => {
-                  setSelectedAmazonAccount(e.target.value);
-                  setPage(1);
-                }}
-              >
-                <MenuItem value=""><em>All Accounts</em></MenuItem>
-                {amazonAccounts.map((acc) => (
-                  <MenuItem key={acc._id} value={acc.name}>{acc.name}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={excludeClient}
+              {/* 4. MARKETPLACE FILTER */}
+              <FormControl size="small" sx={{ minWidth: 150 }}>
+                <InputLabel id="marketplace-select-label">Marketplace</InputLabel>
+                <Select
+                  labelId="marketplace-select-label"
+                  value={searchMarketplace}
+                  label="Marketplace"
                   onChange={(e) => {
-                    setExcludeClient(e.target.checked);
+                    setSearchMarketplace(e.target.value);
                     setPage(1);
                   }}
-                  color="primary"
-                />
-              }
-              label="Exclude Client"
-              sx={{ m: 0, px: 1.5, minHeight: 40, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}
-            />
+                >
+                  <MenuItem value=""><em>All</em></MenuItem>
+                  <MenuItem value="EBAY_US">EBAY_US</MenuItem>
+                  <MenuItem value="EBAY_AU">EBAY_AU</MenuItem>
+                  <MenuItem value="EBAY_ENCA">EBAY_CA</MenuItem>
+                  <MenuItem value="EBAY_GB">EBAY_GB</MenuItem>
+                </Select>
+              </FormControl>
 
-            <Button variant="outlined" onClick={handleClearFilters} size="small" sx={{ height: 40, boxSizing: 'border-box' }}>Clear</Button>
+              {/* 5. SHIP BY DATE FILTER */}
+              <TextField
+                type="date"
+                size="small"
+                label="Ship By Date"
+                value={shipByDate}
+                onChange={(e) => {
+                  setShipByDate(e.target.value);
+                  setPage(1);
+                }}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 160 }}
+              />
 
-            <ColumnSelector
-              allColumns={ALL_COLUMNS}
-              visibleColumns={visibleColumns}
-              onColumnChange={setVisibleColumns}
-              onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
-              page="awaiting-shipment"
-            />
-          </Stack>
-        </Box>
+              {/* 6. DATE SOLD FILTER */}
+              <TextField
+                type="date"
+                size="small"
+                label="Date Sold"
+                value={dateSold}
+                onChange={(e) => {
+                  setDateSold(e.target.value);
+                  setPage(1);
+                }}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 160 }}
+              />
 
-        {error && (
-          <Typography color="error" sx={{ mb: 2 }}>{error}</Typography>
-        )}
-      </Paper>
+              {/* 7. ARRIVAL DATE FROM FILTER */}
+              <TextField
+                type="date"
+                size="small"
+                label="Arrival From"
+                value={arrivalDateFrom}
+                onChange={(e) => {
+                  setArrivalDateFrom(e.target.value);
+                  setPage(1);
+                }}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 160 }}
+              />
 
-      {orders.length === 0 ? (
-        <Box sx={{ textAlign: 'center', p: 4, flexGrow: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}>
-          <LocalShippingIcon sx={{ fontSize: 40, color: 'text.secondary', mb: 1, opacity: 0.5 }} />
-          <Typography variant="body1" color="text.secondary">
-            No orders found matching criteria.
-          </Typography>
-        </Box>
-      ) : (
-        <>
-          <TableContainer
-            component={Paper}
-            sx={{
-              flexGrow: 1,
-              overflow: 'auto',
-              width: '100%',
-              '&::-webkit-scrollbar': {
-                width: '8px',
-                height: '8px',
-              },
-              '&::-webkit-scrollbar-track': {
-                backgroundColor: '#f1f1f1',
-                borderRadius: '10px',
-              },
-              '&::-webkit-scrollbar-thumb': {
-                backgroundColor: '#888',
-                borderRadius: '10px',
-                '&:hover': {
-                  backgroundColor: '#555',
-                },
-              },
-            }}
-          >
-            <Table
-              size="small"
-              stickyHeader
-              sx={{ '& td, & th': { whiteSpace: 'nowrap' } }}
-            >
-              <TableHead>
-                <TableRow>
-                  {ALL_COLUMNS.filter(c => visibleColumns.includes(c.id)).map(col => (
-                    <TableCell
-                      key={col.id}
-                      sx={{ backgroundColor: 'primary.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 100 }}
-                    >
-                      {col.label}
-                    </TableCell>
+              {/* 8. ARRIVAL DATE TO FILTER */}
+              <TextField
+                type="date"
+                size="small"
+                label="Arrival To"
+                value={arrivalDateTo}
+                onChange={(e) => {
+                  setArrivalDateTo(e.target.value);
+                  setPage(1);
+                }}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 160 }}
+              />
+
+              {/* 9. AMAZON ACCOUNT FILTER */}
+              <FormControl size="small" sx={{ minWidth: 180 }}>
+                <InputLabel id="amazon-account-select-label">Amazon Account</InputLabel>
+                <Select
+                  labelId="amazon-account-select-label"
+                  value={selectedAmazonAccount}
+                  label="Amazon Account"
+                  onChange={(e) => {
+                    setSelectedAmazonAccount(e.target.value);
+                    setPage(1);
+                  }}
+                >
+                  <MenuItem value=""><em>All Accounts</em></MenuItem>
+                  {amazonAccounts.map((acc) => (
+                    <MenuItem key={acc._id} value={acc.name}>{acc.name}</MenuItem>
                   ))}
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {orders.map((order, idx) => (
-                  <TableRow key={order._id || idx}>
-                    {ALL_COLUMNS.filter(c => visibleColumns.includes(c.id)).map(col => (
-                      <TableCell key={col.id}>
-                        {renderCell(order, col.id)}
-                      </TableCell>
-                    ))}
+                </Select>
+              </FormControl>
+
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={excludeClient}
+                    onChange={(e) => {
+                      setExcludeClient(e.target.checked);
+                      setPage(1);
+                    }}
+                    color="primary"
+                  />
+                }
+                label="Exclude Client"
+                sx={{ m: 0, px: 1.5, minHeight: 40, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}
+              />
+
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={handleToggleShipBySort}
+                startIcon={(sortBy === 'shipBy' ? sortDir : 'asc') === 'asc' ? <ArrowUpwardIcon /> : <ArrowDownwardIcon />}
+                sx={{ ...yellowOutlinedButtonSx, height: 40 }}
+              >
+                {sortBy === 'shipBy' && sortDir === 'desc' ? 'Ship By: Newest First' : 'Ship By: Oldest First'}
+              </Button>
+
+              <Button variant="outlined" onClick={handleClearFilters} size="small" sx={{ ...yellowOutlinedButtonSx, height: 40 }}>Clear</Button>
+
+              <ColumnSelector
+                allColumns={ALL_COLUMNS}
+                visibleColumns={visibleColumns}
+                onColumnChange={setVisibleColumns}
+                onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
+                page="awaiting-shipment"
+              />
+            </Stack>
+          </Box>
+
+          {error && (
+            <Typography color="error" sx={{ mb: 2 }}>{error}</Typography>
+          )}
+        </SectionCard>
+
+        {orders.length === 0 ? (
+          <Box sx={{ textAlign: 'center', p: 4, flexGrow: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}>
+            <LocalShippingIcon sx={{ fontSize: 40, color: 'text.secondary', mb: 1, opacity: 0.5 }} />
+            <Typography variant="body1" color="text.secondary">
+              No orders found matching criteria.
+            </Typography>
+          </Box>
+        ) : (
+          <>
+            <TableContainer
+              component={Paper}
+              sx={{
+                ...tableContainerSx,
+                flexGrow: 1,
+                overflow: 'auto',
+                width: '100%',
+                '&::-webkit-scrollbar': {
+                  width: '8px',
+                  height: '8px',
+                },
+                '&::-webkit-scrollbar-track': {
+                  backgroundColor: '#f1f1f1',
+                  borderRadius: '10px',
+                },
+                '&::-webkit-scrollbar-thumb': {
+                  backgroundColor: '#888',
+                  borderRadius: '10px',
+                  '&:hover': {
+                    backgroundColor: '#555',
+                  },
+                },
+              }}
+            >
+              <Table
+                size="small"
+                stickyHeader
+                sx={{ '& td, & th': { whiteSpace: 'nowrap' } }}
+              >
+                <TableHead>
+                  <TableRow>
+                    {ALL_COLUMNS.filter(c => visibleColumns.includes(c.id)).map(col => {
+                      const headerSx = {
+                        ...tableHeaderCellSx,
+                        position: 'sticky',
+                        top: 0,
+                        zIndex: 100,
+                        ...(col.id === 'notes' || col.id === 'trackingId'
+                          ? { whiteSpace: 'nowrap', minWidth: 180, maxWidth: 220 }
+                          : null),
+                      };
+                      if (SORTABLE_COLUMN_IDS.has(col.id)) {
+                        return (
+                          <SortableHeaderCell
+                            key={col.id}
+                            field={col.id}
+                            label={col.label}
+                            sortBy={sortBy}
+                            sortDir={sortDir}
+                            onSort={handleSort}
+                            sx={headerSx}
+                          />
+                        );
+                      }
+                      return (
+                        <TableCell key={col.id} sx={headerSx}>
+                          {col.label}
+                        </TableCell>
+                      );
+                    })}
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
+                </TableHead>
+                <TableBody>
+                  {orders.map((order, idx) => (
+                    <TableRow key={order._id || idx} sx={tableBodyRowSx}>
+                      {ALL_COLUMNS.filter(c => visibleColumns.includes(c.id)).map(col => (
+                        <TableCell
+                          key={col.id}
+                          sx={
+                            col.id === 'notes' || col.id === 'trackingId'
+                              ? {
+                                  whiteSpace: 'nowrap',
+                                  verticalAlign: 'middle',
+                                  minWidth: 180,
+                                  maxWidth: 220,
+                                  overflow: 'hidden',
+                                }
+                              : col.id === 'dateSold' || col.id === 'shipBy'
+                                ? { whiteSpace: 'normal', minWidth: 150 }
+                                : undefined
+                          }
+                        >
+                          {renderCell(order, col.id)}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
 
-          <Paper sx={{
-            py: 1,
-            px: 2,
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            gap: 2,
-            flexShrink: 0,
-            mt: 2
-          }}>
-            <Typography variant="body2" color="text.secondary" fontSize="0.875rem">
-              Showing {orders.length} orders (Page {page} of {totalPages})
-            </Typography>
-            <Pagination
-              count={totalPages}
-              page={page}
-              onChange={(e, value) => setPage(value)}
-              color="primary"
-              showFirstButton
-              showLastButton
-              size="small"
-            />
-          </Paper>
-        </>
-      )}
-
-      <Snackbar open={snack.open} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
-        <Alert severity={snack.severity} sx={{ width: '100%' }}>
-          {snack.message}
-        </Alert>
-      </Snackbar>
-
-      {selectedOrderForMessage && (
-        <ChatModal
-          open={Boolean(selectedOrderForMessage)}
-          onClose={handleCloseMessageDialog}
-          orderId={selectedOrderForMessage.orderId}
-          buyerUsername={selectedOrderForMessage.buyer?.username || selectedOrderForMessage.buyerUsername}
-          buyerName={selectedOrderForMessage.buyer?.buyerRegistrationAddress?.fullName || selectedOrderForMessage.buyerUsername || 'Buyer'}
-          itemId={selectedOrderForMessage.itemNumber || selectedOrderForMessage.lineItems?.[0]?.legacyItemId}
-          title="Awaiting Shipment Chat"
-          category="Awaiting Shipment"
-          caseStatus={selectedOrderForMessage.messagingStatus || 'Open'}
-        />
-      )}
-
-      <RemarkTemplateManagerModal
-        open={manageRemarkTemplatesOpen}
-        onClose={() => setManageRemarkTemplatesOpen(false)}
-        templates={remarkTemplates}
-        onSaveTemplates={handleSaveRemarkTemplates}
-      />
-
-      <Dialog
-        open={remarkConfirmOpen}
-        onClose={() => {
-          if (!sendingRemarkMessage) {
-            setRemarkConfirmOpen(false);
-            setPendingRemarkUpdate(null);
-          }
-        }}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>
-          <Stack direction="row" alignItems="center" spacing={1}>
-            <ChatIcon color="primary" />
-            <Typography variant="h6">Send Message to Buyer?</Typography>
-          </Stack>
-        </DialogTitle>
-        <DialogContent>
-          <Stack spacing={2}>
-            <Alert severity="info" icon={<InfoIcon />}>
-              You are updating the remark to <strong>"{pendingRemarkUpdate?.remarkValue}"</strong>.
-            </Alert>
-            <Typography variant="body2" color="text.secondary">
-              Send the related message template to the buyer as well?
-            </Typography>
-            <Paper elevation={0} sx={{ p: 2, bgcolor: 'grey.50', border: '1px solid', borderColor: 'divider' }}>
-              <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                {pendingRemarkUpdate && findRemarkTemplateText(remarkTemplates, pendingRemarkUpdate.remarkValue)
-                  ? replaceTemplateVariables(
-                    findRemarkTemplateText(remarkTemplates, pendingRemarkUpdate.remarkValue),
-                    pendingRemarkUpdate.order
-                  )
-                  : ''}
+            <SectionCard sx={{
+              py: 1,
+              px: 2,
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              gap: 2,
+              flexShrink: 0,
+              mt: 2
+            }}>
+              <Typography variant="body2" color="text.secondary" fontSize="0.875rem">
+                Showing {orders.length} orders (Page {page} of {totalPages})
               </Typography>
-            </Paper>
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={handleSkipRemarkMessage} disabled={sendingRemarkMessage} variant="outlined">
-            No, Just Update Remark
-          </Button>
-          <Button onClick={handleConfirmRemarkMessage} disabled={sendingRemarkMessage} variant="contained">
-            {sendingRemarkMessage ? 'Sending...' : 'Yes, Send Message'}
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
+              <Pagination
+                count={totalPages}
+                page={page}
+                onChange={(e, value) => setPage(value)}
+                color="primary"
+                showFirstButton
+                showLastButton
+                size="small"
+              />
+            </SectionCard>
+          </>
+        )}
+
+        <Snackbar open={snack.open} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
+          <Alert severity={snack.severity} sx={{ width: '100%' }}>
+            {snack.message}
+          </Alert>
+        </Snackbar>
+
+        {selectedOrderForMessage && (
+          <ChatModal
+            open={Boolean(selectedOrderForMessage)}
+            onClose={handleCloseMessageDialog}
+            orderId={selectedOrderForMessage.orderId}
+            buyerUsername={selectedOrderForMessage.buyer?.username || selectedOrderForMessage.buyerUsername}
+            buyerName={selectedOrderForMessage.buyer?.buyerRegistrationAddress?.fullName || selectedOrderForMessage.buyerUsername || 'Buyer'}
+            itemId={selectedOrderForMessage.itemNumber || selectedOrderForMessage.lineItems?.[0]?.legacyItemId}
+            title="Awaiting Shipment Chat"
+            category="Awaiting Shipment"
+            caseStatus={selectedOrderForMessage.messagingStatus || 'Open'}
+          />
+        )}
+
+        <RemarkTemplateManagerModal
+          open={manageRemarkTemplatesOpen}
+          onClose={() => setManageRemarkTemplatesOpen(false)}
+          templates={remarkTemplates}
+          onSaveTemplates={handleSaveRemarkTemplates}
+        />
+
+        <Dialog
+          open={remarkConfirmOpen}
+          onClose={() => {
+            if (!sendingRemarkMessage) {
+              setRemarkConfirmOpen(false);
+              setPendingRemarkUpdate(null);
+            }
+          }}
+          maxWidth="sm"
+          fullWidth
+        >
+          <DialogTitle>
+            <Stack direction="row" alignItems="center" spacing={1}>
+              <ChatIcon color="primary" />
+              <Typography variant="h6">Send Message to Buyer?</Typography>
+            </Stack>
+          </DialogTitle>
+          <DialogContent>
+            <Stack spacing={2}>
+              <Alert severity="info" icon={<InfoIcon />}>
+                You are updating the remark to <strong>"{pendingRemarkUpdate?.remarkValue}"</strong>.
+              </Alert>
+              <Typography variant="body2" color="text.secondary">
+                Send the related message template to the buyer as well?
+              </Typography>
+              <Paper elevation={0} sx={{ p: 2, bgcolor: 'grey.50', border: '1px solid', borderColor: 'divider' }}>
+                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+                  {pendingRemarkUpdate && findRemarkTemplateText(remarkTemplates, pendingRemarkUpdate.remarkValue)
+                    ? replaceTemplateVariables(
+                      findRemarkTemplateText(remarkTemplates, pendingRemarkUpdate.remarkValue),
+                      pendingRemarkUpdate.order
+                    )
+                    : ''}
+                </Typography>
+              </Paper>
+            </Stack>
+          </DialogContent>
+          <DialogActions sx={{ p: 2 }}>
+            <Button onClick={handleSkipRemarkMessage} disabled={sendingRemarkMessage} variant="outlined">
+              No, Just Update Remark
+            </Button>
+            <Button onClick={handleConfirmRemarkMessage} disabled={sendingRemarkMessage} variant="contained">
+              {sendingRemarkMessage ? 'Sending...' : 'Yes, Send Message'}
+            </Button>
+          </DialogActions>
+        </Dialog>
+      </Box>
     </Fade>
   );
 }
@@ -1576,6 +1816,7 @@ function NotesCell({
   payloadKey = 'notes'
 }) {
   const [editing, setEditing] = React.useState(false);
+  const [viewOpen, setViewOpen] = React.useState(false);
   const [value, setValue] = React.useState(order[valueKey] || '');
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState('');
@@ -1584,8 +1825,11 @@ function NotesCell({
     setValue(order[valueKey] || '');
   }, [order, valueKey]);
 
+  const noteText = order[valueKey] || '';
+
   const startEdit = () => {
     setError('');
+    setViewOpen(false);
     setEditing(true);
   };
 
@@ -1618,31 +1862,66 @@ function NotesCell({
   };
 
   return (
-    <div>
+    <Box sx={{ width: '100%', maxWidth: 220 }}>
       {editing ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, width: '100%' }}>
           <textarea
             value={value}
             onChange={e => setValue(e.target.value)}
-            style={{ padding: 6, minWidth: 180, minHeight: 60, resize: 'vertical' }}
+            style={{ padding: 6, width: '100%', minHeight: 60, resize: 'vertical', boxSizing: 'border-box' }}
             placeholder="Enter notes..."
           />
-          <div style={{ display: 'flex', gap: 8 }}>
+          <Box sx={{ display: 'flex', gap: 1 }}>
             <Button size="small" variant="contained" onClick={save} disabled={saving}>Save</Button>
             <Button size="small" onClick={cancel} disabled={saving}>Cancel</Button>
-          </div>
+          </Box>
           {error && <Typography variant="caption" color="error">{error}</Typography>}
-        </div>
+        </Box>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Typography variant="body2" sx={{ fontSize: '0.85rem', maxWidth: 200, wordWrap: 'break-word' }}>
-            {order[valueKey] || '-'}
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, width: '100%' }}>
+          <Typography
+            variant="body2"
+            onClick={() => { if (noteText) setViewOpen(true); }}
+            title={noteText ? 'Click to view full note' : undefined}
+            sx={{
+              fontSize: '0.85rem',
+              maxWidth: '100%',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              cursor: noteText ? 'pointer' : 'default',
+              '&:hover': noteText ? { textDecoration: 'underline', color: 'primary.main' } : undefined,
+            }}
+          >
+            {noteText || '-'}
           </Typography>
           <Button size="small" onClick={startEdit} sx={{ alignSelf: 'flex-start' }}>
-            {order[valueKey] ? `Edit ${fieldLabel}` : `Add ${fieldLabel}`}
+            {noteText ? `Edit ${fieldLabel}` : `Add ${fieldLabel}`}
           </Button>
-        </div>
+        </Box>
       )}
-    </div>
+
+      <Dialog open={viewOpen} onClose={() => setViewOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ position: 'relative', pr: 6 }}>
+          {fieldLabel}
+          <IconButton
+            aria-label="close"
+            onClick={() => setViewOpen(false)}
+            sx={{ position: 'absolute', right: 8, top: 8 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            {noteText}
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 2, py: 1.5 }}>
+          <Button onClick={() => setViewOpen(false)}>Close</Button>
+          <Button variant="contained" onClick={startEdit}>Edit</Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
   );
 }

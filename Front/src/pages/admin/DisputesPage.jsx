@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import {
   Box,
-  Paper,
   Table,
   TableBody,
   TableCell,
@@ -24,10 +23,11 @@ import {
   Snackbar,
   Tabs,
   Tab,
+  Fade,
+  TablePagination,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
-import GavelIcon from '@mui/icons-material/Gavel';
 import ClearIcon from '@mui/icons-material/Clear';
 import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import PaymentIcon from '@mui/icons-material/Payment';
@@ -44,7 +44,17 @@ import WorksheetPage from './WorksheetPage.jsx';
 import ColumnSelector from '../../components/ColumnSelector';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 import ChatModal from '../../components/ChatModal';
-import { yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
+import AdminPageShell from '../../components/AdminPageShell.jsx';
+import SectionCard from '../../components/SectionCard.jsx';
+import PageHeader from '../../components/PageHeader.jsx';
+import { dashboardSignatureTokens } from '../../theme/appTheme.js';
+import {
+  tableHeaderCellSx,
+  tableBodyRowSx,
+  tableContainerSx,
+  yellowFilledButtonSx,
+  yellowOutlinedButtonSx,
+} from '../../theme/tableStyles.js';
 
 
 function TabPanel({ children, value, index }) {
@@ -177,6 +187,10 @@ export default function DisputesPage({ initialTab = 0 }) {
     from: '',
     to: ''
   });
+
+  const ROWS_PER_PAGE = 25;
+  const [inrPage, setInrPage] = useState(0);
+  const [pdPage, setPdPage] = useState(0);
   
   const hasFetchedCases = useRef(false);
   const hasFetchedDisputes = useRef(false);
@@ -212,6 +226,15 @@ export default function DisputesPage({ initialTab = 0 }) {
       return;
     }
     loadStoredDisputes();
+  }, [pdStatusFilter, pdSellerFilter, pdReasonFilter, dateFilter]);
+
+  // Reset table page when filters change
+  useEffect(() => {
+    setInrPage(0);
+  }, [inrStatusFilter, inrSellerFilter, inrTypeFilter, dateFilter]);
+
+  useEffect(() => {
+    setPdPage(0);
   }, [pdStatusFilter, pdSellerFilter, pdReasonFilter, dateFilter]);
 
   async function loadStoredCases() {
@@ -432,20 +455,23 @@ export default function DisputesPage({ initialTab = 0 }) {
   const getCaseStatusColor = (status) => {
     if (!status) return 'default';
     const s = status.toUpperCase();
-    // Open/Waiting statuses - warning (yellow/orange)
-    if (s === 'OPEN' || s === 'WAITING_FOR_SELLER' || s === 'WAITING_SELLER_RESPONSE') return 'warning';
-    // Waiting for buyer - info (blue) - we're good, waiting on them
+    // Seller action needed — distinct warm tones
+    if (s === 'OPEN') return 'error';
+    if (s === 'WAITING_FOR_SELLER' || s === 'WAITING_SELLER_RESPONSE') return 'warning';
+    // Waiting on buyer / review — cool blue
     if (s === 'WAITING_BUYER_RESPONSE' || s === 'ON_HOLD' || s === 'UNDER_REVIEW') return 'info';
-    // Closed - success (green)
-    if (s === 'CLOSED') return 'success';
+    // Closed outcomes — green / grey
+    if (s === 'CLOSED' || s === 'CS_CLOSED') return 'success';
+    if (s === 'CLOSED_WITH_ESCALATION') return 'default';
     return 'default';
   };
 
   const getDisputeStatusColor = (status) => {
     if (!status) return 'default';
     const s = status.toUpperCase();
-    if (s === 'OPEN' || s === 'WAITING_FOR_SELLER_RESPONSE') return 'warning';
-    if (s === 'UNDER_REVIEW' || s === 'ACTION_NEEDED') return 'info';
+    if (s === 'OPEN') return 'error';
+    if (s === 'WAITING_FOR_SELLER_RESPONSE' || s === 'ACTION_NEEDED') return 'warning';
+    if (s === 'UNDER_REVIEW') return 'info';
     if (s === 'RESOLVED_SELLER_FAVOUR' || s === 'CLOSED') return 'success';
     if (s === 'RESOLVED_BUYER_FAVOUR') return 'error';
     return 'default';
@@ -510,6 +536,11 @@ export default function DisputesPage({ initialTab = 0 }) {
     return true;
   });
 
+  const paginatedCases = filteredCases.slice(
+    inrPage * ROWS_PER_PAGE,
+    inrPage * ROWS_PER_PAGE + ROWS_PER_PAGE
+  );
+
   // Compute filtered payment disputes
   const filteredDisputes = disputes.filter(d => {
     if (pdSellerFilter && d.seller?._id !== pdSellerFilter) return false;
@@ -542,6 +573,11 @@ export default function DisputesPage({ initialTab = 0 }) {
     
     return true;
   });
+
+  const paginatedDisputes = filteredDisputes.slice(
+    pdPage * ROWS_PER_PAGE,
+    pdPage * ROWS_PER_PAGE + ROWS_PER_PAGE
+  );
 
   // CSV Export Handlers
   const handleExportINRCases = () => {
@@ -592,160 +628,167 @@ export default function DisputesPage({ initialTab = 0 }) {
   };
 
   return (
-    <Box sx={{ p: 3 }}>
-      <Stack direction="row" alignItems="center" spacing={2} mb={3}>
-        <GavelIcon sx={{ fontSize: 32, color: 'primary.main' }} />
-        <Typography variant="h4">Issues and Resolutions</Typography>
-      </Stack>
+    <Fade in timeout={500}>
+      <AdminPageShell>
+        {error && (
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+            {error}
+          </Alert>
+        )}
 
-      {error && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
-          {error}
-        </Alert>
-      )}
-
-      <Snackbar
-        open={snackbarOpen}
-        autoHideDuration={10000}
-        onClose={() => setSnackbarOpen(false)}
-        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
-      >
-        <Alert 
-          onClose={() => setSnackbarOpen(false)} 
-          severity="success" 
-          sx={{ whiteSpace: 'pre-line', maxWidth: 600 }}
+        <Snackbar
+          open={snackbarOpen}
+          autoHideDuration={10000}
+          onClose={() => setSnackbarOpen(false)}
+          anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
         >
-          {snackbarMsg}
-        </Alert>
-      </Snackbar>
+          <Alert
+            onClose={() => setSnackbarOpen(false)}
+            severity="success"
+            sx={{ whiteSpace: 'pre-line', maxWidth: 600 }}
+          >
+            {snackbarMsg}
+          </Alert>
+        </Snackbar>
 
-      {/* DATE FILTER SECTION */}
-      <Paper sx={{ p: 2, mb: 3 }}>
-        <Stack direction="row" alignItems="center" spacing={2} flexWrap="wrap" useFlexGap>
-          <FormControl size="small" sx={{ minWidth: 140 }}>
-            <InputLabel>Date</InputLabel>
-            <Select
-              value={dateFilter.mode}
-              onChange={(e) => setDateFilter({...dateFilter, mode: e.target.value})}
-              label="Date"
-            >
-              <MenuItem value="all">All</MenuItem>
-              <MenuItem value="single">Single Date</MenuItem>
-              <MenuItem value="range">Date Range</MenuItem>
-            </Select>
-          </FormControl>
+        <SectionCard
+          sx={{
+            p: { xs: 1.25, md: 1.5 },
+            mb: 1.5,
+            background: dashboardSignatureTokens.surfaces.pageCard,
+          }}
+        >
+          <PageHeader
+            title="Issues and Resolutions"
+            sx={{ pt: 0, pb: 1 }}
+            actions={
+              <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
+                <FormControl size="small" sx={{ minWidth: 110 }}>
+                  <InputLabel>Date</InputLabel>
+                  <Select
+                    value={dateFilter.mode}
+                    onChange={(e) => setDateFilter({ ...dateFilter, mode: e.target.value })}
+                    label="Date"
+                  >
+                    <MenuItem value="all">All</MenuItem>
+                    <MenuItem value="single">Single Date</MenuItem>
+                    <MenuItem value="range">Date Range</MenuItem>
+                  </Select>
+                </FormControl>
+                {dateFilter.mode === 'single' && (
+                  <TextField
+                    type="date"
+                    size="small"
+                    value={dateFilter.single}
+                    onChange={(e) => setDateFilter({ ...dateFilter, single: e.target.value })}
+                    InputLabelProps={{ shrink: true }}
+                    sx={{ width: 150 }}
+                  />
+                )}
+                {dateFilter.mode === 'range' && (
+                  <>
+                    <TextField
+                      type="date"
+                      size="small"
+                      value={dateFilter.from}
+                      onChange={(e) => setDateFilter({ ...dateFilter, from: e.target.value })}
+                      label="From"
+                      InputLabelProps={{ shrink: true }}
+                      sx={{ width: 150 }}
+                    />
+                    <TextField
+                      type="date"
+                      size="small"
+                      value={dateFilter.to}
+                      onChange={(e) => setDateFilter({ ...dateFilter, to: e.target.value })}
+                      label="To"
+                      InputLabelProps={{ shrink: true }}
+                      sx={{ width: 150 }}
+                    />
+                  </>
+                )}
+              </Stack>
+            }
+          />
 
-          {dateFilter.mode === 'single' && (
-            <TextField
-              type="date"
-              size="small"
-              value={dateFilter.single}
-              onChange={(e) => setDateFilter({...dateFilter, single: e.target.value})}
-              InputLabelProps={{ shrink: true }}
+          <Tabs
+            value={tabValue}
+            onChange={(e, newValue) => setTabValue(newValue)}
+            variant="scrollable"
+            scrollButtons="auto"
+            sx={{
+              minHeight: 36,
+              mx: { xs: -1.25, md: -1.5 },
+              px: { xs: 1.25, md: 1.5 },
+              borderTop: '1px solid',
+              borderColor: 'divider',
+              '& .MuiTabs-indicator': { height: 2 },
+              '& .MuiTab-root': {
+                minHeight: 36,
+                py: 0.5,
+                px: 1.25,
+                fontSize: '0.78rem',
+                textTransform: 'none',
+                minWidth: 'auto',
+              },
+            }}
+          >
+            <Tab
+              icon={<LocalShippingIcon sx={{ fontSize: 16 }} />}
+              label={`INR Cases (${cases.length})`}
+              iconPosition="start"
             />
-          )}
-
-          {dateFilter.mode === 'range' && (
-            <>
-              <TextField
-                type="date"
-                size="small"
-                value={dateFilter.from}
-                onChange={(e) => setDateFilter({...dateFilter, from: e.target.value})}
-                label="From"
-                InputLabelProps={{ shrink: true }}
-              />
-              <Typography variant="body2">to</Typography>
-              <TextField
-                type="date"
-                size="small"
-                value={dateFilter.to}
-                onChange={(e) => setDateFilter({...dateFilter, to: e.target.value})}
-                label="To"
-                InputLabelProps={{ shrink: true }}
-              />
-            </>
-          )}
-        </Stack>
-      </Paper>
-
-      {/* Tabs */}
-      <Paper sx={{ mb: 3 }}>
-        <Tabs 
-          value={tabValue} 
-          onChange={(e, newValue) => setTabValue(newValue)}
-          sx={{ borderBottom: 1, borderColor: 'divider' }}
-        >
-          <Tab 
-            icon={<LocalShippingIcon />} 
-            label={`INR Cases (${cases.length})`}
-            iconPosition="start"
-          />
-          <Tab 
-            icon={<PaymentIcon />} 
-            label={`Payment Disputes (${disputes.length})`}
-            iconPosition="start"
-          />
-          <Tab
-            icon={<AssignmentReturnIcon />}
-            label="Return Requests"
-            iconPosition="start"
-          />
-          <Tab
-            icon={<CancelIcon />}
-            label="Cancelled Status"
-            iconPosition="start"
-          />
-          <Tab
-            icon={<ListAltIcon />}
-            label="Worksheet"
-            iconPosition="start"
-          />
-        </Tabs>
-      </Paper>
+            <Tab
+              icon={<PaymentIcon sx={{ fontSize: 16 }} />}
+              label={`Payment Disputes (${disputes.length})`}
+              iconPosition="start"
+            />
+            <Tab
+              icon={<AssignmentReturnIcon sx={{ fontSize: 16 }} />}
+              label="Return Requests"
+              iconPosition="start"
+            />
+            <Tab
+              icon={<CancelIcon sx={{ fontSize: 16 }} />}
+              label="Cancelled Status"
+              iconPosition="start"
+            />
+            <Tab
+              icon={<ListAltIcon sx={{ fontSize: 16 }} />}
+              label="Worksheet"
+              iconPosition="start"
+            />
+          </Tabs>
+        </SectionCard>
 
       {/* INR Cases Tab */}
       <TabPanel value={tabValue} index={0}>
-        {/* Controls Row 1: Fetch Button & Info */}
-        <Stack direction="row" spacing={2} mb={2} alignItems="center" justifyContent="space-between">
-          <Stack direction="row" spacing={2} alignItems="center">
-            <Button
-              variant="contained"
-              color="primary"
-              startIcon={casesFetching ? <CircularProgress size={20} color="inherit" /> : <RefreshIcon />}
-              onClick={fetchCasesFromEbay}
-              disabled={casesFetching}
-            >
-              {casesFetching ? 'Fetching...' : 'Fetch INR Cases from eBay'}
-            </Button>
-            
-            <Typography variant="caption" color="text.secondary">
-              📅 Polls INR/SNAD cases from <strong>last 30 days</strong> via Post-Order API
-            </Typography>
-          </Stack>
-          
-          <Button
-            variant="outlined"
-            color="success"
-            startIcon={<DownloadIcon />}
-            onClick={handleExportINRCases}
-            disabled={filteredCases.length === 0}
-          >
-            Download CSV ({filteredCases.length})
-          </Button>
-           <ColumnSelector
-              allColumns={ALL_INR_COLUMNS}
-              visibleColumns={inrVisibleColumns}
-              onColumnChange={setInrVisibleColumns}
-              onReset={() => setInrVisibleColumns(ALL_INR_COLUMNS.map(c => c.id))}
-              page="disputes-inr"
-          />
-        </Stack>
+        <Stack
+          direction="row"
+          spacing={1}
+          mb={1.5}
+          alignItems="center"
+          justifyContent="space-between"
+          flexWrap="wrap"
+          useFlexGap
+        >
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Tooltip title="Polls INR/SNAD cases from the last 30 days via eBay's Post-Order API">
+              <span>
+                <Button
+                  size="small"
+                  variant="contained"
+                  sx={yellowFilledButtonSx}
+                  startIcon={casesFetching ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+                  onClick={fetchCasesFromEbay}
+                  disabled={casesFetching}
+                >
+                  {casesFetching ? 'Fetching...' : 'Fetch from eBay'}
+                </Button>
+              </span>
+            </Tooltip>
 
-        {/* Filters */}
-        <Paper sx={{ p: 2, mb: 3 }}>
-          <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
-            <FormControl size="small" sx={{ minWidth: 150 }}>
+            <FormControl size="small" sx={{ minWidth: 130 }}>
               <InputLabel>Seller</InputLabel>
               <Select
                 value={inrSellerFilter}
@@ -761,7 +804,7 @@ export default function DisputesPage({ initialTab = 0 }) {
               </Select>
             </FormControl>
 
-            <FormControl size="small" sx={{ minWidth: 180 }}>
+            <FormControl size="small" sx={{ minWidth: 140 }}>
               <InputLabel>Status</InputLabel>
               <Select
                 value={inrStatusFilter}
@@ -770,13 +813,16 @@ export default function DisputesPage({ initialTab = 0 }) {
               >
                 <MenuItem value="">All Statuses</MenuItem>
                 <MenuItem value="OPEN">Open</MenuItem>
+                <MenuItem value="WAITING_SELLER_RESPONSE">Waiting for Seller</MenuItem>
+                <MenuItem value="WAITING_BUYER_RESPONSE">Waiting for Buyer</MenuItem>
                 <MenuItem value="ON_HOLD">On Hold</MenuItem>
-                <MenuItem value="WAITING_FOR_SELLER">Waiting for Seller</MenuItem>
                 <MenuItem value="CLOSED">Closed</MenuItem>
+                <MenuItem value="CS_CLOSED">Closed by eBay Support</MenuItem>
+                <MenuItem value="CLOSED_WITH_ESCALATION">Closed with Escalation</MenuItem>
               </Select>
             </FormControl>
 
-            <FormControl size="small" sx={{ minWidth: 150 }}>
+            <FormControl size="small" sx={{ minWidth: 120 }}>
               <InputLabel>Case Type</InputLabel>
               <Select
                 value={inrTypeFilter}
@@ -784,24 +830,39 @@ export default function DisputesPage({ initialTab = 0 }) {
                 label="Case Type"
               >
                 <MenuItem value="">All Types</MenuItem>
-                <MenuItem value="INR">INR (Item Not Received)</MenuItem>
-                <MenuItem value="SNAD">SNAD (Not as Described)</MenuItem>
+                <MenuItem value="INR">INR</MenuItem>
+                <MenuItem value="SNAD">SNAD</MenuItem>
                 <MenuItem value="OTHER">Other</MenuItem>
               </Select>
             </FormControl>
 
             {hasActiveInrFilters && (
-              <Button
-                size="small"
-                startIcon={<ClearIcon />}
-                onClick={handleClearInrFilters}
-                color="inherit"
-              >
-                Clear Filters
+              <Button size="small" startIcon={<ClearIcon />} onClick={handleClearInrFilters} color="inherit">
+                Clear
               </Button>
             )}
           </Stack>
-        </Paper>
+
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Button
+              size="small"
+              variant="outlined"
+              sx={yellowOutlinedButtonSx}
+              startIcon={<DownloadIcon />}
+              onClick={handleExportINRCases}
+              disabled={filteredCases.length === 0}
+            >
+              CSV ({filteredCases.length})
+            </Button>
+            <ColumnSelector
+              allColumns={ALL_INR_COLUMNS}
+              visibleColumns={inrVisibleColumns}
+              onColumnChange={setInrVisibleColumns}
+              onReset={() => setInrVisibleColumns(ALL_INR_COLUMNS.map(c => c.id))}
+              page="disputes-inr"
+            />
+          </Stack>
+        </Stack>
 
         {/* INR Cases Table */}
         {casesLoading ? (
@@ -809,9 +870,9 @@ export default function DisputesPage({ initialTab = 0 }) {
             <CircularProgress />
           </Box>
         ) : (
-          <TableContainer 
-            component={Paper}
-            sx={{ 
+          <TableContainer
+            sx={{
+              ...tableContainerSx,
               maxWidth: '100%',
               overflowX: 'auto',
               '&::-webkit-scrollbar': {
@@ -829,21 +890,21 @@ export default function DisputesPage({ initialTab = 0 }) {
               },
             }}
           >
-            <Table size="small" sx={{ minWidth: 1200 }}>
+            <Table size="small" sx={{ minWidth: 1200 }} stickyHeader>
               <TableHead>
-                <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
-            {inrVisibleColumns.includes('caseId') && <TableCell><strong>Case ID</strong></TableCell>}
-            {inrVisibleColumns.includes('orderId') && <TableCell><strong>Order ID</strong></TableCell>}
-            {inrVisibleColumns.includes('type') && <TableCell><strong>Type</strong></TableCell>}
-            {inrVisibleColumns.includes('seller') && <TableCell><strong>Seller</strong></TableCell>}
-            {inrVisibleColumns.includes('buyer') && <TableCell><strong>Buyer</strong></TableCell>}
-            {inrVisibleColumns.includes('item') && <TableCell><strong>Item</strong></TableCell>}
-            {inrVisibleColumns.includes('status') && <TableCell><strong>Status</strong></TableCell>}
-            {inrVisibleColumns.includes('claimAmount') && <TableCell><strong>Claim Amount</strong></TableCell>}
-            {inrVisibleColumns.includes('created') && <TableCell><strong>Created (PST)</strong></TableCell>}
-            {inrVisibleColumns.includes('responseDue') && <TableCell><strong>Response Due (PST)</strong></TableCell>}
-            {inrVisibleColumns.includes('logs') && <TableCell><strong>Logs</strong></TableCell>}
-            {inrVisibleColumns.includes('action') && <TableCell align="center"><strong>Action</strong></TableCell>}
+                <TableRow>
+            {inrVisibleColumns.includes('caseId') && <TableCell sx={tableHeaderCellSx}>Case ID</TableCell>}
+            {inrVisibleColumns.includes('orderId') && <TableCell sx={tableHeaderCellSx}>Order ID</TableCell>}
+            {inrVisibleColumns.includes('type') && <TableCell sx={tableHeaderCellSx}>Type</TableCell>}
+            {inrVisibleColumns.includes('seller') && <TableCell sx={tableHeaderCellSx}>Seller</TableCell>}
+            {inrVisibleColumns.includes('buyer') && <TableCell sx={tableHeaderCellSx}>Buyer</TableCell>}
+            {inrVisibleColumns.includes('item') && <TableCell sx={tableHeaderCellSx}>Item</TableCell>}
+            {inrVisibleColumns.includes('status') && <TableCell sx={tableHeaderCellSx}>Status</TableCell>}
+            {inrVisibleColumns.includes('claimAmount') && <TableCell sx={tableHeaderCellSx}>Claim Amount</TableCell>}
+            {inrVisibleColumns.includes('created') && <TableCell sx={tableHeaderCellSx}>Created (PST)</TableCell>}
+            {inrVisibleColumns.includes('responseDue') && <TableCell sx={tableHeaderCellSx}>Response Due (PST)</TableCell>}
+            {inrVisibleColumns.includes('logs') && <TableCell sx={tableHeaderCellSx}>Logs</TableCell>}
+            {inrVisibleColumns.includes('action') && <TableCell align="center" sx={tableHeaderCellSx}>Action</TableCell>}
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -856,8 +917,8 @@ export default function DisputesPage({ initialTab = 0 }) {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filteredCases.map((c) => (
-                    <TableRow key={c._id} hover>
+                  paginatedCases.map((c) => (
+                    <TableRow key={c._id} hover sx={tableBodyRowSx}>
                       {inrVisibleColumns.includes('caseId') && <TableCell>
                         <Stack direction="row" alignItems="center" spacing={0.5}>
                           <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
@@ -977,62 +1038,48 @@ export default function DisputesPage({ initialTab = 0 }) {
             </Table>
           </TableContainer>
         )}
+        {!casesLoading && filteredCases.length > 0 && (
+          <TablePagination
+            component="div"
+            count={filteredCases.length}
+            page={inrPage}
+            onPageChange={(_, nextPage) => setInrPage(nextPage)}
+            rowsPerPage={ROWS_PER_PAGE}
+            rowsPerPageOptions={[ROWS_PER_PAGE]}
+            onRowsPerPageChange={() => {}}
+            sx={{ mt: 0.5, borderTop: '1px solid', borderColor: 'divider' }}
+          />
+        )}
       </TabPanel>
 
       {/* Payment Disputes Tab */}
       <TabPanel value={tabValue} index={1}>
-        {/* Info Alert about OAuth scope */}
-        <Alert severity="info" sx={{ mb: 2 }}>
-          <Typography variant="body2">
-            <strong>Note:</strong> Payment Disputes require the <code>sell.payment.dispute</code> OAuth scope. 
-            If you're seeing errors, each seller needs to disconnect and reconnect their eBay account, 
-            then revoke your app from <strong>eBay → Account Settings → Third-party app access</strong> before reconnecting.
-          </Typography>
-        </Alert>
+        <Stack
+          direction="row"
+          spacing={1}
+          mb={1.5}
+          alignItems="center"
+          justifyContent="space-between"
+          flexWrap="wrap"
+          useFlexGap
+        >
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Tooltip title="Polls payment disputes via eBay's Fulfillment API">
+              <span>
+                <Button
+                  size="small"
+                  variant="contained"
+                  sx={yellowFilledButtonSx}
+                  startIcon={disputesFetching ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+                  onClick={fetchDisputesFromEbay}
+                  disabled={disputesFetching}
+                >
+                  {disputesFetching ? 'Fetching...' : 'Fetch from eBay'}
+                </Button>
+              </span>
+            </Tooltip>
 
-        {/* Controls Row 1: Fetch Button & Info */}
-        <Stack direction="row" spacing={2} mb={2} alignItems="center" justifyContent="space-between">
-          <Stack direction="row" spacing={2} alignItems="center">
-            <Button
-              variant="contained"
-              color="primary"
-              startIcon={disputesFetching ? <CircularProgress size={20} color="inherit" />: <RefreshIcon />}
-              onClick={fetchDisputesFromEbay}
-              disabled={disputesFetching}
-            >
-              {disputesFetching ? 'Fetching...' : 'Fetch Payment Disputes from eBay'}
-            </Button>
-            
-            <Typography variant="caption" color="text.secondary">
-              📅 Polls payment disputes via Fulfillment API
-            </Typography>
-          </Stack>
-          
-          <Stack direction="row" spacing={2} alignItems="center">
-
-            <Button
-              variant="outlined"
-              color="success"
-              startIcon={<DownloadIcon />}
-              onClick={handleExportPaymentDisputes}
-              disabled={filteredDisputes.length === 0}
-            >
-              Download CSV ({filteredDisputes.length})
-            </Button>
-            <ColumnSelector
-                allColumns={ALL_DISPUTE_COLUMNS}
-                visibleColumns={disputeVisibleColumns}
-                onColumnChange={setDisputeVisibleColumns}
-                onReset={() => setDisputeVisibleColumns(ALL_DISPUTE_COLUMNS.map(c => c.id))}
-                page="disputes-pd"
-            />
-          </Stack>
-        </Stack>
-
-        {/* Filters */}
-        <Paper sx={{ p: 2, mb: 3 }}>
-          <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap>
-            <FormControl size="small" sx={{ minWidth: 150 }}>
+            <FormControl size="small" sx={{ minWidth: 130 }}>
               <InputLabel>Seller</InputLabel>
               <Select
                 value={pdSellerFilter}
@@ -1048,7 +1095,7 @@ export default function DisputesPage({ initialTab = 0 }) {
               </Select>
             </FormControl>
 
-            <FormControl size="small" sx={{ minWidth: 220 }}>
+            <FormControl size="small" sx={{ minWidth: 160 }}>
               <InputLabel>Status</InputLabel>
               <Select
                 value={pdStatusFilter}
@@ -1065,7 +1112,7 @@ export default function DisputesPage({ initialTab = 0 }) {
               </Select>
             </FormControl>
 
-            <FormControl size="small" sx={{ minWidth: 180 }}>
+            <FormControl size="small" sx={{ minWidth: 140 }}>
               <InputLabel>Reason</InputLabel>
               <Select
                 value={pdReasonFilter}
@@ -1083,17 +1130,32 @@ export default function DisputesPage({ initialTab = 0 }) {
             </FormControl>
 
             {hasActivePdFilters && (
-              <Button
-                size="small"
-                startIcon={<ClearIcon />}
-                onClick={handleClearPdFilters}
-                color="inherit"
-              >
-                Clear Filters
+              <Button size="small" startIcon={<ClearIcon />} onClick={handleClearPdFilters} color="inherit">
+                Clear
               </Button>
             )}
           </Stack>
-        </Paper>
+
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Button
+              size="small"
+              variant="outlined"
+              sx={yellowOutlinedButtonSx}
+              startIcon={<DownloadIcon />}
+              onClick={handleExportPaymentDisputes}
+              disabled={filteredDisputes.length === 0}
+            >
+              CSV ({filteredDisputes.length})
+            </Button>
+            <ColumnSelector
+              allColumns={ALL_DISPUTE_COLUMNS}
+              visibleColumns={disputeVisibleColumns}
+              onColumnChange={setDisputeVisibleColumns}
+              onReset={() => setDisputeVisibleColumns(ALL_DISPUTE_COLUMNS.map(c => c.id))}
+              page="disputes-pd"
+            />
+          </Stack>
+        </Stack>
 
         {/* Payment Disputes Table */}
         {disputesLoading ? (
@@ -1101,9 +1163,9 @@ export default function DisputesPage({ initialTab = 0 }) {
             <CircularProgress />
           </Box>
         ) : (
-          <TableContainer 
-            component={Paper}
-            sx={{ 
+          <TableContainer
+            sx={{
+              ...tableContainerSx,
               maxWidth: '100%',
               overflowX: 'auto',
               '&::-webkit-scrollbar': {
@@ -1121,19 +1183,19 @@ export default function DisputesPage({ initialTab = 0 }) {
               },
             }}
           >
-            <Table size="small" sx={{ minWidth: 1200 }}>
+            <Table size="small" sx={{ minWidth: 1200 }} stickyHeader>
               <TableHead>
-                <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
-                  {disputeVisibleColumns.includes('disputeId') && <TableCell><strong>Dispute ID</strong></TableCell>}
-                  {disputeVisibleColumns.includes('orderId') && <TableCell><strong>Order ID</strong></TableCell>}
-                  {disputeVisibleColumns.includes('seller') && <TableCell><strong>Seller</strong></TableCell>}
-                  {disputeVisibleColumns.includes('buyer') && <TableCell><strong>Buyer</strong></TableCell>}
-                  {disputeVisibleColumns.includes('reason') && <TableCell><strong>Reason</strong></TableCell>}
-                  {disputeVisibleColumns.includes('status') && <TableCell><strong>Status</strong></TableCell>}
-                  {disputeVisibleColumns.includes('amount') && <TableCell><strong>Amount</strong></TableCell>}
-                  {disputeVisibleColumns.includes('openedDate') && <TableCell><strong>Open Date (PST)</strong></TableCell>}
-                  {disputeVisibleColumns.includes('responseDue') && <TableCell><strong>Respond By (PST)</strong></TableCell>}
-                  {disputeVisibleColumns.includes('outcome') && <TableCell><strong>Resolution</strong></TableCell>}
+                <TableRow>
+                  {disputeVisibleColumns.includes('disputeId') && <TableCell sx={tableHeaderCellSx}>Dispute ID</TableCell>}
+                  {disputeVisibleColumns.includes('orderId') && <TableCell sx={tableHeaderCellSx}>Order ID</TableCell>}
+                  {disputeVisibleColumns.includes('seller') && <TableCell sx={tableHeaderCellSx}>Seller</TableCell>}
+                  {disputeVisibleColumns.includes('buyer') && <TableCell sx={tableHeaderCellSx}>Buyer</TableCell>}
+                  {disputeVisibleColumns.includes('reason') && <TableCell sx={tableHeaderCellSx}>Reason</TableCell>}
+                  {disputeVisibleColumns.includes('status') && <TableCell sx={tableHeaderCellSx}>Status</TableCell>}
+                  {disputeVisibleColumns.includes('amount') && <TableCell sx={tableHeaderCellSx}>Amount</TableCell>}
+                  {disputeVisibleColumns.includes('openedDate') && <TableCell sx={tableHeaderCellSx}>Open Date (PST)</TableCell>}
+                  {disputeVisibleColumns.includes('responseDue') && <TableCell sx={tableHeaderCellSx}>Respond By (PST)</TableCell>}
+                  {disputeVisibleColumns.includes('outcome') && <TableCell sx={tableHeaderCellSx}>Resolution</TableCell>}
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -1146,8 +1208,8 @@ export default function DisputesPage({ initialTab = 0 }) {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filteredDisputes.map((d) => (
-                    <TableRow key={d._id} hover>
+                  paginatedDisputes.map((d) => (
+                    <TableRow key={d._id} hover sx={tableBodyRowSx}>
                       {disputeVisibleColumns.includes('disputeId') && <TableCell>
                         <Stack direction="row" alignItems="center" spacing={0.5}>
                           <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
@@ -1250,6 +1312,18 @@ export default function DisputesPage({ initialTab = 0 }) {
             </Table>
           </TableContainer>
         )}
+        {!disputesLoading && filteredDisputes.length > 0 && (
+          <TablePagination
+            component="div"
+            count={filteredDisputes.length}
+            page={pdPage}
+            onPageChange={(_, nextPage) => setPdPage(nextPage)}
+            rowsPerPage={ROWS_PER_PAGE}
+            rowsPerPageOptions={[ROWS_PER_PAGE]}
+            onRowsPerPageChange={() => {}}
+            sx={{ mt: 0.5, borderTop: '1px solid', borderColor: 'divider' }}
+          />
+        )}
       </TabPanel>
 
       {/* Return Requests Tab */}
@@ -1259,7 +1333,7 @@ export default function DisputesPage({ initialTab = 0 }) {
 
       {/* Cancelled Status Tab */}
       <TabPanel value={tabValue} index={3}>
-        <CancelledStatusPage dateFilter={dateFilter} hideDateFilter />
+        <CancelledStatusPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
       {/* Worksheet Tab */}
@@ -1313,6 +1387,7 @@ export default function DisputesPage({ initialTab = 0 }) {
           orderId={selectedOrderId}
         />
       )}
-    </Box>
+      </AdminPageShell>
+    </Fade>
   );
 }

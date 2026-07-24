@@ -45,6 +45,7 @@ export const EbayApiUsagePage = lazy(() => import('../pages/admin/EbayApiUsagePa
 export const EbayAnalyticsHubPage = lazy(() => import('../pages/admin/EbayAnalyticsHubPage.jsx'));
 export const EbayFeedbackPage = lazy(() => import('../pages/admin/EbayFeedbackPage.jsx'));
 export const EbayApiTesterPage = lazy(() => import('../pages/admin/EbayApiTesterPage.jsx'));
+export const GetOrdersApiPage = lazy(() => import('../pages/admin/GetOrdersApiPage.jsx'));
 export const SkuIndexSyncPage = lazy(() => import('../pages/admin/SkuIndexSyncPage.jsx'));
 export const DuplicateSkusPage = lazy(() => import('../pages/admin/DuplicateSkusPage.jsx'));
 export const SkuIndexDashboardPage = lazy(() => import('../pages/admin/SkuIndexDashboardPage.jsx'));
@@ -101,7 +102,6 @@ export const LegacyItemAnalyticsPage = lazy(() => import('../pages/admin/LegacyI
 export const CRPAnalyticsPage = lazy(() => import('../pages/admin/CRPAnalyticsPage.jsx'));
 export const SellerAnalyticsPage = lazy(() => import('../pages/admin/SellerAnalyticsPage.jsx'));
 export const OrdersDepartmentDashboardPage = lazy(() => import('../pages/admin/OrdersDepartmentDashboardPage.jsx'));
-export const ColumnCreatorPage = lazy(() => import('../pages/admin/ColumnCreatorPage.jsx'));
 export const ManageTemplatesPage = lazy(() => import('../pages/admin/ManageTemplatesPage.jsx'));
 export const TemplateListingsLabPage = lazy(() => import('../pages/admin/TemplateListingsLabPage.jsx'));
 export const TemplateListingAnalyticsPage = lazy(() => import('../pages/admin/TemplateListingAnalyticsPage.jsx'));

@@ -3267,7 +3267,25 @@ router.get('/stored-orders', async (req, res) => {
         .populate('orderProductId', 'name')
         .sort(
           awaitingShipment === 'true'
-            ? { shipByDate: 1 }
+            ? (() => {
+                const AWAITING_SORT_FIELDS = {
+                  shipBy: 'shipByDate',
+                  dateSold: 'dateSold',
+                  orderId: 'orderId',
+                  marketplace: 'purchaseMarketplaceId',
+                  productName: 'productName',
+                  arriving: 'arrivingDate',
+                  deliveryDate: 'estimatedDelivery',
+                  seller: 'seller',
+                  // buyerSla sorted on the client after SLA enrichment
+                };
+                const requested = String(sortBy || '').trim();
+                const field = AWAITING_SORT_FIELDS[requested] || 'shipByDate';
+                const dirRaw = String(sortDir || 'asc').toLowerCase();
+                const dir = dirRaw === 'desc' ? -1 : 1;
+                // Grow default: Ship By oldest-first
+                return { [field]: dir, _id: 1 };
+              })()
             : amazonArriving === 'true'
               ? (() => {
                   const AMAZON_ARRIVAL_SORT_FIELDS = {
@@ -3336,7 +3354,7 @@ router.get('/stored-orders', async (req, res) => {
       orderIds.length
         ? ConversationMeta.find({ orderId: { $in: orderIds } }).select('orderId category caseStatus').lean()
         : Promise.resolve([]),
-      (amazonArriving === 'true' && orderIds.length > 0 && sellerIdsForSla.length > 0)
+      (amazonArriving === 'true' || awaitingShipment === 'true') && orderIds.length > 0 && sellerIdsForSla.length > 0
         ? Message.aggregate([
           { $match: { orderId: { $in: orderIds }, seller: { $in: sellerIdsForSla } } },
           {
@@ -3651,9 +3669,70 @@ router.get('/all-orders-usd', async (req, res) => {
       }
     }
 
-    // Calculate pagination (max 200 rows per request)
-    const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
+    // Calculate pagination. Single-date views need a much higher cap so the whole
+    // day's orders can be fetched in one page (mirrors Grow's uncapped limit behavior).
+    const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query, { maxLimit: 10000 });
     const includeCounts = req.query.includeCounts !== 'false';
+
+    // Compute cross-page totals whenever a date filter is active (matches Grow parity).
+    let filteredTotals = null;
+    if (startDate || endDate) {
+      const totalsAgg = await Order.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            subtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
+            shipping: { $sum: { $ifNull: ['$shipping', 0] } },
+            salesTax: { $sum: { $ifNull: ['$salesTax', 0] } },
+            discount: { $sum: { $ifNull: ['$discount', 0] } },
+            transactionFees: { $sum: { $ifNull: ['$transactionFees', 0] } },
+            adFeeGeneral: { $sum: { $ifNull: ['$adFeeGeneral', 0] } },
+            orderEarnings: { $sum: { $ifNull: ['$orderEarnings', 0] } },
+            orderTotal: { $sum: { $ifNull: ['$orderTotal', 0] } },
+            tds: { $sum: { $ifNull: ['$tds', 0] } },
+            tid: { $sum: { $ifNull: ['$tid', 0] } },
+            net: { $sum: { $ifNull: ['$net', 0] } },
+            pBalanceINR: { $sum: { $ifNull: ['$pBalanceINR', 0] } },
+            beforeTax: { $sum: { $ifNull: ['$beforeTax', 0] } },
+            estimatedTax: { $sum: { $ifNull: ['$estimatedTax', 0] } },
+            amazonTotal: { $sum: { $ifNull: ['$amazonTotal', 0] } },
+            amazonTotalINR: { $sum: { $ifNull: ['$amazonTotalINR', 0] } },
+            marketplaceFee: { $sum: { $ifNull: ['$marketplaceFee', 0] } },
+            igst: { $sum: { $ifNull: ['$igst', 0] } },
+            totalCC: { $sum: { $ifNull: ['$totalCC', 0] } },
+          }
+        },
+        {
+          $addFields: {
+            profit: {
+              $subtract: [
+                { $subtract: ['$pBalanceINR', '$amazonTotalINR'] },
+                '$totalCC'
+              ]
+            }
+          }
+        }
+      ]);
+      if (totalsAgg.length > 0) {
+        const { _id, ...rest } = totalsAgg[0];
+        filteredTotals = rest;
+      }
+    }
+
+    // Raw count: same active-seller/date/marketplace scope only, no refund/cancel/toggle exclusions.
+    // This matches what the Fulfillment Dashboard shows for the same filters.
+    const rawQuery = {};
+    await applyActiveSellerScope(rawQuery, sellerId);
+    if (startDate || endDate) {
+      rawQuery.dateSold = {};
+      if (startDate) rawQuery.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
+      if (endDate) rawQuery.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
+    }
+    if (searchMarketplace && searchMarketplace !== '') {
+      rawQuery.purchaseMarketplaceId = searchMarketplace === 'EBAY_ENCA' ? 'EBAY_CA' : searchMarketplace;
+    }
+    const rawCount = await Order.countDocuments(rawQuery);
 
     const [totalOrders, orders, categoryData, rangeData, productData] = await Promise.all([
       Order.countDocuments(query),
@@ -3744,7 +3823,8 @@ router.get('/all-orders-usd', async (req, res) => {
         totalOrders,
         ordersPerPage: limitNum,
         hasNextPage: pageNum < totalPages,
-        hasPrevPage: pageNum > 1
+        hasPrevPage: pageNum > 1,
+        rawCount
       },
       counts: {
         uniqueCategories: categoriesWithCounts.length,
@@ -3753,7 +3833,8 @@ router.get('/all-orders-usd', async (req, res) => {
         categoryData: categoriesWithCounts,
         rangeData: rangesWithCounts,
         productData: productsWithCounts
-      }
+      },
+      filteredTotals
     });
   } catch (err) {
     console.error('[All Orders USD] Error:', err);
@@ -4177,6 +4258,33 @@ router.patch('/orders/:orderId/order-total', requireAuth, requirePageAccess('All
     });
   } catch (err) {
     console.error('Error updating order total:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/orders/:orderId/all-orders-usd-remark', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { allOrdersUsdRemark } = req.body;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    order.allOrdersUsdRemark = allOrdersUsdRemark == null ? '' : String(allOrdersUsdRemark);
+    await order.save();
+
+    res.json({
+      success: true,
+      order: {
+        _id: order._id,
+        orderId: order.orderId,
+        allOrdersUsdRemark: order.allOrdersUsdRemark
+      }
+    });
+  } catch (err) {
+    console.error('Error updating All Orders USD remark:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -5818,10 +5926,16 @@ async function runPollOrderUpdatesJob() {
         let sinceDate;
 
         if (latestOrder && latestOrder.lastModifiedDate) {
-          // Use latest lastModifiedDate from DB
+          // Use latest lastModifiedDate from DB, then walk back an overlap window.
+          // Without overlap, once any newer order advances the watermark past an older
+          // order's eBay lastModifiedDate, that older order (e.g. cancel → CANCELED)
+          // is never fetched again and Cancel Status stays stale forever.
           sinceDate = new Date(latestOrder.lastModifiedDate);
           console.log(`[${sellerName}] Latest order: ${latestOrder.orderId}`);
           console.log(`[${sellerName}] Latest lastModifiedDate: ${sinceDate.toISOString()}`);
+          const overlapDays = Math.min(30, Math.max(1, parseInt(process.env.EBAY_ORDER_POLL_OVERLAP_DAYS || '7', 10) || 7));
+          sinceDate = new Date(sinceDate.getTime() - overlapDays * 24 * 60 * 60 * 1000);
+          console.log(`[${sellerName}] Overlap ${overlapDays}d → since: ${sinceDate.toISOString()}`);
         } else {
           // No orders yet - use initialSyncDate or lookback floor
           sinceDate = seller.initialSyncDate || lookbackFloor;
@@ -6067,6 +6181,106 @@ async function runPollOrderUpdatesJob() {
             } else {
               offset += batchSize;
             }
+          }
+        }
+
+        // Force-refresh open cancelations. Watermark/overlap can still miss an order
+        // once cancel completes if lastModified fell behind the seller cursor.
+        const openCancelOrders = await Order.find({
+          seller: seller._id,
+          cancelState: { $in: ['IN_PROGRESS', 'CANCEL_REQUESTED'] },
+          creationDate: { $gte: lookbackFloor },
+        }).select('orderId lastModifiedDate cancelState orderPaymentStatus');
+
+        // Also re-check a limited set of still-PAID recent orders whose eBay
+        // lastModified in DB is stale — catches NONE_REQUESTED → CANCELED misses.
+        const stalePaidCutoff = new Date(nowUTC - 2 * 24 * 60 * 60 * 1000);
+        const stalePaidOrders = await Order.find({
+          seller: seller._id,
+          creationDate: { $gte: lookbackFloor },
+          orderPaymentStatus: 'PAID',
+          cancelState: { $in: ['NONE_REQUESTED', null, ''] },
+          lastModifiedDate: { $lte: stalePaidCutoff },
+        })
+          .sort({ lastModifiedDate: 1 })
+          .limit(25)
+          .select('orderId lastModifiedDate cancelState orderPaymentStatus');
+
+        const forceRefreshOrders = [];
+        const seenForceIds = new Set();
+        for (const row of [...openCancelOrders, ...stalePaidOrders]) {
+          const id = String(row.orderId);
+          if (seenForceIds.has(id)) continue;
+          seenForceIds.add(id);
+          forceRefreshOrders.push(row);
+        }
+
+        if (forceRefreshOrders.length > 0) {
+          console.log(`[${sellerName}] Force-refreshing ${forceRefreshOrders.length} cancel/stale-paid order(s)...`);
+        }
+
+        for (const openCancel of forceRefreshOrders) {
+          try {
+            const openCancelRes = await axios.get(
+              `https://api.ebay.com/sell/fulfillment/v1/order/${encodeURIComponent(openCancel.orderId)}`,
+              {
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  Accept: 'application/json',
+                },
+              }
+            );
+            const ebayOrder = openCancelRes.data;
+            const ebayModTime = new Date(ebayOrder.lastModifiedDate).getTime();
+            const dbModTime = new Date(openCancel.lastModifiedDate).getTime();
+            const ebayCancelState = ebayOrder.cancelStatus?.cancelState || 'NONE_REQUESTED';
+            const cancelChanged = ebayCancelState !== openCancel.cancelState;
+            const paymentChanged = ebayOrder.orderPaymentStatus !== openCancel.orderPaymentStatus;
+
+            if (ebayModTime <= dbModTime && !cancelChanged && !paymentChanged) {
+              continue;
+            }
+
+            const existingOrder = await Order.findOne({
+              orderId: openCancel.orderId,
+              seller: seller._id,
+            });
+            if (!existingOrder) continue;
+
+            const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+            const changedFields = [];
+            for (const key of Object.keys(orderData)) {
+              if (hasFieldChanged(existingOrder[key], orderData[key], key)) {
+                changedFields.push(key);
+              }
+            }
+
+            Object.assign(existingOrder, orderData);
+
+            if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED' || existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
+              existingOrder.orderEarnings = 0;
+              const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+              const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+              existingOrder.tds = financials.tds;
+              existingOrder.tid = financials.tid;
+              existingOrder.net = financials.net;
+              existingOrder.pBalanceINR = financials.pBalanceINR;
+              existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+              existingOrder.profit = financials.profit;
+            }
+
+            await existingOrder.save();
+
+            if (changedFields.length > 0) {
+              updatedOrders.push({
+                orderId: existingOrder.orderId,
+                changedFields,
+              });
+              console.log(`  🔁 OPEN-CANCEL REFRESH: ${ebayOrder.orderId} - ${changedFields.join(', ')}`);
+            }
+          } catch (openCancelErr) {
+            console.log(`  ⚠️ Open-cancel refresh failed for ${openCancel.orderId}: ${openCancelErr.message}`);
           }
         }
 
@@ -18526,6 +18740,72 @@ async function listConversationsFromDb(sellerId, query = {}) {
  * Dev-only generic eBay API proxy for internal tester page.
  * Lets admins call arbitrary eBay REST paths with a selected seller token.
  */
+/**
+ * Live Sell Fulfillment getOrders proxy for the getOrders API explorer page.
+ * Docs: https://developer.ebay.com/api-docs/sell/fulfillment/resources/order/methods/getOrders
+ */
+router.get('/fulfillment/get-orders', requireAuth, requirePageAccess('GetOrdersApi'), async (req, res) => {
+  try {
+    const sellerLookup = String(req.query.sellerId || '').trim();
+    if (!sellerLookup) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    if (!seller.ebayTokens?.refresh_token) {
+      return res.status(400).json({ error: 'Seller not connected to eBay', needsReconnect: true });
+    }
+
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const filter = String(req.query.filter || '').trim();
+    const fieldGroups = String(req.query.fieldGroups || '').trim();
+    const orderIds = String(req.query.orderIds || '').trim();
+
+    const params = { limit, offset };
+    if (filter) params.filter = filter;
+    if (fieldGroups) params.fieldGroups = fieldGroups;
+    if (orderIds) params.orderIds = orderIds;
+
+    const accessToken = await ensureValidToken(seller);
+    const response = await axios.get('https://api.ebay.com/sell/fulfillment/v1/order', {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      params,
+    });
+
+    return res.json({
+      seller: {
+        id: seller._id,
+        username: seller.user?.username || null,
+      },
+      api: {
+        method: 'GET',
+        path: '/sell/fulfillment/v1/order',
+        url: 'https://api.ebay.com/sell/fulfillment/v1/order',
+        docs: 'https://developer.ebay.com/develop/api/sell/fulfillment_api#sell-fulfillment_api-order-getorders',
+      },
+      params,
+      data: response.data || {},
+    });
+  } catch (err) {
+    console.error('[getOrders explorer] Error:', err.response?.data || err.message);
+    if (sendTokenReconnectError(err, res)) return;
+    const status = err.response?.status || 500;
+    return res.status(status).json({
+      error: err.response?.data?.errors?.[0]?.message
+        || err.response?.data?.error
+        || err.message
+        || 'getOrders failed',
+      ebayErrors: err.response?.data?.errors || undefined,
+    });
+  }
+});
+
 router.post('/dev/raw-call', requireAuth, requirePageAccess('EbayApiTester'), async (req, res) => {
   try {
     const {
