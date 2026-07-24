@@ -115,6 +115,7 @@ export const PAGE_REGISTRY = [
 
   // ====== COMPLIANCE & SUPPORT ======
   { id: 'ComplianceBoard', name: 'Compliance Board', path: '/compliance-board', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
+  { id: 'ComplianceMonitoring', name: 'Compliance Monitoring', path: '/compliance-monitoring', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'Disputes', name: 'Issues and Resolutions', path: '/disputes', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'AccountHealth', name: 'Account Health Report', path: '/account-health', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'BuyerMessages', name: 'Buyer Messages', path: '/message-received', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },

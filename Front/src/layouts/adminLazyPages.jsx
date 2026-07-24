@@ -28,6 +28,7 @@ export const ConversationTrackingPage = lazy(() => import('../pages/admin/Conver
 export const DisputesPage = lazy(() => import('../pages/admin/DisputesPage.jsx'));
 export const AccountHealthReportPage = lazy(() => import('../pages/admin/AccountHealthReportPage.jsx'));
 export const ComplianceBoardPage = lazy(() => import('../pages/admin/ComplianceBoardPage.jsx'));
+export const ComplianceMonitoringPage = lazy(() => import('../pages/admin/ComplianceMonitoringPage.jsx'));
 export const PayoneerSheetPage = lazy(() => import('../pages/admin/PayoneerSheetPage.jsx'));
 export const BankAccountsPage = lazy(() => import('../pages/admin/BankAccountsPage.jsx'));
 export const TransactionPage = lazy(() => import('../pages/admin/TransactionPage.jsx'));

@@ -513,6 +513,7 @@ export async function listBuyerChatThreadsFromCommerce(query = {}) {
     page = 1,
     limit = 20,
     search = '',
+    searchOrderId = '',
     filterType = 'ALL',
     filterMarketplace = '',
     showUnreadOnly = 'false',
@@ -564,6 +565,18 @@ export async function listBuyerChatThreadsFromCommerce(query = {}) {
         { 'latestMessage.messageBody': regex },
         { 'latestMessage.senderUsername': regex },
         { 'latestMessage.recipientUsername': regex }
+      ]
+    });
+  }
+
+  if (searchOrderId && String(searchOrderId).trim()) {
+    const regex = new RegExp(escapeRegexLiteral(String(searchOrderId).trim()), 'i');
+    match.$and = match.$and || [];
+    match.$and.push({
+      $or: [
+        { orderId: regex },
+        { referenceId: regex },
+        { conversationTitle: regex }
       ]
     });
   }
@@ -831,6 +844,7 @@ export async function listBuyerChatThreadsFromCommerceV2(query = {}) {
     page = 1,
     limit = 20,
     search = '',
+    searchOrderId = '',
     filterType = 'ALL',
     filterMarketplace = '',
     showUnreadOnly = 'false',
@@ -882,6 +896,18 @@ export async function listBuyerChatThreadsFromCommerceV2(query = {}) {
         { 'latestMessage.messageBody': regex },
         { 'latestMessage.senderUsername': regex },
         { 'latestMessage.recipientUsername': regex }
+      ]
+    });
+  }
+
+  if (searchOrderId && String(searchOrderId).trim()) {
+    const regex = new RegExp(escapeRegexLiteral(String(searchOrderId).trim()), 'i');
+    match.$and = match.$and || [];
+    match.$and.push({
+      $or: [
+        { orderId: regex },
+        { referenceId: regex },
+        { conversationTitle: regex }
       ]
     });
   }

@@ -2386,6 +2386,343 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
   }
 });
 
+const COMPLIANCE_MONITORING_BOARDS = [
+  {
+    id: 'order_fulfillment',
+    label: 'Order Fulfillment',
+    statuses: ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'],
+    includeAllOrders: true
+  },
+  {
+    id: 'cancellation',
+    label: 'Cancellation',
+    statuses: ['cancellation_request', 'case_not_opened', 'accepted', 'declined']
+  },
+  {
+    id: 'inr',
+    label: 'INR',
+    statuses: ['inr_case_opened', 'case_not_opened', 'inr_follow_up', 'inr_tracking_id_upload', 'inr_case_open_ebay_step_in', 'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved']
+  },
+  {
+    id: 'return_refund',
+    label: 'Return / Refund / Replace',
+    statuses: ['case_opened', 'case_not_opened', 'provide_return_label', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement']
+  }
+];
+
+const COMPLIANCE_STATUS_LABELS = {
+  todo: 'To Do',
+  out_of_stock: 'Out of Stock',
+  cancellation: 'Cancellation',
+  address_issue: 'Address Issue',
+  not_fulfilled: 'Not Fulfilled',
+  fulfilled: 'Fulfilled',
+  buyer_confirmation: 'Buyer Confirmation',
+  cancellation_request: 'Cancellation Request',
+  accepted: 'Accepted',
+  declined: 'Declined',
+  case_opened: 'Case Opened',
+  case_not_opened: 'Case Not Opened',
+  inr_case_opened: 'INR Case Opened',
+  inr_follow_up: 'INR Follow Up',
+  inr_tracking_id_upload: 'Tracking ID Upload',
+  inr_case_open_ebay_step_in: 'Case Open Ebay Step In',
+  inr_fully_refunded: 'Fully Refunded',
+  inr_partial_refund: 'Partial Refund',
+  inr_not_refunded_resolved: 'Not Refunded / Resolved',
+  provide_return_label: 'Provide Return Label',
+  buyer_drop_off: 'Buyer Drop Off',
+  item_delivered: 'Item Delivered',
+  partial_refund: 'Partial Refund',
+  full_refund: 'Full Refund',
+  replacement: 'Replacement'
+};
+
+function getComplianceMonitoringDateRange({ dateMode, dateSingle, dateFrom, dateTo }) {
+  if (dateMode === 'single' && dateSingle) {
+    return { startDate: dateSingle, endDate: dateSingle };
+  }
+
+  if (dateMode === 'range') {
+    return {
+      startDate: dateFrom || null,
+      endDate: dateTo || null
+    };
+  }
+
+  return { startDate: null, endDate: null };
+}
+
+function buildDateFieldMatch(fieldName, startDate, endDate) {
+  if (!startDate && !endDate) return null;
+
+  const range = {};
+  if (startDate) range.$gte = getPTDayBoundsUTC(startDate).start;
+  if (endDate) range.$lte = getPTDayBoundsUTC(endDate).end;
+  return { [fieldName]: range };
+}
+
+function buildComplianceMonitoringOrderMatch({
+  boardId,
+  includeAllOrders,
+  sellerObjectId,
+  excludedSellerIds,
+  excludeLowValueEnabled,
+  marketplace,
+  startDate,
+  endDate
+}) {
+  const match = {};
+
+  if (!includeAllOrders) {
+    match.$or = [
+      { complianceBoardCategories: boardId },
+      { complianceBoardCategory: boardId }
+    ];
+  }
+
+  match.$and = match.$and || [];
+  match.$and.push(
+    {
+      $or: [
+        { cancelState: { $exists: false } },
+        { cancelState: null },
+        { cancelState: { $nin: FINAL_CANCELLED_STATES } }
+      ]
+    },
+    {
+      $or: [
+        { 'cancelStatus.cancelState': { $exists: false } },
+        { 'cancelStatus.cancelState': null },
+        { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
+      ]
+    }
+  );
+
+  if (sellerObjectId) {
+    match.seller = sellerObjectId;
+  }
+
+  if (excludedSellerIds.length > 0) {
+    match.$and.push({ seller: { $nin: excludedSellerIds } });
+  }
+
+  if (excludeLowValueEnabled) {
+    match.$and.push({
+      $or: [
+        { subtotalUSD: { $gte: 3 } },
+        { subtotal: { $gte: 3 } }
+      ]
+    });
+  }
+
+  applyOrderMarketplaceFilter(match, marketplace);
+
+  const dateMatch = buildDateFieldMatch('dateSold', startDate, endDate);
+  if (dateMatch) {
+    Object.assign(match, dateMatch);
+  }
+
+  return match;
+}
+
+/**
+ * GET /orders/compliance-monitoring/overview
+ * Cross-board compliance overview for monitoring dashboards.
+ */
+router.get('/compliance-monitoring/overview', requireAuth, requirePageAccess('ComplianceMonitoring'), async (req, res) => {
+  try {
+    const {
+      sellerId = '',
+      marketplace = '',
+      dateMode = 'none',
+      dateSingle = '',
+      dateFrom = '',
+      dateTo = '',
+      excludeClient = 'true',
+      excludeLowValue = 'true'
+    } = req.query;
+
+    const sellerObjectId = sellerId && mongoose.Types.ObjectId.isValid(sellerId)
+      ? new mongoose.Types.ObjectId(sellerId)
+      : null;
+    const excludeClientEnabled = excludeClient === 'true' || excludeClient === true;
+    const excludeLowValueEnabled = excludeLowValue === 'true' || excludeLowValue === true;
+    const excludedSellerIds = excludeClientEnabled ? await getExcludedClientSellerIds() : [];
+    const { startDate, endDate } = getComplianceMonitoringDateRange({ dateMode, dateSingle, dateFrom, dateTo });
+
+    const orderBoardResults = await Promise.all(
+      COMPLIANCE_MONITORING_BOARDS.map(async (board) => {
+        const match = buildComplianceMonitoringOrderMatch({
+          boardId: board.id,
+          includeAllOrders: board.includeAllOrders,
+          sellerObjectId,
+          excludedSellerIds,
+          excludeLowValueEnabled,
+          marketplace,
+          startDate,
+          endDate
+        });
+
+        const rows = await Order.aggregate([
+          { $match: match },
+          {
+            $group: {
+              _id: { $ifNull: ['$complianceBoardStatus', 'todo'] },
+              count: { $sum: 1 }
+            }
+          }
+        ]);
+
+        const counts = rows.reduce((acc, row) => {
+          const status = row._id || 'todo';
+          acc[status] = row.count || 0;
+          return acc;
+        }, {});
+
+        const items = board.statuses.map((status) => ({
+          id: status,
+          label: COMPLIANCE_STATUS_LABELS[status] || status,
+          count: counts[status] || 0
+        }));
+
+        return {
+          id: board.id,
+          label: board.label,
+          total: items.reduce((sum, item) => sum + item.count, 0),
+          items
+        };
+      })
+    );
+
+    const conversationMatch = {
+      category: { $in: ['On Hold', 'INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Inquiry'] }
+    };
+    if (sellerObjectId) {
+      conversationMatch.seller = sellerObjectId;
+    }
+    if (excludedSellerIds.length > 0) {
+      conversationMatch.seller = conversationMatch.seller
+        ? conversationMatch.seller
+        : { $nin: excludedSellerIds };
+    }
+
+    const conversationPipeline = [
+      { $match: conversationMatch },
+      {
+        $lookup: {
+          from: 'orders',
+          localField: 'orderId',
+          foreignField: 'orderId',
+          as: 'orderInfo'
+        }
+      }
+    ];
+
+    if (marketplace) {
+      const marketplaceMatch = {};
+      applyOrderMarketplaceFilter(marketplaceMatch, marketplace);
+      if (marketplaceMatch.purchaseMarketplaceId) {
+        conversationPipeline.push({
+          $match: {
+            'orderInfo.purchaseMarketplaceId': marketplaceMatch.purchaseMarketplaceId
+          }
+        });
+      }
+    }
+
+    const orderDateMatch = buildDateFieldMatch('orderInfo.dateSold', startDate, endDate);
+    const conversationCreatedDateMatch = buildDateFieldMatch('createdAt', startDate, endDate);
+    if (orderDateMatch && conversationCreatedDateMatch) {
+      conversationPipeline.push({
+        $match: {
+          $or: [
+            orderDateMatch,
+            {
+              orderInfo: { $size: 0 },
+              ...conversationCreatedDateMatch
+            }
+          ]
+        }
+      });
+    }
+
+    if (excludeLowValueEnabled) {
+      conversationPipeline.push({
+        $match: {
+          $or: [
+            { orderId: { $in: [null, ''] } },
+            { orderInfo: { $size: 0 } },
+            { 'orderInfo.subtotalUSD': { $gte: 3 } },
+            { 'orderInfo.subtotal': { $gte: 3 } }
+          ]
+        }
+      });
+    }
+
+    conversationPipeline.push({
+      $group: {
+        _id: '$category',
+        count: { $sum: 1 }
+      }
+    });
+
+    const conversationRows = await ConversationMeta.aggregate(conversationPipeline);
+    const conversationCounts = conversationRows.reduce((acc, row) => {
+      const category = row._id || 'Unassigned';
+      acc[category] = row.count || 0;
+      return acc;
+    }, {});
+    const conversationItems = [
+      { id: 'On Hold', label: 'On Hold', count: conversationCounts['On Hold'] || 0 },
+      { id: 'INR', label: 'INR', count: conversationCounts.INR || 0 },
+      { id: 'Cancellation', label: 'Cancellation', count: conversationCounts.Cancellation || 0 },
+      {
+        id: 'Return',
+        label: 'Return / Refund / Replace',
+        count: (conversationCounts.Return || 0) + (conversationCounts.Refund || 0) + (conversationCounts.Replace || 0)
+      },
+      { id: 'Out of Stock', label: 'Out of Stock', count: conversationCounts['Out of Stock'] || 0 },
+      { id: 'Issue with Product', label: 'Issue with Product', count: conversationCounts['Issue with Product'] || 0 },
+      { id: 'Inquiry', label: 'Inquiry', count: conversationCounts.Inquiry || 0 }
+    ];
+
+    const orderTotal = orderBoardResults.reduce((sum, board) => sum + board.total, 0);
+    const communicationTotal = conversationItems.reduce((sum, item) => sum + item.count, 0);
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      filters: {
+        sellerId: sellerId || null,
+        marketplace: marketplace || null,
+        dateMode,
+        dateSingle: dateSingle || null,
+        dateFrom: dateFrom || null,
+        dateTo: dateTo || null,
+        excludeClient: excludeClientEnabled,
+        excludeLowValue: excludeLowValueEnabled
+      },
+      totals: {
+        allTracked: orderTotal + communicationTotal,
+        orderBoards: orderTotal,
+        orderCommunication: communicationTotal
+      },
+      boards: [
+        ...orderBoardResults,
+        {
+          id: 'order_communication',
+          label: 'Order Communication',
+          total: communicationTotal,
+          items: conversationItems
+        }
+      ]
+    });
+  } catch (error) {
+    console.error('Error fetching compliance monitoring overview:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch compliance monitoring overview' });
+  }
+});
+
 /**
  * PATCH /orders/:orderId/compliance-status
  * Update the compliance board status of an order

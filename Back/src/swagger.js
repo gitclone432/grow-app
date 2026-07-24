@@ -107,7 +107,7 @@ export const swaggerSpec = {
                     category: {
                         type: 'string',
                         nullable: true,
-                        enum: ['INR', 'Cancellation', 'Return', 'Refund', 'Replace',
+                        enum: ['On Hold', 'INR', 'Cancellation', 'Return', 'Refund', 'Replace',
                             'Out of Stock', 'Issue with Product', 'Inquiry', ''],
                         description: 'The "About" classification of the conversation'
                     },
@@ -559,7 +559,7 @@ export const swaggerSpec = {
                                     category: {
                                         type: 'string',
                                         nullable: true,
-                                        enum: ['', 'INR', 'Cancellation', 'Return', 'Refund', 'Replace',
+                                        enum: ['', 'On Hold', 'INR', 'Cancellation', 'Return', 'Refund', 'Replace',
                                             'Out of Stock', 'Issue with Product', 'Inquiry']
                                     },
                                     caseStatus: {
