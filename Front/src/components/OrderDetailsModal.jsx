@@ -396,7 +396,8 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
     beforeTax: '',
     estimatedTax: '',
     azOrderId: '',
-    remark: ''
+    remark: '',
+    fulfillmentNotes: ''
   });
   const [amazonAccounts, setAmazonAccounts] = useState([]);
   const [remarkOptions, setRemarkOptions] = useState([]);
@@ -415,7 +416,8 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
       beforeTax: order.beforeTax ?? '',
       estimatedTax: order.estimatedTax ?? '',
       azOrderId: order.azOrderId || '',
-      remark: order.remark || ''
+      remark: order.remark || '',
+      fulfillmentNotes: order.fulfillmentNotes || ''
     });
     setSaveError('');
     setSavedField('');
@@ -564,7 +566,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
       onChange={(event) => handleLocalChange(field, event.target.value)}
       onBlur={() => saveField(field, values[field])}
       onKeyDown={(event) => {
-        if (event.key === 'Enter') event.currentTarget.blur();
+        if (event.key === 'Enter' && !props.multiline) event.currentTarget.blur();
       }}
       size="small"
       fullWidth
@@ -652,6 +654,16 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
               </MenuItem>
             ))}
           </TextField>
+          {renderTextField('fulfillmentNotes', 'Notes', {
+            multiline: true,
+            minRows: 3,
+            maxRows: 6,
+            sx: {
+              gridColumn: '1 / -1',
+              ...fieldSx,
+              '& .MuiInputBase-input': { py: 0.75 },
+            },
+          })}
         </Box>
         <Stack direction="row" alignItems="center" spacing={1} sx={{ minHeight: 28, mt: 0.75 }}>
           {savingField && <CircularProgress size={14} />}
