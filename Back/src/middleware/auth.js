@@ -113,6 +113,8 @@ export const PAGE_DEFAULT_ROLES = {
   'SellerAnalytics': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // Compliance & Support
+  'ComplianceBoard': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'ComplianceMonitoring': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'Disputes': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'AccountHealth': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'BuyerMessages': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],

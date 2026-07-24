@@ -12697,7 +12697,7 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
     } = req.query;
 
     const match = {
-      category: { $in: ['INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Inquiry'] }
+      category: { $in: ['On Hold', 'INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Inquiry'] }
     };
 
     if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {

@@ -83,6 +83,7 @@ const COLUMN_STATUS = {
 // Message categories for Order Communication
 const MESSAGE_CATEGORIES = {
   ALL_MESSAGES: 'all_messages',
+  ON_HOLD: 'On Hold',
   INR: 'INR',
   CANCELLATION: 'Cancellation',
   RETURN_REFUND_REPLACE: 'Return',
@@ -98,6 +99,7 @@ const ISSUE_HUB_MESSAGE_COLUMNS = new Set([
 ]);
 
 const ORDER_COMMUNICATION_WORK_OPTIONS = [
+  { id: MESSAGE_CATEGORIES.ON_HOLD, label: 'On Hold', color: '#64748b' },
   { id: MESSAGE_CATEGORIES.INR, label: 'INR', color: '#ef4444' },
   { id: MESSAGE_CATEGORIES.CANCELLATION, label: 'Cancellation', color: '#f97316' },
   { id: MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE, label: 'Return / Refund / Replace', color: '#8b5cf6' },
@@ -394,6 +396,7 @@ function ComplianceBoardPage() {
   const [logsModalOpen, setLogsModalOpen] = useState(false);
   const [selectedOrderForLogs, setSelectedOrderForLogs] = useState(null);
   const [selectedOrderDetailsId, setSelectedOrderDetailsId] = useState(null);
+  const [selectedOrderDetailsCanEditFulfillment, setSelectedOrderDetailsCanEditFulfillment] = useState(false);
   const [orderActivityLogs, setOrderActivityLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [newNote, setNewNote] = useState('');
@@ -402,6 +405,7 @@ function ComplianceBoardPage() {
   // Order Communication specific state
   const [messages, setMessages] = useState({
     [MESSAGE_CATEGORIES.ALL_MESSAGES]: [],
+    [MESSAGE_CATEGORIES.ON_HOLD]: [],
     [MESSAGE_CATEGORIES.INR]: [],
     [MESSAGE_CATEGORIES.CANCELLATION]: [],
     [MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE]: [],
@@ -419,7 +423,7 @@ function ComplianceBoardPage() {
   const [visibleMessageCounts, setVisibleMessageCounts] = useState({});
   const [issueHubSourceCategory, setIssueHubSourceCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
   const [issueHubWorkspaceCategory, setIssueHubWorkspaceCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
-  const [orderCommunicationWorkCategory, setOrderCommunicationWorkCategory] = useState(MESSAGE_CATEGORIES.INR);
+  const [orderCommunicationWorkCategory, setOrderCommunicationWorkCategory] = useState(MESSAGE_CATEGORIES.ON_HOLD);
   const [fulfillmentIssueCategory, setFulfillmentIssueCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
   const [fulfillmentProgressCategory, setFulfillmentProgressCategory] = useState(COLUMN_STATUS.NOT_FULFILLED);
   const [returnCaseOpenedCategory, setReturnCaseOpenedCategory] = useState(COLUMN_STATUS.CASE_OPENED);
@@ -468,6 +472,27 @@ function ComplianceBoardPage() {
     params.excludeClient = excludeClient;
     params.excludeLowValue = excludeLowValue;
     return params;
+  };
+
+  const matchesMessageFilters = (message) => {
+    if (selectedSeller) {
+      const messageSellerId = String(message?.sellerId || message?.seller?._id || message?.seller || '');
+      if (messageSellerId !== String(selectedSeller)) return false;
+    }
+
+    const orderQuery = searchOrderId.trim().toLowerCase();
+    if (orderQuery) {
+      const messageOrderId = String(message?.orderId || message?._conversationMeta?.orderId || '');
+      if (!messageOrderId.toLowerCase().includes(orderQuery)) return false;
+    }
+
+    const buyerQuery = searchBuyerName.trim().toLowerCase();
+    if (buyerQuery) {
+      const buyerName = String(message?.buyerName || message?.buyerUsername || message?._conversationMeta?.buyerUsername || '');
+      if (!buyerName.toLowerCase().includes(buyerQuery)) return false;
+    }
+
+    return true;
   };
 
   const matchesBoardOrderFilters = (order) => {
@@ -947,7 +972,7 @@ function ComplianceBoardPage() {
       ].forEach((thread) => {
         threadMap.set(getMessageKey(thread), thread);
       });
-      const threads = Array.from(threadMap.values());
+      const threads = Array.from(threadMap.values()).filter(matchesMessageFilters);
       
       // Debug: Log sample thread data to verify structure
       if (threads.length > 0) {
@@ -980,6 +1005,7 @@ function ComplianceBoardPage() {
       // Group messages by category - messages ONLY appear in their assigned category OR "All Messages"
       const grouped = {
         [MESSAGE_CATEGORIES.ALL_MESSAGES]: [],
+        [MESSAGE_CATEGORIES.ON_HOLD]: [],
         [MESSAGE_CATEGORIES.INR]: [],
         [MESSAGE_CATEGORIES.CANCELLATION]: [],
         [MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE]: [],
@@ -1020,7 +1046,9 @@ function ComplianceBoardPage() {
         } else {
           // Message has a category - add ONLY to that category, NOT to "All Messages"
           const category = meta.category;
-          if (category === 'Return' || category === 'Refund' || category === 'Replace') {
+          if (category === 'On Hold') {
+            grouped[MESSAGE_CATEGORIES.ON_HOLD].push(thread);
+          } else if (category === 'Return' || category === 'Refund' || category === 'Replace') {
             grouped[MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE].push(thread);
           } else if (category === 'Issue with Delivery') {
             grouped[MESSAGE_CATEGORIES.ISSUE_WITH_DELIVERY].push(thread);
@@ -1503,6 +1531,7 @@ function ComplianceBoardPage() {
 
     if (selectedCategory === 'order_communication') {
       return [
+        { id: MESSAGE_CATEGORIES.ON_HOLD, label: 'On Hold', color: '#64748b', count: messages[MESSAGE_CATEGORIES.ON_HOLD]?.length || 0, type: 'stat' },
         { id: MESSAGE_CATEGORIES.INR, label: 'INR', color: BRAND_RED, count: messages[MESSAGE_CATEGORIES.INR]?.length || 0, type: 'stat' },
         { id: MESSAGE_CATEGORIES.CANCELLATION, label: 'Cancellation', color: BRAND_ORANGE, count: messages[MESSAGE_CATEGORIES.CANCELLATION]?.length || 0, type: 'stat' },
         { id: MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE, label: 'Return / Refund / Replace', color: '#8b5cf6', count: messages[MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE]?.length || 0, type: 'stat' },
@@ -2127,8 +2156,10 @@ function ComplianceBoardPage() {
     setSnackbar({ open: true, message: 'Order ID copied!' });
   };
 
-  const handleOpenOrderDetails = (orderId) => {
-    if (orderId) setSelectedOrderDetailsId(orderId);
+  const handleOpenOrderDetails = (orderId, options = {}) => {
+    if (!orderId) return;
+    setSelectedOrderDetailsId(orderId);
+    setSelectedOrderDetailsCanEditFulfillment(Boolean(options.canEditFulfillment));
   };
 
   const handleCopy = (text) => {
@@ -2704,7 +2735,7 @@ function ComplianceBoardPage() {
   };
 
   // Render order card (compact version for mini tiles, full version for main columns)
-  const renderOrderCard = (order, provided, snapshot, isCompact = false) => {
+  const renderOrderCard = (order, provided, snapshot, isCompact = false, columnStatus = '') => {
     const showOrderCommunicationBadge = (
       (selectedCategory === 'cancellation' || selectedCategory === 'inr') &&
       order.complianceBoardSource === 'order_communication'
@@ -2741,7 +2772,9 @@ function ComplianceBoardPage() {
                   fontWeight={700}
                   onClick={(e) => {
                     e.stopPropagation();
-                    handleOpenOrderDetails(order.orderId || order.legacyOrderId);
+                    handleOpenOrderDetails(order.orderId || order.legacyOrderId, {
+                      canEditFulfillment: selectedCategory === 'order_fulfillment' && columnStatus === COLUMN_STATUS.TODO
+                    });
                   }}
                   sx={{
                     color: BRAND_DARK,
@@ -2953,7 +2986,7 @@ function ComplianceBoardPage() {
           <Stack spacing={1} sx={{ overflowY: 'auto', flex: 1 }}>
             {orders[status]?.slice(0, visibleCount).map((order, index) => (
               <Draggable key={order._id} draggableId={order._id} index={index}>
-                {(provided, snapshot) => renderOrderCard(order, provided, snapshot)}
+                {(provided, snapshot) => renderOrderCard(order, provided, snapshot, false, status)}
               </Draggable>
             ))}
             {remainingCount > 0 && (
@@ -3948,8 +3981,12 @@ function ComplianceBoardPage() {
 
       <OrderDetailsModal
         open={Boolean(selectedOrderDetailsId)}
-        onClose={() => setSelectedOrderDetailsId(null)}
+        onClose={() => {
+          setSelectedOrderDetailsId(null);
+          setSelectedOrderDetailsCanEditFulfillment(false);
+        }}
         orderId={selectedOrderDetailsId}
+        fulfillmentFieldsEditable={selectedOrderDetailsCanEditFulfillment}
       />
 
       {/* Activity Logs Dialog */}

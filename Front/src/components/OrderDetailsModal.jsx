@@ -222,6 +222,60 @@ function Section({ title, children, titleColor }) {
   );
 }
 
+function ItemThumbnail({ order, itemId }) {
+  const sellerId = order?.seller?._id || order?.seller;
+  const [thumbnailUrl, setThumbnailUrl] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+    setThumbnailUrl('');
+
+    if (!itemId || !sellerId) return () => {
+      mounted = false;
+    };
+
+    api.get(`/ebay/item-images/${encodeURIComponent(itemId)}`, {
+      params: { sellerId, thumbnail: true }
+    })
+      .then(({ data }) => {
+        const firstImage = data?.images?.[0] || '';
+        if (mounted) setThumbnailUrl(firstImage);
+      })
+      .catch(() => {
+        if (mounted) setThumbnailUrl('');
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [itemId, sellerId]);
+
+  if (!thumbnailUrl) return null;
+
+  return (
+    <Box
+      sx={{
+        width: 54,
+        height: 54,
+        borderRadius: 1,
+        overflow: 'hidden',
+        border: '1px solid',
+        borderColor: 'grey.300',
+        flexShrink: 0,
+        bgcolor: 'grey.50'
+      }}
+    >
+      <img
+        src={thumbnailUrl}
+        alt={order?.productName || order?.lineItems?.[0]?.title || 'Item'}
+        loading="lazy"
+        decoding="async"
+        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+      />
+    </Box>
+  );
+}
+
 function ShippingAddressSection({ order, onCopy }) {
   const [expanded, setExpanded] = useState(true);
   const fields = getShippingAddressFields(order);
@@ -334,7 +388,7 @@ function ShippingAddressSection({ order, onCopy }) {
   );
 }
 
-function EditableFulfillmentFields({ order, onOrderUpdate }) {
+function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
   const orderMongoId = order?._id || order?.id;
   const [values, setValues] = useState({
     amazonAccount: '',
@@ -412,6 +466,8 @@ function EditableFulfillmentFields({ order, onOrderUpdate }) {
   };
 
   const saveField = async (field, nextValue, extraFields = {}) => {
+    if (!editable) return false;
+
     if (!orderMongoId) {
       setSaveError('Order id missing. Cannot save.');
       return false;
@@ -512,7 +568,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate }) {
       }}
       size="small"
       fullWidth
-      disabled={savingField === field}
+      disabled={!editable || savingField === field}
       {...props}
       sx={{ ...fieldSx, ...(props.sx || {}) }}
     />
@@ -530,9 +586,18 @@ function EditableFulfillmentFields({ order, onOrderUpdate }) {
       }}
     >
       <Box sx={{ px: 1.25, py: 1, bgcolor: '#15152a' }}>
-        <Typography variant="subtitle2" fontWeight={800} sx={{ color: '#fff', fontSize: '0.78rem' }}>
-          FULFILLMENT FIELDS
-        </Typography>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+          <Typography variant="subtitle2" fontWeight={800} sx={{ color: '#fff', fontSize: '0.78rem' }}>
+            FULFILLMENT FIELDS
+          </Typography>
+          {!editable && (
+            <Chip
+              label="Read only"
+              size="small"
+              sx={{ height: 20, bgcolor: 'rgba(255,255,255,0.14)', color: '#fff', fontSize: '0.68rem' }}
+            />
+          )}
+        </Stack>
       </Box>
       <Box sx={{ p: 1.25 }}>
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 1 }}>
@@ -547,7 +612,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate }) {
             }}
             size="small"
             fullWidth
-            disabled={savingField === 'amazonAccount'}
+            disabled={!editable || savingField === 'amazonAccount'}
             sx={fieldSx}
           >
             <MenuItem value="">- Select -</MenuItem>
@@ -577,7 +642,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate }) {
             }}
             size="small"
             fullWidth
-            disabled={savingField === 'remark'}
+            disabled={!editable || savingField === 'remark'}
             sx={fieldSx}
           >
             <MenuItem value="">- Select -</MenuItem>
@@ -674,7 +739,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate }) {
   );
 }
 
-export default function OrderDetailsModal({ open, onClose, orderId }) {
+export default function OrderDetailsModal({ open, onClose, orderId, fulfillmentFieldsEditable = false }) {
   const [order, setOrder] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -839,53 +904,62 @@ export default function OrderDetailsModal({ open, onClose, orderId }) {
 
             <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 1.5 }}>
               <ShippingAddressSection order={order} onCopy={handleCopy} />
-              <EditableFulfillmentFields order={order} onOrderUpdate={setOrder} />
+              <EditableFulfillmentFields
+                order={order}
+                onOrderUpdate={setOrder}
+                editable={fulfillmentFieldsEditable}
+              />
             </Box>
 
             {/* Item */}
             <Section title="Item">
-              <DetailCell
-                label="Title"
-                value={itemTitle}
-                fullWidth
-              />
-              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, columnGap: 2 }}>
-                <DetailCell
-                  label="Item #"
-                  value={
-                    itemId ? (
-                      <Stack direction="row" alignItems="center" spacing={0.25} sx={{ minWidth: 0 }}>
-                        <Button
-                          size="small"
-                          variant="text"
-                          onClick={() => openEbayItemPopup(itemId)}
-                          endIcon={<OpenInNewIcon sx={{ fontSize: 14 }} />}
-                          sx={{
-                            minWidth: 0,
-                            p: 0,
-                            fontSize: '0.8125rem',
-                            fontFamily: 'monospace',
-                            textTransform: 'none',
-                            justifyContent: 'flex-start'
-                          }}
-                        >
-                          {itemId}
-                        </Button>
-                        <IconButton size="small" onClick={() => handleCopy(itemId)} sx={{ p: 0.25 }}>
-                          <ContentCopyIcon sx={{ fontSize: 13 }} />
-                        </IconButton>
-                      </Stack>
-                    ) : '-'
-                  }
-                />
-                <DetailCell label="Qty" value={order.quantity ?? order.lineItems?.[0]?.quantity} />
-                <DetailCell label="SKU" value={order.lineItems?.[0]?.sku} />
-                <DetailCell
-                  label="Line Item"
-                  value={order.lineItems?.[0]?.lineItemId}
-                  copyable
-                  onCopy={handleCopy}
-                />
+              <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25 }}>
+                <ItemThumbnail order={order} itemId={itemId} />
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <DetailCell
+                    label="Title"
+                    value={itemTitle}
+                    fullWidth
+                  />
+                  <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, columnGap: 2 }}>
+                    <DetailCell
+                      label="Item #"
+                      value={
+                        itemId ? (
+                          <Stack direction="row" alignItems="center" spacing={0.25} sx={{ minWidth: 0 }}>
+                            <Button
+                              size="small"
+                              variant="text"
+                              onClick={() => openEbayItemPopup(itemId)}
+                              endIcon={<OpenInNewIcon sx={{ fontSize: 14 }} />}
+                              sx={{
+                                minWidth: 0,
+                                p: 0,
+                                fontSize: '0.8125rem',
+                                fontFamily: 'monospace',
+                                textTransform: 'none',
+                                justifyContent: 'flex-start'
+                              }}
+                            >
+                              {itemId}
+                            </Button>
+                            <IconButton size="small" onClick={() => handleCopy(itemId)} sx={{ p: 0.25 }}>
+                              <ContentCopyIcon sx={{ fontSize: 13 }} />
+                            </IconButton>
+                          </Stack>
+                        ) : '-'
+                      }
+                    />
+                    <DetailCell label="Qty" value={order.quantity ?? order.lineItems?.[0]?.quantity} />
+                    <DetailCell label="SKU" value={order.lineItems?.[0]?.sku} />
+                    <DetailCell
+                      label="Line Item"
+                      value={order.lineItems?.[0]?.lineItemId}
+                      copyable
+                      onCopy={handleCopy}
+                    />
+                  </Box>
+                </Box>
               </Box>
             </Section>
 
