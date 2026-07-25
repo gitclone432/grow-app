@@ -51,7 +51,7 @@ import api from '../../lib/api';
 import ColumnSelector from '../../components/ColumnSelector';
 import ChatModal from '../../components/ChatModal';
 import SectionCard from '../../components/SectionCard.jsx';
-import { tableContainerSx, tableHeaderCellSx, tableBodyRowSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
+import { tableContainerSx, tableHeaderCellSx, tableBodyRowSx, yellowOutlinedButtonSx, yellowFilledButtonSx } from '../../theme/tableStyles.js';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
 import {
   findRemarkTemplateText,
@@ -114,6 +114,16 @@ const SORTABLE_COLUMN_IDS = new Set([
   'arriving',
   'buyerSla',
 ]);
+
+/** Today's calendar date in India (YYYY-MM-DD). */
+function getTodayIstYmd() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
 
 function SortableHeaderCell({ field, label, sortBy, sortDir, onSort, sx }) {
   const active = sortBy === field;
@@ -563,15 +573,17 @@ export default function AwaitingShipmentPage() {
   const [searchBuyerName, setSearchBuyerName] = useState('');
   const [searchMarketplace, setSearchMarketplace] = useState('');
   const [shipByDate, setShipByDate] = useState('');
+  /** When 'IST', ship-by filter uses India calendar day (matches red "today" highlight). */
+  const [shipByDateTz, setShipByDateTz] = useState('');
   const [dateSold, setDateSold] = useState('');
   const [arrivalDateFrom, setArrivalDateFrom] = useState('');
   const [arrivalDateTo, setArrivalDateTo] = useState('');
   const [excludeClient, setExcludeClient] = useState(true);
   const [amazonAccounts, setAmazonAccounts] = useState([]);
   const [selectedAmazonAccount, setSelectedAmazonAccount] = useState('');
-  // Grow default: Ship By oldest-first
+  // Grow default column: Ship By; UI default: newest first
   const [sortBy, setSortBy] = useState('shipBy');
-  const [sortDir, setSortDir] = useState('asc');
+  const [sortDir, setSortDir] = useState('desc');
 
   const [visibleColumns, setVisibleColumns] = useState([
     'seller', 'orderId', 'marketplace', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'buyerName', 'shippingAddress', 'trackingNumber', 'trackingId', 'arriving', 'notes'
@@ -652,7 +664,7 @@ export default function AwaitingShipmentPage() {
   useEffect(() => {
     fetchAwaitingOrders();
     // eslint-disable-next-line
-  }, [page, debouncedOrderId, debouncedBuyerName, selectedSeller, searchMarketplace, shipByDate, dateSold, arrivalDateFrom, arrivalDateTo, excludeClient, selectedAmazonAccount, sortBy, sortDir]);
+  }, [page, debouncedOrderId, debouncedBuyerName, selectedSeller, searchMarketplace, shipByDate, shipByDateTz, dateSold, arrivalDateFrom, arrivalDateTo, excludeClient, selectedAmazonAccount, sortBy, sortDir]);
 
   // Handlers
   const handleSellerChange = (e) => {
@@ -666,14 +678,40 @@ export default function AwaitingShipmentPage() {
       setSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'));
     } else {
       setSortBy(field);
-      setSortDir(field === 'shipBy' || field === 'dateSold' || field === 'arriving' ? 'asc' : 'asc');
+      // Ship By defaults to newest first; other date fields keep oldest first
+      setSortDir(field === 'shipBy' ? 'desc' : 'asc');
     }
     setPage(1);
   };
 
   const handleToggleShipBySort = () => {
     setSortBy('shipBy');
-    setSortDir((prev) => (sortBy === 'shipBy' && prev === 'asc' ? 'desc' : 'asc'));
+    setSortDir((prev) => (sortBy === 'shipBy' && prev === 'desc' ? 'asc' : 'desc'));
+    setPage(1);
+  };
+
+  const handleShipByTodayIst = () => {
+    const todayIst = getTodayIstYmd();
+    // Toggle off if already filtering today IST
+    if (shipByDate === todayIst && shipByDateTz === 'IST') {
+      setShipByDate('');
+      setShipByDateTz('');
+    } else {
+      setShipByDate(todayIst);
+      setShipByDateTz('IST');
+    }
+    setPage(1);
+  };
+
+  const handleArrivingToday = () => {
+    const todayIst = getTodayIstYmd();
+    if (arrivalDateFrom === todayIst && arrivalDateTo === todayIst) {
+      setArrivalDateFrom('');
+      setArrivalDateTo('');
+    } else {
+      setArrivalDateFrom(todayIst);
+      setArrivalDateTo(todayIst);
+    }
     setPage(1);
   };
 
@@ -685,13 +723,14 @@ export default function AwaitingShipmentPage() {
     setSelectedSeller('');
     setSearchMarketplace('');
     setShipByDate('');
+    setShipByDateTz('');
     setDateSold('');
     setArrivalDateFrom('');
     setArrivalDateTo('');
     setExcludeClient(true);
     setSelectedAmazonAccount('');
     setSortBy('shipBy');
-    setSortDir('asc');
+    setSortDir('desc');
     setPage(1);
   };
 
@@ -712,6 +751,7 @@ export default function AwaitingShipmentPage() {
     if (selectedSeller) params.sellerId = selectedSeller;
     if (searchMarketplace) params.searchMarketplace = searchMarketplace;
     if (shipByDate) params.shipByDate = shipByDate;
+    if (shipByDate && shipByDateTz) params.shipByDateTz = shipByDateTz;
     if (dateSold) params.dateSold = dateSold;
     if (arrivalDateFrom) params.arrivalDateFrom = arrivalDateFrom;
     if (arrivalDateTo) params.arrivalDateTo = arrivalDateTo;
@@ -1399,6 +1439,10 @@ export default function AwaitingShipmentPage() {
 
   if (loading && orders.length === 0) return <AwaitingShipmentSkeleton />;
 
+  const todayIst = getTodayIstYmd();
+  const shipByTodayActive = shipByDateTz === 'IST' && shipByDate === todayIst;
+  const arrivingTodayActive = arrivalDateFrom === todayIst && arrivalDateTo === todayIst;
+
   return (
     <Fade in timeout={600}>
       <Box sx={{
@@ -1489,6 +1533,7 @@ export default function AwaitingShipmentPage() {
                 value={shipByDate}
                 onChange={(e) => {
                   setShipByDate(e.target.value);
+                  setShipByDateTz(''); // manual pick keeps existing Pacific-day filter
                   setPage(1);
                 }}
                 InputLabelProps={{ shrink: true }}
@@ -1579,6 +1624,30 @@ export default function AwaitingShipmentPage() {
                 sx={{ ...yellowOutlinedButtonSx, height: 40 }}
               >
                 {sortBy === 'shipBy' && sortDir === 'desc' ? 'Ship By: Newest First' : 'Ship By: Oldest First'}
+              </Button>
+
+              <Button
+                size="small"
+                variant={shipByTodayActive ? 'contained' : 'outlined'}
+                onClick={handleShipByTodayIst}
+                sx={{
+                  ...(shipByTodayActive ? yellowFilledButtonSx : yellowOutlinedButtonSx),
+                  height: 40,
+                }}
+              >
+                Ship By Today
+              </Button>
+
+              <Button
+                size="small"
+                variant={arrivingTodayActive ? 'contained' : 'outlined'}
+                onClick={handleArrivingToday}
+                sx={{
+                  ...(arrivingTodayActive ? yellowFilledButtonSx : yellowOutlinedButtonSx),
+                  height: 40,
+                }}
+              >
+                Arriving Today
               </Button>
 
               <Button variant="outlined" onClick={handleClearFilters} size="small" sx={{ ...yellowOutlinedButtonSx, height: 40 }}>Clear</Button>

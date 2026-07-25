@@ -50,7 +50,7 @@ import { dashboardSignatureTokens } from '../../theme/appTheme.js';
 import { tableHeaderCellSx, tableBodyRowSx, tableContainerSx, yellowOutlinedButtonSx, yellowFilledButtonSx } from '../../theme/tableStyles.js';
 import { BRAND_DARK, BRAND_YELLOW } from '../../constants/brandTheme.js';
 import { alpha } from '@mui/material/styles';
-
+import { sortSellersByName } from '../../lib/sellersSort';
 /** Toolbar section toggles — highlighted when open or filters from that section are active */
 const filterSectionToggleSx = (active) => ({
   fontSize: '0.75rem',
@@ -108,6 +108,8 @@ const EXCHANGE_RATE_DEFAULTS = {
  * Subtotal…Total_CC slides up under the section band when scrolling.
  */
 const stickyHeaderTableSx = {
+  borderCollapse: 'separate',
+  borderSpacing: 0,
   '& thead tr:nth-of-type(1) .MuiTableCell-stickyHeader': {
     top: 0,
     zIndex: 5,
@@ -119,6 +121,91 @@ const stickyHeaderTableSx = {
     zIndex: 4,
     backgroundColor: BRAND_DARK,
     backgroundImage: 'none',
+  },
+};
+
+/** Freeze Seller for horizontal scroll (header + body). */
+const stickySellerHeadSx = {
+  ...tableHeaderCellSx,
+  position: 'sticky',
+  left: 0,
+  top: 0,
+  zIndex: 10,
+  // Keep Seller above other sticky header cells while side-scrolling
+  '&.MuiTableCell-stickyHeader': {
+    zIndex: '10 !important',
+    left: 0,
+    backgroundColor: `${BRAND_DARK} !important`,
+    backgroundImage: 'none !important',
+  },
+  minWidth: 110,
+  width: 110,
+  maxWidth: 110,
+  borderRight: `2px solid ${BRAND_YELLOW}`,
+  boxShadow: '6px 0 10px rgba(0,0,0,0.22)',
+  backgroundColor: `${BRAND_DARK} !important`,
+  backgroundImage: 'none !important',
+};
+
+// Opaque fills so scrolled columns never show through the frozen Seller cell
+const SELLER_STICKY_BG = '#ffffff';
+const SELLER_STICKY_BG_STRIPE = '#e8f4fc';
+const SELLER_STICKY_BG_HOVER = '#d9f3ef';
+
+const allOrdersBodyRowSx = {
+  // Avoid spreading tableBodyRowSx — its translucent hover on all `td` bleeds under sticky Seller
+  '& td': {
+    borderBottomColor: dashboardSignatureTokens.table.rowBorder,
+  },
+  '&:nth-of-type(even) td:not(:first-of-type)': {
+    backgroundColor: dashboardSignatureTokens.table.rowStripe,
+  },
+  '&:hover td:not(:first-of-type)': {
+    backgroundColor: `${dashboardSignatureTokens.table.rowHover} !important`,
+  },
+  '& > td:first-of-type': {
+    position: 'sticky',
+    left: 0,
+    zIndex: 3,
+    minWidth: 110,
+    width: 110,
+    maxWidth: 110,
+    backgroundColor: `${SELLER_STICKY_BG} !important`,
+    backgroundImage: 'none',
+    borderRight: `2px solid ${alpha(BRAND_DARK, 0.2)}`,
+    boxShadow: '6px 0 10px rgba(0,0,0,0.14)',
+  },
+  '&:nth-of-type(even) > td:first-of-type': {
+    backgroundColor: `${SELLER_STICKY_BG_STRIPE} !important`,
+  },
+  '&:hover > td:first-of-type': {
+    backgroundColor: `${SELLER_STICKY_BG_HOVER} !important`,
+  },
+};
+
+/** Freeze TOTALS row at bottom of the scroll area. */
+const stickyTotalsRowSx = {
+  bgcolor: 'primary.main',
+  '& td': {
+    position: 'sticky',
+    bottom: 0,
+    zIndex: 3,
+    fontWeight: 'bold',
+    borderTop: '2px solid rgba(0,0,0,0.12)',
+    color: 'white',
+    backgroundColor: 'primary.main',
+    backgroundImage: 'none',
+    boxShadow: '0 -3px 6px rgba(0,0,0,0.18)',
+  },
+  '& td:first-of-type': {
+    left: 0,
+    zIndex: 5,
+    minWidth: 110,
+    width: 110,
+    maxWidth: 110,
+    backgroundColor: 'primary.main !important',
+    borderRight: `2px solid ${BRAND_YELLOW}`,
+    boxShadow: '6px 0 10px rgba(0,0,0,0.22), 0 -3px 6px rgba(0,0,0,0.18)',
   },
 };
 
@@ -234,7 +321,7 @@ export default function AllOrdersSheetPage() {
   const [searchProductName, setSearchProductName] = useState(() => getInitialState('searchProductName', ''));
   const [searchMarketplace, setSearchMarketplace] = useState(() => getInitialState('searchMarketplace', ''));
   const [filtersExpanded, setFiltersExpanded] = useState(() => getInitialState('filtersExpanded', false));
-  const [excludeLowValue, setExcludeLowValue] = useState(() => getInitialState('excludeLowValue', false));
+  const [excludeLowValue, setExcludeLowValue] = useState(() => getInitialState('excludeLowValue', true));
   const [excludeNoAmazonAccount, setExcludeNoAmazonAccount] = useState(() => getInitialState('excludeNoAmazonAccount', false));
 
   // Pagination state
@@ -377,7 +464,7 @@ export default function AllOrdersSheetPage() {
     setError('');
     try {
       const { data } = await api.get('/sellers/all');
-      setSellers(data || []);
+      setSellers(sortSellersByName(data || []));
     } catch (e) {
       setError('Failed to load sellers');
     }
@@ -938,7 +1025,6 @@ export default function AllOrdersSheetPage() {
     || searchBuyerName.trim()
     || searchItemNumber.trim()
     || searchProductName.trim()
-    || dateFilter.mode !== 'none'
     || profitFilter.mode !== 'none'
   );
   const profitFiltersInUse = profitFilter.mode !== 'none';
@@ -1073,6 +1159,55 @@ export default function AllOrdersSheetPage() {
             </Select>
           </FormControl>
 
+          <FormControl size="small" sx={{ minWidth: 130 }}>
+            <InputLabel id="date-mode-label">Date Mode</InputLabel>
+            <Select
+              labelId="date-mode-label"
+              value={dateFilter.mode}
+              label="Date Mode"
+              onChange={(e) => setDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+            >
+              <MenuItem value="none">None</MenuItem>
+              <MenuItem value="single">Single Day</MenuItem>
+              <MenuItem value="range">Date Range</MenuItem>
+            </Select>
+          </FormControl>
+
+          {dateFilter.mode === 'single' && (
+            <TextField
+              size="small"
+              label="Date"
+              type="date"
+              value={dateFilter.single}
+              onChange={(e) => setDateFilter(prev => ({ ...prev, single: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
+              sx={{ width: 150 }}
+            />
+          )}
+
+          {dateFilter.mode === 'range' && (
+            <>
+              <TextField
+                size="small"
+                label="From"
+                type="date"
+                value={dateFilter.from}
+                onChange={(e) => setDateFilter(prev => ({ ...prev, from: e.target.value }))}
+                InputLabelProps={{ shrink: true }}
+                sx={{ width: 150 }}
+              />
+              <TextField
+                size="small"
+                label="To"
+                type="date"
+                value={dateFilter.to}
+                onChange={(e) => setDateFilter(prev => ({ ...prev, to: e.target.value }))}
+                InputLabelProps={{ shrink: true }}
+                sx={{ width: 150 }}
+              />
+            </>
+          )}
+
           <FormControlLabel
             control={
               <Switch
@@ -1140,10 +1275,18 @@ export default function AllOrdersSheetPage() {
           </Button>
           <Button
             size="small"
+            variant="outlined"
+            onClick={handleClearFilters}
+            sx={{ ...yellowOutlinedButtonSx, ml: { sm: 'auto' }, minWidth: 80, height: 32 }}
+          >
+            CLEAR
+          </Button>
+          <Button
+            size="small"
             variant="contained"
             onClick={handleApplyFilters}
             disabled={loading}
-            sx={{ ...yellowFilledButtonSx, ml: { sm: 'auto' }, height: 32 }}
+            sx={{ ...yellowFilledButtonSx, height: 32 }}
           >
             Apply Filters
           </Button>
@@ -1188,58 +1331,6 @@ export default function AllOrdersSheetPage() {
                 placeholder="Search by product name..."
                 sx={{ flex: 1, minWidth: 140 }}
               />
-              
-              {/* Date Mode Selector */}
-              <FormControl size="small" sx={{ minWidth: 130 }}>
-                <InputLabel id="date-mode-label">Date Mode</InputLabel>
-                <Select
-                  labelId="date-mode-label"
-                  value={dateFilter.mode}
-                  label="Date Mode"
-                  onChange={(e) => setDateFilter(prev => ({ ...prev, mode: e.target.value }))}
-                >
-                  <MenuItem value="none">None</MenuItem>
-                  <MenuItem value="single">Single Day</MenuItem>
-                  <MenuItem value="range">Date Range</MenuItem>
-                </Select>
-              </FormControl>
-
-              {/* Single Date Input */}
-              {dateFilter.mode === 'single' && (
-                <TextField
-                  size="small"
-                  label="Date"
-                  type="date"
-                  value={dateFilter.single}
-                  onChange={(e) => setDateFilter(prev => ({ ...prev, single: e.target.value }))}
-                  InputLabelProps={{ shrink: true }}
-                  sx={{ width: 150 }}
-                />
-              )}
-
-              {/* Range Inputs */}
-              {dateFilter.mode === 'range' && (
-                <>
-                  <TextField
-                    size="small"
-                    label="From"
-                    type="date"
-                    value={dateFilter.from}
-                    onChange={(e) => setDateFilter(prev => ({ ...prev, from: e.target.value }))}
-                    InputLabelProps={{ shrink: true }}
-                    sx={{ width: 150 }}
-                  />
-                  <TextField
-                    size="small"
-                    label="To"
-                    type="date"
-                    value={dateFilter.to}
-                    onChange={(e) => setDateFilter(prev => ({ ...prev, to: e.target.value }))}
-                    InputLabelProps={{ shrink: true }}
-                    sx={{ width: 150 }}
-                  />
-                </>
-              )}
 
               {/* Profit Filter Mode Selector */}
               <FormControl size="small" sx={{ minWidth: 130 }}>
@@ -1293,25 +1384,6 @@ export default function AllOrdersSheetPage() {
                   />
                 </>
               )}
-
-              {/* Clear / Apply */}
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={handleClearFilters}
-                sx={{ ...yellowOutlinedButtonSx, minWidth: 80 }}
-              >
-                CLEAR
-              </Button>
-              <Button
-                size="small"
-                variant="contained"
-                onClick={handleApplyFilters}
-                disabled={loading}
-                sx={yellowFilledButtonSx}
-              >
-                Apply Filters
-              </Button>
           </Stack>
         </Collapse>
       </SectionCard>
@@ -1789,7 +1861,7 @@ export default function AllOrdersSheetPage() {
             <TableHead>
               {/* First row: Section headers */}
               <TableRow>
-                <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 100 }}>Seller</TableCell>
+                <TableCell rowSpan={2} sx={stickySellerHeadSx}>Seller</TableCell>
                 <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 110 }}>Date Sold</TableCell>
                 <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 350 }}>Product Name</TableCell>
                 <TableCell rowSpan={2} sx={{ ...tableHeaderCellSx, borderRight: `2px solid ${BRAND_DARK}`, minWidth: 120 }}>Marketplace</TableCell>
@@ -1922,7 +1994,7 @@ export default function AllOrdersSheetPage() {
             </TableHead>
             <TableBody>
               {orders.map((order) => (
-                <TableRow key={order._id} hover sx={tableBodyRowSx}>
+                <TableRow key={order._id} hover sx={allOrdersBodyRowSx}>
                   <TableCell>{order.seller?.user?.username || '-'}</TableCell>
                   <TableCell>
                     <Typography variant="body2" sx={{ whiteSpace: 'pre-line', lineHeight: 1.4, fontSize: '0.8rem' }}>
@@ -2378,7 +2450,7 @@ export default function AllOrdersSheetPage() {
                 });
                 
                 return (
-                  <TableRow sx={{ bgcolor: theme => theme.palette.primary.main, '& td': { fontWeight: 'bold', borderTop: '2px solid rgba(0,0,0,0.12)', color: 'white' } }}>
+                  <TableRow sx={stickyTotalsRowSx}>
                     <TableCell>TOTALS</TableCell>
                     <TableCell />
                     <TableCell sx={{ minWidth: 350 }} />
@@ -2404,7 +2476,7 @@ export default function AllOrdersSheetPage() {
                     <TableCell align="right">₹{totals.marketplaceFee.toFixed(2)}</TableCell>
                     <TableCell align="right">₹{totals.igst.toFixed(2)}</TableCell>
                     <TableCell align="right">₹{totals.totalCC.toFixed(2)}</TableCell>
-                    <TableCell align="right" sx={{ color: totals.profit < 0 ? 'error.main' : 'success.main' }}>
+                    <TableCell align="right" sx={{ color: totals.profit < 0 ? '#ffcdd2' : '#c8e6c9' }}>
                       ₹{totals.profit.toFixed(2)}
                     </TableCell>
                     <TableCell></TableCell>

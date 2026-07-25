@@ -3154,25 +3154,32 @@ router.get('/stored-orders', async (req, res) => {
       query.orderPaymentStatus = paymentStatus;
     }
 
-    // Ship By Date Filter (Pacific Time - handles DST)
+    // Ship By Date Filter — default Pacific Time (handles DST); shipByDateTz=IST uses India calendar day
     if (req.query.shipByDate) {
       const shipByDate = req.query.shipByDate;
 
-      const refDate = new Date(shipByDate + 'T12:00:00Z');
-      const month = refDate.getUTCMonth();
-      const day = refDate.getUTCDate();
-      const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
+      if (String(req.query.shipByDateTz || '').toUpperCase() === 'IST') {
+        // India Standard Time (UTC+05:30, no DST)
+        const startOfDay = new Date(`${shipByDate}T00:00:00+05:30`);
+        const endOfDay = new Date(`${shipByDate}T23:59:59.999+05:30`);
+        query.shipByDate = { $gte: startOfDay, $lte: endOfDay };
+      } else {
+        const refDate = new Date(shipByDate + 'T12:00:00Z');
+        const month = refDate.getUTCMonth();
+        const day = refDate.getUTCDate();
+        const usePDT = (month > 2 && month < 10) || (month === 2 && day >= 8) || (month === 10 && day < 2);
 
-      // Start of ship-by date in PT (midnight)
-      const startOfDay = new Date(shipByDate + 'T00:00:00Z');
-      startOfDay.setUTCHours(usePDT ? 7 : 8, 0, 0, 0);
+        // Start of ship-by date in PT (midnight)
+        const startOfDay = new Date(shipByDate + 'T00:00:00Z');
+        startOfDay.setUTCHours(usePDT ? 7 : 8, 0, 0, 0);
 
-      // End of ship-by date in PT (23:59:59.999)
-      const endOfDay = new Date(shipByDate + 'T00:00:00Z');
-      endOfDay.setUTCDate(endOfDay.getUTCDate() + 1);
-      endOfDay.setUTCHours(usePDT ? 6 : 7, 59, 59, 999);
+        // End of ship-by date in PT (23:59:59.999)
+        const endOfDay = new Date(shipByDate + 'T00:00:00Z');
+        endOfDay.setUTCDate(endOfDay.getUTCDate() + 1);
+        endOfDay.setUTCHours(usePDT ? 6 : 7, 59, 59, 999);
 
-      query.shipByDate = { $gte: startOfDay, $lte: endOfDay };
+        query.shipByDate = { $gte: startOfDay, $lte: endOfDay };
+      }
     }
 
     // Date Sold Specific Day Filter (req.query.dateSold) - Pacific Time
