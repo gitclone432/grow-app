@@ -78,7 +78,13 @@ export function applyEbayFinancialsSync(orderObj, ebayExchangeRate) {
   const earnings = parseFloat(orderObj.orderEarnings) || 0;
   const tid = 0.24;
   const orderTotal = getOrderTotalAmount(orderObj);
-  orderObj.tds = parseFloat((orderTotal * 0.01).toFixed(2));
+  // Prefer Finances TAX_DEDUCTION_AT_SOURCE when already stored on the order
+  if (orderObj.tdsSource === 'finances' && orderObj.tds != null && orderObj.tds !== undefined) {
+    orderObj.tds = parseFloat(Number(orderObj.tds).toFixed(2));
+  } else {
+    orderObj.tds = parseFloat((orderTotal * 0.01).toFixed(2));
+    orderObj.tdsSource = orderObj.tdsSource || 'calculated';
+  }
   orderObj.tid = tid;
   orderObj.net = parseFloat((earnings - orderObj.tds - tid).toFixed(2));
   orderObj.ebayExchangeRate = ebayExchangeRate;
@@ -142,7 +148,13 @@ export function enrichOrderFinancialsSync(orderObj, rateCache) {
     applyEbayFinancialsSync(orderObj, ebayRate);
   } else if (orderObj.orderEarnings != null && orderObj.orderEarnings !== undefined) {
     const total = getOrderTotalAmount(orderObj);
-    if (orderObj.tds == null) orderObj.tds = parseFloat((total * 0.01).toFixed(2));
+    if (orderObj.tdsSource === 'finances' && orderObj.tds != null) {
+      // keep Finances TDS
+      orderObj.tds = parseFloat(Number(orderObj.tds).toFixed(2));
+    } else if (orderObj.tds == null) {
+      orderObj.tds = parseFloat((total * 0.01).toFixed(2));
+      orderObj.tdsSource = 'calculated';
+    }
     if (orderObj.tid == null) orderObj.tid = 0.24;
     if (orderObj.net == null) {
       orderObj.net = parseFloat(

@@ -1348,6 +1348,7 @@ function FulfillmentDashboard() {
   const [recalcEarningsLoading, setRecalcEarningsLoading] = useState(false);
   const [recalcAmazonLoading, setRecalcAmazonLoading] = useState(false);
   const [backfillEverythingLoading, setBackfillEverythingLoading] = useState(false);
+  const [pollTdsLoading, setPollTdsLoading] = useState(false);
   const [fetchingAdFeeGeneral, setFetchingAdFeeGeneral] = useState({});
 
   // Auto-message state
@@ -1427,7 +1428,7 @@ function FulfillmentDashboard() {
     'seller', 'orderId', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'sku', 'supplierLink', 'itemCategory', 'buyerNote',
     'buyerName', 'shippingAddress', 'marketplace', 'subtotal',
     'shipping', 'salesTax', 'discount', 'transactionFees',
-    'adFeeGeneral', 'cancelStatus', 'refunds', 'orderEarnings', 'trackingNumber',
+    'adFeeGeneral', 'tds', 'cancelStatus', 'refunds', 'orderEarnings', 'trackingNumber',
     'amazonAccount', 'arriving', 'beforeTax', 'estimatedTax',
     'azOrderId', 'amazonRefund', 'cardName', 'resolution', 'notes', 'messagingStatus', 'remark', 'issueFlags',
     'convoCategory', 'convoCaseStatus'
@@ -1453,6 +1454,7 @@ function FulfillmentDashboard() {
     { id: 'discount', label: 'Discount' },
     { id: 'transactionFees', label: 'Transaction Fees' },
     { id: 'adFeeGeneral', label: 'Ad Fee General' },
+    { id: 'tds', label: 'TDS' },
     { id: 'cancelStatus', label: 'Cancel Status' },
     { id: 'refunds', label: 'Refunds' },
     { id: 'refundItemAmount', label: 'Refund Item' },
@@ -2619,13 +2621,17 @@ function FulfillmentDashboard() {
       )));
 
       const fee = data?.adFeeGeneral ?? data?.order?.adFeeGeneral;
+      const tds = data?.tds ?? data?.order?.tds;
+      const tdsSource = data?.tdsSource ?? data?.order?.tdsSource;
       const src = data?.lookupSource ? ` via ${data.lookupSource}` : '';
-      if (fee > 0) {
-        setSnackbarMsg(`Ad fee $${Number(fee).toFixed(2)} loaded for ${order.orderId}${src}`);
+      if (tdsSource === 'finances' && tds != null) {
+        setSnackbarMsg(`TDS $${Number(tds).toFixed(2)} (Finances) · Ad fee $${Number(fee || 0).toFixed(2)} for ${order.orderId}${src}`);
+      } else if (fee > 0) {
+        setSnackbarMsg(`Ad fee $${Number(fee).toFixed(2)} loaded for ${order.orderId}, but no TAX_DEDUCTION_AT_SOURCE found on eBay${src}`);
       } else if (data?.lookupSource === 'not_found') {
-        setSnackbarMsg(`No promoted-listing (AD_FEE) charge found on eBay for ${order.orderId}.`);
+        setSnackbarMsg(`No AD_FEE / TDS charge found on eBay for ${order.orderId}.`);
       } else {
-        setSnackbarMsg(`Ad fee is $0 for ${order.orderId} (checked on eBay${src}).`);
+        setSnackbarMsg(`Ad fee is $0 for ${order.orderId}; no Finances TDS found${src}.`);
       }
       setSnackbarSeverity('success');
       setSnackbarOpen(true);
@@ -2637,6 +2643,47 @@ function FulfillmentDashboard() {
       setFetchingAdFeeGeneral(prev => ({ ...prev, [order._id]: false }));
     }
   }, []);
+
+  const pollTds = async () => {
+    const pending = (orders || []).filter((o) => (
+      o.tdsSource !== 'finances'
+      && o.orderPaymentStatus !== 'FULLY_REFUNDED'
+      && o.orderPaymentStatus !== 'PARTIALLY_REFUNDED'
+    ));
+
+    if (!pending.length) {
+      setSnackbarMsg(orders?.length
+        ? 'All visible orders already have Finances TDS (or are refunded).'
+        : 'No orders loaded — wait for the table to load, then try again.');
+      setSnackbarSeverity('info');
+      setSnackbarOpen(true);
+      return;
+    }
+
+    setPollTdsLoading(true);
+    setSnackbarMsg(`Polling TDS for ${pending.length} visible order(s)…`);
+    setSnackbarSeverity('info');
+    setSnackbarOpen(true);
+
+    try {
+      const { data } = await api.post(
+        '/ebay/poll-tds',
+        { orderIds: pending.map((o) => o._id), skipAlreadySet: true },
+        { timeout: 600000 },
+      );
+      await loadStoredOrders();
+      setSnackbarMsg(data?.message || 'TDS poll complete');
+      setSnackbarSeverity((data?.results?.failed || 0) > 0 ? 'warning' : 'success');
+      setSnackbarOpen(true);
+    } catch (e) {
+      console.error('Poll TDS error:', e);
+      setSnackbarMsg(e?.response?.data?.error || e?.message || 'Failed to poll TDS');
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setPollTdsLoading(false);
+    }
+  };
 
   // Recalculate Earnings for all orders of selected seller
   const recalculateEarnings = async () => {
@@ -3215,6 +3262,7 @@ function FulfillmentDashboard() {
         discount: { header: 'Discount', accessor: 'discount' },
         transactionFees: { header: 'Transaction Fees', accessor: 'transactionFees' },
         adFeeGeneral: { header: 'Ad Fee General', accessor: 'adFeeGeneral' },
+        tds: { header: 'TDS', accessor: 'tds' },
         cancelStatus: { header: 'Cancel Status', accessor: 'cancelState' },
         refunds: {
           header: 'Refunds',
@@ -3549,6 +3597,22 @@ function FulfillmentDashboard() {
                   {loading ? 'Updating...' : isSmallMobile ? 'Poll Updates' : 'Poll Order Updates'}
                 </Button>
 
+                <Button
+                  variant="contained"
+                  startIcon={!isSmallMobile && (pollTdsLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />)}
+                  onClick={pollTds}
+                  disabled={pollTdsLoading}
+                  size="small"
+                  fullWidth
+                  sx={{
+                    ...yellowFilledButtonSx,
+                    fontSize: { xs: '0.7rem', sm: '0.8rem' },
+                    px: { xs: 0.5, sm: 1 }
+                  }}
+                >
+                  {pollTdsLoading ? 'Polling TDS...' : isSmallMobile ? 'Poll TDS' : 'Poll TDS'}
+                </Button>
+
                 {isSuperAdmin && (
                   <>
                     <Button
@@ -3829,6 +3893,17 @@ function FulfillmentDashboard() {
                     sx={{ ...yellowFilledButtonSx, minWidth: 'auto' }}
                   >
                     {loading ? 'Updating...' : 'Poll Order Updates'}
+                  </Button>
+
+                  <Button
+                    variant="contained"
+                    size="small"
+                    startIcon={pollTdsLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+                    onClick={pollTds}
+                    disabled={pollTdsLoading}
+                    sx={{ ...yellowFilledButtonSx, minWidth: 'auto' }}
+                  >
+                    {pollTdsLoading ? 'Polling TDS...' : 'Poll TDS'}
                   </Button>
 
                   {isSuperAdmin && (
@@ -4179,6 +4254,7 @@ function FulfillmentDashboard() {
                       {visibleColumnsSet.has('discount') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Discount</TableCell>}
                       {visibleColumnsSet.has('transactionFees') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Transaction Fees</TableCell>}
                       {visibleColumnsSet.has('adFeeGeneral') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Ad Fee General</TableCell>}
+                      {visibleColumnsSet.has('tds') && <TableCell sx={HEADER_CELL_RIGHT_SX}>TDS</TableCell>}
                       {visibleColumnsSet.has('cancelStatus') && <TableCell sx={HEADER_CELL_SX}>Cancel Status</TableCell>}
                       {visibleColumnsSet.has('refunds') && <TableCell sx={HEADER_CELL_SX}>Refunds</TableCell>}
                       {visibleColumnsSet.has('refundItemAmount') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Refund Item</TableCell>}
@@ -4576,6 +4652,36 @@ function FulfillmentDashboard() {
                                 >
                                   {order.adFeeGeneral ? formatOrderUsdAmount(order, order.adFeeGeneral) : '-'}
                                 </Typography>
+                              </TableCell>
+                            ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
+                          )}
+                          {visibleColumnsSet.has('tds') && (
+                            order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
+                              <TableCell align="right">
+                                {order.tdsSource === 'finances' && order.tds != null ? (
+                                  <Typography
+                                    variant="body2"
+                                    sx={{
+                                      fontWeight: order.tds ? 'medium' : 'normal',
+                                      color: order.tds ? 'error.main' : 'text.secondary'
+                                    }}
+                                  >
+                                    {formatOrderUsdAmount(order, order.tds)}
+                                  </Typography>
+                                ) : (
+                                  <Tooltip title="Load Tax Deduction at Source from eBay Finances (same API as Ad Fee)">
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      onClick={() => handleFetchAdFeeGeneral(order)}
+                                      disabled={Boolean(fetchingAdFeeGeneral[order._id])}
+                                      startIcon={fetchingAdFeeGeneral[order._id] ? <CircularProgress size={14} color="inherit" /> : <SyncIcon />}
+                                      sx={{ minWidth: 100, fontSize: '0.72rem', py: 0.4 }}
+                                    >
+                                      {fetchingAdFeeGeneral[order._id] ? 'Fetching...' : 'Fetch TDS'}
+                                    </Button>
+                                  </Tooltip>
+                                )}
                               </TableCell>
                             ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
                           )}

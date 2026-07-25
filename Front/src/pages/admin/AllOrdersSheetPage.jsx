@@ -35,6 +35,7 @@ import {
   Fade
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import SyncIcon from '@mui/icons-material/Sync';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
@@ -258,6 +259,8 @@ export default function AllOrdersSheetPage() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [pollTdsLoading, setPollTdsLoading] = useState(false);
+  const [infoMsg, setInfoMsg] = useState('');
   
   // Counts for categories, ranges, and products
   const [counts, setCounts] = useState({
@@ -779,6 +782,46 @@ export default function AllOrdersSheetPage() {
     }
   }
 
+  async function pollTds() {
+    const pending = (orders || []).filter((o) => (
+      o.tdsSource !== 'finances'
+      && o.orderPaymentStatus !== 'FULLY_REFUNDED'
+      && o.orderPaymentStatus !== 'PARTIALLY_REFUNDED'
+    ));
+
+    if (!pending.length) {
+      setInfoMsg(orders?.length
+        ? 'All visible orders already have Finances TDS (same as All Orders Fulfilment).'
+        : 'No orders loaded — apply filters / refresh first.');
+      return;
+    }
+
+    // Cap batch size — single-date mode can load thousands of rows
+    const batch = pending.slice(0, 100);
+    setPollTdsLoading(true);
+    setInfoMsg(
+      batch.length < pending.length
+        ? `Polling TDS for first ${batch.length} of ${pending.length} order(s)…`
+        : `Polling TDS from eBay Finances for ${batch.length} order(s)…`
+    );
+    setError('');
+    try {
+      const { data } = await api.post(
+        '/ebay/poll-tds',
+        { orderIds: batch.map((o) => o._id), skipAlreadySet: true },
+        { timeout: 600000 },
+      );
+      await loadOrders();
+      setInfoMsg(data?.message || 'TDS poll complete');
+    } catch (e) {
+      console.error('Poll TDS error:', e);
+      setInfoMsg('');
+      setError(e?.response?.data?.error || e?.message || 'Failed to poll TDS');
+    } finally {
+      setPollTdsLoading(false);
+    }
+  }
+
   const formatCurrency = (value) => {
     if (value == null || value === '') return '-';
     const num = parseFloat(value);
@@ -1120,11 +1163,26 @@ export default function AllOrdersSheetPage() {
               >
                 Refresh
               </Button>
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={pollTdsLoading ? <CircularProgress size={14} color="inherit" /> : <SyncIcon />}
+                onClick={pollTds}
+                disabled={pollTdsLoading}
+                sx={yellowFilledButtonSx}
+              >
+                {pollTdsLoading ? 'Polling TDS...' : 'Poll TDS'}
+              </Button>
             </Stack>
           }
         />
 
         {error && <Alert severity="error" sx={{ mb: 1 }}>{error}</Alert>}
+        {infoMsg && (
+          <Alert severity="info" sx={{ mb: 1 }} onClose={() => setInfoMsg('')}>
+            {infoMsg}
+          </Alert>
+        )}
 
         {/* Compact toolbar: Seller, Marketplace, toggles, filter triggers */}
         <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap', rowGap: 1 }}>
@@ -1926,7 +1984,7 @@ export default function AllOrdersSheetPage() {
                   </Tooltip>
                 </TableCell>
                 <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
-                  <Tooltip title="TDS = 1% of (pricingSummary.total.value + salesTax)" arrow placement="top">
+                  <Tooltip title="TDS from eBay Finances (TAX_DEDUCTION_AT_SOURCE), else 1% of order total" arrow placement="top">
                     <Box component="span">TDS</Box>
                   </Tooltip>
                 </TableCell>
@@ -2122,7 +2180,20 @@ export default function AllOrdersSheetPage() {
                     })()}
                   </TableCell>
                   <TableCell align="right">
-                    {formatCurrency(order.tds)}
+                    <Typography
+                      variant="body2"
+                      sx={{
+                        color: order.tdsSource === 'finances' && order.tds
+                          ? 'error.main'
+                          : 'text.primary',
+                        fontWeight: order.tdsSource === 'finances' && order.tds ? 600 : 400,
+                      }}
+                      title={order.tdsSource === 'finances'
+                        ? 'From eBay Finances (TAX_DEDUCTION_AT_SOURCE) — same as All Orders (Fulfilment)'
+                        : '1% estimate — click Poll TDS to load Finances value'}
+                    >
+                      {formatCurrency(order.tds)}
+                    </Typography>
                   </TableCell>
                   <TableCell align="right">
                     {formatCurrency(order.tid)}
@@ -2729,7 +2800,9 @@ export default function AllOrdersSheetPage() {
                                 </Typography>
                               </Stack>
                               <Stack direction="row" justifyContent="space-between">
-                                <Typography variant="caption">TDS (1% of pricingSummary.total.value + salesTax):</Typography>
+                                <Typography variant="caption">
+                                  TDS {order.tdsSource === 'finances' ? '(Finances)' : '(1% estimate)'}:
+                                </Typography>
                                 <Typography variant="caption" sx={{ color: 'error.main' }}>
                                   -${breakdown.tds.toFixed(2)}
                                 </Typography>

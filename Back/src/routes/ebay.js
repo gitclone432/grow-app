@@ -1748,18 +1748,52 @@ function resolveOrderFinancesMarketplaceIds(seller, purchaseMarketplaceId) {
   ])];
 }
 
-function sumAdFeeFromTransactions(transactions) {
-  let adFeeTotal = 0;
-  for (const txn of transactions) {
-    if (txn.feeType !== 'AD_FEE') continue;
-    const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
-    if (txn.bookingEntry === 'CREDIT') {
-      adFeeTotal -= feeAmount;
-    } else {
-      adFeeTotal += feeAmount;
+function parseFinancesAmountAsUsd(amount) {
+  if (!amount || typeof amount !== 'object') return 0;
+  const currency = String(amount.currency || '').toUpperCase();
+  const value = parseFloat(amount.value);
+  const convertedToValue = parseFloat(amount.convertedToValue);
+  const convertedFromValue = parseFloat(amount.convertedFromValue);
+  const convertedToCurrency = String(amount.convertedToCurrency || '').toUpperCase();
+  const convertedFromCurrency = String(amount.convertedFromCurrency || '').toUpperCase();
+
+  if (currency === 'USD' && Number.isFinite(value)) return Math.abs(value);
+  if (convertedToCurrency === 'USD' && Number.isFinite(convertedToValue)) return Math.abs(convertedToValue);
+  if (convertedFromCurrency === 'USD' && Number.isFinite(convertedFromValue)) return Math.abs(convertedFromValue);
+  // Foreign fee with a converted USD amount (currency field may be omitted on convertedTo*)
+  if (currency && currency !== 'USD' && Number.isFinite(convertedToValue)) return Math.abs(convertedToValue);
+  if (Number.isFinite(convertedToValue)) return Math.abs(convertedToValue);
+  if (Number.isFinite(value)) return Math.abs(value);
+  return 0;
+}
+
+function sumFeeTypeFromTransactions(transactions, feeType) {
+  const target = String(feeType || '').toUpperCase();
+  let total = 0;
+  for (const txn of transactions || []) {
+    if (String(txn.feeType || '').toUpperCase() === target) {
+      const feeAmount = parseFinancesAmountAsUsd(txn.amount);
+      if (txn.bookingEntry === 'CREDIT') total -= feeAmount;
+      else total += feeAmount;
+    }
+    for (const line of txn.orderLineItems || []) {
+      for (const fee of line.marketplaceFees || []) {
+        if (String(fee?.feeType || '').toUpperCase() !== target) continue;
+        const feeAmount = parseFinancesAmountAsUsd(fee?.amount);
+        if (fee?.bookingEntry === 'CREDIT') total -= feeAmount;
+        else total += feeAmount;
+      }
     }
   }
-  return Math.max(0, parseFloat(adFeeTotal.toFixed(2)));
+  return Math.max(0, parseFloat(total.toFixed(2)));
+}
+
+function sumAdFeeFromTransactions(transactions) {
+  return sumFeeTypeFromTransactions(transactions, 'AD_FEE');
+}
+
+function sumTdsFromTransactions(transactions) {
+  return sumFeeTypeFromTransactions(transactions, 'TAX_DEDUCTION_AT_SOURCE');
 }
 
 function financesApiHeaders(accessToken, marketplaceId) {
@@ -2067,13 +2101,15 @@ function nonSaleChargeFilterForOrder(creationDate) {
 async function fetchOrderAdFeeFromNonSaleCharges(accessToken, orderId, marketplaceIds, creationDate = null) {
   const ids = [...new Set((marketplaceIds || ['EBAY_US']).map(normalizeFinancesMarketplaceId))];
   const filterValue = nonSaleChargeFilterForOrder(creationDate);
-  let best = { adFeeGeneral: 0, marketplace: ids[0], source: 'non_sale_charge' };
+  let best = { adFeeGeneral: 0, tds: 0, marketplace: ids[0], source: 'non_sale_charge' };
 
   for (const mp of ids) {
     let offset = 0;
     const limit = 200;
-    let runningTotal = 0;
-    let foundAnyForOrder = false;
+    let runningAdFee = 0;
+    let runningTds = 0;
+    let foundAnyAdFeeForOrder = false;
+    let foundAnyTdsForOrder = false;
 
     while (offset < 10000) {
       const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
@@ -2087,16 +2123,19 @@ async function fetchOrderAdFeeFromNonSaleCharges(accessToken, orderId, marketpla
 
       const transactions = response.data?.transactions || [];
       for (const txn of transactions) {
-        if (txn.feeType !== 'AD_FEE' || !txn.references) continue;
+        const feeType = String(txn.feeType || '').toUpperCase();
+        if ((feeType !== 'AD_FEE' && feeType !== 'TAX_DEDUCTION_AT_SOURCE') || !txn.references) continue;
         const orderRef = txn.references.find((ref) => ref.referenceType === 'ORDER_ID');
         if (orderRef?.referenceId !== orderId) continue;
 
-        foundAnyForOrder = true;
-        const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
-        if (txn.bookingEntry === 'CREDIT') {
-          runningTotal -= feeAmount;
+        const feeAmount = parseFinancesAmountAsUsd(txn.amount);
+        const signed = txn.bookingEntry === 'CREDIT' ? -feeAmount : feeAmount;
+        if (feeType === 'AD_FEE') {
+          foundAnyAdFeeForOrder = true;
+          runningAdFee += signed;
         } else {
-          runningTotal += feeAmount;
+          foundAnyTdsForOrder = true;
+          runningTds += signed;
         }
       }
 
@@ -2104,17 +2143,19 @@ async function fetchOrderAdFeeFromNonSaleCharges(accessToken, orderId, marketpla
       offset += limit;
     }
 
-    const adFeeGeneral = Math.max(0, parseFloat(runningTotal.toFixed(2)));
-    if (adFeeGeneral > 0) {
+    const adFeeGeneral = Math.max(0, parseFloat(runningAdFee.toFixed(2)));
+    const tds = Math.max(0, parseFloat(runningTds.toFixed(2)));
+    if (adFeeGeneral > 0 || tds > 0) {
       return {
         success: true,
         adFeeGeneral,
+        tds,
         marketplace: mp,
         source: 'non_sale_charge',
       };
     }
-    if (foundAnyForOrder && adFeeGeneral === 0) {
-      best = { adFeeGeneral: 0, marketplace: mp, source: 'non_sale_charge' };
+    if (foundAnyAdFeeForOrder || foundAnyTdsForOrder) {
+      best = { adFeeGeneral: 0, tds: 0, marketplace: mp, source: 'non_sale_charge' };
     }
   }
 
@@ -2125,7 +2166,7 @@ async function fetchOrderAdFeeFromNonSaleCharges(accessToken, orderId, marketpla
 async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplaceId = 'EBAY_US', marketplaceIds = null, options = {}) {
   if (adFeeMap) {
     const adFee = adFeeMap.get(orderId) || 0;
-    return { success: true, adFeeGeneral: adFee, source: 'map' };
+    return { success: true, adFeeGeneral: adFee, tds: null, source: 'map' };
   }
 
   const idsToTry = [...new Set(
@@ -2138,6 +2179,7 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
 
   let lastError = null;
   let bestResult = null;
+  let bestTds = 0;
 
   // Step 1: orderId filter (paginated). Do not stop at first marketplace with sale txns but no AD_FEE.
   for (const mp of idsToTry) {
@@ -2145,11 +2187,14 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
       const filter = `orderId:{${orderId}}`;
       const transactions = await fetchFinancesTransactionsAllPages(accessToken, mp, filter);
       const adFeeGeneral = sumAdFeeFromTransactions(transactions);
+      const tds = sumTdsFromTransactions(transactions);
+      if (tds > bestTds) bestTds = tds;
 
       if (adFeeGeneral > 0) {
         return {
           success: true,
           adFeeGeneral,
+          tds,
           marketplace: mp,
           source: 'orderId_filter',
           transactionCount: transactions.length,
@@ -2160,15 +2205,18 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
         bestResult = {
           success: true,
           adFeeGeneral: 0,
+          tds,
           marketplace: mp,
           source: 'orderId_filter',
           transactionCount: transactions.length,
         };
+      } else if (bestResult && tds > (bestResult.tds || 0)) {
+        bestResult = { ...bestResult, tds };
       }
     } catch (error) {
       lastError = error;
       if (error.response?.status === 403) {
-        return { success: false, error: 'missing_scope', adFeeGeneral: null };
+        return { success: false, error: 'missing_scope', adFeeGeneral: null, tds: null };
       }
       console.warn(`[Finances API] orderId filter for ${orderId} on ${mp}:`, error.message);
     }
@@ -2182,19 +2230,20 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
       idsToTry,
       options.creationDate
     );
+    const mergedTds = Math.max(fromNonSale.tds || 0, bestTds, bestResult?.tds || 0);
     if (fromNonSale.adFeeGeneral > 0) {
-      return fromNonSale;
+      return { ...fromNonSale, tds: mergedTds };
     }
     if (fromNonSale.source === 'non_sale_charge' && bestResult) {
-      return { ...bestResult, triedNonSaleCharge: true };
+      return { ...bestResult, tds: mergedTds, triedNonSaleCharge: true };
     }
     if (fromNonSale.adFeeGeneral === 0 && fromNonSale.source === 'non_sale_charge') {
-      return fromNonSale;
+      return { ...fromNonSale, tds: mergedTds };
     }
   } catch (error) {
     lastError = error;
     if (error.response?.status === 403) {
-      return { success: false, error: 'missing_scope', adFeeGeneral: null };
+      return { success: false, error: 'missing_scope', adFeeGeneral: null, tds: null };
     }
     console.warn(`[Finances API] NON_SALE_CHARGE scan for ${orderId}:`, error.message);
   }
@@ -2202,14 +2251,27 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
   if (lastError && !bestResult) {
     const detail = lastError.response?.data?.errors?.[0]?.message || lastError.message;
     console.error(`[Finances API] Error fetching ad fee for ${orderId}:`, detail);
-    return { success: false, error: detail, adFeeGeneral: null };
+    return { success: false, error: detail, adFeeGeneral: null, tds: null };
   }
 
   if (bestResult) {
-    return bestResult;
+    return { ...bestResult, tds: Math.max(bestResult.tds || 0, bestTds) };
   }
 
-  return { success: true, adFeeGeneral: 0, source: 'not_found', marketplace: idsToTry[0] };
+  return { success: true, adFeeGeneral: 0, tds: bestTds, source: 'not_found', marketplace: idsToTry[0] };
+}
+
+/** Apply Finances AD_FEE + TAX_DEDUCTION_AT_SOURCE onto an order doc/plain object. */
+function applyFinancesFeeResult(order, feeResult) {
+  if (!feeResult?.success) return;
+  if (feeResult.adFeeGeneral != null) {
+    order.adFeeGeneral = parseFloat(feeResult.adFeeGeneral) || 0;
+  }
+  // Only pin TDS from Finances when a real TAX_DEDUCTION_AT_SOURCE amount was found
+  if (feeResult.tds != null && Number(feeResult.tds) > 0) {
+    order.tds = parseFloat(feeResult.tds) || 0;
+    order.tdsSource = 'finances';
+  }
 }
 
 // ============================================
@@ -4061,7 +4123,7 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
   }
 });
 
-router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAccess(['Fulfillment', 'AllOrdersSheet']), async (req, res) => {
   try {
     const { orderId } = req.params;
 
@@ -4094,6 +4156,7 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
     }
 
     order.adFeeGeneral = parseFloat(adFeeResult.adFeeGeneral ?? 0);
+    applyFinancesFeeResult(order, adFeeResult);
 
     if (order.orderPaymentStatus === 'FULLY_REFUNDED') {
       order.orderEarnings = 0;
@@ -4115,6 +4178,8 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
     res.json({
       success: true,
       adFeeGeneral: order.adFeeGeneral,
+      tds: order.tds,
+      tdsSource: order.tdsSource,
       financesMarketplace: adFeeResult.marketplace,
       lookupSource: adFeeResult.source,
       order: order.toObject()
@@ -4470,6 +4535,187 @@ router.post('/backfill-ad-fees', requireAuth, requirePageAccess('AllOrdersSheet'
 
   } catch (err) {
     console.error('[Backfill Ad Fees] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Poll TDS (TAX_DEDUCTION_AT_SOURCE) from eBay Finances.
+ * Body: { orderIds?: string[], sellerId?, allSellers?, sinceDate?, skipAlreadySet?, limit? }
+ */
+router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrdersSheet']), async (req, res) => {
+  const {
+    orderIds,
+    sellerId,
+    allSellers,
+    sinceDate,
+    skipAlreadySet = true,
+    limit = 250,
+  } = req.body || {};
+
+  const hasOrderIds = Array.isArray(orderIds) && orderIds.length > 0;
+  if (!hasOrderIds && !sellerId && !allSellers) {
+    return res.status(400).json({ error: 'orderIds, sellerId, or allSellers:true is required' });
+  }
+
+  try {
+    const totals = {
+      total: 0,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+      sellerErrors: [],
+      errors: [],
+    };
+
+    const processOrder = async (order, seller, accessToken) => {
+      totals.total++;
+      try {
+        if (skipAlreadySet && order.tdsSource === 'finances' && order.tds != null) {
+          totals.skipped++;
+          return;
+        }
+
+        const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, order.purchaseMarketplaceId);
+        const feeResult = await fetchOrderAdFee(
+          accessToken,
+          order.orderId,
+          null,
+          financeMpIds[0],
+          financeMpIds,
+          { creationDate: order.creationDate }
+        );
+
+        if (!feeResult.success) {
+          totals.failed++;
+          if (totals.errors.length < 25) {
+            totals.errors.push({ orderId: order.orderId, error: feeResult.error || 'fetch failed' });
+          }
+          return;
+        }
+
+        if (!(feeResult.tds > 0)) {
+          totals.skipped++;
+          return;
+        }
+
+        applyFinancesFeeResult(order, feeResult);
+
+        if (order.orderPaymentStatus === 'PAID' && feeResult.adFeeGeneral != null) {
+          const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
+          const adFeeVal = parseFloat(order.adFeeGeneral || 0);
+          order.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
+        }
+
+        const financials = await calculateFinancials(order);
+        Object.assign(order, financials);
+        await order.save();
+        totals.updated++;
+      } catch (orderErr) {
+        totals.failed++;
+        if (totals.errors.length < 25) {
+          totals.errors.push({ orderId: order.orderId, error: orderErr.message });
+        }
+      }
+    };
+
+    // Fast path: poll specific order Mongo IDs (current table page)
+    if (hasOrderIds) {
+      const ids = orderIds.slice(0, Math.min(orderIds.length, 200));
+      const orders = await Order.find({ _id: { $in: ids } });
+      const sellerCache = new Map();
+
+      for (const order of orders) {
+        const sid = String(order.seller);
+        let sellerEntry = sellerCache.get(sid);
+        if (!sellerEntry) {
+          const seller = await Seller.findById(order.seller);
+          if (!seller?.ebayTokens?.refresh_token) {
+            totals.failed++;
+            if (totals.errors.length < 25) {
+              totals.errors.push({ orderId: order.orderId, error: 'Seller missing eBay token' });
+            }
+            continue;
+          }
+          try {
+            const accessToken = await ensureValidToken(seller);
+            sellerEntry = { seller, accessToken };
+            sellerCache.set(sid, sellerEntry);
+          } catch (tokenErr) {
+            totals.failed++;
+            if (totals.errors.length < 25) {
+              totals.errors.push({ orderId: order.orderId, error: tokenErr.message });
+            }
+            continue;
+          }
+        }
+        await processOrder(order, sellerEntry.seller, sellerEntry.accessToken);
+      }
+
+      return res.json({
+        message: `TDS poll complete: ${totals.updated} updated from Finances, ${totals.skipped} with no TAX_DEDUCTION_AT_SOURCE, ${totals.failed} failed (${totals.total} checked)`,
+        results: totals,
+      });
+    }
+
+    let sellersToProcess;
+    if (allSellers) {
+      sellersToProcess = await Seller.find({
+        'ebayTokens.refresh_token': { $exists: true, $ne: null }
+      });
+    } else {
+      const seller = await Seller.findById(sellerId);
+      if (!seller) return res.status(404).json({ error: 'Seller not found' });
+      if (!seller.ebayTokens?.refresh_token) {
+        return res.status(400).json({ error: 'Seller not connected to eBay' });
+      }
+      sellersToProcess = [seller];
+    }
+
+    const effectiveSinceDate = sinceDate ? new Date(sinceDate) : new Date('2026-02-28');
+    const maxOrders = Math.min(Math.max(parseInt(limit, 10) || 250, 1), 1000);
+
+    for (const seller of sellersToProcess) {
+      try {
+        const accessToken = await ensureValidToken(seller);
+        const query = {
+          seller: seller._id,
+          creationDate: { $gte: effectiveSinceDate },
+          orderPaymentStatus: { $nin: ['FULLY_REFUNDED'] },
+        };
+        if (skipAlreadySet) {
+          query.$or = [
+            { tdsSource: { $ne: 'finances' } },
+            { tdsSource: { $exists: false } },
+            { tds: { $exists: false } },
+            { tds: null },
+          ];
+        }
+
+        const orders = await Order.find(query).sort({ creationDate: -1 }).limit(maxOrders);
+        console.log(`[Poll TDS] ${seller.user?.username || seller._id}: ${orders.length} orders to check`);
+
+        for (let i = 0; i < orders.length; i++) {
+          await processOrder(orders[i], seller, accessToken);
+          if ((i + 1) % 25 === 0) {
+            console.log(`[Poll TDS] ${seller.user?.username || seller._id}: ${i + 1}/${orders.length}`);
+          }
+        }
+      } catch (sellerErr) {
+        totals.sellerErrors.push({
+          seller: seller.user?.username || seller._id.toString(),
+          error: sellerErr.message,
+        });
+        console.error(`[Poll TDS] Seller error:`, sellerErr.message);
+      }
+    }
+
+    res.json({
+      message: `TDS poll complete: ${totals.updated} updated from Finances, ${totals.skipped} with no TAX_DEDUCTION_AT_SOURCE, ${totals.failed} failed (${totals.total} checked)`,
+      results: totals,
+    });
+  } catch (err) {
+    console.error('[Poll TDS] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -5577,8 +5823,8 @@ export async function scheduledPollNewOrders() {
                   { creationDate: newOrder.creationDate || ebayOrder.creationDate }
                 );
                 if (adFeeResult.success) {
-                  newOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
-                  newOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
+                  applyFinancesFeeResult(newOrder, adFeeResult);
+                  newOrder.adFeeGeneralUSD = parseFloat((newOrder.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
 
                   // Recalculate orderEarnings if this is a PAID order
                   if (newOrder.orderPaymentStatus === 'PAID') {
@@ -5591,15 +5837,16 @@ export async function scheduledPollNewOrders() {
                       newOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                     const financials = await calculateFinancials({ ...newOrder.toObject(), orderEarnings: newOrder.orderEarnings }, marketplace);
                     newOrder.tds = financials.tds;
+                    newOrder.tdsSource = financials.tdsSource;
                     newOrder.tid = financials.tid;
                     newOrder.net = financials.net;
                     newOrder.pBalanceINR = financials.pBalanceINR;
                     newOrder.ebayExchangeRate = financials.ebayExchangeRate;
                     newOrder.profit = financials.profit;
 
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Calculated earnings: $${newOrder.orderEarnings}`);
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} TDS: $${adFeeResult.tds ?? newOrder.tds} - Calculated earnings: $${newOrder.orderEarnings}`);
                   } else {
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} TDS: $${adFeeResult.tds ?? '-'} for ${ebayOrder.orderId}`);
                   }
 
                   await newOrder.save();
@@ -6060,6 +6307,7 @@ async function runPollOrderUpdatesJob() {
                     existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                   const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
                   existingOrder.tds = financials.tds;
+                  existingOrder.tdsSource = financials.tdsSource;
                   existingOrder.tid = financials.tid;
                   existingOrder.net = financials.net;
                   existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6076,6 +6324,7 @@ async function runPollOrderUpdatesJob() {
                     existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                   const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                   existingOrder.tds = financials.tds;
+                  existingOrder.tdsSource = financials.tdsSource;
                   existingOrder.tid = financials.tid;
                   existingOrder.net = financials.net;
                   existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6100,8 +6349,8 @@ async function runPollOrderUpdatesJob() {
                       { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
                     );
                     if (adFeeResult.success) {
-                      existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
-                      existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
+                      applyFinancesFeeResult(existingOrder, adFeeResult);
+                      existingOrder.adFeeGeneralUSD = parseFloat((existingOrder.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
 
                       // Recalculate orderEarnings based on payment status
                       if (existingOrder.orderPaymentStatus === 'PAID') {
@@ -6114,13 +6363,14 @@ async function runPollOrderUpdatesJob() {
                           existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                         const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                         existingOrder.tds = financials.tds;
+                        existingOrder.tdsSource = financials.tdsSource;
                         existingOrder.tid = financials.tid;
                         existingOrder.net = financials.net;
                         existingOrder.pBalanceINR = financials.pBalanceINR;
                         existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                         existingOrder.profit = financials.profit;
 
-                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
+                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} TDS: $${adFeeResult.tds ?? existingOrder.tds} - Recalculated earnings: $${existingOrder.orderEarnings}`);
                       } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
                         // For PARTIALLY_REFUNDED: earnings remain $0
                         existingOrder.orderEarnings = 0;
@@ -6130,6 +6380,7 @@ async function runPollOrderUpdatesJob() {
                           existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                         const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                         existingOrder.tds = financials.tds;
+                        existingOrder.tdsSource = financials.tdsSource;
                         existingOrder.tid = financials.tid;
                         existingOrder.net = financials.net;
                         existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6146,6 +6397,7 @@ async function runPollOrderUpdatesJob() {
                           existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                         const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
                         existingOrder.tds = financials.tds;
+                        existingOrder.tdsSource = financials.tdsSource;
                         existingOrder.tid = financials.tid;
                         existingOrder.net = financials.net;
                         existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6270,6 +6522,7 @@ async function runPollOrderUpdatesJob() {
                 existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
               const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
               existingOrder.tds = financials.tds;
+              existingOrder.tdsSource = financials.tdsSource;
               existingOrder.tid = financials.tid;
               existingOrder.net = financials.net;
               existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6472,6 +6725,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                   existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                 const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
                 existingOrder.tds = financials.tds;
+                existingOrder.tdsSource = financials.tdsSource;
                 existingOrder.tid = financials.tid;
                 existingOrder.net = financials.net;
                 existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6488,6 +6742,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                   existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                 const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                 existingOrder.tds = financials.tds;
+                existingOrder.tdsSource = financials.tdsSource;
                 existingOrder.tid = financials.tid;
                 existingOrder.net = financials.net;
                 existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6518,8 +6773,8 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                   { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
                 );
                 if (adFeeResult.success) {
-                  existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
-                  existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
+                  applyFinancesFeeResult(existingOrder, adFeeResult);
+                  existingOrder.adFeeGeneralUSD = parseFloat((existingOrder.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
 
                   // Recalculate orderEarnings based on payment status
                   if (existingOrder.orderPaymentStatus === 'PAID') {
@@ -6532,13 +6787,14 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                       existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                     const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                     existingOrder.tds = financials.tds;
+                    existingOrder.tdsSource = financials.tdsSource;
                     existingOrder.tid = financials.tid;
                     existingOrder.net = financials.net;
                     existingOrder.pBalanceINR = financials.pBalanceINR;
                     existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                     existingOrder.profit = financials.profit;
 
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - Recalculated earnings: $${existingOrder.orderEarnings}`);
+                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} TDS: $${adFeeResult.tds ?? existingOrder.tds} - Recalculated earnings: $${existingOrder.orderEarnings}`);
                   } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
                     // For PARTIALLY_REFUNDED: earnings remain $0
                     existingOrder.orderEarnings = 0;
@@ -6548,6 +6804,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                       existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                     const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                     existingOrder.tds = financials.tds;
+                    existingOrder.tdsSource = financials.tdsSource;
                     existingOrder.tid = financials.tid;
                     existingOrder.net = financials.net;
                     existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6564,6 +6821,7 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
                       existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                     const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
                     existingOrder.tds = financials.tds;
+                    existingOrder.tdsSource = financials.tdsSource;
                     existingOrder.tid = financials.tid;
                     existingOrder.net = financials.net;
                     existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6799,6 +7057,7 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
                 existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
               const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
               existingOrder.tds = financials.tds;
+              existingOrder.tdsSource = financials.tdsSource;
               existingOrder.tid = financials.tid;
               existingOrder.net = financials.net;
               existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -6819,10 +7078,11 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
                 financeMpIds,
                 { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
               );
-              if (adFeeResult.success && adFeeResult.adFeeGeneral) {
-                existingOrder.adFeeGeneral = adFeeResult.adFeeGeneral;
-                existingOrder.adFeeGeneralUSD = parseFloat((adFeeResult.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
-                if (!changedFields.includes('adFeeGeneral')) changedFields.push('adFeeGeneral');
+              if (adFeeResult.success && (adFeeResult.adFeeGeneral || adFeeResult.tds)) {
+                applyFinancesFeeResult(existingOrder, adFeeResult);
+                existingOrder.adFeeGeneralUSD = parseFloat((existingOrder.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
+                if (adFeeResult.adFeeGeneral && !changedFields.includes('adFeeGeneral')) changedFields.push('adFeeGeneral');
+                if (adFeeResult.tds != null && !changedFields.includes('tds')) changedFields.push('tds');
 
                 if (existingOrder.orderPaymentStatus === 'PAID') {
                   const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
@@ -6833,6 +7093,7 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
                     existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
                   const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                   existingOrder.tds = financials.tds;
+                  existingOrder.tdsSource = financials.tdsSource;
                   existingOrder.tid = financials.tid;
                   existingOrder.net = financials.net;
                   existingOrder.pBalanceINR = financials.pBalanceINR;
@@ -9229,6 +9490,8 @@ router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'D
           if (fs.existsSync(filePath)) {
             const ebayUrl = await uploadImageToEbay(token, filePath);
             finalMediaUrls.push(ebayUrl);
+          } else {
+            console.warn(`[Send Message] Local upload file not found: ${filePath}`);
           }
         } catch (err) {
           console.error(`[Send Message] Failed to upload image: ${err.message}`);
@@ -9236,13 +9499,10 @@ router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'D
       }
     }
 
-    let messageText = body;
-    if (finalMediaUrls.length > 0) {
-      const imageLinks = finalMediaUrls.map((url, index) => `Image ${index + 1}: ${url}`).join('\n');
-      messageText += '\n\n---\nAttached Image(s):\n' + imageLinks;
-    }
-
-    const messageMedia = finalMediaUrls.map((url) => ({
+    // Commerce Message API attaches real images via messageMedia (requires mediaName).
+    // Do NOT paste URLs into messageText for Commerce — that is what shows as plain text.
+    const messageMedia = finalMediaUrls.map((url, index) => ({
+      mediaName: `image_${index + 1}.jpg`,
       mediaType: 'IMAGE',
       mediaUrl: url
     }));
@@ -9262,7 +9522,7 @@ router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'D
       const commerceResult = await sendCommerceMessage(token, {
         conversationId: commerceConversationId || undefined,
         otherPartyUsername: commerceConversationId ? undefined : finalBuyer,
-        messageText,
+        messageText: body || (messageMedia.length ? 'Please see the attached image(s).' : ''),
         referenceId: commerceConversationId ? undefined : finalItemId,
         messageMedia
       });
@@ -9286,15 +9546,19 @@ router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'D
         conversationId: resolvedConversationId || null,
         sender: 'SELLER',
         subject: subject || 'Reply',
-        body,
+        body: body || (messageMedia.length ? 'Please see the attached image(s).' : ''),
         mediaUrls: finalMediaUrls,
+        messageMedia,
         read: true,
         messageType: isTransaction ? 'ORDER' : 'INQUIRY',
         messageDate: new Date(),
         externalMessageId: commerceResult.messageId ? `commerce-${commerceResult.messageId}` : undefined
       });
 
-      console.log('[Send Message] ✅ Sent via Commerce Message API');
+      console.log('[Send Message] ✅ Sent via Commerce Message API', {
+        mediaCount: messageMedia.length,
+        conversationId: resolvedConversationId || null
+      });
       return res.json({ success: true, message: newMsg, via: 'commerce' });
     } catch (commerceErr) {
       console.warn(
@@ -9303,15 +9567,17 @@ router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'D
       );
     }
 
-    // --- Fallback: Trading API (legacy XML) ---
+    // --- Fallback: Trading API (legacy XML) — no real image attachment support ---
     if (!isTransaction && !parentMessageId) {
       return res.status(400).json({ error: 'Cannot reply to inquiry: Original message ID not found' });
     }
 
-    let finalBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let finalBody = String(body || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     if (finalMediaUrls.length > 0) {
+      // Trading AAQ/RTQ cannot attach images; URLs in body are the only fallback.
       const imageLinks = finalMediaUrls.map((url, index) => `Image ${index + 1}: ${url}`).join('\n');
       finalBody += '\n\n---\nAttached Image(s):\n' + imageLinks;
+      console.warn('[Send Message] Trading API fallback: embedding image URLs in body (no MessageMedia support)');
     }
 
     let xmlRequest;

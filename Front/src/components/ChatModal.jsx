@@ -113,13 +113,23 @@ export default function ChatModal({
   }, []);
 
   const getMessageMediaItems = useCallback((message) => {
-    const rawMedia = Array.isArray(message?.mediaUrls)
+    const rawMedia = Array.isArray(message?.mediaUrls) && message.mediaUrls.length
       ? message.mediaUrls.map((url) => ({ url, name: '' }))
       : (message?.messageMedia || []).map((m) => ({
           url: m?.mediaUrl,
           name: m?.mediaName || '',
           type: m?.mediaType
         }));
+
+    // Legacy sends pasted image URLs into the body — recover them for thumbnails
+    if (!rawMedia.length && typeof message?.body === 'string') {
+      const urlMatches = message.body.match(/https?:\/\/[^\s]+/g) || [];
+      for (const url of urlMatches) {
+        if (/i\.ebayimg\.com|ebayimg|\.(jpe?g|png|gif|webp)(\?|$)/i.test(url)) {
+          rawMedia.push({ url, name: '' });
+        }
+      }
+    }
 
     return rawMedia
       .filter((item) => item?.url)
@@ -135,6 +145,18 @@ export default function ChatModal({
 
         return { ...item, url, name, isImage };
       });
+  }, []);
+
+  const getDisplayMessageBody = useCallback((message, mediaItems = []) => {
+    let text = String(message?.body || '');
+    // Hide the legacy "Attached Image(s): URL" footer when we render thumbnails
+    if (mediaItems.length > 0) {
+      text = text
+        .replace(/\n*---\s*\nAttached Image\(s\):\s*([\s\S]*)$/i, '')
+        .replace(/(?:^|\n)Image\s+\d+:\s*https?:\/\/\S+/gi, '')
+        .trim();
+    }
+    return text;
   }, []);
 
   useEffect(() => {
@@ -733,6 +755,7 @@ export default function ChatModal({
                         ? msg.senderUsername
                         : (templateBuyerName || 'Buyer')));
                   const media = getMessageMediaItems(msg);
+                  const displayBody = getDisplayMessageBody(msg, media);
 
                   return (
                     <Box
@@ -754,9 +777,11 @@ export default function ChatModal({
                           <Typography variant="caption" sx={{ display: 'block', mb: 0.5, opacity: 0.8, fontWeight: 700, fontSize: '0.68rem' }}>
                             {senderLabel} · {isSeller ? 'seller' : 'buyer'}
                           </Typography>
-                          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: { xs: '0.82rem', sm: '0.875rem' }, lineHeight: 1.5 }}>
-                            {msg.body}
-                          </Typography>
+                          {displayBody ? (
+                            <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: { xs: '0.82rem', sm: '0.875rem' }, lineHeight: 1.5 }}>
+                              {displayBody}
+                            </Typography>
+                          ) : null}
                           {media.length > 0 && (
                             <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
                               {media.map((attachment, index) => {

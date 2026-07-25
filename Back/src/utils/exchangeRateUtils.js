@@ -232,7 +232,14 @@ export async function calculateOrderEbayFinancials(order, overrideRate = null) {
 
   const earnings = parseFloat(order.orderEarnings) || 0;
   const orderTotal = getOrderTotalAmount(order);
-  updates.tds = parseFloat((orderTotal * 0.01).toFixed(2));
+  // Prefer Finances API TAX_DEDUCTION_AT_SOURCE when already applied on the order
+  if (order.tdsSource === 'finances' && order.tds != null && order.tds !== undefined) {
+    updates.tds = parseFloat(Number(order.tds).toFixed(2));
+    updates.tdsSource = 'finances';
+  } else {
+    updates.tds = parseFloat((orderTotal * 0.01).toFixed(2));
+    updates.tdsSource = 'calculated';
+  }
   updates.net = parseFloat((earnings - updates.tds - updates.tid).toFixed(2));
 
   const ebayMarketplace = getExchangeRateMarketplace('EBAY', order.purchaseMarketplaceId);

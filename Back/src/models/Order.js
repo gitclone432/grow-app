@@ -110,7 +110,12 @@ const OrderSchema = new mongoose.Schema(
     },
     orderTotal: Number, // Stored order total for sheet editing; defaults to pricingSummary.total.value + salesTax
     // Financial calculations (All Orders Sheet)
-    tds: Number, // Tax Deducted at Source (1% of (pricingSummary.total.value + salesTax))
+    tds: Number, // Tax Deduction at Source — Finances API TAX_DEDUCTION_AT_SOURCE, else 1% estimate
+    tdsSource: {
+      type: String,
+      enum: ['calculated', 'finances'],
+      default: 'calculated'
+    },
     tid: { type: Number, default: 0.24 }, // Transaction ID (fixed at $0.24)
     net: Number, // orderEarnings - tds - tid
     pBalanceINR: Number, // net * exchangeRate (for selected marketplace)
