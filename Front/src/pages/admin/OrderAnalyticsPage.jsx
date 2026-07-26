@@ -21,7 +21,9 @@ import {
   Select,
   MenuItem,
   Switch,
-  Fade
+  Fade,
+  Tabs,
+  Tab,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
@@ -39,6 +41,11 @@ function getTodayPtDateString() {
     month: '2-digit',
     day: '2-digit',
   }).format(new Date());
+}
+
+function TabPanel({ children, value, index }) {
+  if (value !== index) return null;
+  return <Box sx={{ pt: 2 }}>{children}</Box>;
 }
 
 const tableHeaderCellSx = {
@@ -61,42 +68,33 @@ function SummaryCard({ label, value, tone = 'neutral' }) {
   const palette = dashboardSignatureTokens.tones[tone] || dashboardSignatureTokens.tones.neutral;
 
   return (
-    <Paper
-      variant="outlined"
+    <Box
       sx={{
-        px: 1.5,
-        py: 1.25,
-        borderRadius: `${dashboardSignatureTokens.radius.card}px`,
-        borderColor: palette.border,
-        background: dashboardSignatureTokens.surfaces.metricCard,
         display: 'flex',
         alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: 1,
-        minHeight: 56,
+        gap: 0.75,
+        px: 1.25,
+        py: 0.75,
+        borderRadius: 1.5,
+        border: '1px solid',
+        borderColor: palette.border,
+        backgroundColor: palette.background,
+        minHeight: 36,
       }}
     >
-      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, letterSpacing: 0.2 }}>
+      <Typography
+        variant="caption"
+        sx={{ fontWeight: 600, color: 'text.secondary', whiteSpace: 'nowrap', letterSpacing: 0.15 }}
+      >
         {label}
       </Typography>
-      <Box
-        sx={{
-          minWidth: 36,
-          px: 1,
-          py: 0.35,
-          borderRadius: `${dashboardSignatureTokens.radius.pill}px`,
-          backgroundColor: palette.background,
-          border: '1px solid',
-          borderColor: palette.border,
-          color: palette.color,
-          textAlign: 'center',
-        }}
+      <Typography
+        variant="body2"
+        sx={{ fontWeight: 700, color: palette.color, lineHeight: 1, ml: 'auto' }}
       >
-        <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2, fontSize: '1rem' }}>
-          {value}
-        </Typography>
-      </Box>
-    </Paper>
+        {value}
+      </Typography>
+    </Box>
   );
 }
 
@@ -105,11 +103,21 @@ function FilterToggle({ label, checked, onChange }) {
     <FormControlLabel
       control={<Switch size="small" checked={checked} onChange={onChange} color="primary" />}
       label={
-        <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.8125rem' }}>
+        <Typography variant="caption" sx={{ whiteSpace: 'nowrap', fontWeight: 600, color: 'text.secondary' }}>
           {label}
         </Typography>
       }
-      sx={{ m: 0, mr: 0.5 }}
+      sx={{
+        m: 0,
+        pl: 0.75,
+        pr: 1,
+        py: 0.25,
+        borderRadius: 1.5,
+        border: '1px solid',
+        borderColor: 'divider',
+        bgcolor: 'background.paper',
+        '& .MuiFormControlLabel-label': { ml: 0.25 },
+      }}
     />
   );
 }
@@ -173,6 +181,7 @@ export default function OrderAnalyticsPage() {
   const [appliedMarketplace, setAppliedMarketplace] = useState('');
   const [excludeClient, setExcludeClient] = useState(true);
   const [excludeLowValue, setExcludeLowValue] = useState(true);
+  const [tab, setTab] = useState(1); // Date-wise by default
 
   // Summary statistics - only count
   const [totalOrders, setTotalOrders] = useState(0);
@@ -246,6 +255,22 @@ export default function OrderAnalyticsPage() {
   const handleApplyFilters = () => {
     setAppliedDateFilter(draftDateFilter);
     setAppliedMarketplace(draftMarketplace);
+  };
+
+  const handleClearFilters = () => {
+    const cleared = {
+      mode: 'single',
+      single: getTodayPtDateString(),
+      from: '',
+      to: '',
+    };
+    setDraftDateFilter(cleared);
+    setAppliedDateFilter(cleared);
+    setSelectedSeller('');
+    setDraftMarketplace('');
+    setAppliedMarketplace('');
+    setExcludeClient(true);
+    setExcludeLowValue(true);
   };
 
   // Poll for NEW orders (like FulfillmentDashboard)
@@ -341,7 +366,81 @@ export default function OrderAnalyticsPage() {
     return { sellers: Array.from(sellersMap.entries()), tableData, dates };
   };
 
-  const { sellers: sellersList, tableData, dates } = transformToTableFormat();
+  const { sellers: sellersList, tableData } = transformToTableFormat();
+
+  // Date-wise pivot: sellers as rows, dates as column groups (Total / US / AU / CA / UK)
+  const dateWiseTable = useMemo(() => {
+    const emptyMp = () => ({
+      total: 0,
+      EBAY_US: 0,
+      EBAY_AU: 0,
+      EBAY_CA: 0,
+      EBAY_GB: 0,
+    });
+
+    const parseMarketplaces = (stat) => {
+      const marketplaces = emptyMp();
+      if (!stat) return marketplaces;
+      marketplaces.total = stat.totalOrders || 0;
+      (stat.marketplaceBreakdown || []).forEach((mp) => {
+        if (mp.marketplace === 'EBAY_US') marketplaces.EBAY_US = mp.count;
+        else if (mp.marketplace === 'EBAY_AU') marketplaces.EBAY_AU = mp.count;
+        else if (mp.marketplace === 'EBAY_CA' || mp.marketplace === 'EBAY_ENCA') marketplaces.EBAY_CA = mp.count;
+        else if (mp.marketplace === 'EBAY_GB' || mp.marketplace === 'GB') marketplaces.EBAY_GB = mp.count;
+      });
+      return marketplaces;
+    };
+
+    const dateCols = [...new Set(statistics.map((stat) => stat.date))].sort();
+    const sellersMap = new Map();
+    statistics.forEach((stat) => {
+      if (!sellersMap.has(stat.seller.id)) {
+        sellersMap.set(stat.seller.id, stat.seller.username);
+      }
+    });
+
+    const rows = Array.from(sellersMap.entries())
+      .map(([sellerId, sellerUsername]) => {
+        const byDate = {};
+        const totals = emptyMp();
+        dateCols.forEach((date) => {
+          const hit = statistics.find((s) => s.seller.id === sellerId && s.date === date);
+          const mp = parseMarketplaces(hit);
+          byDate[date] = mp;
+          totals.total += mp.total;
+          totals.EBAY_US += mp.EBAY_US;
+          totals.EBAY_AU += mp.EBAY_AU;
+          totals.EBAY_CA += mp.EBAY_CA;
+          totals.EBAY_GB += mp.EBAY_GB;
+        });
+        return { sellerId, sellerUsername, byDate, totals };
+      })
+      .sort((a, b) => a.sellerUsername.localeCompare(b.sellerUsername, undefined, { sensitivity: 'base' }));
+
+    const dateTotals = {};
+    dateCols.forEach((date) => {
+      dateTotals[date] = rows.reduce((acc, row) => {
+        const mp = row.byDate[date] || emptyMp();
+        return {
+          total: acc.total + mp.total,
+          EBAY_US: acc.EBAY_US + mp.EBAY_US,
+          EBAY_AU: acc.EBAY_AU + mp.EBAY_AU,
+          EBAY_CA: acc.EBAY_CA + mp.EBAY_CA,
+          EBAY_GB: acc.EBAY_GB + mp.EBAY_GB,
+        };
+      }, emptyMp());
+    });
+
+    const grandTotal = rows.reduce((acc, row) => ({
+      total: acc.total + row.totals.total,
+      EBAY_US: acc.EBAY_US + row.totals.EBAY_US,
+      EBAY_AU: acc.EBAY_AU + row.totals.EBAY_AU,
+      EBAY_CA: acc.EBAY_CA + row.totals.EBAY_CA,
+      EBAY_GB: acc.EBAY_GB + row.totals.EBAY_GB,
+    }), emptyMp());
+
+    return { dateCols, rows, dateTotals, grandTotal };
+  }, [statistics]);
 
   /** `dateString` is YYYY-MM-DD in Pacific (from API); avoid UTC parse so weekday matches PT. */
   const formatDate = (dateString) => {
@@ -367,15 +466,12 @@ export default function OrderAnalyticsPage() {
     }, 0);
   };
 
-  // Calculate date totals across all sellers
-  const calculateDateTotals = (date) => {
-    const dateRow = tableData.find(row => row.date === date);
-    if (!dateRow) return 0;
-
-    return Object.values(dateRow.sellers).reduce((sum, seller) => {
-      return sum + (seller.total || 0);
-    }, 0);
+  const handleTabChange = (_event, nextTab) => {
+    setTab(nextTab);
   };
+
+  // TOTAL column group is redundant when only one date is in the filter/result.
+  const showDateWiseTotalCols = dateWiseTable.dateCols.length > 1;
 
   const topHeaderOffset = 0;
   const firstHeaderHeight = 44;
@@ -383,6 +479,16 @@ export default function OrderAnalyticsPage() {
   const isDateFilterDirty = JSON.stringify(draftDateFilter) !== JSON.stringify(appliedDateFilter);
   const isMarketplaceDirty = draftMarketplace !== appliedMarketplace;
   const hasPendingFilterChanges = isDateFilterDirty || isMarketplaceDirty;
+  const isFiltersAtDefault =
+    appliedDateFilter.mode === 'single' &&
+    appliedDateFilter.single === getTodayPtDateString() &&
+    draftDateFilter.mode === 'single' &&
+    draftDateFilter.single === appliedDateFilter.single &&
+    !selectedSeller &&
+    !draftMarketplace &&
+    !appliedMarketplace &&
+    excludeClient &&
+    excludeLowValue;
 
   const summaryCards = useMemo(() => {
     const marketplaceTotals = statistics.reduce((accumulator, stat) => {
@@ -423,8 +529,8 @@ export default function OrderAnalyticsPage() {
       <Box sx={{ p: 3 }}>
         <Paper
           sx={{
-            p: { xs: 2, md: 2.5 },
-            mb: 3,
+            p: { xs: 1.75, md: 2 },
+            mb: 2.5,
             borderRadius: `${dashboardSignatureTokens.radius.card}px`,
             border: '1px solid',
             borderColor: 'divider',
@@ -433,14 +539,14 @@ export default function OrderAnalyticsPage() {
           }}
         >
           <Stack
-            direction={{ xs: 'column', md: 'row' }}
+            direction={{ xs: 'column', sm: 'row' }}
             justifyContent="space-between"
-            alignItems={{ xs: 'stretch', md: 'center' }}
-            gap={1.5}
-            sx={{ mb: 2 }}
+            alignItems={{ xs: 'stretch', sm: 'center' }}
+            gap={1.25}
+            sx={{ mb: 1.5 }}
           >
             <Box>
-              <Typography variant="h5" sx={{ fontWeight: 700 }}>
+              <Typography variant="h5" sx={{ fontWeight: 700, lineHeight: 1.25 }}>
                 Order Analytics
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
@@ -454,7 +560,7 @@ export default function OrderAnalyticsPage() {
                 icon={<ShoppingCartIcon sx={{ fontSize: 16 }} />}
                 label={`${totalOrders} orders`}
                 sx={{
-                  height: 32,
+                  height: 30,
                   border: '1px solid',
                   borderColor: dashboardSignatureTokens.tones.info.border,
                   backgroundColor: dashboardSignatureTokens.tones.info.background,
@@ -475,145 +581,164 @@ export default function OrderAnalyticsPage() {
             </Stack>
           </Stack>
 
-          <Stack
-            direction="row"
-            spacing={1.25}
-            alignItems="center"
-            flexWrap="wrap"
-            useFlexGap
+          <Box
             sx={{
-              p: 1.5,
+              p: 1.25,
               borderRadius: 2,
               bgcolor: 'action.hover',
               border: '1px solid',
               borderColor: 'divider',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 1.25,
             }}
           >
-            <FormControl size="small" sx={{ minWidth: 130 }}>
-              <InputLabel id="date-mode-label">Date Mode</InputLabel>
-              <Select
-                labelId="date-mode-label"
-                value={draftDateFilter.mode}
-                label="Date Mode"
-                onChange={(e) => setDraftDateFilter(prev => ({ ...prev, mode: e.target.value }))}
-              >
-                <MenuItem value="none">None</MenuItem>
-                <MenuItem value="single">Single Day</MenuItem>
-                <MenuItem value="range">Date Range</MenuItem>
-              </Select>
-            </FormControl>
+            <Stack
+              direction="row"
+              spacing={1.25}
+              alignItems="center"
+              flexWrap="wrap"
+              useFlexGap
+            >
+              <FormControl size="small" sx={{ minWidth: 138 }}>
+                <InputLabel id="date-mode-label">Date Mode</InputLabel>
+                <Select
+                  labelId="date-mode-label"
+                  value={draftDateFilter.mode}
+                  label="Date Mode"
+                  onChange={(e) => setDraftDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+                >
+                  <MenuItem value="none">None</MenuItem>
+                  <MenuItem value="single">Single Day</MenuItem>
+                  <MenuItem value="range">Date Range</MenuItem>
+                </Select>
+              </FormControl>
 
-            {draftDateFilter.mode === 'single' && (
-              <TextField
-                label="Date"
-                type="date"
-                value={draftDateFilter.single}
-                onChange={(e) => setDraftDateFilter(prev => ({ ...prev, single: e.target.value }))}
-                InputLabelProps={{ shrink: true }}
-                size="small"
-                sx={{ width: 160 }}
-              />
-            )}
-
-            {draftDateFilter.mode === 'range' && (
-              <>
+              {draftDateFilter.mode === 'single' && (
                 <TextField
-                  label="From"
+                  label="Date"
                   type="date"
-                  value={draftDateFilter.from}
-                  onChange={(e) => setDraftDateFilter(prev => ({ ...prev, from: e.target.value }))}
+                  value={draftDateFilter.single}
+                  onChange={(e) => setDraftDateFilter(prev => ({ ...prev, single: e.target.value }))}
                   InputLabelProps={{ shrink: true }}
                   size="small"
-                  sx={{ width: 150 }}
+                  sx={{ width: 155 }}
                 />
-                <TextField
-                  label="To"
-                  type="date"
-                  value={draftDateFilter.to}
-                  onChange={(e) => setDraftDateFilter(prev => ({ ...prev, to: e.target.value }))}
-                  InputLabelProps={{ shrink: true }}
+              )}
+
+              {draftDateFilter.mode === 'range' && (
+                <>
+                  <TextField
+                    label="From"
+                    type="date"
+                    value={draftDateFilter.from}
+                    onChange={(e) => setDraftDateFilter(prev => ({ ...prev, from: e.target.value }))}
+                    InputLabelProps={{ shrink: true }}
+                    size="small"
+                    sx={{ width: 150 }}
+                  />
+                  <TextField
+                    label="To"
+                    type="date"
+                    value={draftDateFilter.to}
+                    onChange={(e) => setDraftDateFilter(prev => ({ ...prev, to: e.target.value }))}
+                    InputLabelProps={{ shrink: true }}
+                    size="small"
+                    sx={{ width: 150 }}
+                  />
+                </>
+              )}
+
+              <FormControl size="small" sx={{ minWidth: 168, flex: { sm: '1 1 160px', md: '0 1 200px' }, maxWidth: 240 }}>
+                <InputLabel id="seller-filter-label">Seller</InputLabel>
+                <Select
+                  labelId="seller-filter-label"
+                  value={selectedSeller}
+                  onChange={(e) => setSelectedSeller(e.target.value)}
+                  label="Seller"
+                >
+                  <MenuItem value="">All Sellers</MenuItem>
+                  {sellers.map((seller) => (
+                    <MenuItem key={seller._id} value={seller._id}>
+                      {sellerDisplayName(seller) || 'Unknown'}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              <FormControl size="small" sx={{ minWidth: 148 }}>
+                <InputLabel id="marketplace-filter-label">Marketplace</InputLabel>
+                <Select
+                  labelId="marketplace-filter-label"
+                  value={draftMarketplace}
+                  onChange={(e) => setDraftMarketplace(e.target.value)}
+                  label="Marketplace"
+                >
+                  <MenuItem value="">All</MenuItem>
+                  <MenuItem value="EBAY_US">USA</MenuItem>
+                  <MenuItem value="EBAY_CA">CA</MenuItem>
+                  <MenuItem value="EBAY_AU">AUS</MenuItem>
+                  <MenuItem value="EBAY_GB">UK</MenuItem>
+                </Select>
+              </FormControl>
+
+              <Stack direction="row" spacing={1} sx={{ ml: { md: 'auto' } }}>
+                <Button
+                  variant="contained"
+                  color="secondary"
                   size="small"
-                  sx={{ width: 150 }}
-                />
-              </>
-            )}
-
-            <FormControl size="small" sx={{ minWidth: 160 }}>
-              <InputLabel>Seller</InputLabel>
-              <Select
-                value={selectedSeller}
-                onChange={(e) => setSelectedSeller(e.target.value)}
-                label="Seller"
-              >
-                <MenuItem value="">All Sellers</MenuItem>
-                {sellers.map((seller) => (
-                  <MenuItem key={seller._id} value={seller._id}>
-                    {sellerDisplayName(seller) || 'Unknown'}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            <FormControl size="small" sx={{ minWidth: 120 }}>
-              <InputLabel>Marketplace</InputLabel>
-              <Select
-                value={draftMarketplace}
-                onChange={(e) => setDraftMarketplace(e.target.value)}
-                label="Marketplace"
-              >
-                <MenuItem value="">All</MenuItem>
-                <MenuItem value="EBAY_US">USA</MenuItem>
-                <MenuItem value="EBAY_CA">CA</MenuItem>
-                <MenuItem value="EBAY_AU">AUS</MenuItem>
-                <MenuItem value="EBAY_GB">UK</MenuItem>
-              </Select>
-            </FormControl>
-
-            <FilterToggle
-              label="Exclude Client"
-              checked={excludeClient}
-              onChange={(e) => setExcludeClient(e.target.checked)}
-            />
-            <FilterToggle
-              label="Exclude &lt; $3"
-              checked={excludeLowValue}
-              onChange={(e) => setExcludeLowValue(e.target.checked)}
-            />
-
-            <Stack direction="row" spacing={1} sx={{ ml: { md: 'auto' } }}>
-              <Button
-                variant="contained"
-                color="secondary"
-                size="small"
-                onClick={handleApplyFilters}
-                disabled={loading || !hasPendingFilterChanges}
-              >
-                Apply
-              </Button>
-              <Button
-                variant="outlined"
-                color="primary"
-                size="small"
-                startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <RefreshIcon />}
-                onClick={handleRefresh}
-                disabled={loading}
-              >
-                Refresh
-              </Button>
+                  onClick={handleApplyFilters}
+                  disabled={loading || !hasPendingFilterChanges}
+                >
+                  Apply
+                </Button>
+                <Button
+                  variant="outlined"
+                  color="inherit"
+                  size="small"
+                  onClick={handleClearFilters}
+                  disabled={loading || isFiltersAtDefault}
+                >
+                  Clear
+                </Button>
+                <Button
+                  variant="outlined"
+                  color="primary"
+                  size="small"
+                  startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <RefreshIcon />}
+                  onClick={handleRefresh}
+                  disabled={loading}
+                >
+                  Refresh
+                </Button>
+              </Stack>
             </Stack>
-          </Stack>
+
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+              <FilterToggle
+                label="Exclude Client"
+                checked={excludeClient}
+                onChange={(e) => setExcludeClient(e.target.checked)}
+              />
+              <FilterToggle
+                label="Exclude < $3"
+                checked={excludeLowValue}
+                onChange={(e) => setExcludeLowValue(e.target.checked)}
+              />
+            </Stack>
+          </Box>
 
           {summaryCards.length > 0 && (
             <Box
               sx={{
-                mt: 2,
+                mt: 1.5,
                 display: 'grid',
                 gridTemplateColumns: {
-                  xs: 'repeat(2, 1fr)',
-                  sm: 'repeat(3, 1fr)',
-                  md: 'repeat(6, 1fr)',
+                  xs: 'repeat(2, minmax(0, 1fr))',
+                  sm: 'repeat(3, minmax(0, 1fr))',
+                  md: 'repeat(6, minmax(0, 1fr))',
                 },
-                gap: 1,
+                gap: 0.75,
               }}
             >
               {summaryCards.map((card) => (
@@ -630,24 +755,46 @@ export default function OrderAnalyticsPage() {
           </Alert>
         )}
 
-        {/* Loading State */}
-        {loading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
-            <CircularProgress />
-          </Box>
-        ) : (
-          /* Statistics Table - Sellers as Columns, Dates as Rows */
-          <TableContainer
-            component={Paper}
+        <Paper
+          sx={{
+            borderRadius: `${dashboardSignatureTokens.radius.card}px`,
+            border: '1px solid',
+            borderColor: 'divider',
+            boxShadow: dashboardSignatureTokens.shadows.card,
+            overflow: 'hidden',
+          }}
+        >
+          <Tabs
+            value={tab}
+            onChange={handleTabChange}
             sx={{
-              borderRadius: `${dashboardSignatureTokens.radius.card}px`,
-              border: '1px solid',
+              px: 1,
+              borderBottom: 1,
               borderColor: 'divider',
-              boxShadow: dashboardSignatureTokens.shadows.table,
-              overflow: 'hidden'
+              minHeight: 44,
+              '& .MuiTab-root': { minHeight: 44, textTransform: 'none', fontWeight: 600 },
             }}
           >
-            <TableContainer sx={{ maxHeight: 'calc(100vh - 400px)' }}>
+            <Tab label="By seller" />
+            <Tab label="Date-wise" />
+          </Tabs>
+
+          <Box sx={{ p: { xs: 1.5, md: 2 } }}>
+            {loading ? (
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+                <CircularProgress />
+              </Box>
+            ) : (
+              <>
+                <TabPanel value={tab} index={0}>
+                  <TableContainer
+                    sx={{
+                      borderRadius: `${dashboardSignatureTokens.radius.card}px`,
+                      border: '1px solid',
+                      borderColor: 'divider',
+                      maxHeight: 'calc(100vh - 420px)',
+                    }}
+                  >
               <Table stickyHeader size="small">
                 <TableHead>
                   {/* First Header Row - Seller Names */}
@@ -898,9 +1045,276 @@ export default function OrderAnalyticsPage() {
                   )}
                 </TableBody>
               </Table>
-            </TableContainer>
-          </TableContainer>
-        )}
+                  </TableContainer>
+                </TabPanel>
+
+                <TabPanel value={tab} index={1}>
+                  <TableContainer
+                    sx={{
+                      borderRadius: `${dashboardSignatureTokens.radius.card}px`,
+                      border: '1px solid',
+                      borderColor: 'divider',
+                      overflowX: 'auto',
+                      overflowY: 'visible',
+                    }}
+                  >
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell
+                            sx={{
+                              ...tableHeaderCellSx,
+                              minWidth: 140,
+                              height: firstHeaderHeight,
+                              boxSizing: 'border-box',
+                              position: 'sticky',
+                              left: 0,
+                              zIndex: 3,
+                            }}
+                          >
+                            Seller
+                          </TableCell>
+                          {dateWiseTable.dateCols.map((date) => (
+                            <TableCell
+                              key={date}
+                              align="center"
+                              colSpan={5}
+                              sx={{
+                                ...tableHeaderCellSx,
+                                borderLeft: '8px solid white',
+                                height: firstHeaderHeight,
+                                boxSizing: 'border-box',
+                              }}
+                            >
+                              {formatDate(date)}
+                            </TableCell>
+                          ))}
+                          {showDateWiseTotalCols && (
+                            <TableCell
+                              align="center"
+                              colSpan={5}
+                              sx={{
+                                ...tableHeaderCellSx,
+                                borderLeft: '8px solid white',
+                                height: firstHeaderHeight,
+                                boxSizing: 'border-box',
+                              }}
+                            >
+                              TOTAL
+                            </TableCell>
+                          )}
+                        </TableRow>
+                        <TableRow>
+                          <TableCell
+                            sx={{
+                              ...tableHeaderCellSx,
+                              boxSizing: 'border-box',
+                              position: 'sticky',
+                              left: 0,
+                              zIndex: 3,
+                            }}
+                          />
+                          {[
+                            ...dateWiseTable.dateCols,
+                            ...(showDateWiseTotalCols ? ['__total__'] : []),
+                          ].map((dateKey) => (
+                            <React.Fragment key={`hdr-${dateKey}`}>
+                              {['Total', 'US', 'AU', 'CA', 'UK'].map((label, idx) => (
+                                <TableCell
+                                  key={`${dateKey}-${label}`}
+                                  align="center"
+                                  sx={{
+                                    ...tableHeaderCellSx,
+                                    fontSize: '0.75rem',
+                                    borderLeft: idx === 0 ? '8px solid white' : undefined,
+                                    boxSizing: 'border-box',
+                                  }}
+                                >
+                                  {label}
+                                </TableCell>
+                              ))}
+                            </React.Fragment>
+                          ))}
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {dateWiseTable.rows.length === 0 ? (
+                          <TableRow>
+                            <TableCell
+                              colSpan={1 + (dateWiseTable.dateCols.length + (showDateWiseTotalCols ? 1 : 0)) * 5}
+                              align="center"
+                            >
+                              <Typography variant="body2" color="text.secondary" sx={{ py: 3 }}>
+                                No orders found for the selected date range and filters.
+                              </Typography>
+                            </TableCell>
+                          </TableRow>
+                        ) : (
+                          <>
+                            {dateWiseTable.rows.map((row) => (
+                              <TableRow
+                                key={row.sellerId}
+                                hover
+                                sx={{
+                                  '&:nth-of-type(odd)': {
+                                    backgroundColor: dashboardSignatureTokens.table.rowStripe,
+                                  },
+                                  '&:hover': {
+                                    backgroundColor: dashboardSignatureTokens.table.rowHover,
+                                  },
+                                }}
+                              >
+                                <TableCell
+                                  sx={{
+                                    ...tableBodyCellSx,
+                                    fontWeight: 700,
+                                    position: 'sticky',
+                                    left: 0,
+                                    bgcolor: 'background.paper',
+                                    zIndex: 1,
+                                  }}
+                                >
+                                  {row.sellerUsername}
+                                </TableCell>
+                                {dateWiseTable.dateCols.map((date) => {
+                                  const mp = row.byDate[date] || {};
+                                  return (
+                                    <React.Fragment key={date}>
+                                      <TableCell
+                                        align="center"
+                                        sx={{
+                                          ...tableBodyCellSx,
+                                          borderLeft: '8px solid',
+                                          borderColor: dashboardSignatureTokens.table.rowBorder,
+                                        }}
+                                      >
+                                        <MetricPill value={mp.total || '-'} tone={getMarketplaceTone(mp.total, 'total')} minWidth={50} />
+                                      </TableCell>
+                                      <TableCell align="center" sx={tableBodyCellSx}>
+                                        <MetricPill value={mp.EBAY_US || '-'} tone={getMarketplaceTone(mp.EBAY_US, 'EBAY_US')} />
+                                      </TableCell>
+                                      <TableCell align="center" sx={tableBodyCellSx}>
+                                        <MetricPill value={mp.EBAY_AU || '-'} tone={getMarketplaceTone(mp.EBAY_AU, 'EBAY_AU')} />
+                                      </TableCell>
+                                      <TableCell align="center" sx={tableBodyCellSx}>
+                                        <MetricPill value={mp.EBAY_CA || '-'} tone={getMarketplaceTone(mp.EBAY_CA, 'EBAY_CA')} />
+                                      </TableCell>
+                                      <TableCell align="center" sx={tableBodyCellSx}>
+                                        <MetricPill value={mp.EBAY_GB || '-'} tone={getMarketplaceTone(mp.EBAY_GB, 'EBAY_GB')} />
+                                      </TableCell>
+                                    </React.Fragment>
+                                  );
+                                })}
+                                {showDateWiseTotalCols && (
+                                  <React.Fragment>
+                                    <TableCell
+                                      align="center"
+                                      sx={{
+                                        ...tableBodyCellSx,
+                                        borderLeft: '8px solid',
+                                        borderColor: dashboardSignatureTokens.table.rowBorder,
+                                        bgcolor: 'grey.50',
+                                      }}
+                                    >
+                                      <MetricPill value={row.totals.total || '-'} tone={getMarketplaceTone(row.totals.total, 'total')} minWidth={50} />
+                                    </TableCell>
+                                    <TableCell align="center" sx={{ ...tableBodyCellSx, bgcolor: 'grey.50' }}>
+                                      <MetricPill value={row.totals.EBAY_US || '-'} tone={getMarketplaceTone(row.totals.EBAY_US, 'EBAY_US')} />
+                                    </TableCell>
+                                    <TableCell align="center" sx={{ ...tableBodyCellSx, bgcolor: 'grey.50' }}>
+                                      <MetricPill value={row.totals.EBAY_AU || '-'} tone={getMarketplaceTone(row.totals.EBAY_AU, 'EBAY_AU')} />
+                                    </TableCell>
+                                    <TableCell align="center" sx={{ ...tableBodyCellSx, bgcolor: 'grey.50' }}>
+                                      <MetricPill value={row.totals.EBAY_CA || '-'} tone={getMarketplaceTone(row.totals.EBAY_CA, 'EBAY_CA')} />
+                                    </TableCell>
+                                    <TableCell align="center" sx={{ ...tableBodyCellSx, bgcolor: 'grey.50' }}>
+                                      <MetricPill value={row.totals.EBAY_GB || '-'} tone={getMarketplaceTone(row.totals.EBAY_GB, 'EBAY_GB')} />
+                                    </TableCell>
+                                  </React.Fragment>
+                                )}
+                              </TableRow>
+                            ))}
+                            <TableRow sx={{ bgcolor: 'grey.100' }}>
+                              <TableCell
+                                sx={{
+                                  ...tableBodyCellSx,
+                                  fontWeight: 'bold',
+                                  position: 'sticky',
+                                  left: 0,
+                                  bgcolor: 'grey.100',
+                                  zIndex: 1,
+                                }}
+                              >
+                                TOTAL
+                              </TableCell>
+                              {dateWiseTable.dateCols.map((date) => {
+                                const mp = dateWiseTable.dateTotals[date] || {};
+                                return (
+                                  <React.Fragment key={`tot-${date}`}>
+                                    <TableCell
+                                      align="center"
+                                      sx={{
+                                        ...tableBodyCellSx,
+                                        borderLeft: '8px solid',
+                                        borderColor: dashboardSignatureTokens.table.rowBorder,
+                                        bgcolor: 'grey.200',
+                                      }}
+                                    >
+                                      <MetricPill value={mp.total || '-'} tone={getMarketplaceTone(mp.total, 'total')} minWidth={50} />
+                                    </TableCell>
+                                    <TableCell align="center" sx={tableBodyCellSx}>
+                                      <MetricPill value={mp.EBAY_US || '-'} tone={getMarketplaceTone(mp.EBAY_US, 'EBAY_US')} />
+                                    </TableCell>
+                                    <TableCell align="center" sx={tableBodyCellSx}>
+                                      <MetricPill value={mp.EBAY_AU || '-'} tone={getMarketplaceTone(mp.EBAY_AU, 'EBAY_AU')} />
+                                    </TableCell>
+                                    <TableCell align="center" sx={tableBodyCellSx}>
+                                      <MetricPill value={mp.EBAY_CA || '-'} tone={getMarketplaceTone(mp.EBAY_CA, 'EBAY_CA')} />
+                                    </TableCell>
+                                    <TableCell align="center" sx={tableBodyCellSx}>
+                                      <MetricPill value={mp.EBAY_GB || '-'} tone={getMarketplaceTone(mp.EBAY_GB, 'EBAY_GB')} />
+                                    </TableCell>
+                                  </React.Fragment>
+                                );
+                              })}
+                              {showDateWiseTotalCols && (
+                                <React.Fragment>
+                                  <TableCell
+                                    align="center"
+                                    sx={{
+                                      ...tableBodyCellSx,
+                                      borderLeft: '8px solid',
+                                      borderColor: dashboardSignatureTokens.table.rowBorder,
+                                      bgcolor: 'grey.200',
+                                    }}
+                                  >
+                                    <MetricPill value={dateWiseTable.grandTotal.total || '-'} tone={getMarketplaceTone(dateWiseTable.grandTotal.total, 'total')} minWidth={50} />
+                                  </TableCell>
+                                  <TableCell align="center" sx={tableBodyCellSx}>
+                                    <MetricPill value={dateWiseTable.grandTotal.EBAY_US || '-'} tone={getMarketplaceTone(dateWiseTable.grandTotal.EBAY_US, 'EBAY_US')} />
+                                  </TableCell>
+                                  <TableCell align="center" sx={tableBodyCellSx}>
+                                    <MetricPill value={dateWiseTable.grandTotal.EBAY_AU || '-'} tone={getMarketplaceTone(dateWiseTable.grandTotal.EBAY_AU, 'EBAY_AU')} />
+                                  </TableCell>
+                                  <TableCell align="center" sx={tableBodyCellSx}>
+                                    <MetricPill value={dateWiseTable.grandTotal.EBAY_CA || '-'} tone={getMarketplaceTone(dateWiseTable.grandTotal.EBAY_CA, 'EBAY_CA')} />
+                                  </TableCell>
+                                  <TableCell align="center" sx={tableBodyCellSx}>
+                                    <MetricPill value={dateWiseTable.grandTotal.EBAY_GB || '-'} tone={getMarketplaceTone(dateWiseTable.grandTotal.EBAY_GB, 'EBAY_GB')} />
+                                  </TableCell>
+                                </React.Fragment>
+                              )}
+                            </TableRow>
+                          </>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                </TabPanel>
+              </>
+            )}
+          </Box>
+        </Paper>
 
         {/* Poll Results Display */}
         {pollResults && pollResults.totalNewOrders > 0 && (

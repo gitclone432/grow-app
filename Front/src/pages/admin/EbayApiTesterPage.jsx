@@ -12,6 +12,7 @@ import {
   Typography,
 } from '@mui/material';
 import api from '../../lib/api';
+import { sortSellersByName } from '../../lib/sellersSort';
 
 const ALL_SELLERS_VALUE = '__all__';
 const BULK_CALL_DELAY_MS = 1200;
@@ -58,6 +59,37 @@ function suggestParamsForPath(pathValue, marketplace = 'EBAY_US') {
   }
   if (/^\/sell\/analytics\/v1\/customer_service_metric\//i.test(pathOnly)) {
     return { evaluation_marketplace_id: marketplace || 'EBAY_US' };
+  }
+  if (/^\/post-order\/v2\/cancellation\/search\/?$/i.test(pathOnly)) {
+    const to = new Date().toISOString();
+    const from = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    return {
+      creation_date_range_from: from,
+      creation_date_range_to: to,
+      limit: '50',
+      role: 'SELLER',
+    };
+  }
+  if (/^\/post-order\/v2\/return\/search\/?$/i.test(pathOnly)) {
+    const to = new Date().toISOString();
+    const from = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    return {
+      creation_date_range_from: from,
+      creation_date_range_to: to,
+      limit: '50',
+    };
+  }
+  if (/^\/post-order\/v2\/return\/[^/]+\/?$/i.test(pathOnly)) {
+    return {};
+  }
+  if (/^\/post-order\/v2\/return\/[^/]+\/tracking\/?$/i.test(pathOnly)) {
+    return {
+      carrier_used: 'UPS',
+      tracking_number: '',
+    };
+  }
+  if (/^\/post-order\/v2\/return\/[^/]+\/files\/?$/i.test(pathOnly)) {
+    return {};
   }
   return null;
 }
@@ -131,7 +163,7 @@ export default function EbayApiTesterPage() {
   useEffect(() => {
     api.get('/sellers/all')
       .then(({ data }) => {
-        const list = data || [];
+        const list = sortSellersByName(data || []);
         setSellers(list);
         if (list.length > 0) {
           setSellerId((prev) => prev || list[0]._id);

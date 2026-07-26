@@ -12,6 +12,12 @@ const ReturnSchema = new mongoose.Schema(
 
     // Return details
     returnReason: String, // e.g., "NOT_AS_DESCRIBED", "DEFECTIVE", etc.
+    reasonType: String, // e.g., "SNAD", "REMORSE"
+    returnCloseReason: String, // e.g., why the return was closed
+    sellerAvailableOptions: [{
+      actionType: String,
+      actionURL: String
+    }],
     returnStatus: String, // e.g., "RETURN_OPEN", "RETURN_CLOSED", "SELLER_CLOSED", etc.
     returnType: String, // e.g., "MONEY_BACK"
     worksheetStatus: {
@@ -34,6 +40,38 @@ const ReturnSchema = new mongoose.Schema(
     sku: String,
     returnQuantity: Number,
 
+    sellerLoginName: String,
+    marketplaceId: String,
+    returnState: String,
+
+    // Shipment / tracking (from GET /return/{id} + /tracking)
+    trackingNumber: String,
+    carrierUsed: String,
+    trackingStatus: String,
+    shippingMethod: String,
+    deliveryStatus: String,
+    trackingScanHistory: [{
+      eventStatus: String,
+      eventDesc: String,
+      eventCode: String,
+      eventTime: Date
+    }],
+    trackingInfo: Object,
+
+    // Files metadata only (from GET /return/{id}/files) — never store fileData blobs
+    filesCount: { type: Number, default: 0 },
+    files: [{
+      fileId: String,
+      fileName: String,
+      filePurpose: String,
+      fileFormat: String,
+      fileSize: Number
+    }],
+
+    // Detail payloads (sanitized)
+    rawDetail: Object,
+    rawTracking: Object,
+
     // Financial
     refundAmount: {
       value: String,
@@ -42,11 +80,13 @@ const ReturnSchema = new mongoose.Schema(
 
     // Dates
     creationDate: Date,
+    transactionDate: Date, // order sale / eBay transaction date
     responseDate: Date, // When seller must respond by
     rmaNumber: String, // Return Merchandise Authorization number
 
     // Comments/notes
     buyerComments: String,
+    notes: String, // alias/display field for return notes (usually buyer comments)
     sellerComments: String,
 
     // Full eBay response (for reference)

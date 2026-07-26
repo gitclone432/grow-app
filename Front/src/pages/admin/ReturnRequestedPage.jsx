@@ -115,10 +115,12 @@ export default function ReturnRequestedPage({
   const [sellers, setSellers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
+  const [enriching, setEnriching] = useState(false);
   const [error, setError] = useState('');
   const [selectedReturn, setSelectedReturn] = useState(null);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
   const [snadConfirm, setSnadConfirm] = useState({ open: false, ret: null, action: null });
+  const [detailDialog, setDetailDialog] = useState({ open: false, ret: null, loading: false, tracking: null, files: null, error: '' });
 
   const ALL_COLUMNS = [
     { id: 'returnId', label: 'Return ID' },
@@ -130,6 +132,10 @@ export default function ReturnRequestedPage({
     { id: 'seller', label: 'Seller' },
     { id: 'buyer', label: 'Buyer' },
     { id: 'item', label: 'Item' },
+    { id: 'trackingNumber', label: 'Tracking #' },
+    { id: 'carrier', label: 'Carrier' },
+    { id: 'trackingStatus', label: 'Tracking Status' },
+    { id: 'files', label: 'Files' },
     { id: 'reason', label: 'Reason' },
     { id: 'status', label: 'Status' },
     { id: 'ebayStatus', label: 'eBay Status' },
@@ -312,6 +318,66 @@ export default function ReturnRequestedPage({
       setError(e.response?.data?.error || e.message);
     } finally {
       setFetching(false);
+    }
+  }
+
+  async function enrichReturnDetails() {
+    setEnriching(true);
+    setError('');
+    try {
+      const res = await api.post('/ebay/enrich-return-details', {
+        sellerId: sellerFilter || undefined,
+        limit: 100,
+      });
+      const updated = res.data.updated || 0;
+      const failed = res.data.failed || 0;
+      const checked = res.data.checked || 0;
+      setSnackbarMsg(
+        `Return details loaded (GET /return/{id}, /files, /tracking) — checked ${checked}, updated ${updated}${failed ? `, failed ${failed}` : ''}`
+      );
+      setSnackbarOpen(true);
+      await loadStoredReturns();
+    } catch (e) {
+      console.error('Failed to enrich return details:', e);
+      setError(e.response?.data?.error || e.message);
+    } finally {
+      setEnriching(false);
+    }
+  }
+
+  async function openReturnApiDetails(ret) {
+    setDetailDialog({ open: true, ret, loading: true, tracking: null, files: null, error: '' });
+    try {
+      const [filesRes, trackingRes] = await Promise.allSettled([
+        api.get(`/ebay/returns/${ret.returnId}/files`),
+        api.get(`/ebay/returns/${ret.returnId}/tracking`),
+      ]);
+      const files = filesRes.status === 'fulfilled' ? filesRes.value.data : null;
+      const tracking = trackingRes.status === 'fulfilled' ? trackingRes.value.data : null;
+      const errParts = [];
+      if (filesRes.status === 'rejected') {
+        errParts.push(filesRes.reason?.response?.data?.error || filesRes.reason?.message || 'files failed');
+      }
+      if (trackingRes.status === 'rejected') {
+        errParts.push(trackingRes.reason?.response?.data?.error || trackingRes.reason?.message || 'tracking failed');
+      }
+      setDetailDialog({
+        open: true,
+        ret,
+        loading: false,
+        files,
+        tracking,
+        error: errParts.join(' | '),
+      });
+    } catch (e) {
+      setDetailDialog({
+        open: true,
+        ret,
+        loading: false,
+        files: null,
+        tracking: null,
+        error: e.response?.data?.error || e.message,
+      });
     }
   }
 
@@ -606,9 +672,24 @@ export default function ReturnRequestedPage({
                 sx={yellowFilledButtonSx}
                 startIcon={fetching ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
                 onClick={fetchReturnsFromEbay}
-                disabled={fetching}
+                disabled={fetching || enriching}
               >
                 {fetching ? 'Fetching...' : 'Fetch from eBay'}
+              </Button>
+            </span>
+          </Tooltip>
+
+          <Tooltip title="GET /post-order/v2/return/{returnId}, /files, and /tracking">
+            <span>
+              <Button
+                size="small"
+                variant="outlined"
+                sx={yellowOutlinedButtonSx}
+                startIcon={enriching ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+                onClick={enrichReturnDetails}
+                disabled={fetching || enriching}
+              >
+                {enriching ? 'Loading details...' : 'Load detail / tracking / files'}
               </Button>
             </span>
           </Tooltip>
@@ -811,7 +892,7 @@ export default function ReturnRequestedPage({
             visibleColumns={visibleColumns}
             onColumnChange={setVisibleColumns}
             onReset={() => setVisibleColumns(ALL_COLUMNS.map(c => c.id))}
-            page="return-requested"
+            page="return-requested-v2"
           />
         </Stack>
       </Stack>
@@ -861,6 +942,10 @@ export default function ReturnRequestedPage({
                 {visibleColumns.includes('seller') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Seller</strong></TableCell>}
                 {visibleColumns.includes('buyer') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Buyer</strong></TableCell>}
                 {visibleColumns.includes('item') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Item</strong></TableCell>}
+                {visibleColumns.includes('trackingNumber') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Tracking #</strong></TableCell>}
+                {visibleColumns.includes('carrier') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Carrier</strong></TableCell>}
+                {visibleColumns.includes('trackingStatus') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Tracking Status</strong></TableCell>}
+                {visibleColumns.includes('files') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Files</strong></TableCell>}
                 {visibleColumns.includes('reason') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Reason</strong></TableCell>}
                 {visibleColumns.includes('status') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>Status</strong></TableCell>}
                 {visibleColumns.includes('ebayStatus') && <TableCell sx={{ backgroundColor: '#f5f5f5', position: 'sticky', top: 0, zIndex: 100 }}><strong>eBay Status</strong></TableCell>}
@@ -1004,6 +1089,41 @@ export default function ReturnRequestedPage({
                         </Typography>
                       )}
                     </TableCell>}
+                    {visibleColumns.includes('trackingNumber') && (
+                      <TableCell>
+                        <Stack direction="row" alignItems="center" spacing={0.5}>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.72rem' }}>
+                            {ret.trackingNumber || '-'}
+                          </Typography>
+                          {ret.trackingNumber ? (
+                            <IconButton size="small" onClick={() => handleCopy(ret.trackingNumber)}>
+                              <ContentCopyIcon sx={{ fontSize: 14 }} />
+                            </IconButton>
+                          ) : null}
+                        </Stack>
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('carrier') && (
+                      <TableCell>
+                        <Typography variant="body2" fontSize="0.75rem">{ret.carrierUsed || '-'}</Typography>
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('trackingStatus') && (
+                      <TableCell>
+                        {ret.trackingStatus ? (
+                          <Chip size="small" label={ret.trackingStatus} sx={{ fontSize: '0.65rem' }} />
+                        ) : (
+                          <Typography variant="body2">-</Typography>
+                        )}
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('files') && (
+                      <TableCell>
+                        <Typography variant="body2">
+                          {ret.filesCount != null ? ret.filesCount : (ret.files?.length || 0)}
+                        </Typography>
+                      </TableCell>
+                    )}
                     {visibleColumns.includes('reason') && <TableCell>
                       <Typography variant="body2" fontSize="0.7rem">
                         {{
@@ -1110,17 +1230,29 @@ export default function ReturnRequestedPage({
                       )}
                     </TableCell>}
                     {visibleColumns.includes('action') && <TableCell align="center">
-                      <Tooltip title="Open conversation">
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          startIcon={<ChatIcon fontSize="small" />}
-                          onClick={() => setSelectedReturn(ret)}
-                          sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
-                        >
-                          Open
-                        </Button>
-                      </Tooltip>
+                      <Stack direction="row" spacing={0.5} justifyContent="center">
+                        <Tooltip title="GET /return/{id}/tracking + /files">
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            onClick={() => openReturnApiDetails(ret)}
+                            sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1, fontSize: '0.7rem' }}
+                          >
+                            Details
+                          </Button>
+                        </Tooltip>
+                        <Tooltip title="Open conversation">
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            startIcon={<ChatIcon fontSize="small" />}
+                            onClick={() => setSelectedReturn(ret)}
+                            sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
+                          >
+                            Open
+                          </Button>
+                        </Tooltip>
+                      </Stack>
                     </TableCell>}
                   </TableRow>
                 ))
@@ -1206,6 +1338,85 @@ export default function ReturnRequestedPage({
             onClick={() => handleToggleSNAD(snadConfirm.ret?.returnId, snadConfirm.action)}
           >
             {snadConfirm.action ? 'Mark as SNAD' : 'Remove SNAD Mark'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={detailDialog.open}
+        onClose={() => setDetailDialog({ open: false, ret: null, loading: false, tracking: null, files: null, error: '' })}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          Return API details — {detailDialog.ret?.returnId || ''}
+        </DialogTitle>
+        <DialogContent dividers>
+          {detailDialog.loading ? (
+            <Box display="flex" justifyContent="center" py={3}>
+              <CircularProgress />
+            </Box>
+          ) : (
+            <Stack spacing={2}>
+              {detailDialog.error ? (
+                <Alert severity="warning">{detailDialog.error}</Alert>
+              ) : null}
+              <Box>
+                <Typography variant="subtitle2" gutterBottom>
+                  GET /post-order/v2/return/{'{returnId}'}/tracking
+                </Typography>
+                <Typography variant="body2" sx={{ mb: 1 }}>
+                  {detailDialog.ret?.carrierUsed || detailDialog.tracking?.carrier_used || '-'}
+                  {' / '}
+                  {detailDialog.ret?.trackingNumber || detailDialog.tracking?.tracking_number || '-'}
+                  {' — '}
+                  {detailDialog.tracking?.data?.trackingStatus || detailDialog.ret?.trackingStatus || 'n/a'}
+                </Typography>
+                <Box
+                  component="pre"
+                  sx={{
+                    m: 0,
+                    p: 1.5,
+                    bgcolor: 'grey.100',
+                    borderRadius: 1,
+                    fontSize: '0.7rem',
+                    overflow: 'auto',
+                    maxHeight: 220,
+                  }}
+                >
+                  {JSON.stringify(detailDialog.tracking?.data || detailDialog.ret?.rawTracking || detailDialog.ret?.trackingScanHistory || {}, null, 2)}
+                </Box>
+              </Box>
+              <Box>
+                <Typography variant="subtitle2" gutterBottom>
+                  GET /post-order/v2/return/{'{returnId}'}/files
+                </Typography>
+                <Typography variant="body2" sx={{ mb: 1 }}>
+                  {(detailDialog.files?.count ?? detailDialog.files?.files?.length ?? detailDialog.ret?.filesCount ?? 0)} file(s)
+                </Typography>
+                <Box
+                  component="pre"
+                  sx={{
+                    m: 0,
+                    p: 1.5,
+                    bgcolor: 'grey.100',
+                    borderRadius: 1,
+                    fontSize: '0.7rem',
+                    overflow: 'auto',
+                    maxHeight: 220,
+                  }}
+                >
+                  {JSON.stringify(detailDialog.files?.files || detailDialog.ret?.files || [], null, 2)}
+                </Box>
+              </Box>
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setDetailDialog({ open: false, ret: null, loading: false, tracking: null, files: null, error: '' })}
+          >
+            Close
           </Button>
         </DialogActions>
       </Dialog>

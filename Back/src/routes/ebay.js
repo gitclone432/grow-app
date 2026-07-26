@@ -21,6 +21,7 @@ import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
 import { postEbayTradingApi } from '../utils/ebayTradingApi.js';
 import Order from '../models/Order.js';
 import Return from '../models/Return.js';
+import Cancellation from '../models/Cancellation.js';
 import Case from '../models/Case.js';
 import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
@@ -2910,7 +2911,7 @@ router.get('/orders', async (req, res) => {
 // New endpoint: Get orders with any cancellation status
 router.get('/cancelled-orders', async (req, res) => {
   try {
-    const { startDate, endDate, sellerId, marketplace, page = 1, limit = 50 } = req.query;
+    const { startDate, endDate, sellerId, marketplace, page = 1, limit = 50, sortBy, sortDir } = req.query;
 
     console.log(`[Cancelled Orders] Fetching all cancellation orders`);
 
@@ -2952,6 +2953,19 @@ router.get('/cancelled-orders', async (req, res) => {
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
 
+    const sortFieldMap = {
+      cancelStatus: 'cancelState',
+      cancelState: 'cancelState',
+      dateSold: 'dateSold',
+      creationDate: 'creationDate'
+    };
+    const requestedSort = String(sortBy || '').trim();
+    const mappedSortField = sortFieldMap[requestedSort];
+    const dir = String(sortDir || 'asc').toLowerCase() === 'desc' ? -1 : 1;
+    const sort = mappedSortField
+      ? { [mappedSortField]: dir, creationDate: -1 }
+      : { creationDate: -1 };
+
     // Get total count for pagination
     const totalCount = await Order.countDocuments(query);
     const totalPages = Math.ceil(totalCount / limitNum);
@@ -2964,7 +2978,7 @@ router.get('/cancelled-orders', async (req, res) => {
           select: 'username email'
         }
       })
-      .sort({ creationDate: -1 })
+      .sort(sort)
       .skip(skip)
       .limit(limitNum);
 
@@ -7997,8 +8011,9 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
               'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
             },
             params: {
-              'creation_date_range_from': thirtyDaysAgo,
-              'limit': 200
+              creation_date_range_from: thirtyDaysAgo,
+              creation_date_range_to: new Date().toISOString(),
+              limit: 200
             }
           });
 
@@ -8023,6 +8038,16 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
               legacyOrderId: ebayReturn.legacyOrderId,
               buyerUsername: ebayReturn.buyerLoginName,
               returnReason: creationInfo.reason,
+              reasonType: creationInfo.reasonType || null,
+              returnCloseReason: ebayReturn.closeInfo?.returnCloseReason
+                || ebayReturn.returnCloseReason
+                || null,
+              sellerAvailableOptions: Array.isArray(ebayReturn.sellerAvailableOptions)
+                ? ebayReturn.sellerAvailableOptions.map((o) => ({
+                  actionType: o.actionType || null,
+                  actionURL: o.actionURL || null,
+                })).filter((o) => o.actionType)
+                : [],
               returnStatus: ebayReturn.state || ebayReturn.status,
               returnType: creationInfo.type,
               itemId: itemInfo.itemId,
@@ -8037,6 +8062,7 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
               responseDate: ebayReturn.sellerResponseDue?.respondByDate?.value ? new Date(ebayReturn.sellerResponseDue.respondByDate.value) : null,
               rmaNumber: ebayReturn.RMANumber,
               buyerComments: creationInfo.comments?.content,
+              notes: creationInfo.comments?.content || null,
               rawData: ebayReturn
             };
 
@@ -8083,6 +8109,16 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
                     ...(refundChanged && { refund: { from: existing.refundAmount?.value, to: returnData.refundAmount?.value } })
                   }
                 });
+              } else {
+                // Keep action metadata fresh even when core fields are unchanged
+                existing.returnReason = returnData.returnReason;
+                existing.reasonType = returnData.reasonType;
+                existing.returnCloseReason = returnData.returnCloseReason;
+                existing.notes = returnData.notes;
+                existing.buyerComments = returnData.buyerComments;
+                existing.sellerAvailableOptions = returnData.sellerAvailableOptions;
+                existing.rawData = returnData.rawData;
+                await existing.save();
               }
             } else {
               await Return.create(returnData);
@@ -8129,6 +8165,1678 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
     res.status(500).json({ error: err.message });
   }
 });
+
+function extractEbayReturnError(errOrData) {
+  const data = errOrData?.response?.data || errOrData;
+  const ebayErr = data?.error;
+  if (Array.isArray(ebayErr) && ebayErr[0]) {
+    const first = ebayErr[0];
+    const detail = first.longMessage || first.message;
+    const params = Array.isArray(first.parameter)
+      ? first.parameter.map((p) => p.value || p.name).filter(Boolean)
+      : [];
+    const param = params.length ? ` (${params.join(', ')})` : '';
+    if (detail) return `${detail}${param}`;
+  }
+  if (typeof ebayErr === 'string') return ebayErr;
+  if (data?.errors?.[0]?.message) return data.errors[0].message;
+  if (errOrData?.message) return errOrData.message;
+  return 'eBay return request failed';
+}
+
+function sanitizeReturnFiles(files = []) {
+  return (files || []).map((f) => ({
+    fileId: f.fileId != null ? String(f.fileId) : null,
+    fileName: f.fileName || f.filePurpose || null,
+    filePurpose: f.filePurpose || null,
+    fileFormat: f.fileFormat || null,
+    fileSize: typeof f.fileData === 'string' ? f.fileData.length : (f.fileSize || 0),
+  })).filter((f) => f.fileId);
+}
+
+async function ebayReturnGet(accessToken, path, { marketplaceId = 'EBAY_US', params } = {}) {
+  const res = await axios.get(`https://api.ebay.com${path}`, {
+    headers: {
+      Authorization: `IAF ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-EBAY-C-MARKETPLACE-ID': marketplaceId || 'EBAY_US',
+    },
+    params,
+    validateStatus: () => true,
+  });
+  if (res.status >= 400) {
+    const err = new Error(extractEbayReturnError(res.data));
+    err.status = res.status;
+    err.ebay = res.data;
+    throw err;
+  }
+  return res.data || {};
+}
+
+async function ebayReturnPost(accessToken, path, { marketplaceId = 'EBAY_US', body } = {}) {
+  const res = await axios.post(`https://api.ebay.com${path}`, body || {}, {
+    headers: {
+      Authorization: `IAF ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-EBAY-C-MARKETPLACE-ID': marketplaceId || 'EBAY_US',
+    },
+    validateStatus: () => true,
+  });
+  if (res.status >= 400) {
+    const err = new Error(extractEbayReturnError(res.data));
+    err.status = res.status;
+    err.ebay = res.data;
+    throw err;
+  }
+  return res.data || {};
+}
+
+/**
+ * Pull GET /return/{id}, /files, and /tracking (when carrier+number known).
+ */
+async function enrichReturnFromEbayApis(doc, accessToken) {
+  const returnId = doc.returnId;
+  const marketplaceId = doc.marketplaceId || 'EBAY_US';
+
+  let detailPayload = null;
+  try {
+    detailPayload = await ebayReturnGet(
+      accessToken,
+      `/post-order/v2/return/${returnId}`,
+      { marketplaceId }
+    );
+  } catch (e) {
+    console.warn(`[Return Detail] ${returnId}:`, e.message);
+  }
+
+  const summary = detailPayload?.summary || {};
+  const detail = detailPayload?.detail || {};
+  const shipment = detail.returnShipmentInfo?.shipmentTracking
+    || detail.returnShipmentInfo?.allShipmentTrackings?.[0]
+    || null;
+
+  if (summary.buyerLoginName || detail.buyerLoginName) {
+    doc.buyerUsername = summary.buyerLoginName || detail.buyerLoginName;
+  }
+  if (summary.sellerLoginName || detail.sellerLoginName) {
+    doc.sellerLoginName = summary.sellerLoginName || detail.sellerLoginName;
+  }
+  if (summary.status) doc.returnStatus = summary.status || summary.state || doc.returnStatus;
+  if (summary.state) doc.returnState = summary.state;
+  if (summary.currentType) doc.returnType = summary.currentType;
+  if (detail.marketplaceId) doc.marketplaceId = detail.marketplaceId;
+
+  const creationInfo = summary.creationInfo || {};
+  if (creationInfo.reason) doc.returnReason = creationInfo.reason;
+  if (creationInfo.reasonType) doc.reasonType = creationInfo.reasonType;
+  const closeReason = summary.closeInfo?.returnCloseReason
+    || detail.closeInfo?.returnCloseReason
+    || detail.summary?.closeInfo?.returnCloseReason
+    || null;
+  if (closeReason) doc.returnCloseReason = closeReason;
+
+  const available = summary.sellerAvailableOptions
+    || detail.sellerAvailableOptions
+    || detailPayload?.summary?.sellerAvailableOptions
+    || [];
+  if (Array.isArray(available) && available.length) {
+    doc.sellerAvailableOptions = available.map((o) => ({
+      actionType: o.actionType || null,
+      actionURL: o.actionURL || null,
+    })).filter((o) => o.actionType);
+  }
+
+  const notesText = creationInfo.comments?.content
+    || detail.buyerComments?.content
+    || detail.buyerComments
+    || null;
+  if (notesText) {
+    doc.buyerComments = notesText;
+    doc.notes = notesText;
+  }
+
+  const item = creationInfo.item || detail.itemDetail || {};
+  if (item.itemId != null) doc.itemId = String(item.itemId);
+  if (item.title || item.itemTitle) doc.itemTitle = item.title || item.itemTitle;
+  if (item.returnQuantity != null) doc.returnQuantity = item.returnQuantity;
+
+  if (shipment) {
+    if (shipment.trackingNumber) doc.trackingNumber = String(shipment.trackingNumber);
+    if (shipment.carrierUsed || shipment.carrierName || shipment.carrierEnum) {
+      doc.carrierUsed = shipment.carrierUsed || shipment.carrierName || shipment.carrierEnum;
+    }
+    if (shipment.shippingMethod) doc.shippingMethod = shipment.shippingMethod;
+    if (shipment.deliveryStatus) doc.deliveryStatus = shipment.deliveryStatus;
+    doc.trackingInfo = shipment;
+  }
+
+  // Files: dedicated endpoint (and sometimes embedded in detail)
+  let filesPayload = null;
+  try {
+    filesPayload = await ebayReturnGet(
+      accessToken,
+      `/post-order/v2/return/${returnId}/files`,
+      { marketplaceId }
+    );
+  } catch (e) {
+    console.warn(`[Return Files] ${returnId}:`, e.message);
+  }
+  const files = sanitizeReturnFiles(
+    filesPayload?.files
+    || detail.files
+    || []
+  );
+  doc.files = files;
+  doc.filesCount = files.length;
+
+  // Tracking history needs carrier_used + tracking_number query params
+  const carrier = doc.carrierUsed;
+  const trackingNumber = doc.trackingNumber;
+  if (carrier && trackingNumber) {
+    try {
+      const trackingPayload = await ebayReturnGet(
+        accessToken,
+        `/post-order/v2/return/${returnId}/tracking`,
+        {
+          marketplaceId,
+          params: {
+            carrier_used: carrier,
+            tracking_number: trackingNumber,
+          },
+        }
+      );
+      doc.rawTracking = trackingPayload;
+      if (trackingPayload.trackingStatus) doc.trackingStatus = trackingPayload.trackingStatus;
+      if (trackingPayload.carrierUsed) doc.carrierUsed = trackingPayload.carrierUsed;
+      if (trackingPayload.trackingNumber) doc.trackingNumber = String(trackingPayload.trackingNumber);
+      doc.trackingScanHistory = (trackingPayload.scanHistory || []).map((ev) => ({
+        eventStatus: ev.eventStatus || null,
+        eventDesc: ev.eventDesc || null,
+        eventCode: ev.eventCode || null,
+        eventTime: parseEbayPostOrderDate(ev.eventTime),
+      }));
+    } catch (e) {
+      console.warn(`[Return Tracking] ${returnId}:`, e.message);
+    }
+  }
+
+  if (detailPayload) {
+    // Keep summary+detail but strip any embedded fileData blobs
+    const safeDetail = JSON.parse(JSON.stringify(detailPayload));
+    const strip = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        node.forEach(strip);
+        return;
+      }
+      if (typeof node.fileData === 'string') node.fileData = `<omitted ${node.fileData.length} chars>`;
+      Object.values(node).forEach(strip);
+    };
+    strip(safeDetail);
+    doc.rawDetail = safeDetail;
+  }
+
+  await doc.save();
+  return doc;
+}
+
+/**
+ * Enrich stored returns via:
+ * GET /post-order/v2/return/{returnId}
+ * GET /post-order/v2/return/{returnId}/files
+ * GET /post-order/v2/return/{returnId}/tracking?carrier_used=&tracking_number=
+ */
+router.post('/enrich-return-details', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const sellerIdFilter = String(req.body?.sellerId || req.query?.sellerId || '').trim();
+    const force = req.body?.force === true || req.query?.force === 'true';
+    const limit = Math.min(300, Math.max(1, parseInt(req.body?.limit || req.query?.limit, 10) || 100));
+
+    const match = {};
+    if (sellerIdFilter) match.seller = sellerIdFilter;
+    if (!force) {
+      match.$or = [
+        { rawDetail: { $exists: false } },
+        { rawDetail: null },
+        { trackingNumber: { $in: [null, ''] } },
+        { filesCount: { $in: [null, 0] } },
+      ];
+    }
+
+    const docs = await Return.find(match)
+      .sort({ creationDate: -1 })
+      .limit(limit)
+      .populate({ path: 'seller', populate: { path: 'user', select: 'username' } });
+
+    if (docs.length === 0) {
+      return res.json({
+        message: 'No returns need detail enrichment',
+        checked: 0,
+        updated: 0,
+        failed: 0,
+      });
+    }
+
+    const bySeller = new Map();
+    for (const doc of docs) {
+      const sid = String(doc.seller?._id || doc.seller || '');
+      if (!sid) continue;
+      if (!bySeller.has(sid)) bySeller.set(sid, []);
+      bySeller.get(sid).push(doc);
+    }
+
+    let updated = 0;
+    let failed = 0;
+    const errors = [];
+
+    for (const [, sellerDocs] of bySeller) {
+      const seller = sellerDocs[0]?.seller;
+      const sellerName = seller?.user?.username || String(seller?._id || 'unknown');
+      if (!seller?.ebayTokens?.refresh_token && !seller?.ebayTokens?.access_token) {
+        failed += sellerDocs.length;
+        errors.push(`${sellerName}: no eBay token`);
+        continue;
+      }
+
+      let accessToken;
+      try {
+        accessToken = await ensureValidToken(seller);
+      } catch (tokenErr) {
+        failed += sellerDocs.length;
+        errors.push(`${sellerName}: token refresh failed (${tokenErr.message})`);
+        continue;
+      }
+
+      for (const doc of sellerDocs) {
+        try {
+          await enrichReturnFromEbayApis(doc, accessToken);
+          updated += 1;
+        } catch (e) {
+          failed += 1;
+          errors.push(`${sellerName}/${doc.returnId}: ${e.message}`);
+        }
+      }
+    }
+
+    res.json({
+      message: 'Enriched returns via GET /return/{id}, /files, /tracking',
+      checked: docs.length,
+      updated,
+      failed,
+      errors: errors.length ? errors.slice(0, 20) : undefined,
+    });
+  } catch (err) {
+    console.error('[Enrich Return Details] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/returns/:returnId/detail', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const returnId = String(req.params.returnId || '').trim();
+    const doc = await Return.findOne({ returnId }).populate({
+      path: 'seller',
+      populate: { path: 'user', select: 'username' },
+    });
+    if (!doc) return res.status(404).json({ error: 'Return not found' });
+    const accessToken = await ensureValidToken(doc.seller);
+    const data = await ebayReturnGet(
+      accessToken,
+      `/post-order/v2/return/${returnId}`,
+      { marketplaceId: doc.marketplaceId || 'EBAY_US' }
+    );
+    res.json({ returnId, data });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: extractEbayReturnError(err), ebay: err.ebay });
+  }
+});
+
+router.get('/returns/:returnId/files', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const returnId = String(req.params.returnId || '').trim();
+    const includeData = req.query.includeData === 'true';
+    const doc = await Return.findOne({ returnId }).populate({
+      path: 'seller',
+      populate: { path: 'user', select: 'username' },
+    });
+    if (!doc) return res.status(404).json({ error: 'Return not found' });
+    const accessToken = await ensureValidToken(doc.seller);
+    const data = await ebayReturnGet(
+      accessToken,
+      `/post-order/v2/return/${returnId}/files`,
+      { marketplaceId: doc.marketplaceId || 'EBAY_US' }
+    );
+    const files = includeData
+      ? (data.files || [])
+      : sanitizeReturnFiles(data.files || []);
+    res.json({ returnId, files, count: files.length });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: extractEbayReturnError(err), ebay: err.ebay });
+  }
+});
+
+router.get('/returns/:returnId/tracking', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const returnId = String(req.params.returnId || '').trim();
+    const doc = await Return.findOne({ returnId }).populate({
+      path: 'seller',
+      populate: { path: 'user', select: 'username' },
+    });
+    if (!doc) return res.status(404).json({ error: 'Return not found' });
+
+    let carrier = String(req.query.carrier_used || doc.carrierUsed || '').trim();
+    let trackingNumber = String(req.query.tracking_number || doc.trackingNumber || '').trim();
+
+    // If missing, load detail first to discover carrier/tracking
+    if (!carrier || !trackingNumber) {
+      const accessToken = await ensureValidToken(doc.seller);
+      await enrichReturnFromEbayApis(doc, accessToken);
+      carrier = doc.carrierUsed || carrier;
+      trackingNumber = doc.trackingNumber || trackingNumber;
+    }
+
+    if (!carrier || !trackingNumber) {
+      return res.status(400).json({
+        error: 'tracking requires carrier_used and tracking_number (none on this return yet)',
+        returnId,
+      });
+    }
+
+    const accessToken = await ensureValidToken(doc.seller);
+    const data = await ebayReturnGet(
+      accessToken,
+      `/post-order/v2/return/${returnId}/tracking`,
+      {
+        marketplaceId: doc.marketplaceId || 'EBAY_US',
+        params: { carrier_used: carrier, tracking_number: trackingNumber },
+      }
+    );
+    res.json({ returnId, carrier_used: carrier, tracking_number: trackingNumber, data });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: extractEbayReturnError(err), ebay: err.ebay });
+  }
+});
+
+const ALLOWED_RETURN_DECISIONS = new Set([
+  'APPROVE',
+  'DECLINE',
+  'OFFER_PARTIAL_REFUND',
+  'OFFER_REPLACEMENT',
+  'OFFER_RETURN',
+  'PROVIDE_RMA',
+  'UNKNOWN',
+]);
+
+async function loadReturnDocForAction(returnId) {
+  const doc = await Return.findOne({ returnId }).populate({
+    path: 'seller',
+    populate: { path: 'user', select: 'username' },
+  });
+  if (!doc) {
+    const err = new Error('Return not found in local DB. Fetch from eBay first.');
+    err.status = 404;
+    throw err;
+  }
+  if (!doc.seller) {
+    const err = new Error('Return has no seller linked');
+    err.status = 400;
+    throw err;
+  }
+  return doc;
+}
+
+async function leanReturnAfterAction(returnId) {
+  return Return.findOne({ returnId })
+    .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
+    .lean();
+}
+
+/**
+ * Process return request (seller decide).
+ * POST https://api.ebay.com/post-order/v2/return/{returnId}/decide
+ * Body: { decision: "APPROVE"|"DECLINE"|..., comments?, RMANumber?, partialRefundAmount? }
+ */
+router.post('/returns/:returnId/decide', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const returnId = String(req.params.returnId || '').trim();
+    if (!returnId) return res.status(400).json({ error: 'returnId is required' });
+
+    const decision = String(req.body?.decision || '').trim().toUpperCase();
+    if (!ALLOWED_RETURN_DECISIONS.has(decision)) {
+      return res.status(400).json({
+        error: `decision must be one of: ${[...ALLOWED_RETURN_DECISIONS].join(', ')}`,
+      });
+    }
+
+    const doc = await loadReturnDocForAction(returnId);
+    const body = { decision };
+
+    const comments = String(req.body?.comments || '').trim();
+    if (comments) body.comments = { content: comments };
+
+    const rma = String(req.body?.RMANumber || req.body?.rmaNumber || '').trim();
+    if (rma) body.RMANumber = rma;
+
+    if (req.body?.partialRefundAmount?.value != null) {
+      body.partialRefundAmount = {
+        value: String(req.body.partialRefundAmount.value),
+        currency: req.body.partialRefundAmount.currency || 'USD',
+      };
+    }
+
+    const accessToken = await ensureValidToken(doc.seller);
+    await ebayReturnPost(
+      accessToken,
+      `/post-order/v2/return/${returnId}/decide`,
+      { marketplaceId: doc.marketplaceId || 'EBAY_US', body }
+    );
+
+    await enrichReturnFromEbayApis(doc, accessToken);
+    const fresh = await leanReturnAfterAction(returnId);
+
+    res.json({
+      message: `Return ${returnId}: ${decision}`,
+      decision,
+      return: fresh,
+    });
+  } catch (err) {
+    console.error('[Return Decide] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayReturnError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+/**
+ * Issue return refund.
+ * POST https://api.ebay.com/post-order/v2/return/{returnId}/issue_refund
+ * Body must include refundDetail (itemized + total). Empty body fails with
+ * "Invalid Input. (planId only or refundLineItem only)".
+ */
+router.post('/returns/:returnId/issue-refund', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const returnId = String(req.params.returnId || '').trim();
+    if (!returnId) return res.status(400).json({ error: 'returnId is required' });
+
+    const doc = await loadReturnDocForAction(returnId);
+    const accessToken = await ensureValidToken(doc.seller);
+    const marketplaceId = doc.marketplaceId || 'EBAY_US';
+
+    // Prefer client-provided refundDetail; otherwise build from eBay return estimate.
+    let body = {};
+    if (req.body?.refundDetail) {
+      body.refundDetail = req.body.refundDetail;
+    } else if (req.body?.planId) {
+      body.planId = req.body.planId;
+    } else if (req.body?.refundLineItem) {
+      body.refundLineItem = req.body.refundLineItem;
+    } else {
+      const detail = await ebayReturnGet(
+        accessToken,
+        `/post-order/v2/return/${returnId}`,
+        { marketplaceId }
+      );
+      const summary = detail?.summary || {};
+      const estimated = detail?.detail?.refundInfo?.estimatedRefundDetail
+        || detail?.refundInfo?.estimatedRefundDetail
+        || {};
+      const itemized = Array.isArray(estimated.itemizedRefundDetails)
+        ? estimated.itemizedRefundDetails
+        : [];
+      const totalAmount = summary.sellerTotalRefund?.estimatedRefundAmount
+        || summary.buyerTotalRefund?.estimatedRefundAmount
+        || estimated.itemizedRefundDetails?.[0]?.estimatedAmount
+        || null;
+
+      if (!itemized.length || !totalAmount) {
+        return res.status(400).json({
+          error: 'No refund estimate available from eBay for this return. Open the return on eBay or provide refundDetail.',
+          ebayDetail: detail?.detail?.refundInfo || null,
+        });
+      }
+
+      body.refundDetail = {
+        itemizedRefundDetail: itemized.map((i) => ({
+          refundAmount: i.estimatedAmount || i.refundAmount,
+          refundFeeType: i.refundFeeType,
+        })).filter((i) => i.refundAmount && i.refundFeeType),
+        totalAmount,
+      };
+    }
+
+    const comments = String(req.body?.comments || '').trim();
+    if (comments) body.comments = { content: comments };
+
+    const ebayRes = await ebayReturnPost(
+      accessToken,
+      `/post-order/v2/return/${returnId}/issue_refund`,
+      { marketplaceId, body }
+    );
+
+    await enrichReturnFromEbayApis(doc, accessToken);
+    const fresh = await leanReturnAfterAction(returnId);
+
+    res.json({
+      message: `Issued refund for return ${returnId}`,
+      ebay: ebayRes,
+      return: fresh,
+    });
+  } catch (err) {
+    console.error('[Return Issue Refund] Error:', JSON.stringify(err.ebay || err.message, null, 2));
+    res.status(err.status || 500).json({
+      error: extractEbayReturnError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+/**
+ * Mark return item as received.
+ * POST https://api.ebay.com/post-order/v2/return/{returnId}/mark_as_received
+ */
+router.post('/returns/:returnId/mark-as-received', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const returnId = String(req.params.returnId || '').trim();
+    if (!returnId) return res.status(400).json({ error: 'returnId is required' });
+
+    const doc = await loadReturnDocForAction(returnId);
+    const accessToken = await ensureValidToken(doc.seller);
+    await ebayReturnPost(
+      accessToken,
+      `/post-order/v2/return/${returnId}/mark_as_received`,
+      { marketplaceId: doc.marketplaceId || 'EBAY_US', body: {} }
+    );
+
+    await enrichReturnFromEbayApis(doc, accessToken);
+    const fresh = await leanReturnAfterAction(returnId);
+
+    res.json({
+      message: `Marked return ${returnId} as received`,
+      return: fresh,
+    });
+  } catch (err) {
+    console.error('[Return Mark Received] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayReturnError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+/**
+ * Escalate return into a case.
+ * POST https://api.ebay.com/post-order/v2/return/{returnId}/escalate
+ */
+router.post('/returns/:returnId/escalate', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const returnId = String(req.params.returnId || '').trim();
+    if (!returnId) return res.status(400).json({ error: 'returnId is required' });
+
+    const doc = await loadReturnDocForAction(returnId);
+    const body = {};
+    const comments = String(req.body?.comments || '').trim();
+    if (comments) body.comments = { content: comments };
+    if (req.body?.reason) body.reason = String(req.body.reason).trim();
+
+    const accessToken = await ensureValidToken(doc.seller);
+    await ebayReturnPost(
+      accessToken,
+      `/post-order/v2/return/${returnId}/escalate`,
+      { marketplaceId: doc.marketplaceId || 'EBAY_US', body }
+    );
+
+    await enrichReturnFromEbayApis(doc, accessToken);
+    const fresh = await leanReturnAfterAction(returnId);
+
+    res.json({
+      message: `Escalated return ${returnId}`,
+      return: fresh,
+    });
+  } catch (err) {
+    console.error('[Return Escalate] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayReturnError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+/**
+ * Send message on a return.
+ * POST https://api.ebay.com/post-order/v2/return/{returnId}/send_message
+ */
+router.post('/returns/:returnId/send-message', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const returnId = String(req.params.returnId || '').trim();
+    if (!returnId) return res.status(400).json({ error: 'returnId is required' });
+
+    const message = String(req.body?.message || req.body?.comments || '').trim();
+    if (!message) return res.status(400).json({ error: 'message is required' });
+
+    const doc = await loadReturnDocForAction(returnId);
+    const body = { message: { content: message } };
+
+    const accessToken = await ensureValidToken(doc.seller);
+    await ebayReturnPost(
+      accessToken,
+      `/post-order/v2/return/${returnId}/send_message`,
+      { marketplaceId: doc.marketplaceId || 'EBAY_US', body }
+    );
+
+    res.json({ message: `Message sent on return ${returnId}` });
+  } catch (err) {
+    console.error('[Return Send Message] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayReturnError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+/**
+ * Add / update seller-provided return shipping label info.
+ * POST https://api.ebay.com/post-order/v2/return/{returnId}/add_shipping_label
+ */
+router.post('/returns/:returnId/add-shipping-label', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const returnId = String(req.params.returnId || '').trim();
+    if (!returnId) return res.status(400).json({ error: 'returnId is required' });
+
+    const doc = await loadReturnDocForAction(returnId);
+    const trackingNumber = String(req.body?.trackingNumber || '').trim();
+    const carrierEnum = String(req.body?.carrierEnum || req.body?.carrierUsed || '').trim();
+    if (!trackingNumber && !req.body?.labelData && !req.body?.fileId) {
+      return res.status(400).json({ error: 'trackingNumber (or label payload) is required' });
+    }
+
+    const body = { ...(req.body || {}) };
+    if (trackingNumber) body.trackingNumber = trackingNumber;
+    if (carrierEnum) {
+      body.carrierEnum = carrierEnum;
+      delete body.carrierUsed;
+    }
+    const labelAction = String(
+      body.labelAction || body.rtnLabelAction || (body.fileId || body.labelData ? 'UPLOAD_LABEL' : 'MARK_AS_SENT')
+    ).trim().toUpperCase();
+    // eBay ProvideShippingLabelRequest uses labelAction (NOT rtnLabelAction).
+    body.labelAction = labelAction;
+    delete body.rtnLabelAction;
+    delete body.comments;
+    if (req.body?.comments) body.comments = { content: String(req.body.comments) };
+    if (body.fileId != null && body.fileId !== '') body.fileId = String(body.fileId);
+
+    const accessToken = await ensureValidToken(doc.seller);
+    await ebayReturnPost(
+      accessToken,
+      `/post-order/v2/return/${returnId}/add_shipping_label`,
+      { marketplaceId: doc.marketplaceId || 'EBAY_US', body }
+    );
+
+    await enrichReturnFromEbayApis(doc, accessToken);
+    const fresh = await leanReturnAfterAction(returnId);
+
+    res.json({
+      message: `Added shipping label info for return ${returnId}`,
+      return: fresh,
+    });
+  } catch (err) {
+    console.error('[Return Add Shipping Label] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayReturnError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+/**
+ * Upload a seller-provided return shipping label (matches Seller Hub "Upload your label").
+ * 1) POST /post-order/v2/return/{returnId}/file/upload  (filePurpose=LABEL_RELATED)
+ * 2) POST /post-order/v2/return/{returnId}/add_shipping_label  (fileId + tracking + carrier)
+ */
+router.post(
+  '/returns/:returnId/upload-shipping-label',
+  requireAuth,
+  requirePageAccess('Disputes'),
+  upload.single('file'),
+  async (req, res) => {
+    try {
+      const returnId = String(req.params.returnId || '').trim();
+      if (!returnId) return res.status(400).json({ error: 'returnId is required' });
+
+      const doc = await loadReturnDocForAction(returnId);
+      const trackingNumber = String(req.body?.trackingNumber || '').trim();
+      const carrierEnum = String(req.body?.carrierEnum || req.body?.carrierUsed || '').trim();
+      if (!trackingNumber) return res.status(400).json({ error: 'trackingNumber is required' });
+      if (!carrierEnum) return res.status(400).json({ error: 'carrierEnum is required' });
+
+      let fileName = String(req.body?.fileName || '').trim();
+      let fileFormat = String(req.body?.fileFormat || '').trim().toUpperCase();
+      let dataB64 = String(req.body?.data || req.body?.fileData || '').trim();
+
+      if (req.file?.buffer) {
+        dataB64 = req.file.buffer.toString('base64');
+        if (!fileName) fileName = req.file.originalname || `return-label-${returnId}`;
+        if (!fileFormat && req.file.mimetype) {
+          const mime = String(req.file.mimetype).toLowerCase();
+          if (mime.includes('jpeg') || mime.includes('jpg')) fileFormat = 'JPEG';
+          else if (mime.includes('png')) fileFormat = 'PNG';
+          else if (mime.includes('gif')) fileFormat = 'GIF';
+          else if (mime.includes('bmp')) fileFormat = 'BMP';
+          else if (mime.includes('tif')) fileFormat = 'TIFF';
+          else if (mime.includes('pdf')) fileFormat = 'PDF';
+        }
+      }
+
+      if (!dataB64) {
+        return res.status(400).json({ error: 'label file is required (PDF or image)' });
+      }
+      if (!fileName) fileName = `return-label-${returnId}.pdf`;
+
+      const commaIdx = dataB64.indexOf(',');
+      if (dataB64.startsWith('data:') && commaIdx >= 0) {
+        dataB64 = dataB64.slice(commaIdx + 1);
+      }
+      dataB64 = dataB64.replace(/\s+/g, '');
+
+      if (!fileFormat) {
+        const lower = fileName.toLowerCase();
+        if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) fileFormat = 'JPEG';
+        else if (lower.endsWith('.png')) fileFormat = 'PNG';
+        else if (lower.endsWith('.gif')) fileFormat = 'GIF';
+        else if (lower.endsWith('.bmp')) fileFormat = 'BMP';
+        else if (lower.endsWith('.tif') || lower.endsWith('.tiff')) fileFormat = 'TIFF';
+        else if (lower.endsWith('.pdf')) fileFormat = 'PDF';
+        else fileFormat = 'PDF';
+      }
+
+      const accessToken = await ensureValidToken(doc.seller);
+      const marketplaceId = doc.marketplaceId || 'EBAY_US';
+
+      const uploadBody = {
+        data: dataB64,
+        fileName,
+        filePurpose: 'LABEL_RELATED',
+        fileFormat,
+      };
+      const uploadRes = await ebayReturnPost(
+        accessToken,
+        `/post-order/v2/return/${returnId}/file/upload`,
+        { marketplaceId, body: uploadBody }
+      );
+
+      const fileId = uploadRes?.fileId
+        ?? uploadRes?.file?.fileId
+        ?? uploadRes?.files?.[0]?.fileId
+        ?? null;
+      if (fileId == null || fileId === '') {
+        return res.status(502).json({
+          error: 'eBay accepted the file upload but did not return a fileId',
+          ebay: uploadRes,
+        });
+      }
+
+      const labelAction = String(
+        req.body?.labelAction || req.body?.rtnLabelAction || 'UPLOAD_LABEL'
+      ).trim().toUpperCase();
+      // Verified against eBay: only labelAction works. Sending rtnLabelAction causes
+      // "Missing Input (rtnLabelAction)".
+      const labelBody = {
+        labelAction,
+        trackingNumber,
+        carrierEnum,
+        fileId: String(fileId),
+      };
+      if (req.body?.comments) {
+        labelBody.comments = { content: String(req.body.comments) };
+      }
+
+      console.log('[Return Upload Shipping Label] add_shipping_label body:', labelBody);
+
+      const labelRes = await ebayReturnPost(
+        accessToken,
+        `/post-order/v2/return/${returnId}/add_shipping_label`,
+        { marketplaceId, body: labelBody }
+      );
+
+      await enrichReturnFromEbayApis(doc, accessToken);
+      const fresh = await leanReturnAfterAction(returnId);
+
+      res.json({
+        message: `Uploaded return shipping label for return ${returnId}`,
+        fileId: String(fileId),
+        ebayUpload: uploadRes,
+        ebayLabel: labelRes,
+        return: fresh,
+      });
+    } catch (err) {
+      console.error('[Return Upload Shipping Label] Error:', JSON.stringify(err.ebay || err.message, null, 2));
+      res.status(err.status || 500).json({
+        error: extractEbayReturnError(err),
+        ebay: err.ebay,
+      });
+    }
+  }
+);
+
+/**
+ * Upload a return file (base64 JSON or multipart).
+ * POST https://api.ebay.com/post-order/v2/return/{returnId}/file/upload
+ */
+router.post(
+  '/returns/:returnId/file-upload',
+  requireAuth,
+  requirePageAccess('Disputes'),
+  upload.single('file'),
+  async (req, res) => {
+    try {
+      const returnId = String(req.params.returnId || '').trim();
+      if (!returnId) return res.status(400).json({ error: 'returnId is required' });
+
+      const doc = await loadReturnDocForAction(returnId);
+      const filePurpose = String(req.body?.filePurpose || 'ITEM_RELATED').trim().toUpperCase();
+      let fileName = String(req.body?.fileName || '').trim();
+      let fileFormat = String(req.body?.fileFormat || '').trim().toUpperCase();
+      let dataB64 = String(req.body?.data || req.body?.fileData || '').trim();
+
+      if (req.file?.buffer) {
+        dataB64 = req.file.buffer.toString('base64');
+        if (!fileName) fileName = req.file.originalname || `return-${returnId}`;
+        if (!fileFormat && req.file.mimetype) {
+          const mime = String(req.file.mimetype).toLowerCase();
+          if (mime.includes('jpeg') || mime.includes('jpg')) fileFormat = 'JPEG';
+          else if (mime.includes('png')) fileFormat = 'PNG';
+          else if (mime.includes('gif')) fileFormat = 'GIF';
+          else if (mime.includes('bmp')) fileFormat = 'BMP';
+          else if (mime.includes('tif')) fileFormat = 'TIFF';
+          else if (mime.includes('pdf')) fileFormat = 'PDF';
+        }
+      }
+
+      if (!dataB64) return res.status(400).json({ error: 'file data is required (multipart file or base64 data)' });
+      if (!fileName) fileName = `return-${returnId}`;
+
+      // Strip data-URL prefix if present
+      const commaIdx = dataB64.indexOf(',');
+      if (dataB64.startsWith('data:') && commaIdx >= 0) {
+        dataB64 = dataB64.slice(commaIdx + 1);
+      }
+      // eBay rejects whitespace/newlines in base64 payloads
+      dataB64 = dataB64.replace(/\s+/g, '');
+
+      if (!fileFormat) {
+        const lower = fileName.toLowerCase();
+        if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) fileFormat = 'JPEG';
+        else if (lower.endsWith('.png')) fileFormat = 'PNG';
+        else if (lower.endsWith('.gif')) fileFormat = 'GIF';
+        else if (lower.endsWith('.bmp')) fileFormat = 'BMP';
+        else if (lower.endsWith('.tif') || lower.endsWith('.tiff')) fileFormat = 'TIFF';
+        else if (lower.endsWith('.pdf')) fileFormat = 'PDF';
+      }
+
+      const body = {
+        data: dataB64,
+        fileName,
+        filePurpose,
+      };
+      if (fileFormat) body.fileFormat = fileFormat;
+
+      const accessToken = await ensureValidToken(doc.seller);
+      const ebayRes = await ebayReturnPost(
+        accessToken,
+        `/post-order/v2/return/${returnId}/file/upload`,
+        { marketplaceId: doc.marketplaceId || 'EBAY_US', body }
+      );
+
+      await enrichReturnFromEbayApis(doc, accessToken);
+      const fresh = await leanReturnAfterAction(returnId);
+
+      res.json({
+        message: `Uploaded file for return ${returnId}`,
+        ebay: ebayRes,
+        return: fresh,
+      });
+    } catch (err) {
+      console.error('[Return File Upload] Error:', err.ebay || err.message);
+      res.status(err.status || 500).json({
+        error: extractEbayReturnError(err),
+        ebay: err.ebay,
+      });
+    }
+  }
+);
+
+async function loadSellerForReturnApis(sellerId) {
+  const sid = String(sellerId || '').trim();
+  if (!sid) {
+    const err = new Error('sellerId is required');
+    err.status = 400;
+    throw err;
+  }
+  const seller = await Seller.findById(sid).populate('user', 'username');
+  if (!seller) {
+    const err = new Error('Seller not found');
+    err.status = 404;
+    throw err;
+  }
+  return seller;
+}
+
+/**
+ * Get seller return preferences.
+ * GET https://api.ebay.com/post-order/v2/return/preference
+ */
+router.get('/return-preferences', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const seller = await loadSellerForReturnApis(req.query.sellerId);
+    const marketplaceId = String(req.query.marketplaceId || 'EBAY_US');
+    const accessToken = await ensureValidToken(seller);
+    const data = await ebayReturnGet(
+      accessToken,
+      '/post-order/v2/return/preference',
+      { marketplaceId }
+    );
+    res.json({
+      sellerId: String(seller._id),
+      sellerName: seller.user?.username || '',
+      data,
+    });
+  } catch (err) {
+    console.error('[Return Get Preferences] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayReturnError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+/**
+ * Set seller return preferences.
+ * POST https://api.ebay.com/post-order/v2/return/preference
+ */
+router.post('/return-preferences', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const seller = await loadSellerForReturnApis(req.body?.sellerId);
+    const marketplaceId = String(req.body?.marketplaceId || 'EBAY_US');
+    const body = { ...(req.body || {}) };
+    delete body.sellerId;
+    delete body.marketplaceId;
+
+    const accessToken = await ensureValidToken(seller);
+    const data = await ebayReturnPost(
+      accessToken,
+      '/post-order/v2/return/preference',
+      { marketplaceId, body }
+    );
+    res.json({
+      message: 'Return preferences updated',
+      sellerId: String(seller._id),
+      data,
+    });
+  } catch (err) {
+    console.error('[Return Set Preferences] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayReturnError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+/**
+ * Create a return request.
+ * POST https://api.ebay.com/post-order/v2/return
+ */
+router.post('/returns/create', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const seller = await loadSellerForReturnApis(req.body?.sellerId);
+    const marketplaceId = String(req.body?.marketplaceId || 'EBAY_US');
+    const body = { ...(req.body || {}) };
+    delete body.sellerId;
+    delete body.marketplaceId;
+
+    if (!body.itemId && !body.returnRequest) {
+      return res.status(400).json({
+        error: 'Provide return create payload (e.g. itemId/transactionId or returnRequest object)',
+      });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+    const data = await ebayReturnPost(
+      accessToken,
+      '/post-order/v2/return',
+      { marketplaceId, body }
+    );
+    res.json({
+      message: 'Return create request submitted',
+      sellerId: String(seller._id),
+      data,
+    });
+  } catch (err) {
+    console.error('[Return Create] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayReturnError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+function parseEbayPostOrderDate(value) {
+  if (!value) return null;
+  if (typeof value === 'string' || value instanceof Date) {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (value.value) {
+    const d = new Date(value.value);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+function mapEbayCancellation(ebayCancel, sellerId) {
+  const lineItem = Array.isArray(ebayCancel.lineItems) ? ebayCancel.lineItems[0] : null;
+  const amount = ebayCancel.requestRefundAmount || {};
+  const cancelId = String(ebayCancel.cancelId || '');
+  const legacyOrderId = ebayCancel.legacyOrderId || ebayCancel.orderId || null;
+  const buyerLoginName = ebayCancel.buyerLoginName || null;
+
+  return {
+    seller: sellerId,
+    cancelId,
+    legacyOrderId,
+    orderId: legacyOrderId,
+    buyerUsername: buyerLoginName,
+    buyerLoginName,
+    sellerLoginName: ebayCancel.sellerLoginName || null,
+    respondType: ebayCancel.respondType || null,
+    cancelState: ebayCancel.cancelState || null,
+    cancelStatus: ebayCancel.cancelStatus || null,
+    cancelReason: ebayCancel.cancelReason || null,
+    cancelCloseReason: ebayCancel.cancelCloseReason || null,
+    requestorType: ebayCancel.requestorType || null,
+    paymentStatus: ebayCancel.paymentStatus || null,
+    marketplaceId: ebayCancel.marketplaceId || null,
+    partialOrderType: ebayCancel.partialOrderType || null,
+    requestRefundAmount: {
+      value: amount.value != null ? String(amount.value) : '',
+      currency: amount.currency || ''
+    },
+    cancelRequestDate: parseEbayPostOrderDate(ebayCancel.cancelRequestDate),
+    cancelCloseDate: parseEbayPostOrderDate(ebayCancel.cancelCloseDate),
+    sellerResponseDueDate: parseEbayPostOrderDate(ebayCancel.sellerResponseDueDate),
+    buyerResponseDueDate: parseEbayPostOrderDate(ebayCancel.buyerResponseDueDate),
+    lastModifiedDate: parseEbayPostOrderDate(ebayCancel.lastModifiedDate),
+    shipmentDate: parseEbayPostOrderDate(ebayCancel.shipmentDate),
+    itemId: lineItem?.itemId != null ? String(lineItem.itemId) : (lineItem?.legacyItemId ? String(lineItem.legacyItemId) : null),
+    itemTitle: lineItem?.itemTitle || lineItem?.title || null,
+    rawData: ebayCancel
+  };
+}
+
+async function fetchEbayCancelDetail(accessToken, cancelId, marketplaceId = 'EBAY_US') {
+  const res = await axios.get(`https://api.ebay.com/post-order/v2/cancellation/${cancelId}`, {
+    headers: {
+      Authorization: `IAF ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-EBAY-C-MARKETPLACE-ID': marketplaceId || 'EBAY_US'
+    },
+    validateStatus: () => true
+  });
+  if (res.status >= 400) {
+    const ebayErr = res.data?.error;
+    const msg = Array.isArray(ebayErr) ? ebayErr[0]?.message : (res.data?.errors?.[0]?.message || `HTTP ${res.status}`);
+    console.warn(`[Fetch Cancellations] detail ${cancelId} failed:`, msg);
+    return null;
+  }
+  return res.data?.cancelDetail || res.data || null;
+}
+
+function applyCancelDetailFields(cancelData, detail) {
+  if (!detail) return cancelData;
+  const lineItem = Array.isArray(detail.lineItems) ? detail.lineItems[0] : null;
+  if (detail.respondType) cancelData.respondType = detail.respondType;
+  if (detail.buyerLoginName) {
+    cancelData.buyerLoginName = detail.buyerLoginName;
+    cancelData.buyerUsername = detail.buyerLoginName;
+  }
+  if (detail.sellerLoginName) cancelData.sellerLoginName = detail.sellerLoginName;
+  const itemId = lineItem?.itemId ?? detail.itemId ?? null;
+  if (itemId != null && itemId !== '') cancelData.itemId = String(itemId);
+  if (lineItem?.itemTitle) cancelData.itemTitle = lineItem.itemTitle;
+  cancelData.rawData = {
+    ...(cancelData.rawData || {}),
+    cancelDetail: detail
+  };
+  return cancelData;
+}
+
+/**
+ * Fetch cancellations from eBay Post-Order cancellation/search and upsert locally.
+ * Docs: https://api.ebay.com/post-order/v2/cancellation/search
+ */
+router.post('/fetch-cancellations', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+      .populate('user', 'username');
+
+    if (sellers.length === 0) {
+      return res.json({ message: 'No sellers with eBay tokens found', totalCancellations: 0 });
+    }
+
+    let totalNew = 0;
+    let totalUpdated = 0;
+    const errors = [];
+
+    console.log(`[Fetch Cancellations] Starting for ${sellers.length} sellers`);
+
+    const results = await Promise.allSettled(
+      sellers.map(async (seller) => {
+        const sellerName = seller.user?.username || 'Unknown Seller';
+
+        try {
+          const nowUTC = Date.now();
+          const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
+          const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
+          let accessToken = seller.ebayTokens.access_token;
+
+          if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
+            console.log(`[Fetch Cancellations] Refreshing token for seller ${sellerName}`);
+            const refreshRes = await axios.post(
+              'https://api.ebay.com/identity/v1/oauth2/token',
+              qs.stringify(buildRefreshTokenParams(seller)),
+              {
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
+                },
+              }
+            );
+            accessToken = refreshRes.data.access_token;
+            seller.ebayTokens.access_token = accessToken;
+            seller.ebayTokens.expires_in = refreshRes.data.expires_in;
+            seller.ebayTokens.fetchedAt = new Date(nowUTC);
+            await seller.save();
+          }
+
+          const cancelUrl = 'https://api.ebay.com/post-order/v2/cancellation/search';
+          const nowIso = new Date().toISOString();
+          const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+          const cancelRes = await axios.get(cancelUrl, {
+            headers: {
+              Authorization: `IAF ${accessToken}`,
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+            },
+            params: {
+              // eBay requires BOTH from + to when either date bound is sent
+              creation_date_range_from: thirtyDaysAgo,
+              creation_date_range_to: nowIso,
+              limit: 200,
+              role: 'SELLER'
+            }
+          });
+
+          const cancellations = cancelRes.data?.cancellations
+            || cancelRes.data?.members
+            || [];
+          console.log(`[Fetch Cancellations] Seller ${sellerName}: Found ${cancellations.length} cancellations`);
+
+          let newCount = 0;
+          let updatedCount = 0;
+
+          for (const ebayCancel of cancellations) {
+            if (!ebayCancel?.cancelId && ebayCancel?.cancelId !== 0) continue;
+            let cancelData = mapEbayCancellation(ebayCancel, seller._id);
+            if (!cancelData.cancelId) continue;
+
+            // Search often omits buyerLoginName / respondType — pull from GET /cancellation/{id}
+            try {
+              const detail = await fetchEbayCancelDetail(
+                accessToken,
+                cancelData.cancelId,
+                cancelData.marketplaceId || 'EBAY_US'
+              );
+              cancelData = applyCancelDetailFields(cancelData, detail);
+            } catch (detailErr) {
+              console.warn(`[Fetch Cancellations] detail enrich failed for ${cancelData.cancelId}:`, detailErr.message);
+            }
+
+            const existing = await Cancellation.findOne({ cancelId: cancelData.cancelId });
+
+            if (existing) {
+              const statusChanged = existing.cancelStatus !== cancelData.cancelStatus;
+              const stateChanged = existing.cancelState !== cancelData.cancelState;
+              const reasonChanged = existing.cancelReason !== cancelData.cancelReason;
+              const buyerChanged = (existing.buyerLoginName || existing.buyerUsername || '') !== (cancelData.buyerLoginName || '');
+              const itemChanged = (existing.itemId || '') !== (cancelData.itemId || '');
+              const respondChanged = (existing.respondType || '') !== (cancelData.respondType || '');
+              if (statusChanged || stateChanged || reasonChanged || buyerChanged || itemChanged || respondChanged) {
+                existing.set(cancelData);
+                await existing.save();
+                updatedCount++;
+              } else {
+                existing.rawData = cancelData.rawData;
+                existing.lastModifiedDate = cancelData.lastModifiedDate;
+                await existing.save();
+              }
+            } else {
+              await Cancellation.create(cancelData);
+              newCount++;
+            }
+          }
+
+          return {
+            sellerName,
+            newCancellations: newCount,
+            updatedCancellations: updatedCount,
+            totalCancellations: cancellations.length
+          };
+        } catch (err) {
+          const ebayErr = err.response?.data?.error;
+          const ebayMsg = (Array.isArray(ebayErr) ? ebayErr[0]?.message : null)
+            || err.response?.data?.errors?.[0]?.message
+            || (typeof ebayErr === 'string' ? ebayErr : null)
+            || (ebayErr && typeof ebayErr === 'object' ? JSON.stringify(ebayErr) : null)
+            || err.message;
+          console.error(`[Fetch Cancellations] Error for seller ${sellerName}:`, ebayMsg);
+          throw new Error(`${sellerName}: ${ebayMsg}`);
+        }
+      })
+    );
+
+    const successResults = [];
+    results.forEach((result) => {
+      if (result.status === 'fulfilled') {
+        successResults.push(result.value);
+        totalNew += result.value.newCancellations;
+        totalUpdated += result.value.updatedCancellations;
+      } else {
+        errors.push(result.reason.message);
+      }
+    });
+
+    res.json({
+      message: `Fetched cancellations for ${successResults.length} sellers`,
+      totalNewCancellations: totalNew,
+      totalUpdatedCancellations: totalUpdated,
+      results: successResults,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (err) {
+    console.error('[Fetch Cancellations] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Enrich stored cancellations with buyerLoginName + respondType
+ * from GET https://api.ebay.com/post-order/v2/cancellation/{cancelId}
+ */
+router.post('/enrich-cancellation-details', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const sellerIdFilter = String(req.body?.sellerId || req.query?.sellerId || '').trim();
+    const force = req.body?.force === true || req.query?.force === 'true';
+    const limit = Math.min(500, Math.max(1, parseInt(req.body?.limit || req.query?.limit, 10) || 300));
+
+    const match = {};
+    if (sellerIdFilter) match.seller = sellerIdFilter;
+    if (!force) {
+      match.$or = [
+        { buyerLoginName: { $in: [null, ''] } },
+        { buyerLoginName: { $exists: false } },
+        { respondType: { $in: [null, ''] } },
+        { respondType: { $exists: false } },
+      ];
+    }
+
+    const docs = await Cancellation.find(match)
+      .sort({ cancelRequestDate: -1 })
+      .limit(limit)
+      .populate({ path: 'seller', populate: { path: 'user', select: 'username' } });
+
+    if (docs.length === 0) {
+      return res.json({
+        message: 'No cancellations need detail enrichment',
+        checked: 0,
+        updated: 0,
+        failed: 0,
+      });
+    }
+
+    const bySeller = new Map();
+    for (const doc of docs) {
+      const sid = String(doc.seller?._id || doc.seller || '');
+      if (!sid) continue;
+      if (!bySeller.has(sid)) bySeller.set(sid, []);
+      bySeller.get(sid).push(doc);
+    }
+
+    let updated = 0;
+    let failed = 0;
+    const errors = [];
+
+    for (const [, sellerDocs] of bySeller) {
+      const seller = sellerDocs[0]?.seller;
+      const sellerName = seller?.user?.username || String(seller?._id || 'unknown');
+      if (!seller?.ebayTokens?.refresh_token && !seller?.ebayTokens?.access_token) {
+        failed += sellerDocs.length;
+        errors.push(`${sellerName}: no eBay token`);
+        continue;
+      }
+
+      let accessToken;
+      try {
+        accessToken = await ensureValidToken(seller);
+      } catch (tokenErr) {
+        failed += sellerDocs.length;
+        errors.push(`${sellerName}: token refresh failed (${tokenErr.message})`);
+        continue;
+      }
+
+      for (const doc of sellerDocs) {
+        try {
+          const detail = await fetchEbayCancelDetail(
+            accessToken,
+            doc.cancelId,
+            doc.marketplaceId || 'EBAY_US'
+          );
+          if (!detail) {
+            failed += 1;
+            continue;
+          }
+
+          const buyerLoginName = detail.buyerLoginName || null;
+          const respondType = detail.respondType || null;
+          const lineItem = Array.isArray(detail.lineItems) ? detail.lineItems[0] : null;
+          const itemId = lineItem?.itemId != null ? String(lineItem.itemId) : (doc.itemId || null);
+
+          const changed =
+            (buyerLoginName && buyerLoginName !== doc.buyerLoginName) ||
+            (respondType && respondType !== doc.respondType) ||
+            (itemId && itemId !== doc.itemId);
+
+          if (buyerLoginName) {
+            doc.buyerLoginName = buyerLoginName;
+            doc.buyerUsername = buyerLoginName;
+          }
+          if (respondType) doc.respondType = respondType;
+          if (itemId) doc.itemId = itemId;
+          if (lineItem?.itemTitle) doc.itemTitle = lineItem.itemTitle;
+          if (detail.sellerLoginName) doc.sellerLoginName = detail.sellerLoginName;
+          doc.rawData = {
+            ...(doc.rawData || {}),
+            cancelDetail: detail,
+          };
+          await doc.save();
+          if (changed || buyerLoginName || respondType) updated += 1;
+        } catch (e) {
+          failed += 1;
+          errors.push(`${sellerName}/${doc.cancelId}: ${e.message}`);
+        }
+      }
+    }
+
+    res.json({
+      message: `Enriched cancellations via GET /post-order/v2/cancellation/{cancelId}`,
+      checked: docs.length,
+      updated,
+      failed,
+      errors: errors.length ? errors.slice(0, 20) : undefined,
+    });
+  } catch (err) {
+    console.error('[Enrich Cancellation Details] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function extractEbayPostOrderError(errOrData) {
+  const data = errOrData?.response?.data || errOrData;
+  const ebayErr = data?.error;
+  if (Array.isArray(ebayErr) && ebayErr[0]?.message) return ebayErr[0].message;
+  if (typeof ebayErr === 'string') return ebayErr;
+  if (data?.errors?.[0]?.message) return data.errors[0].message;
+  if (data?.errorMessage) return data.errorMessage;
+  if (errOrData?.message) return errOrData.message;
+  return 'eBay Post-Order request failed';
+}
+
+async function postEbayCancelAction({ accessToken, cancelId, action, marketplaceId, body }) {
+  const url = `https://api.ebay.com/post-order/v2/cancellation/${cancelId}/${action}`;
+  const res = await axios.post(url, body || {}, {
+    headers: {
+      Authorization: `IAF ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-EBAY-C-MARKETPLACE-ID': marketplaceId || 'EBAY_US',
+    },
+    validateStatus: () => true,
+  });
+  if (res.status >= 400) {
+    const err = new Error(extractEbayPostOrderError(res.data));
+    err.status = res.status;
+    err.ebay = res.data;
+    throw err;
+  }
+  return res.data || {};
+}
+
+async function refreshLocalCancellationFromEbay(doc, accessToken) {
+  const detail = await fetchEbayCancelDetail(
+    accessToken,
+    doc.cancelId,
+    doc.marketplaceId || 'EBAY_US'
+  );
+  if (!detail) return doc;
+  const mapped = mapEbayCancellation(detail, doc.seller?._id || doc.seller);
+  applyCancelDetailFields(mapped, detail);
+  doc.set({
+    cancelState: mapped.cancelState,
+    cancelStatus: mapped.cancelStatus,
+    cancelReason: mapped.cancelReason,
+    cancelCloseReason: mapped.cancelCloseReason,
+    respondType: mapped.respondType,
+    buyerLoginName: mapped.buyerLoginName,
+    buyerUsername: mapped.buyerUsername,
+    sellerLoginName: mapped.sellerLoginName,
+    itemId: mapped.itemId,
+    itemTitle: mapped.itemTitle,
+    cancelCloseDate: mapped.cancelCloseDate,
+    sellerResponseDueDate: mapped.sellerResponseDueDate,
+    lastModifiedDate: mapped.lastModifiedDate,
+    requestRefundAmount: mapped.requestRefundAmount,
+    rawData: mapped.rawData,
+  });
+  await doc.save();
+  return doc;
+}
+
+/**
+ * Approve a buyer cancellation request.
+ * POST https://api.ebay.com/post-order/v2/cancellation/{cancelId}/approve
+ */
+router.post('/cancellations/:cancelId/approve', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const cancelId = String(req.params.cancelId || '').trim();
+    if (!cancelId) return res.status(400).json({ error: 'cancelId is required' });
+
+    const doc = await Cancellation.findOne({ cancelId }).populate({
+      path: 'seller',
+      populate: { path: 'user', select: 'username' },
+    });
+    if (!doc) return res.status(404).json({ error: 'Cancellation not found in local DB. Fetch from eBay first.' });
+    if (!doc.seller) return res.status(400).json({ error: 'Cancellation has no seller linked' });
+
+    const accessToken = await ensureValidToken(doc.seller);
+    await postEbayCancelAction({
+      accessToken,
+      cancelId,
+      action: 'approve',
+      marketplaceId: doc.marketplaceId || 'EBAY_US',
+      body: {},
+    });
+
+    await refreshLocalCancellationFromEbay(doc, accessToken);
+    const fresh = await Cancellation.findOne({ cancelId })
+      .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
+      .lean();
+
+    res.json({
+      message: `Approved cancellation ${cancelId}`,
+      cancellation: fresh,
+    });
+  } catch (err) {
+    console.error('[Cancel Approve] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayPostOrderError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+/**
+ * Reject a buyer cancellation request.
+ * POST https://api.ebay.com/post-order/v2/cancellation/{cancelId}/reject
+ * Optional body: { shipmentDate: "2026-07-26T00:00:00.000Z" } when already shipped.
+ */
+router.post('/cancellations/:cancelId/reject', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const cancelId = String(req.params.cancelId || '').trim();
+    if (!cancelId) return res.status(400).json({ error: 'cancelId is required' });
+
+    const doc = await Cancellation.findOne({ cancelId }).populate({
+      path: 'seller',
+      populate: { path: 'user', select: 'username' },
+    });
+    if (!doc) return res.status(404).json({ error: 'Cancellation not found in local DB. Fetch from eBay first.' });
+    if (!doc.seller) return res.status(400).json({ error: 'Cancellation has no seller linked' });
+
+    const shipmentDateRaw = req.body?.shipmentDate;
+    const body = {};
+    if (shipmentDateRaw) {
+      const d = new Date(shipmentDateRaw);
+      if (Number.isNaN(d.getTime())) {
+        return res.status(400).json({ error: 'shipmentDate must be a valid date' });
+      }
+      body.shipmentDate = { value: d.toISOString() };
+    }
+
+    const accessToken = await ensureValidToken(doc.seller);
+    await postEbayCancelAction({
+      accessToken,
+      cancelId,
+      action: 'reject',
+      marketplaceId: doc.marketplaceId || 'EBAY_US',
+      body,
+    });
+
+    await refreshLocalCancellationFromEbay(doc, accessToken);
+    const fresh = await Cancellation.findOne({ cancelId })
+      .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
+      .lean();
+
+    res.json({
+      message: `Rejected cancellation ${cancelId}`,
+      cancellation: fresh,
+    });
+  } catch (err) {
+    console.error('[Cancel Reject] Error:', err.ebay || err.message);
+    res.status(err.status || 500).json({
+      error: extractEbayPostOrderError(err),
+      ebay: err.ebay,
+    });
+  }
+});
+
+router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const { sellerId, status, state, startDate, endDate, sortBy, sortDir } = req.query;
+    const query = {};
+
+    if (sellerId) query.seller = sellerId;
+    if (status) query.cancelStatus = status;
+    if (state) query.cancelState = state;
+
+    if (startDate || endDate) {
+      query.cancelRequestDate = {};
+      if (startDate) query.cancelRequestDate.$gte = new Date(startDate);
+      if (endDate) {
+        const endOfDay = new Date(endDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        query.cancelRequestDate.$lte = endOfDay;
+      }
+    }
+
+    const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
+    const sortFieldMap = {
+      cancelStatus: 'cancelStatus',
+      cancelState: 'cancelState',
+      cancelRequestDate: 'cancelRequestDate',
+      sellerResponseDueDate: 'sellerResponseDueDate'
+    };
+    const mappedSort = sortFieldMap[String(sortBy || '').trim()];
+    const dir = String(sortDir || 'desc').toLowerCase() === 'asc' ? 1 : -1;
+    const sort = mappedSort
+      ? { [mappedSort]: dir, cancelRequestDate: -1 }
+      : { cancelRequestDate: -1 };
+
+    const [cancellations, totalCount] = await Promise.all([
+      Cancellation.find(query)
+        .populate({
+          path: 'seller',
+          select: 'user',
+          populate: { path: 'user', select: 'username' }
+        })
+        .sort(sort)
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Cancellation.countDocuments(query)
+    ]);
+
+    const orderIds = cancellations.map((c) => c.orderId || c.legacyOrderId).filter(Boolean);
+    const orders = orderIds.length
+      ? await Order.find(
+        { $or: [{ orderId: { $in: orderIds } }, { legacyOrderId: { $in: orderIds } }] },
+        { orderId: 1, legacyOrderId: 1, productName: 1, creationDate: 1 }
+      ).lean()
+      : [];
+    const orderMap = {};
+    orders.forEach((o) => {
+      const payload = { productName: o.productName, dateSold: o.creationDate };
+      if (o.orderId) orderMap[o.orderId] = payload;
+      if (o.legacyOrderId) orderMap[o.legacyOrderId] = payload;
+    });
+
+    const rows = cancellations.map((c) => {
+      const key = c.orderId || c.legacyOrderId;
+      return {
+        ...c,
+        productName: orderMap[key]?.productName || c.itemTitle || null,
+        dateSold: orderMap[key]?.dateSold || null
+      };
+    });
+
+    res.json({
+      cancellations: rows,
+      totalCancellations: totalCount,
+      pagination: {
+        currentPage: pageNum,
+        totalPages: Math.ceil(totalCount / limitNum) || 1,
+        totalOrders: totalCount,
+        limit: limitNum
+      }
+    });
+  } catch (err) {
+    console.error('[Stored Cancellations] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get stored returns from database
 
 router.get('/stored-returns', async (req, res) => {
@@ -8176,23 +9884,35 @@ router.get('/stored-returns', async (req, res) => {
 
     const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
 
+    // Exclude bulky eBay payloads from list responses (keeps UI from hanging).
+    // Action menus use sellerAvailableOptions + lean row fields instead of rawData.
     const returns = await Return.find(query)
+      .select({
+        rawData: 0,
+        rawDetail: 0,
+        rawTracking: 0,
+        files: 0,
+        trackingInfo: 0,
+        trackingScanHistory: 0,
+      })
       .populate({
         path: 'seller',
-        select: 'user', // Select the 'user' field from Seller.js
+        select: 'user',
         populate: {
-          path: 'user', // Follow the link to User.js
-          select: 'username' // Get the 'username' from User.js
+          path: 'user',
+          select: 'username'
         }
       })
       .sort({ creationDate: -1 })
       .skip(skip)
       .limit(limitNum)
-      .lean(); // Use lean for faster queries and to allow modification
+      .lean();
 
     // Lookup product names and order dates from Orders collection
     const orderIds = returns.map(r => r.orderId).filter(Boolean);
-    const orders = await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1, creationDate: 1 }).lean();
+    const orders = orderIds.length
+      ? await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1, creationDate: 1 }).lean()
+      : [];
     const orderMap = {};
     orders.forEach(o => {
       orderMap[o.orderId] = {
@@ -8205,7 +9925,9 @@ router.get('/stored-returns', async (req, res) => {
     const returnsWithOrderData = returns.map(r => ({
       ...r,
       productName: orderMap[r.orderId]?.productName || null,
-      dateSold: orderMap[r.orderId]?.dateSold || null
+      dateSold: orderMap[r.orderId]?.dateSold || null,
+      // Order sale / transaction date for Return API table
+      transactionDate: orderMap[r.orderId]?.dateSold || r.transactionDate || null,
     }));
 
     // Get total count for the query
@@ -19013,72 +20735,6 @@ async function listConversationsFromDb(sellerId, query = {}) {
  * Dev-only generic eBay API proxy for internal tester page.
  * Lets admins call arbitrary eBay REST paths with a selected seller token.
  */
-/**
- * Live Sell Fulfillment getOrders proxy for the getOrders API explorer page.
- * Docs: https://developer.ebay.com/api-docs/sell/fulfillment/resources/order/methods/getOrders
- */
-router.get('/fulfillment/get-orders', requireAuth, requirePageAccess('GetOrdersApi'), async (req, res) => {
-  try {
-    const sellerLookup = String(req.query.sellerId || '').trim();
-    if (!sellerLookup) {
-      return res.status(400).json({ error: 'sellerId is required' });
-    }
-
-    const seller = await findSellerByIdOrUsername(sellerLookup, { populate: 'user' });
-    if (!seller) return res.status(404).json({ error: 'Seller not found' });
-    if (!seller.ebayTokens?.refresh_token) {
-      return res.status(400).json({ error: 'Seller not connected to eBay', needsReconnect: true });
-    }
-
-    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 25));
-    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
-    const filter = String(req.query.filter || '').trim();
-    const fieldGroups = String(req.query.fieldGroups || '').trim();
-    const orderIds = String(req.query.orderIds || '').trim();
-
-    const params = { limit, offset };
-    if (filter) params.filter = filter;
-    if (fieldGroups) params.fieldGroups = fieldGroups;
-    if (orderIds) params.orderIds = orderIds;
-
-    const accessToken = await ensureValidToken(seller);
-    const response = await axios.get('https://api.ebay.com/sell/fulfillment/v1/order', {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      params,
-    });
-
-    return res.json({
-      seller: {
-        id: seller._id,
-        username: seller.user?.username || null,
-      },
-      api: {
-        method: 'GET',
-        path: '/sell/fulfillment/v1/order',
-        url: 'https://api.ebay.com/sell/fulfillment/v1/order',
-        docs: 'https://developer.ebay.com/develop/api/sell/fulfillment_api#sell-fulfillment_api-order-getorders',
-      },
-      params,
-      data: response.data || {},
-    });
-  } catch (err) {
-    console.error('[getOrders explorer] Error:', err.response?.data || err.message);
-    if (sendTokenReconnectError(err, res)) return;
-    const status = err.response?.status || 500;
-    return res.status(status).json({
-      error: err.response?.data?.errors?.[0]?.message
-        || err.response?.data?.error
-        || err.message
-        || 'getOrders failed',
-      ebayErrors: err.response?.data?.errors || undefined,
-    });
-  }
-});
-
 router.post('/dev/raw-call', requireAuth, requirePageAccess('EbayApiTester'), async (req, res) => {
   try {
     const {

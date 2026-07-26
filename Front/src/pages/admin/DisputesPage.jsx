@@ -25,6 +25,7 @@ import {
   Tab,
   Fade,
   TablePagination,
+  TableSortLabel,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -39,7 +40,9 @@ import DownloadIcon from '@mui/icons-material/Download';
 import api from '../../lib/api';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ReturnRequestedPage from './ReturnRequestedPage.jsx';
+import ReturnPostOrderPage from './ReturnPostOrderPage.jsx';
 import CancelledStatusPage from './CancelledStatusPage.jsx';
+import CancellationSearchPage from './CancellationSearchPage.jsx';
 import WorksheetPage from './WorksheetPage.jsx';
 import ColumnSelector from '../../components/ColumnSelector';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
@@ -191,6 +194,8 @@ export default function DisputesPage({ initialTab = 0 }) {
   const ROWS_PER_PAGE = 25;
   const [inrPage, setInrPage] = useState(0);
   const [pdPage, setPdPage] = useState(0);
+  const [inrSortBy, setInrSortBy] = useState('');
+  const [inrSortDir, setInrSortDir] = useState('asc');
   
   const hasFetchedCases = useRef(false);
   const hasFetchedDisputes = useRef(false);
@@ -502,6 +507,16 @@ export default function DisputesPage({ initialTab = 0 }) {
   const hasActiveInrFilters = inrStatusFilter || inrSellerFilter || inrTypeFilter;
   const hasActivePdFilters = pdStatusFilter || pdSellerFilter || pdReasonFilter;
 
+  const handleInrSort = (field) => {
+    if (inrSortBy === field) {
+      setInrSortDir((dir) => (dir === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setInrSortBy(field);
+      setInrSortDir('asc');
+    }
+    setInrPage(0);
+  };
+
   // Compute filtered INR cases
   const filteredCases = cases.filter(c => {
     if (inrSellerFilter && c.seller?._id !== inrSellerFilter) return false;
@@ -536,7 +551,19 @@ export default function DisputesPage({ initialTab = 0 }) {
     return true;
   });
 
-  const paginatedCases = filteredCases.slice(
+  const sortedCases = !inrSortBy
+    ? filteredCases
+    : [...filteredCases].sort((a, b) => {
+        const dir = inrSortDir === 'asc' ? 1 : -1;
+        if (inrSortBy === 'status') {
+          const aVal = (a.status || '').toUpperCase();
+          const bVal = (b.status || '').toUpperCase();
+          return dir * aVal.localeCompare(bVal);
+        }
+        return 0;
+      });
+
+  const paginatedCases = sortedCases.slice(
     inrPage * ROWS_PER_PAGE,
     inrPage * ROWS_PER_PAGE + ROWS_PER_PAGE
   );
@@ -745,12 +772,22 @@ export default function DisputesPage({ initialTab = 0 }) {
             />
             <Tab
               icon={<AssignmentReturnIcon sx={{ fontSize: 16 }} />}
-              label="Return Requests"
+              label="Return API"
+              iconPosition="start"
+            />
+            <Tab
+              icon={<AssignmentReturnIcon sx={{ fontSize: 16 }} />}
+              label="Return Search"
               iconPosition="start"
             />
             <Tab
               icon={<CancelIcon sx={{ fontSize: 16 }} />}
               label="Cancelled Status"
+              iconPosition="start"
+            />
+            <Tab
+              icon={<CancelIcon sx={{ fontSize: 16 }} />}
+              label="Cancellation Search"
               iconPosition="start"
             />
             <Tab
@@ -899,7 +936,17 @@ export default function DisputesPage({ initialTab = 0 }) {
             {inrVisibleColumns.includes('seller') && <TableCell sx={tableHeaderCellSx}>Seller</TableCell>}
             {inrVisibleColumns.includes('buyer') && <TableCell sx={tableHeaderCellSx}>Buyer</TableCell>}
             {inrVisibleColumns.includes('item') && <TableCell sx={tableHeaderCellSx}>Item</TableCell>}
-            {inrVisibleColumns.includes('status') && <TableCell sx={tableHeaderCellSx}>Status</TableCell>}
+            {inrVisibleColumns.includes('status') && (
+              <TableCell sx={tableHeaderCellSx} sortDirection={inrSortBy === 'status' ? inrSortDir : false}>
+                <TableSortLabel
+                  active={inrSortBy === 'status'}
+                  direction={inrSortBy === 'status' ? inrSortDir : 'asc'}
+                  onClick={() => handleInrSort('status')}
+                >
+                  Status
+                </TableSortLabel>
+              </TableCell>
+            )}
             {inrVisibleColumns.includes('claimAmount') && <TableCell sx={tableHeaderCellSx}>Claim Amount</TableCell>}
             {inrVisibleColumns.includes('created') && <TableCell sx={tableHeaderCellSx}>Created (PST)</TableCell>}
             {inrVisibleColumns.includes('responseDue') && <TableCell sx={tableHeaderCellSx}>Response Due (PST)</TableCell>}
@@ -1326,18 +1373,28 @@ export default function DisputesPage({ initialTab = 0 }) {
         )}
       </TabPanel>
 
-      {/* Return Requests Tab */}
+      {/* Return API Tab (search + detail + tracking + files) */}
       <TabPanel value={tabValue} index={2}>
+        <ReturnPostOrderPage dateFilter={dateFilter} hideDateFilter embedded />
+      </TabPanel>
+
+      {/* Return Search Tab (ops / worksheet) */}
+      <TabPanel value={tabValue} index={3}>
         <ReturnRequestedPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
       {/* Cancelled Status Tab */}
-      <TabPanel value={tabValue} index={3}>
+      <TabPanel value={tabValue} index={4}>
         <CancelledStatusPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
+      {/* Cancellation Search (Post-Order API) Tab */}
+      <TabPanel value={tabValue} index={5}>
+        <CancellationSearchPage dateFilter={dateFilter} hideDateFilter embedded />
+      </TabPanel>
+
       {/* Worksheet Tab */}
-      <TabPanel value={tabValue} index={4}>
+      <TabPanel value={tabValue} index={6}>
         <WorksheetPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 

@@ -20,7 +20,8 @@ import {
   FormControl,
   InputLabel,
   TextField,
-  Pagination
+  Pagination,
+  TableSortLabel
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import CancelIcon from '@mui/icons-material/Cancel';
@@ -54,6 +55,8 @@ export default function CancelledStatusPage({
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalOrders, setTotalOrders] = useState(0);
+  const [sortBy, setSortBy] = useState('');
+  const [sortDir, setSortDir] = useState('asc');
   const limit = 25; // Items per page
 
   const MARKETPLACES = [
@@ -96,12 +99,12 @@ export default function CancelledStatusPage({
 
   useEffect(() => {
     fetchCancelledOrders();
-  }, [dateFilter, sellerFilter, marketplaceFilter, page]);
+  }, [dateFilter, sellerFilter, marketplaceFilter, page, sortBy, sortDir]);
 
   // Reset page when filters change
   useEffect(() => {
     setPage(1);
-  }, [dateFilter, sellerFilter, marketplaceFilter]);
+  }, [dateFilter, sellerFilter, marketplaceFilter, sortBy, sortDir]);
 
   // Fetch sellers on mount
   useEffect(() => {
@@ -151,6 +154,10 @@ export default function CancelledStatusPage({
       // Add filters
       if (sellerFilter) params.sellerId = sellerFilter;
       if (marketplaceFilter) params.marketplace = marketplaceFilter;
+      if (sortBy) {
+        params.sortBy = sortBy;
+        params.sortDir = sortDir;
+      }
 
       // NEW: Use the dedicated endpoint that filters server-side (30-day window)
       const res = await api.get('/ebay/cancelled-orders', { params });
@@ -176,6 +183,28 @@ export default function CancelledStatusPage({
     if (navigator?.clipboard?.writeText) {
       navigator.clipboard.writeText(val);
     }
+  };
+
+  const handleSort = (field) => {
+    if (sortBy === field) {
+      setSortDir((dir) => (dir === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(field);
+      setSortDir('asc');
+    }
+  };
+
+  const cancelStatusHeaderSx = {
+    backgroundColor: 'error.main',
+    color: 'white',
+    fontWeight: 'bold',
+    position: 'sticky',
+    top: 0,
+    zIndex: 1,
+    '& .MuiTableSortLabel-root': { color: 'inherit' },
+    '& .MuiTableSortLabel-root:hover': { color: 'rgba(255,255,255,0.85)' },
+    '& .MuiTableSortLabel-root.Mui-active': { color: 'inherit' },
+    '& .MuiTableSortLabel-icon': { color: 'rgba(255,255,255,0.7) !important' },
   };
 
   const formatDate = (dateStr) => {
@@ -478,7 +507,20 @@ export default function CancelledStatusPage({
                 {visibleColumns.includes('total') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }} align="right">
                   Total
                 </TableCell>}
-                {visibleColumns.includes('cancelStatus') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }}>Cancel Status</TableCell>}
+                {visibleColumns.includes('cancelStatus') && (
+                  <TableCell
+                    sx={cancelStatusHeaderSx}
+                    sortDirection={sortBy === 'cancelStatus' ? sortDir : false}
+                  >
+                    <TableSortLabel
+                      active={sortBy === 'cancelStatus'}
+                      direction={sortBy === 'cancelStatus' ? sortDir : 'asc'}
+                      onClick={() => handleSort('cancelStatus')}
+                    >
+                      Cancel Status
+                    </TableSortLabel>
+                  </TableCell>
+                )}
                 {visibleColumns.includes('refunds') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }}>Refunds</TableCell>}
                 {visibleColumns.includes('worksheetStatus') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }}>Worksheet Status</TableCell>}
                 {visibleColumns.includes('logs') && <TableCell sx={{ backgroundColor: 'error.main', color: 'white', fontWeight: 'bold', position: 'sticky', top: 0, zIndex: 1 }}>Logs</TableCell>}
