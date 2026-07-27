@@ -3521,6 +3521,236 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 }
 
 // NEW ENDPOINT: All Orders with USD conversion
+router.get('/all-orders-usd/account-profit', async (req, res) => {
+  const { sellerId, searchOrderId, searchBuyerName, searchItemNumber, productName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
+
+  try {
+    const computedProfitExpression = {
+      $subtract: [
+        {
+          $subtract: [
+            { $ifNull: ['$pBalanceINR', 0] },
+            { $ifNull: ['$amazonTotalINR', 0] }
+          ]
+        },
+        { $ifNull: ['$totalCC', 0] }
+      ]
+    };
+
+    let query = {};
+    const { activeSellerIds } = await applyActiveSellerScope(query, sellerId);
+
+    query.$and = query.$and || [];
+    query.$and.push({
+      $or: [
+        { orderPaymentStatus: { $exists: false } },
+        { orderPaymentStatus: null },
+        { orderPaymentStatus: { $nin: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] } }
+      ]
+    });
+
+    if (excludeCancelled === 'true') {
+      query.$and.push(
+        {
+          $or: [
+            { cancelState: { $exists: false } },
+            { cancelState: null },
+            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        },
+        {
+          $or: [
+            { 'cancelStatus.cancelState': { $exists: false } },
+            { 'cancelStatus.cancelState': null },
+            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        }
+      );
+    }
+
+    if (searchOrderId) query.orderId = { $regex: searchOrderId, $options: 'i' };
+
+    if (searchBuyerName) {
+      query.$and.push({
+        $or: [
+          { 'buyer.buyerRegistrationAddress.fullName': { $regex: searchBuyerName, $options: 'i' } },
+          { 'buyer.username': { $regex: searchBuyerName, $options: 'i' } }
+        ]
+      });
+    }
+
+    if (searchItemNumber) {
+      query.$and.push({ 'lineItems.legacyItemId': { $regex: searchItemNumber, $options: 'i' } });
+    }
+
+    if (productName) {
+      const normalizedTokens = String(productName)
+        .trim()
+        .split(/\s+/)
+        .map(token => '\\b' + token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .filter(Boolean);
+
+      const productNamePattern = normalizedTokens.length > 0
+        ? normalizedTokens.join('.*')
+        : '\\b' + String(productName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+      query.$and.push({
+        $or: [
+          { productName: { $regex: productNamePattern, $options: 'i' } },
+          { 'lineItems.title': { $regex: productNamePattern, $options: 'i' } }
+        ]
+      });
+    }
+
+    if (startDate || endDate) {
+      query.dateSold = {};
+      if (startDate) query.dateSold.$gte = getPTDayBoundsUTC(startDate).start;
+      if (endDate) query.dateSold.$lte = getPTDayBoundsUTC(endDate).end;
+    }
+
+    if (searchMarketplace && searchMarketplace !== '') {
+      query.purchaseMarketplaceId = searchMarketplace === 'EBAY_ENCA' ? 'EBAY_CA' : searchMarketplace;
+    }
+
+    if (excludeLowValue === 'true') {
+      query.$and.push({
+        $or: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } }
+        ]
+      });
+    }
+
+    if (req.query.missingAmazonAccount === 'true') {
+      query.$and.push(
+        {
+          $or: [
+            { amazonAccount: { $exists: false } },
+            { amazonAccount: null },
+            { amazonAccount: '' }
+          ]
+        },
+        {
+          $or: [
+            { cancelState: { $exists: false } },
+            { cancelState: null },
+            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        },
+        {
+          $or: [
+            { 'cancelStatus.cancelState': { $exists: false } },
+            { 'cancelStatus.cancelState': null },
+            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+          ]
+        },
+        {
+          $or: [
+            { refunds: { $exists: false } },
+            { refunds: { $size: 0 } },
+            { refunds: null }
+          ]
+        }
+      );
+    }
+
+    if (excludeNoAmazonAccount === 'true') {
+      query.$and.push({ amazonAccount: { $exists: true, $nin: [null, ''] } });
+    }
+
+    if (minProfit !== undefined || maxProfit !== undefined) {
+      const profitConditions = [];
+      if (minProfit !== undefined && minProfit !== '') {
+        profitConditions.push({ $gte: [computedProfitExpression, parseFloat(minProfit)] });
+      }
+      if (maxProfit !== undefined && maxProfit !== '') {
+        profitConditions.push({ $lte: [computedProfitExpression, parseFloat(maxProfit)] });
+      }
+      if (profitConditions.length === 1) {
+        query.$and.push({ $expr: profitConditions[0] });
+      } else if (profitConditions.length > 1) {
+        query.$and.push({ $expr: { $and: profitConditions } });
+      }
+    }
+
+    if (minSubtotal !== undefined || maxSubtotal !== undefined) {
+      const subtotalCondition = {};
+      if (minSubtotal !== undefined && minSubtotal !== '') subtotalCondition.$gte = parseFloat(minSubtotal);
+      if (maxSubtotal !== undefined && maxSubtotal !== '') subtotalCondition.$lte = parseFloat(maxSubtotal);
+      if (Object.keys(subtotalCondition).length > 0) query.$and.push({ subtotal: subtotalCondition });
+    }
+
+    if (query.$and.length === 0) delete query.$and;
+
+    const visibleSellerIds = (() => {
+      if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+        const requested = new mongoose.Types.ObjectId(sellerId);
+        return activeSellerIds.some((id) => id.equals(requested)) ? [requested] : [];
+      }
+      return activeSellerIds;
+    })();
+
+    const [sellerAccounts, profitRows] = await Promise.all([
+      Seller.find({ _id: { $in: visibleSellerIds } })
+        .populate('user', 'username email')
+        .lean(),
+      Order.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: '$seller',
+            orderCount: { $sum: 1 },
+            totalProfit: { $sum: computedProfitExpression }
+          }
+        }
+      ])
+    ]);
+
+    const rowsBySellerId = new Map();
+    for (const seller of sellerAccounts) {
+      const id = seller._id?.toString();
+      if (!id) continue;
+      rowsBySellerId.set(id, {
+        sellerId: id,
+        accountName: seller.user?.username || seller.user?.email || seller.ebayUserId || id,
+        orderCount: 0,
+        totalProfit: 0
+      });
+    }
+
+    for (const row of profitRows) {
+      const sellerKey = row._id?.toString() || 'unknown';
+      const existing = rowsBySellerId.get(sellerKey) || {
+        sellerId: sellerKey,
+        accountName: 'Unknown Seller',
+        orderCount: 0,
+        totalProfit: 0
+      };
+
+      rowsBySellerId.set(sellerKey, {
+        ...existing,
+        orderCount: row.orderCount || 0,
+        totalProfit: Number(row.totalProfit || 0)
+      });
+    }
+
+    const rows = [...rowsBySellerId.values()].sort((a, b) => {
+      const byProfit = (b.totalProfit || 0) - (a.totalProfit || 0);
+      if (byProfit !== 0) return byProfit;
+      return String(a.accountName).localeCompare(String(b.accountName));
+    });
+
+    res.json({
+      rows,
+      totalAccounts: rows.length,
+      updatedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error('[All Orders USD Account Profit] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/all-orders-usd', async (req, res) => {
   const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemNumber, productName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
 
