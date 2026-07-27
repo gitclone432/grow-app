@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import { requireAuth, requireAuthSSE } from '../middleware/auth.js';
 import TemplateListing from '../models/TemplateListing.js';
 import ListingTemplate from '../models/ListingTemplate.js';
@@ -22,6 +23,7 @@ import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStat
 import { getAsinCacheStats, clearAsinCache, invalidateAsinCache, getCachedAsinData } from '../utils/asinCache.js';
 import { amazonSourceSnapshotFields, buildListingReuseContext } from '../utils/listingDatabaseAmazonCache.js';
 import AsinDirectory from '../models/AsinDirectory.js';
+import User from '../models/User.js';
 import { ensureValidToken } from './ebay.js';
 import {
   parseDirectListAsins,
@@ -50,6 +52,29 @@ import {
 } from '../utils/ebayDraftListingCsv.js';
 
 const router = express.Router();
+
+/** Build createdAt range from YYYY-MM-DD (Asia/Kolkata day bounds). */
+function buildCreatedAtDateFilter(startDate, endDate) {
+  const start = String(startDate || '').trim();
+  const end = String(endDate || '').trim();
+  if (!start && !end) return null;
+  const range = {};
+  if (start && /^\d{4}-\d{2}-\d{2}$/.test(start)) {
+    range.$gte = new Date(`${start}T00:00:00.000+05:30`);
+  }
+  if (end && /^\d{4}-\d{2}-\d{2}$/.test(end)) {
+    range.$lte = new Date(`${end}T23:59:59.999+05:30`);
+  }
+  return Object.keys(range).length ? range : null;
+}
+
+/** Cast query ids for aggregation $match (find() casts; aggregate does not). */
+function toObjectId(id) {
+  if (id == null || id === '' || id === 'all') return null;
+  const value = String(id);
+  if (!mongoose.Types.ObjectId.isValid(value)) return null;
+  return new mongoose.Types.ObjectId(value);
+}
 
 function toPlainTemplateColumn(col) {
   if (!col) return col;
@@ -537,7 +562,11 @@ router.get('/database-view', requireAuth, async (req, res) => {
       templateId, 
       status,
       listingOrigin,
-      search, 
+      search,
+      startDate,
+      endDate,
+      createdBy,
+      userId,
       page = 1, 
       limit = 50 
     } = req.query;
@@ -548,6 +577,12 @@ router.get('/database-view', requireAuth, async (req, res) => {
     if (sellerId) query.sellerId = sellerId;
     if (templateId) query.templateId = templateId;
     if (status) query.status = status;
+
+    const creatorId = createdBy || userId;
+    if (creatorId && creatorId !== 'all') query.createdBy = creatorId;
+
+    const createdAtRange = buildCreatedAtDateFilter(startDate, endDate);
+    if (createdAtRange) query.createdAt = createdAtRange;
 
     // Source filter: CSV Listings vs Direct List to eBay
     if (listingOrigin === 'direct_list') {
@@ -594,10 +629,10 @@ router.get('/database-view', requireAuth, async (req, res) => {
     
     const skip = (parseInt(page) - 1) * parseInt(limit);
     
-    // Fetch with populated fields
+    // Sort by createdAt (always set). UI Listed column shows ebayPublishedAt || createdAt.
     const [listings, total] = await Promise.all([
       TemplateListing.find(query)
-        .select('+_asinReference') // Include ASIN in results
+        .select('+_asinReference')
         .populate({
           path: 'sellerId',
           populate: {
@@ -606,7 +641,8 @@ router.get('/database-view', requireAuth, async (req, res) => {
           }
         })
         .populate('templateId', 'name')
-        .sort({ ebayPublishedAt: -1, createdAt: -1 })
+        .populate('createdBy', 'username email role')
+        .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit)),
       TemplateListing.countDocuments(query)
@@ -629,11 +665,40 @@ router.get('/database-view', requireAuth, async (req, res) => {
   }
 });
 
+// Users who actually created template listings (excludes seller-role noise)
+router.get('/database-creators', requireAuth, async (req, res) => {
+  try {
+    const ids = await TemplateListing.distinct('createdBy', {
+      deletedAt: null,
+      createdBy: { $ne: null },
+    });
+    const users = await User.find({
+      _id: { $in: ids },
+      active: { $ne: false },
+      role: { $nin: ['seller'] },
+    })
+      .select('username email role')
+      .sort({ username: 1 })
+      .lean();
+    res.json(users);
+  } catch (error) {
+    console.error('Database creators error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Database statistics endpoint (MUST be before /:id route)
 router.get('/database-stats', requireAuth, async (req, res) => {
   try {
+    const { startDate, endDate, createdBy, userId } = req.query;
+    const match = { deletedAt: null };
+    const createdAtRange = buildCreatedAtDateFilter(startDate, endDate);
+    if (createdAtRange) match.createdAt = createdAtRange;
+    const creatorOid = toObjectId(createdBy || userId);
+    if (creatorOid) match.createdBy = creatorOid;
+
     const stats = await TemplateListing.aggregate([
-      { $match: { deletedAt: null } },
+      { $match: match },
       {
         $group: {
           _id: null,
@@ -696,11 +761,30 @@ router.get('/database-stats', requireAuth, async (req, res) => {
   }
 });
 
-// Per-seller summary: CSV Listings vs Direct List, draft/active breakdown
+// Per-seller or per-user summary: CSV Listings vs Direct List, draft/active breakdown
 router.get('/database-summary', requireAuth, async (req, res) => {
   try {
-    const rows = await TemplateListing.aggregate([
-      { $match: { deletedAt: null, sellerId: { $ne: null } } },
+    const { startDate, endDate, createdBy, userId, sellerId, templateId, groupBy = 'seller' } = req.query;
+    const byUser = String(groupBy).toLowerCase() === 'user';
+    const match = { deletedAt: null };
+    if (byUser) {
+      match.createdBy = { $ne: null };
+    } else {
+      match.sellerId = { $ne: null };
+    }
+    const createdAtRange = buildCreatedAtDateFilter(startDate, endDate);
+    if (createdAtRange) match.createdAt = createdAtRange;
+    const creatorOid = toObjectId(createdBy || userId);
+    if (creatorOid) match.createdBy = creatorOid;
+    const sellerOid = toObjectId(sellerId);
+    if (sellerOid) match.sellerId = sellerOid;
+    const templateOid = toObjectId(templateId);
+    if (templateOid) match.templateId = templateOid;
+
+    const groupId = byUser ? '$createdBy' : '$sellerId';
+
+    const pipeline = [
+      { $match: match },
       {
         $addFields: {
           isDirectList: {
@@ -718,7 +802,7 @@ router.get('/database-summary', requireAuth, async (req, res) => {
       },
       {
         $group: {
-          _id: '$sellerId',
+          _id: groupId,
           total: { $sum: 1 },
           csvTotal: {
             $sum: { $cond: [{ $eq: ['$isDirectList', false] }, 1, 0] },
@@ -790,44 +874,84 @@ router.get('/database-summary', requireAuth, async (req, res) => {
           },
         },
       },
-      {
-        $lookup: {
-          from: 'sellers',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'seller',
-        },
-      },
-      { $unwind: { path: '$seller', preserveNullAndEmptyArrays: true } },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'seller.user',
-          foreignField: '_id',
-          as: 'user',
-        },
-      },
-      { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          _id: 0,
-          sellerId: '$_id',
-          sellerName: {
-            $ifNull: ['$user.username', { $ifNull: ['$user.email', 'Unknown'] }],
+    ];
+
+    if (byUser) {
+      pipeline.push(
+        {
+          $lookup: {
+            from: 'users',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'user',
           },
-          total: 1,
-          csvTotal: 1,
-          csvActive: 1,
-          csvDraft: 1,
-          directTotal: 1,
-          directActive: 1,
-          directDraft: 1,
-          draft: 1,
-          active: 1,
         },
-      },
-      { $sort: { total: -1, sellerName: 1 } },
-    ]);
+        { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            userId: '$_id',
+            sellerId: null,
+            sellerName: {
+              $ifNull: ['$user.username', { $ifNull: ['$user.email', 'Unknown'] }],
+            },
+            total: 1,
+            csvTotal: 1,
+            csvActive: 1,
+            csvDraft: 1,
+            directTotal: 1,
+            directActive: 1,
+            directDraft: 1,
+            draft: 1,
+            active: 1,
+          },
+        },
+        { $sort: { total: -1, sellerName: 1 } },
+      );
+    } else {
+      pipeline.push(
+        {
+          $lookup: {
+            from: 'sellers',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'seller',
+          },
+        },
+        { $unwind: { path: '$seller', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'seller.user',
+            foreignField: '_id',
+            as: 'user',
+          },
+        },
+        { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            _id: 0,
+            sellerId: '$_id',
+            userId: null,
+            sellerName: {
+              $ifNull: ['$user.username', { $ifNull: ['$user.email', 'Unknown'] }],
+            },
+            total: 1,
+            csvTotal: 1,
+            csvActive: 1,
+            csvDraft: 1,
+            directTotal: 1,
+            directActive: 1,
+            directDraft: 1,
+            draft: 1,
+            active: 1,
+          },
+        },
+        { $sort: { total: -1, sellerName: 1 } },
+      );
+    }
+
+    const rows = await TemplateListing.aggregate(pipeline);
 
     const totals = rows.reduce(
       (acc, row) => {
@@ -855,7 +979,12 @@ router.get('/database-summary', requireAuth, async (req, res) => {
       }
     );
 
-    res.json({ rows, totals, sellerCount: rows.length });
+    res.json({
+      rows,
+      totals,
+      sellerCount: rows.length,
+      groupBy: byUser ? 'user' : 'seller',
+    });
   } catch (error) {
     console.error('Database summary error:', error);
     res.status(500).json({ error: error.message });

@@ -395,6 +395,7 @@ function getPollTotals(jobType, payload = {}) {
     return {
       totalPolled: payload.totalPolled || 0,
       totalUpdatedOrders: payload.totalUpdatedOrders || 0,
+      totalNewOrders: payload.totalNewOrders || 0,
       results: payload.pollResults || []
     };
   }
@@ -4790,16 +4791,22 @@ router.post('/backfill-ad-fees', requireAuth, requirePageAccess('AllOrdersSheet'
 router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrdersSheet']), async (req, res) => {
   const {
     orderIds,
+    ebayOrderIds,
     sellerId,
     allSellers,
+    allOrders,
     sinceDate,
     skipAlreadySet = true,
     limit = 250,
   } = req.body || {};
 
+  const scanAllOrders = allOrders === true || allOrders === 'true';
+  const scanAllSellers = scanAllOrders || allSellers === true || allSellers === 'true';
+
   const hasOrderIds = Array.isArray(orderIds) && orderIds.length > 0;
-  if (!hasOrderIds && !sellerId && !allSellers) {
-    return res.status(400).json({ error: 'orderIds, sellerId, or allSellers:true is required' });
+  const hasEbayOrderIds = Array.isArray(ebayOrderIds) && ebayOrderIds.length > 0;
+  if (!hasOrderIds && !hasEbayOrderIds && !sellerId && !scanAllSellers) {
+    return res.status(400).json({ error: 'orderIds, ebayOrderIds, sellerId, allSellers:true, or allOrders:true is required' });
   }
 
   try {
@@ -4838,7 +4845,15 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
           return;
         }
 
+        // Pin Finances result even when TDS is $0 so full-DB scans can progress
+        // and skipAlreadySet won't re-hit the same orders forever.
         if (!(feeResult.tds > 0)) {
+          order.tds = 0;
+          order.tdsSource = 'finances';
+          if (feeResult.adFeeGeneral != null) {
+            order.adFeeGeneral = parseFloat(feeResult.adFeeGeneral) || 0;
+          }
+          await order.save();
           totals.skipped++;
           return;
         }
@@ -4863,10 +4878,18 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
       }
     };
 
-    // Fast path: poll specific order Mongo IDs (current table page)
-    if (hasOrderIds) {
-      const ids = orderIds.slice(0, Math.min(orderIds.length, 200));
-      const orders = await Order.find({ _id: { $in: ids } });
+    // Fast path: poll specific orders by Mongo _id and/or eBay orderId
+    if (hasOrderIds || hasEbayOrderIds) {
+      const mongoIds = hasOrderIds ? orderIds.slice(0, 200) : [];
+      const ebayIds = hasEbayOrderIds
+        ? [...new Set(ebayOrderIds.map((id) => String(id)).filter(Boolean))].slice(0, 200)
+        : [];
+      const query = mongoIds.length && ebayIds.length
+        ? { $or: [{ _id: { $in: mongoIds } }, { orderId: { $in: ebayIds } }] }
+        : mongoIds.length
+          ? { _id: { $in: mongoIds } }
+          : { orderId: { $in: ebayIds } };
+      const orders = await Order.find(query).limit(200);
       const sellerCache = new Map();
 
       for (const order of orders) {
@@ -4903,7 +4926,7 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
     }
 
     let sellersToProcess;
-    if (allSellers) {
+    if (scanAllSellers) {
       sellersToProcess = await Seller.find({
         'ebayTokens.refresh_token': { $exists: true, $ne: null }
       });
@@ -4916,31 +4939,42 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
       sellersToProcess = [seller];
     }
 
-    const effectiveSinceDate = sinceDate ? new Date(sinceDate) : new Date('2026-02-28');
-    const maxOrders = Math.min(Math.max(parseInt(limit, 10) || 250, 1), 1000);
+    // allOrders: no date floor. Otherwise default since 2026-02-28 (legacy backfill window).
+    const effectiveSinceDate = scanAllOrders
+      ? null
+      : (sinceDate ? new Date(sinceDate) : new Date('2026-02-28'));
+    // Keep batches modest so the HTTP request can finish; frontend loops until remaining=0.
+    // limit = max orders processed in THIS request across all sellers combined.
+    const maxOrdersTotal = Math.min(Math.max(parseInt(limit, 10) || 50, 1), scanAllOrders ? 100 : 1000);
+    let processedBudget = maxOrdersTotal;
+
+    const pendingQueryBase = {
+      orderPaymentStatus: { $nin: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] },
+    };
+    if (effectiveSinceDate) {
+      pendingQueryBase.creationDate = { $gte: effectiveSinceDate };
+    }
+    if (skipAlreadySet) {
+      pendingQueryBase.$or = [
+        { tdsSource: { $ne: 'finances' } },
+        { tdsSource: { $exists: false } },
+        { tds: { $exists: false } },
+        { tds: null },
+      ];
+    }
 
     for (const seller of sellersToProcess) {
+      if (processedBudget <= 0) break;
       try {
         const accessToken = await ensureValidToken(seller);
-        const query = {
-          seller: seller._id,
-          creationDate: { $gte: effectiveSinceDate },
-          orderPaymentStatus: { $nin: ['FULLY_REFUNDED'] },
-        };
-        if (skipAlreadySet) {
-          query.$or = [
-            { tdsSource: { $ne: 'finances' } },
-            { tdsSource: { $exists: false } },
-            { tds: { $exists: false } },
-            { tds: null },
-          ];
-        }
+        const query = { ...pendingQueryBase, seller: seller._id };
 
-        const orders = await Order.find(query).sort({ creationDate: -1 }).limit(maxOrders);
+        const orders = await Order.find(query).sort({ creationDate: -1 }).limit(processedBudget);
         console.log(`[Poll TDS] ${seller.user?.username || seller._id}: ${orders.length} orders to check`);
 
         for (let i = 0; i < orders.length; i++) {
           await processOrder(orders[i], seller, accessToken);
+          processedBudget -= 1;
           if ((i + 1) % 25 === 0) {
             console.log(`[Poll TDS] ${seller.user?.username || seller._id}: ${i + 1}/${orders.length}`);
           }
@@ -4954,9 +4988,18 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
       }
     }
 
+    const remainingQuery = { ...pendingQueryBase };
+    if (scanAllSellers) {
+      remainingQuery.seller = { $in: sellersToProcess.map((s) => s._id) };
+    } else if (sellerId) {
+      remainingQuery.seller = sellerId;
+    }
+    const remaining = skipAlreadySet ? await Order.countDocuments(remainingQuery) : 0;
+
     res.json({
-      message: `TDS poll complete: ${totals.updated} updated from Finances, ${totals.skipped} with no TAX_DEDUCTION_AT_SOURCE, ${totals.failed} failed (${totals.total} checked)`,
+      message: `TDS poll complete: ${totals.updated} updated from Finances, ${totals.skipped} with no TAX_DEDUCTION_AT_SOURCE, ${totals.failed} failed (${totals.total} checked). Remaining: ${remaining}`,
       results: totals,
+      remaining,
     });
   } catch (err) {
     console.error('[Poll TDS] Error:', err);
@@ -6401,6 +6444,7 @@ async function runPollOrderUpdatesJob() {
     const orderPollLookbackDays = Math.min(90, parseInt(process.env.EBAY_ORDER_POLL_LOOKBACK_DAYS || '90', 10) || 90);
     const lookbackMs = orderPollLookbackDays * 24 * 60 * 60 * 1000;
     const lookbackFloor = new Date(nowUTC - lookbackMs);
+    const queueListingQtyUpdate = await isOrderListingQtyUpdateEnabled();
 
     console.log(`\n========== POLLING ORDER UPDATES FOR ${sellers.length} SELLERS ==========`);
     console.log(`UTC Time: ${new Date(nowUTC).toISOString()}`);
@@ -6476,6 +6520,7 @@ async function runPollOrderUpdatesJob() {
 
         console.log(`[${sellerName}] Filter: ${modifiedFilter}`);
         const updatedOrders = [];
+        const newOrders = [];
 
         const recentOrders = await Order.find({
           seller: seller._id,
@@ -6484,7 +6529,8 @@ async function runPollOrderUpdatesJob() {
 
         console.log(`[${sellerName}] ${recentOrders.length} orders within lookback window`);
 
-        if (recentOrders.length > 0) {
+        {
+          // Always scan eBay modified window (even if DB lookback set is empty)
 
           let offset = 0;
           const batchSize = 100;
@@ -6507,13 +6553,41 @@ async function runPollOrderUpdatesJob() {
             const batchOrders = phase2Res.data.orders || [];
             console.log(`[${sellerName}] Got ${batchOrders.length} orders at offset ${offset}`);
 
-            const relevantOrders = batchOrders.filter(o => recentOrderIdSet.has(o.orderId));
-
-            for (const ebayOrder of relevantOrders) {
-              const existingOrder = await Order.findOne({
+            for (const ebayOrder of batchOrders) {
+              let existingOrder = await Order.findOne({
                 orderId: ebayOrder.orderId,
                 seller: seller._id
               });
+
+              // Gap-fill: Cancellation Search can show orderIds that Poll New missed
+              // (creationdate end lag / watermark). Import them instead of dropping.
+              if (!existingOrder) {
+                const createdAt = ebayOrder.creationDate ? new Date(ebayOrder.creationDate) : null;
+                if (!createdAt || Number.isNaN(createdAt.getTime()) || createdAt < lookbackFloor) {
+                  continue;
+                }
+                try {
+                  const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+                  await enrichNewOrderData(orderData, seller._id);
+                  if (!orderData.policyMessageDisabled) {
+                    const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
+                    if (policyEligibleAt) {
+                      orderData.policyMessageEligibleAt = policyEligibleAt;
+                    }
+                  }
+                  if (queueListingQtyUpdate) {
+                    orderData.listingQtyUpdatePending = true;
+                  }
+                  existingOrder = await Order.create(orderData);
+                  recentOrderIdSet.add(ebayOrder.orderId);
+                  newOrders.push(existingOrder.orderId);
+                  console.log(`  🆕 NEW (via updates gap-fill): ${ebayOrder.orderId}`);
+                  await sendAutoWelcomeMessage(seller, existingOrder);
+                } catch (createErr) {
+                  console.log(`  ⚠️ Gap-fill create failed for ${ebayOrder.orderId}: ${createErr.message}`);
+                }
+                continue;
+              }
 
               if (existingOrder) {
                 const ebayModTime = new Date(ebayOrder.lastModifiedDate).getTime();
@@ -6788,14 +6862,16 @@ async function runPollOrderUpdatesJob() {
           }
         }
 
-        console.log(`[${sellerName}] ✅ Complete: ${updatedOrders.length} updated`);
+        console.log(`[${sellerName}] ✅ Complete: ${updatedOrders.length} updated, ${newOrders.length} new`);
 
         return {
           sellerId: seller._id,
           sellerName,
           success: true,
           updatedOrders, // Now contains { orderId, changedFields }
-          totalUpdated: updatedOrders.length
+          newOrders,
+          totalUpdated: updatedOrders.length,
+          totalNew: newOrders.length
         };
 
       } catch (sellerErr) {
@@ -6812,15 +6888,18 @@ async function runPollOrderUpdatesJob() {
     const results = await Promise.allSettled(pollingPromises);
     const pollResults = results.map(result => result.status === 'fulfilled' ? result.value : { success: false, error: result.reason?.message || 'Unknown error' });
     const totalUpdatedOrders = pollResults.reduce((sum, r) => sum + (r.totalUpdated || 0), 0);
+    const totalNewOrders = pollResults.reduce((sum, r) => sum + (r.totalNew || 0), 0);
 
     console.log(`\n========== ORDER UPDATES SUMMARY ==========`);
     console.log(`Total updated orders: ${totalUpdatedOrders}`);
+    console.log(`Total new orders (gap-fill): ${totalNewOrders}`);
 
     return {
       message: 'Order updates polling complete',
       pollResults,
       totalPolled: sellers.length,
-      totalUpdatedOrders
+      totalUpdatedOrders,
+      totalNewOrders
     };
 
   } catch (err) {
@@ -7632,7 +7711,8 @@ function buildCreationDateFilter(fromDate, toDate) {
 
 /** Poll window end — slightly before now to avoid clock-skew edge cases. */
 function getOrderPollEndDate(nowMs = Date.now()) {
-  return new Date(nowMs - 5 * 60 * 1000);
+  // Keep lag short: 5 minutes caused brand-new orders to miss Poll New until much later.
+  return new Date(nowMs - 60 * 1000);
 }
 
 // This fetches orders in batches of 200 (eBay max) until all orders are retrieved
@@ -9546,157 +9626,163 @@ function applyCancelDetailFields(cancelData, detail) {
 /**
  * Fetch cancellations from eBay Post-Order cancellation/search and upsert locally.
  * Docs: https://api.ebay.com/post-order/v2/cancellation/search
+ * Used by POST /fetch-cancellations and the fetchCancellations cron job.
  */
+export async function scheduledFetchCancellations() {
+  const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+    .populate('user', 'username');
+
+  if (sellers.length === 0) {
+    return { message: 'No sellers with eBay tokens found', totalCancellations: 0, totalNewCancellations: 0, totalUpdatedCancellations: 0, results: [] };
+  }
+
+  let totalNew = 0;
+  let totalUpdated = 0;
+  const errors = [];
+
+  console.log(`[Fetch Cancellations] Starting for ${sellers.length} sellers`);
+
+  const results = await Promise.allSettled(
+    sellers.map(async (seller) => {
+      const sellerName = seller.user?.username || 'Unknown Seller';
+
+      try {
+        const nowUTC = Date.now();
+        const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
+        const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
+        let accessToken = seller.ebayTokens.access_token;
+
+        if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
+          console.log(`[Fetch Cancellations] Refreshing token for seller ${sellerName}`);
+          const refreshRes = await axios.post(
+            'https://api.ebay.com/identity/v1/oauth2/token',
+            qs.stringify(buildRefreshTokenParams(seller)),
+            {
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
+              },
+            }
+          );
+          accessToken = refreshRes.data.access_token;
+          seller.ebayTokens.access_token = accessToken;
+          seller.ebayTokens.expires_in = refreshRes.data.expires_in;
+          seller.ebayTokens.fetchedAt = new Date(nowUTC);
+          await seller.save();
+        }
+
+        const cancelUrl = 'https://api.ebay.com/post-order/v2/cancellation/search';
+        const nowIso = new Date().toISOString();
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        const cancelRes = await axios.get(cancelUrl, {
+          headers: {
+            Authorization: `IAF ${accessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+          },
+          params: {
+            // eBay requires BOTH from + to when either date bound is sent
+            creation_date_range_from: thirtyDaysAgo,
+            creation_date_range_to: nowIso,
+            limit: 200,
+            role: 'SELLER'
+          }
+        });
+
+        const cancellations = cancelRes.data?.cancellations
+          || cancelRes.data?.members
+          || [];
+        console.log(`[Fetch Cancellations] Seller ${sellerName}: Found ${cancellations.length} cancellations`);
+
+        let newCount = 0;
+        let updatedCount = 0;
+
+        for (const ebayCancel of cancellations) {
+          if (!ebayCancel?.cancelId && ebayCancel?.cancelId !== 0) continue;
+          let cancelData = mapEbayCancellation(ebayCancel, seller._id);
+          if (!cancelData.cancelId) continue;
+
+          // Search often omits buyerLoginName / respondType — pull from GET /cancellation/{id}
+          try {
+            const detail = await fetchEbayCancelDetail(
+              accessToken,
+              cancelData.cancelId,
+              cancelData.marketplaceId || 'EBAY_US'
+            );
+            cancelData = applyCancelDetailFields(cancelData, detail);
+          } catch (detailErr) {
+            console.warn(`[Fetch Cancellations] detail enrich failed for ${cancelData.cancelId}:`, detailErr.message);
+          }
+
+          const existing = await Cancellation.findOne({ cancelId: cancelData.cancelId });
+
+          if (existing) {
+            const statusChanged = existing.cancelStatus !== cancelData.cancelStatus;
+            const stateChanged = existing.cancelState !== cancelData.cancelState;
+            const reasonChanged = existing.cancelReason !== cancelData.cancelReason;
+            const buyerChanged = (existing.buyerLoginName || existing.buyerUsername || '') !== (cancelData.buyerLoginName || '');
+            const itemChanged = (existing.itemId || '') !== (cancelData.itemId || '');
+            const respondChanged = (existing.respondType || '') !== (cancelData.respondType || '');
+            if (statusChanged || stateChanged || reasonChanged || buyerChanged || itemChanged || respondChanged) {
+              existing.set(cancelData);
+              await existing.save();
+              updatedCount++;
+            } else {
+              existing.rawData = cancelData.rawData;
+              existing.lastModifiedDate = cancelData.lastModifiedDate;
+              await existing.save();
+            }
+          } else {
+            await Cancellation.create(cancelData);
+            newCount++;
+          }
+        }
+
+        return {
+          sellerName,
+          newCancellations: newCount,
+          updatedCancellations: updatedCount,
+          totalCancellations: cancellations.length
+        };
+      } catch (err) {
+        const ebayErr = err.response?.data?.error;
+        const ebayMsg = (Array.isArray(ebayErr) ? ebayErr[0]?.message : null)
+          || err.response?.data?.errors?.[0]?.message
+          || (typeof ebayErr === 'string' ? ebayErr : null)
+          || (ebayErr && typeof ebayErr === 'object' ? JSON.stringify(ebayErr) : null)
+          || err.message;
+        console.error(`[Fetch Cancellations] Error for seller ${sellerName}:`, ebayMsg);
+        throw new Error(`${sellerName}: ${ebayMsg}`);
+      }
+    })
+  );
+
+  const successResults = [];
+  results.forEach((result) => {
+    if (result.status === 'fulfilled') {
+      successResults.push(result.value);
+      totalNew += result.value.newCancellations;
+      totalUpdated += result.value.updatedCancellations;
+    } else {
+      errors.push(result.reason.message);
+    }
+  });
+
+  return {
+    message: `Fetched cancellations for ${successResults.length} sellers`,
+    totalNewCancellations: totalNew,
+    totalUpdatedCancellations: totalUpdated,
+    results: successResults,
+    errors: errors.length > 0 ? errors : undefined
+  };
+}
+
 router.post('/fetch-cancellations', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
-    const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
-      .populate('user', 'username');
-
-    if (sellers.length === 0) {
-      return res.json({ message: 'No sellers with eBay tokens found', totalCancellations: 0 });
-    }
-
-    let totalNew = 0;
-    let totalUpdated = 0;
-    const errors = [];
-
-    console.log(`[Fetch Cancellations] Starting for ${sellers.length} sellers`);
-
-    const results = await Promise.allSettled(
-      sellers.map(async (seller) => {
-        const sellerName = seller.user?.username || 'Unknown Seller';
-
-        try {
-          const nowUTC = Date.now();
-          const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-          const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-          let accessToken = seller.ebayTokens.access_token;
-
-          if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-            console.log(`[Fetch Cancellations] Refreshing token for seller ${sellerName}`);
-            const refreshRes = await axios.post(
-              'https://api.ebay.com/identity/v1/oauth2/token',
-              qs.stringify(buildRefreshTokenParams(seller)),
-              {
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-                },
-              }
-            );
-            accessToken = refreshRes.data.access_token;
-            seller.ebayTokens.access_token = accessToken;
-            seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-            seller.ebayTokens.fetchedAt = new Date(nowUTC);
-            await seller.save();
-          }
-
-          const cancelUrl = 'https://api.ebay.com/post-order/v2/cancellation/search';
-          const nowIso = new Date().toISOString();
-          const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-
-          const cancelRes = await axios.get(cancelUrl, {
-            headers: {
-              Authorization: `IAF ${accessToken}`,
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-              'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-            },
-            params: {
-              // eBay requires BOTH from + to when either date bound is sent
-              creation_date_range_from: thirtyDaysAgo,
-              creation_date_range_to: nowIso,
-              limit: 200,
-              role: 'SELLER'
-            }
-          });
-
-          const cancellations = cancelRes.data?.cancellations
-            || cancelRes.data?.members
-            || [];
-          console.log(`[Fetch Cancellations] Seller ${sellerName}: Found ${cancellations.length} cancellations`);
-
-          let newCount = 0;
-          let updatedCount = 0;
-
-          for (const ebayCancel of cancellations) {
-            if (!ebayCancel?.cancelId && ebayCancel?.cancelId !== 0) continue;
-            let cancelData = mapEbayCancellation(ebayCancel, seller._id);
-            if (!cancelData.cancelId) continue;
-
-            // Search often omits buyerLoginName / respondType — pull from GET /cancellation/{id}
-            try {
-              const detail = await fetchEbayCancelDetail(
-                accessToken,
-                cancelData.cancelId,
-                cancelData.marketplaceId || 'EBAY_US'
-              );
-              cancelData = applyCancelDetailFields(cancelData, detail);
-            } catch (detailErr) {
-              console.warn(`[Fetch Cancellations] detail enrich failed for ${cancelData.cancelId}:`, detailErr.message);
-            }
-
-            const existing = await Cancellation.findOne({ cancelId: cancelData.cancelId });
-
-            if (existing) {
-              const statusChanged = existing.cancelStatus !== cancelData.cancelStatus;
-              const stateChanged = existing.cancelState !== cancelData.cancelState;
-              const reasonChanged = existing.cancelReason !== cancelData.cancelReason;
-              const buyerChanged = (existing.buyerLoginName || existing.buyerUsername || '') !== (cancelData.buyerLoginName || '');
-              const itemChanged = (existing.itemId || '') !== (cancelData.itemId || '');
-              const respondChanged = (existing.respondType || '') !== (cancelData.respondType || '');
-              if (statusChanged || stateChanged || reasonChanged || buyerChanged || itemChanged || respondChanged) {
-                existing.set(cancelData);
-                await existing.save();
-                updatedCount++;
-              } else {
-                existing.rawData = cancelData.rawData;
-                existing.lastModifiedDate = cancelData.lastModifiedDate;
-                await existing.save();
-              }
-            } else {
-              await Cancellation.create(cancelData);
-              newCount++;
-            }
-          }
-
-          return {
-            sellerName,
-            newCancellations: newCount,
-            updatedCancellations: updatedCount,
-            totalCancellations: cancellations.length
-          };
-        } catch (err) {
-          const ebayErr = err.response?.data?.error;
-          const ebayMsg = (Array.isArray(ebayErr) ? ebayErr[0]?.message : null)
-            || err.response?.data?.errors?.[0]?.message
-            || (typeof ebayErr === 'string' ? ebayErr : null)
-            || (ebayErr && typeof ebayErr === 'object' ? JSON.stringify(ebayErr) : null)
-            || err.message;
-          console.error(`[Fetch Cancellations] Error for seller ${sellerName}:`, ebayMsg);
-          throw new Error(`${sellerName}: ${ebayMsg}`);
-        }
-      })
-    );
-
-    const successResults = [];
-    results.forEach((result) => {
-      if (result.status === 'fulfilled') {
-        successResults.push(result.value);
-        totalNew += result.value.newCancellations;
-        totalUpdated += result.value.updatedCancellations;
-      } else {
-        errors.push(result.reason.message);
-      }
-    });
-
-    res.json({
-      message: `Fetched cancellations for ${successResults.length} sellers`,
-      totalNewCancellations: totalNew,
-      totalUpdatedCancellations: totalUpdated,
-      results: successResults,
-      errors: errors.length > 0 ? errors : undefined
-    });
+    const payload = await scheduledFetchCancellations();
+    res.json(payload);
   } catch (err) {
     console.error('[Fetch Cancellations] Error:', err);
     res.status(500).json({ error: err.message });
@@ -9704,6 +9790,7 @@ router.post('/fetch-cancellations', requireAuth, requirePageAccess('Disputes'), 
 });
 
 /**
+
  * Enrich stored cancellations with buyerLoginName + respondType
  * from GET https://api.ebay.com/post-order/v2/cancellation/{cancelId}
  */

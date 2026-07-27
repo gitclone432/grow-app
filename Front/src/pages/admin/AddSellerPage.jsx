@@ -92,6 +92,7 @@ export default function AddSellerPage() {
   const [permanentConfirmUsername, setPermanentConfirmUsername] = useState('');
   const [permanentSaving, setPermanentSaving] = useState(false);
   const [permanentBlockers, setPermanentBlockers] = useState([]);
+  const [permanentImpactLoading, setPermanentImpactLoading] = useState(false);
 
   const loadSellers = useCallback(async () => {
     setLoading(true);
@@ -197,6 +198,7 @@ export default function AddSellerPage() {
     setPermanentBlockers([]);
     setPermanentConfirmUsername('');
     setPermanentStep(1);
+    setPermanentImpactLoading(false);
     setPermanentTarget(seller);
   };
 
@@ -206,12 +208,26 @@ export default function AddSellerPage() {
     setPermanentStep(1);
     setPermanentConfirmUsername('');
     setPermanentBlockers([]);
+    setPermanentImpactLoading(false);
+  };
+
+  const loadDeleteImpact = async (sellerId) => {
+    setPermanentImpactLoading(true);
+    try {
+      const { data } = await api.get(`/sellers/${sellerId}/delete-impact`);
+      setPermanentBlockers(Array.isArray(data?.preserved) ? data.preserved : []);
+    } catch {
+      setPermanentBlockers([]);
+    } finally {
+      setPermanentImpactLoading(false);
+    }
   };
 
   const handlePermanentDelete = async () => {
     if (!permanentTarget?.sellerId) return;
     if (permanentStep === 1) {
       setPermanentStep(2);
+      void loadDeleteImpact(permanentTarget.sellerId);
       return;
     }
 
@@ -222,19 +238,22 @@ export default function AddSellerPage() {
 
     setPermanentSaving(true);
     setError('');
-    setPermanentBlockers([]);
     try {
-      await api.delete(`/sellers/${permanentTarget.sellerId}/permanent`, {
+      const { data } = await api.delete(`/sellers/${permanentTarget.sellerId}/permanent`, {
         data: { confirmUsername: permanentConfirmUsername.trim() },
       });
-      setSuccess(`Seller "${permanentTarget.username}" permanently deleted`);
+      const preserved = Array.isArray(data?.preserved) ? data.preserved : [];
+      const retained = preserved.length
+        ? preserved.map((p) => `${p.count} ${p.type}`).join(', ')
+        : null;
+      setSuccess(
+        retained
+          ? `Seller "${permanentTarget.username}" permanently deleted; retained ${retained}`
+          : `Seller "${permanentTarget.username}" permanently deleted`
+      );
       closePermanentDelete();
       await loadSellers();
     } catch (err) {
-      const blockers = err?.response?.data?.blockers;
-      if (Array.isArray(blockers) && blockers.length > 0) {
-        setPermanentBlockers(blockers);
-      }
       setError(err?.response?.data?.error || 'Failed to permanently delete seller');
     } finally {
       setPermanentSaving(false);
@@ -247,7 +266,8 @@ export default function AddSellerPage() {
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 700 }}>Seller Management</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Create seller accounts, reset passwords, archive stores, or permanently remove archived sellers.
+            Create seller accounts, reset passwords, archive stores, or permanently remove archived
+            seller logins (historical data is retained).
           </Typography>
         </Box>
         <Tooltip title="Refresh list">
@@ -496,12 +516,13 @@ export default function AddSellerPage() {
                 Permanently delete <strong>{permanentTarget?.username}</strong>?
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                This removes the seller account and login from the database. It cannot be undone.
-                The seller must already be archived, and deletion is blocked if orders, listings,
-                messages, or other historical records exist.
+                This removes the seller account and login from Seller Management and frees the username.
+                The seller must already be archived. Historical business data (template listings, orders,
+                messages, and similar records) is kept.
               </Typography>
               <Alert severity="warning" sx={{ borderRadius: 1.5 }}>
-                Archive first if the seller is still active. Permanent delete is for freeing the username when no business history exists.
+                After deletion, retained records may show the store as Unassigned or Unknown.
+                This cannot be undone.
               </Alert>
             </Stack>
           ) : (
@@ -517,16 +538,24 @@ export default function AddSellerPage() {
                 size="small"
                 autoFocus
               />
-              {permanentBlockers.length > 0 ? (
-                <Alert severity="error" sx={{ borderRadius: 1.5 }}>
-                  Cannot delete — this seller still has:
+              {permanentImpactLoading ? (
+                <Alert severity="info" sx={{ borderRadius: 1.5 }}>
+                  Checking historical records that will be kept…
+                </Alert>
+              ) : permanentBlockers.length > 0 ? (
+                <Alert severity="info" sx={{ borderRadius: 1.5 }}>
+                  These historical records will be kept:
                   <Box component="ul" sx={{ m: 0, pl: 2.5, mt: 0.5 }}>
                     {permanentBlockers.map((b) => (
                       <li key={b.type}>{b.count} {b.type}</li>
                     ))}
                   </Box>
                 </Alert>
-              ) : null}
+              ) : (
+                <Alert severity="info" sx={{ borderRadius: 1.5 }}>
+                  No historical business records found for this seller.
+                </Alert>
+              )}
             </Stack>
           )}
         </DialogContent>

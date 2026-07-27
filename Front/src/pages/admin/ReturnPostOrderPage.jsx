@@ -48,8 +48,6 @@ import EscalatorWarningIcon from '@mui/icons-material/EscalatorWarning';
 import SendIcon from '@mui/icons-material/Send';
 import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
-import SettingsIcon from '@mui/icons-material/Settings';
-import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import api from '../../lib/api';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ColumnSelector from '../../components/ColumnSelector';
@@ -73,7 +71,7 @@ export default function ReturnPostOrderPage({
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
-  const [enriching, setEnriching] = useState(false);
+  const [fetchPhase, setFetchPhase] = useState(''); // 'search' | 'details' | ''
   const [error, setError] = useState('');
   const [sellers, setSellers] = useState([]);
   const [sellerFilter, setSellerFilter] = useState('');
@@ -109,12 +107,6 @@ export default function ReturnPostOrderPage({
   });
   const [uploadDialog, setUploadDialog] = useState({
     open: false, row: null, filePurpose: 'ITEM_RELATED', file: null, fileName: '',
-  });
-  const [prefsDialog, setPrefsDialog] = useState({
-    open: false, mode: 'get', sellerId: '', loading: false, json: '', result: null,
-  });
-  const [createDialog, setCreateDialog] = useState({
-    open: false, sellerId: '', json: '{\n  "itemId": "",\n  "transactionId": "",\n  "returnQuantity": 1\n}',
   });
   const [partialDialog, setPartialDialog] = useState({
     open: false, row: null, amount: '', currency: 'USD', comments: '',
@@ -195,48 +187,55 @@ export default function ReturnPostOrderPage({
     }
   }
 
-  async function fetchFromEbay() {
+  async function fetchFromEbayAndEnrich() {
     setFetching(true);
+    setFetchPhase('search');
     setError('');
     try {
-      const res = await api.post('/ebay/fetch-returns');
+      // 1) Sync return/search (same as Return Search "Fetch from eBay")
+      const res = await api.post('/ebay/fetch-returns', {}, { timeout: 300000 });
       const newCount = res.data.totalNewReturns || 0;
       const updatedCount = res.data.totalUpdatedReturns || 0;
       const errCount = res.data.errors?.length || 0;
-      setSnackbar({
-        open: true,
-        severity: errCount && !newCount && !updatedCount ? 'error' : errCount ? 'warning' : 'success',
-        message: `return/search synced — ${newCount} new, ${updatedCount} updated${errCount ? `, ${errCount} seller error(s)` : ''}`,
-      });
       setSellerFilter('');
       setPage(1);
-      await loadStored();
-    } catch (e) {
-      setError(e.response?.data?.error || e.message);
-    } finally {
-      setFetching(false);
-    }
-  }
 
-  async function enrichDetails() {
-    setEnriching(true);
-    setError('');
-    try {
-      const res = await api.post('/ebay/enrich-return-details', {
-        sellerId: sellerFilter || undefined,
-        force: true,
-        limit: 150,
-      });
+      // 2) Enrich only rows missing detail/files/tracking (no force — force:true re-hits eBay for every row and hangs)
+      setFetchPhase('details');
+      let checked = 0;
+      let updated = 0;
+      let failed = 0;
+      let enrichError = '';
+      try {
+        const enrichRes = await api.post(
+          '/ebay/enrich-return-details',
+          { limit: 100 },
+          { timeout: 300000 }
+        );
+        checked = enrichRes.data.checked || 0;
+        updated = enrichRes.data.updated || 0;
+        failed = enrichRes.data.failed || 0;
+      } catch (e) {
+        enrichError = e.response?.data?.error || e.message || 'details timed out';
+      }
+
+      const searchFailed = errCount && !newCount && !updatedCount;
       setSnackbar({
         open: true,
-        severity: res.data.failed && !res.data.updated ? 'error' : res.data.failed ? 'warning' : 'success',
-        message: `Loaded GET /return/{id} + /files + /tracking — checked ${res.data.checked || 0}, updated ${res.data.updated || 0}${res.data.failed ? `, failed ${res.data.failed}` : ''}`,
+        severity: searchFailed || enrichError ? 'error' : (errCount || failed) ? 'warning' : 'success',
+        message: enrichError
+          ? `Synced ${newCount} new, ${updatedCount} updated — details failed: ${enrichError}`
+          : `Synced ${newCount} new, ${updatedCount} updated${errCount ? ` (${errCount} seller error(s))` : ''}; details checked ${checked}, updated ${updated}${failed ? `, failed ${failed}` : ''}`,
       });
       await loadStored();
     } catch (e) {
-      setError(e.response?.data?.error || e.message);
+      const msg = e.code === 'ECONNABORTED'
+        ? 'Fetch timed out. Try again or use Refresh to reload stored rows.'
+        : (e.response?.data?.error || e.message);
+      setError(msg);
     } finally {
-      setEnriching(false);
+      setFetching(false);
+      setFetchPhase('');
     }
   }
 
@@ -679,76 +678,6 @@ export default function ReturnPostOrderPage({
     }
   }
 
-  async function handleGetPreferences() {
-    const sellerId = prefsDialog.sellerId || sellerFilter;
-    if (!sellerId) {
-      setSnackbar({ open: true, severity: 'error', message: 'Select a seller first' });
-      return;
-    }
-    setPrefsDialog((p) => ({ ...p, loading: true, result: null }));
-    try {
-      const { data } = await api.get('/ebay/return-preferences', { params: { sellerId } });
-      setPrefsDialog((p) => ({
-        ...p,
-        loading: false,
-        result: data,
-        json: JSON.stringify(data.data || {}, null, 2),
-      }));
-    } catch (e) {
-      setPrefsDialog((p) => ({ ...p, loading: false }));
-      const msg = e.response?.data?.error || e.message;
-      setSnackbar({ open: true, severity: 'error', message: msg });
-    }
-  }
-
-  async function handleSetPreferences() {
-    const sellerId = prefsDialog.sellerId || sellerFilter;
-    if (!sellerId) {
-      setSnackbar({ open: true, severity: 'error', message: 'Select a seller first' });
-      return;
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(prefsDialog.json || '{}');
-    } catch {
-      setSnackbar({ open: true, severity: 'error', message: 'Preferences JSON is invalid' });
-      return;
-    }
-    setPrefsDialog((p) => ({ ...p, loading: true }));
-    try {
-      const { data } = await api.post('/ebay/return-preferences', { sellerId, ...parsed });
-      setPrefsDialog((p) => ({ ...p, loading: false, result: data }));
-      setSnackbar({ open: true, severity: 'success', message: data.message || 'Preferences saved' });
-    } catch (e) {
-      setPrefsDialog((p) => ({ ...p, loading: false }));
-      const msg = e.response?.data?.error || e.message;
-      setSnackbar({ open: true, severity: 'error', message: msg });
-    }
-  }
-
-  async function handleCreateReturn() {
-    const sellerId = createDialog.sellerId || sellerFilter;
-    if (!sellerId) {
-      setSnackbar({ open: true, severity: 'error', message: 'Select a seller first' });
-      return;
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(createDialog.json || '{}');
-    } catch {
-      setSnackbar({ open: true, severity: 'error', message: 'Create payload JSON is invalid' });
-      return;
-    }
-    try {
-      const { data } = await api.post('/ebay/returns/create', { sellerId, ...parsed });
-      setCreateDialog({ open: false, sellerId: '', json: createDialog.json });
-      setSnackbar({ open: true, severity: 'success', message: data.message || 'Create submitted' });
-    } catch (e) {
-      const msg = e.response?.data?.error || e.message;
-      setSnackbar({ open: true, severity: 'error', message: msg });
-    }
-  }
-
   const jsonBlock = (value, { maxHeight = 420 } = {}) => (
     <Box
       component="pre"
@@ -805,7 +734,7 @@ export default function ReturnPostOrderPage({
 
       <Alert severity="info" sx={{ mb: 1.5 }}>
         Full Return Call Index: search, get, files, tracking, decide, issue_refund, mark_as_received,
-        escalate, send_message, add_shipping_label, file/upload, preference get/set, and create.
+        escalate, send_message, add_shipping_label, and file/upload.
       </Alert>
 
       <Stack
@@ -818,73 +747,21 @@ export default function ReturnPostOrderPage({
         useFlexGap
       >
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-          <Tooltip title="GET /post-order/v2/return/search (last 30 days)">
+          <Tooltip title="GET /post-order/v2/return/search, then fill missing detail / files / tracking">
             <span>
               <Button
                 size="small"
                 variant="contained"
                 sx={yellowFilledButtonSx}
                 startIcon={fetching ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
-                onClick={fetchFromEbay}
-                disabled={fetching || enriching}
+                onClick={fetchFromEbayAndEnrich}
+                disabled={fetching}
               >
-                {fetching ? 'Fetching search...' : 'Fetch return/search'}
-              </Button>
-            </span>
-          </Tooltip>
-
-          <Tooltip title="GET /return/{id}, /files, /tracking for stored rows">
-            <span>
-              <Button
-                size="small"
-                variant="outlined"
-                sx={yellowOutlinedButtonSx}
-                startIcon={enriching ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
-                onClick={enrichDetails}
-                disabled={fetching || enriching}
-              >
-                {enriching ? 'Loading details...' : 'Load detail / tracking / files'}
-              </Button>
-            </span>
-          </Tooltip>
-
-          <Tooltip title="GET /post-order/v2/return/preference">
-            <span>
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<SettingsIcon />}
-                disabled={!sellerFilter}
-                onClick={() => setPrefsDialog({
-                  open: true,
-                  mode: 'get',
-                  sellerId: sellerFilter,
-                  loading: false,
-                  json: '',
-                  result: null,
-                })}
-                sx={{ textTransform: 'none' }}
-              >
-                Preferences
-              </Button>
-            </span>
-          </Tooltip>
-
-          <Tooltip title="POST /post-order/v2/return">
-            <span>
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<AddCircleOutlineIcon />}
-                disabled={!sellerFilter}
-                onClick={() => setCreateDialog({
-                  open: true,
-                  sellerId: sellerFilter,
-                  json: '{\n  "itemId": "",\n  "transactionId": "",\n  "returnQuantity": 1\n}',
-                })}
-                sx={{ textTransform: 'none' }}
-              >
-                Create return
+                {fetchPhase === 'details'
+                  ? 'Loading details...'
+                  : fetching
+                    ? 'Fetching search...'
+                    : 'Fetch from eBay'}
               </Button>
             </span>
           </Tooltip>
@@ -1237,16 +1114,16 @@ export default function ReturnPostOrderPage({
             <>
               <MenuItem dense onClick={() => { closeActionMenu(); openApiDetails(row); }}>
                 <ListItemIcon><VisibilityIcon fontSize="small" /></ListItemIcon>
-                <ListItemText primary="Get Return / Files / Tracking" secondary="GET detail + files + tracking" />
+                <ListItemText primary="Get Return / Files / Tracking" />
               </MenuItem>
               <Divider />
               <MenuItem dense disabled={!canApprove(row)} onClick={() => handleApprove(row)}>
                 <ListItemIcon><CheckCircleOutlineIcon fontSize="small" color="success" /></ListItemIcon>
-                <ListItemText primary="Accept the return" secondary="POST .../decide APPROVE → then upload label" />
+                <ListItemText primary="Accept the return" />
               </MenuItem>
               <MenuItem dense disabled={!canDecline(row)} onClick={() => openDeclineDialog(row)}>
                 <ListItemIcon><HighlightOffIcon fontSize="small" color="error" /></ListItemIcon>
-                <ListItemText primary="Process — Decline" secondary="POST .../decide DECLINE" />
+                <ListItemText primary="Process — Decline" />
               </MenuItem>
               <MenuItem
                 dense
@@ -1263,15 +1140,15 @@ export default function ReturnPostOrderPage({
                 }}
               >
                 <ListItemIcon><LocalAtmIcon fontSize="small" /></ListItemIcon>
-                <ListItemText primary="Process — Offer partial refund" secondary="POST .../decide OFFER_PARTIAL_REFUND" />
+                <ListItemText primary="Process — Offer partial refund" />
               </MenuItem>
               <MenuItem dense disabled={!canIssueRefund(row)} onClick={() => handleIssueRefund(row)}>
                 <ListItemIcon><LocalAtmIcon fontSize="small" color="warning" /></ListItemIcon>
-                <ListItemText primary="Issue Return Refund" secondary="POST .../issue_refund" />
+                <ListItemText primary="Issue Return Refund" />
               </MenuItem>
               <MenuItem dense disabled={!canMarkReceived(row)} onClick={() => handleMarkReceived(row)}>
                 <ListItemIcon><InventoryIcon fontSize="small" /></ListItemIcon>
-                <ListItemText primary="Mark Return Received" secondary="POST .../mark_as_received" />
+                <ListItemText primary="Mark Return Received" />
               </MenuItem>
               <Divider />
               <MenuItem
@@ -1283,7 +1160,7 @@ export default function ReturnPostOrderPage({
                 }}
               >
                 <ListItemIcon><EscalatorWarningIcon fontSize="small" /></ListItemIcon>
-                <ListItemText primary="Escalate Return" secondary="POST .../escalate" />
+                <ListItemText primary="Escalate Return" />
               </MenuItem>
               <MenuItem
                 dense
@@ -1294,7 +1171,7 @@ export default function ReturnPostOrderPage({
                 }}
               >
                 <ListItemIcon><SendIcon fontSize="small" /></ListItemIcon>
-                <ListItemText primary="Send Return Message" secondary="POST .../send_message" />
+                <ListItemText primary="Send Return Message" />
               </MenuItem>
               <MenuItem
                 dense
@@ -1313,10 +1190,7 @@ export default function ReturnPostOrderPage({
                 }}
               >
                 <ListItemIcon><LocalShippingIcon fontSize="small" /></ListItemIcon>
-                <ListItemText
-                  primary="Upload Return Label"
-                  secondary="file/upload (LABEL_RELATED) + add_shipping_label"
-                />
+                <ListItemText primary="Upload Return Label" />
               </MenuItem>
               <MenuItem
                 dense
@@ -1329,7 +1203,7 @@ export default function ReturnPostOrderPage({
                 }}
               >
                 <ListItemIcon><UploadFileIcon fontSize="small" /></ListItemIcon>
-                <ListItemText primary="Upload Return File" secondary="POST .../file/upload" />
+                <ListItemText primary="Upload Return File" />
               </MenuItem>
             </>
           );
@@ -1817,73 +1691,6 @@ export default function ReturnPostOrderPage({
           >
             Offer partial
           </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog
-        open={prefsDialog.open}
-        onClose={() => !prefsDialog.loading && setPrefsDialog((p) => ({ ...p, open: false }))}
-        maxWidth="md"
-        fullWidth
-      >
-        <DialogTitle>Return Preferences</DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2" mb={1.5}>
-            GET/POST <code>/post-order/v2/return/preference</code> for seller{' '}
-            <strong>{sellers.find((s) => s._id === (prefsDialog.sellerId || sellerFilter))?.user?.username || prefsDialog.sellerId}</strong>
-          </Typography>
-          <Stack direction="row" spacing={1} mb={1.5}>
-            <Button size="small" variant="outlined" onClick={handleGetPreferences} disabled={prefsDialog.loading}>
-              Get preferences
-            </Button>
-            <Button size="small" variant="contained" onClick={handleSetPreferences} disabled={prefsDialog.loading}>
-              Set preferences
-            </Button>
-          </Stack>
-          <TextField
-            label="Preferences JSON body (for Set)"
-            fullWidth
-            multiline
-            minRows={8}
-            value={prefsDialog.json}
-            onChange={(e) => setPrefsDialog((p) => ({ ...p, json: e.target.value }))}
-            sx={{ fontFamily: 'monospace' }}
-          />
-          {prefsDialog.result ? (
-            <Box mt={1.5}>
-              <Typography variant="subtitle2" gutterBottom>Last response</Typography>
-              {jsonBlock(prefsDialog.result)}
-            </Box>
-          ) : null}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setPrefsDialog((p) => ({ ...p, open: false }))}>Close</Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog
-        open={createDialog.open}
-        onClose={() => setCreateDialog((d) => ({ ...d, open: false }))}
-        maxWidth="md"
-        fullWidth
-      >
-        <DialogTitle>Create Return Request</DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2" mb={1.5}>
-            <code>POST /post-order/v2/return</code> — usually buyer-initiated; use carefully.
-          </Typography>
-          <TextField
-            label="Create payload JSON"
-            fullWidth
-            multiline
-            minRows={10}
-            value={createDialog.json}
-            onChange={(e) => setCreateDialog((d) => ({ ...d, json: e.target.value }))}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setCreateDialog((d) => ({ ...d, open: false }))}>Cancel</Button>
-          <Button variant="contained" onClick={handleCreateReturn}>Create</Button>
         </DialogActions>
       </Dialog>
 

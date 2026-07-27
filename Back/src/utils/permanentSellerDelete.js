@@ -119,13 +119,8 @@ export async function permanentlyDeleteSeller(sellerId) {
     throw err;
   }
 
-  const blockers = await getSellerPermanentDeleteBlockers(sellerId);
-  if (blockers.length > 0) {
-    const err = new Error('Cannot permanently delete: seller has historical records');
-    err.status = 409;
-    err.blockers = blockers;
-    throw err;
-  }
+  // Historical business records stay; counts are returned as preserved for the UI.
+  const preserved = await getSellerPermanentDeleteBlockers(sellerId);
 
   const userId = seller.user?._id;
   await deleteSellerScopedData(sellerId);
@@ -140,5 +135,6 @@ export async function permanentlyDeleteSeller(sellerId) {
     sellerId,
     userId,
     username: seller.user?.username || null,
+    preserved,
   };
 }

@@ -11,6 +11,7 @@ import { getActiveSellerIds, invalidateActiveSellerScopeCache } from '../utils/a
 import {
   getSellerPermanentDeleteBlockers,
   permanentlyDeleteSeller,
+  isSellerArchived,
 } from '../utils/permanentSellerDelete.js';
 
 const router = Router();
@@ -195,7 +196,27 @@ router.get('/:id/renew-ebay-url', requireAuth, requirePageAccess('StoresPage', [
   }
 });
 
-// Superadmin permanent delete (archived sellers only, no historical records)
+// Counts of historical records that will be retained on permanent delete (display only)
+router.get('/:id/delete-impact', requireAuth, requireRole('superadmin'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const seller = await Seller.findById(id).populate('user', 'username active');
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const preserved = await getSellerPermanentDeleteBlockers(id);
+    res.json({
+      sellerId: id,
+      username: seller.user?.username || null,
+      archived: isSellerArchived(seller, seller.user),
+      preserved,
+    });
+  } catch (err) {
+    console.error('Error loading seller delete impact:', err);
+    res.status(500).json({ error: 'Failed to load delete impact' });
+  }
+});
+
+// Superadmin permanent delete (archived sellers only; historical business data retained)
 router.delete('/:id/permanent', requireAuth, requireRole('superadmin'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -210,18 +231,16 @@ router.delete('/:id/permanent', requireAuth, requireRole('superadmin'), async (r
 
     const result = await permanentlyDeleteSeller(id);
     invalidateActiveSellerScopeCache();
+    const preserved = Array.isArray(result.preserved) ? result.preserved : [];
+    const retainedSummary = preserved.length
+      ? preserved.map((p) => `${p.count} ${p.type}`).join(', ')
+      : 'no historical records';
     res.json({
       success: true,
-      message: `Seller "${result.username}" permanently deleted`,
+      message: `Seller "${result.username}" permanently deleted; retained ${retainedSummary}`,
       ...result,
     });
   } catch (err) {
-    if (err.status === 409) {
-      return res.status(409).json({
-        error: err.message,
-        blockers: err.blockers || [],
-      });
-    }
     if (err.status === 400 || err.status === 404) {
       return res.status(err.status).json({ error: err.message });
     }

@@ -10,6 +10,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import SearchIcon from '@mui/icons-material/Search';
 import DownloadIcon from '@mui/icons-material/Download';
 import VisibilityIcon from '@mui/icons-material/Visibility';
@@ -32,6 +33,11 @@ function formatListedDate(value) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+/** Prefer eBay publish time; fall back to when the row was created in DB. */
+function listingListedAt(listing) {
+  return listing?.ebayPublishedAt || listing?.createdAt || null;
 }
 
 function resolveSupplierLink(listing) {
@@ -75,6 +81,14 @@ const SUMMARY_SORT_COLUMNS = [
   { id: 'total', label: 'Total', align: 'right', numeric: true },
 ];
 
+function listingCreatorName(listing) {
+  return listing?.createdBy?.username || listing?.createdBy?.email || '—';
+}
+
+function listingStoreName(listing) {
+  return listing?.sellerId?.user?.username || listing?.sellerId?.user?.email || 'Unassigned';
+}
+
 function compareSummaryRows(a, b, orderBy, order) {
   const direction = order === 'asc' ? 1 : -1;
   if (orderBy === 'sellerName') {
@@ -100,11 +114,18 @@ export default function TemplateDatabasePage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [originFilter, setOriginFilter] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [dateMode, setDateMode] = useState('none'); // none | single | range
+  const [dateSingle, setDateSingle] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [selectedUser, setSelectedUser] = useState('');
+  const [byUserSeller, setByUserSeller] = useState('');
+  const [byUserTemplate, setByUserTemplate] = useState('');
   
   // Data state
   const [listings, setListings] = useState([]);
-  const [groupedListings, setGroupedListings] = useState({});
   const [sellers, setSellers] = useState([]);
+  const [creators, setCreators] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [stats, setStats] = useState({});
   const [activeTab, setActiveTab] = useState(0);
@@ -114,12 +135,19 @@ export default function TemplateDatabasePage() {
   const [summaryError, setSummaryError] = useState('');
   const [summarySortBy, setSummarySortBy] = useState('total');
   const [summarySortOrder, setSummarySortOrder] = useState('desc');
+  const [userSummaryRows, setUserSummaryRows] = useState([]);
+  const [userSummaryTotals, setUserSummaryTotals] = useState(null);
+  const [userSummaryLoading, setUserSummaryLoading] = useState(false);
+  const [userSummaryError, setUserSummaryError] = useState('');
+  const [userListings, setUserListings] = useState([]);
+  const [userListingsLoading, setUserListingsLoading] = useState(false);
+  const [expandedUserStores, setExpandedUserStores] = useState(() => new Set());
+  const [userListingCreatedSort, setUserListingCreatedSort] = useState('desc'); // desc = newest first
   
   // UI state
   const [pagination, setPagination] = useState({ page: 1, limit: 50, total: 0, pages: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [expandedSellers, setExpandedSellers] = useState(new Set());
   
   // Details dialog state
   const [detailsDialogOpen, setDetailsDialogOpen] = useState(false);
@@ -131,6 +159,91 @@ export default function TemplateDatabasePage() {
     );
   }, [summaryRows, summarySortBy, summarySortOrder]);
 
+  const sortedUserSummaryRows = useMemo(() => {
+    return [...userSummaryRows].sort((a, b) =>
+      compareSummaryRows(a, b, summarySortBy, summarySortOrder)
+    );
+  }, [userSummaryRows, summarySortBy, summarySortOrder]);
+
+  const sortedSellers = useMemo(() => {
+    return [...sellers].sort((a, b) => {
+      const left = String(a.user?.username || a.user?.email || '').toLowerCase();
+      const right = String(b.user?.username || b.user?.email || '').toLowerCase();
+      return left.localeCompare(right, undefined, { sensitivity: 'base' });
+    });
+  }, [sellers]);
+
+  const summaryColumns = useMemo(
+    () => SUMMARY_SORT_COLUMNS.map((col) => (col.id === 'sellerName' ? { ...col, label: 'Seller' } : col)),
+    []
+  );
+
+  const userSummaryColumns = useMemo(
+    () => SUMMARY_SORT_COLUMNS.map((col) => (col.id === 'sellerName' ? { ...col, label: 'User' } : col)),
+    []
+  );
+
+  const groupedUserListings = useMemo(() => {
+    const grouped = {};
+    const direction = userListingCreatedSort === 'asc' ? 1 : -1;
+    userListings.forEach((listing) => {
+      const sellerName = listing.sellerId?.user?.username || listing.sellerId?.user?.email || 'Unassigned';
+      if (!grouped[sellerName]) grouped[sellerName] = [];
+      grouped[sellerName].push(listing);
+    });
+    Object.keys(grouped).forEach((sellerName) => {
+      grouped[sellerName].sort((a, b) => {
+        const left = new Date(a.createdAt || 0).getTime();
+        const right = new Date(b.createdAt || 0).getTime();
+        if (left === right) return String(a._id || '').localeCompare(String(b._id || ''));
+        return (left - right) * direction;
+      });
+    });
+    return Object.fromEntries(
+      Object.entries(grouped).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+    );
+  }, [userListings, userListingCreatedSort]);
+
+  const selectedUserLabel = useMemo(() => {
+    if (!selectedUser) return '';
+    return (
+      creators.find((u) => String(u._id) === String(selectedUser))?.username
+      || creators.find((u) => String(u._id) === String(selectedUser))?.email
+      || userSummaryRows.find((r) => String(r.userId) === String(selectedUser))?.sellerName
+      || 'user'
+    );
+  }, [selectedUser, creators, userSummaryRows]);
+
+  const selectedUserStats = useMemo(() => {
+    if (!selectedUser) return null;
+    const row = userSummaryRows.find((r) => String(r.userId) === String(selectedUser));
+    if (row) return row;
+    if (userSummaryTotals && userSummaryRows.length <= 1) return userSummaryTotals;
+    return null;
+  }, [selectedUser, userSummaryRows, userSummaryTotals]);
+
+  // Keep store sections collapsed by default when user listings reload
+  useEffect(() => {
+    setExpandedUserStores(new Set());
+  }, [userListings]);
+
+  const toggleUserStore = (sellerName) => {
+    setExpandedUserStores((prev) => {
+      const next = new Set(prev);
+      if (next.has(sellerName)) next.delete(sellerName);
+      else next.add(sellerName);
+      return next;
+    });
+  };
+
+  const expandAllUserStores = () => {
+    setExpandedUserStores(new Set(Object.keys(groupedUserListings)));
+  };
+
+  const collapseAllUserStores = () => {
+    setExpandedUserStores(new Set());
+  };
+
   const handleSummarySort = (columnId) => {
     if (summarySortBy === columnId) {
       setSummarySortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
@@ -140,39 +253,53 @@ export default function TemplateDatabasePage() {
     setSummarySortOrder(columnId === 'sellerName' ? 'asc' : 'desc');
   };
 
+  const dateFilterParams = useMemo(() => {
+    if (dateMode === 'single' && dateSingle) {
+      return { startDate: dateSingle, endDate: dateSingle };
+    }
+    if (dateMode === 'range' && (dateFrom || dateTo)) {
+      const params = {};
+      if (dateFrom) params.startDate = dateFrom;
+      if (dateTo) params.endDate = dateTo;
+      return params;
+    }
+    return {};
+  }, [dateMode, dateSingle, dateFrom, dateTo]);
+
+  const hasDateFilter = Boolean(dateFilterParams.startDate || dateFilterParams.endDate);
+
   useEffect(() => {
     fetchSellers();
     fetchTemplates();
-    fetchStats();
+    fetchCreators();
   }, []);
 
   useEffect(() => {
+    fetchStats();
+  }, [dateFilterParams]);
+
+  useEffect(() => {
     if (activeTab === 0) {
-      fetchListings();
+      fetchSummary();
     }
-  }, [selectedSeller, selectedTemplate, statusFilter, originFilter, searchQuery, pagination.page, activeTab]);
+  }, [activeTab, dateFilterParams]);
 
   useEffect(() => {
     if (activeTab === 1) {
-      fetchSummary();
+      fetchListings();
     }
-  }, [activeTab]);
+  }, [selectedSeller, selectedTemplate, statusFilter, originFilter, searchQuery, pagination.page, activeTab, dateFilterParams]);
 
   useEffect(() => {
-    // Group listings by seller
-    const grouped = {};
-    listings.forEach(listing => {
-      const sellerName = listing.sellerId?.user?.username || listing.sellerId?.user?.email || 'Unassigned';
-      if (!grouped[sellerName]) {
-        grouped[sellerName] = [];
+    if (activeTab === 2) {
+      fetchUserSummary();
+      if (selectedUser) {
+        fetchUserListings();
+      } else {
+        setUserListings([]);
       }
-      grouped[sellerName].push(listing);
-    });
-    setGroupedListings(grouped);
-    
-    // Auto-expand all sellers initially
-    setExpandedSellers(new Set(Object.keys(grouped)));
-  }, [listings]);
+    }
+  }, [activeTab, dateFilterParams, selectedUser, byUserSeller, byUserTemplate]);
 
   const fetchSellers = async () => {
     try {
@@ -192,9 +319,20 @@ export default function TemplateDatabasePage() {
     }
   };
 
+  const fetchCreators = async () => {
+    try {
+      const { data } = await api.get('/template-listings/database-creators');
+      setCreators(data || []);
+    } catch (err) {
+      console.error('Error fetching creators:', err);
+    }
+  };
+
   const fetchStats = async () => {
     try {
-      const { data } = await api.get('/template-listings/database-stats');
+      const { data } = await api.get('/template-listings/database-stats', {
+        params: dateFilterParams,
+      });
       setStats(data || {});
     } catch (err) {
       console.error('Error fetching stats:', err);
@@ -205,7 +343,9 @@ export default function TemplateDatabasePage() {
     setSummaryLoading(true);
     setSummaryError('');
     try {
-      const { data } = await api.get('/template-listings/database-summary');
+      const { data } = await api.get('/template-listings/database-summary', {
+        params: { ...dateFilterParams, groupBy: 'seller' },
+      });
       setSummaryRows(data.rows || []);
       setSummaryTotals(data.totals || null);
     } catch (err) {
@@ -216,13 +356,58 @@ export default function TemplateDatabasePage() {
     }
   };
 
+  const fetchUserSummary = async () => {
+    setUserSummaryLoading(true);
+    setUserSummaryError('');
+    try {
+      const params = { ...dateFilterParams, groupBy: 'user' };
+      if (selectedUser) params.createdBy = selectedUser;
+      if (byUserSeller) params.sellerId = byUserSeller;
+      if (byUserTemplate) params.templateId = byUserTemplate;
+      const { data } = await api.get('/template-listings/database-summary', { params });
+      setUserSummaryRows(data.rows || []);
+      setUserSummaryTotals(data.totals || null);
+    } catch (err) {
+      console.error('Error fetching user summary:', err);
+      setUserSummaryError('Failed to load user activity');
+    } finally {
+      setUserSummaryLoading(false);
+    }
+  };
+
+  const fetchUserListings = async () => {
+    if (!selectedUser) {
+      setUserListings([]);
+      return;
+    }
+    setUserListingsLoading(true);
+    try {
+      const params = {
+        ...dateFilterParams,
+        createdBy: selectedUser,
+        page: 1,
+        limit: 200,
+      };
+      if (byUserSeller) params.sellerId = byUserSeller;
+      if (byUserTemplate) params.templateId = byUserTemplate;
+      const { data } = await api.get('/template-listings/database-view', { params });
+      setUserListings(data.listings || []);
+    } catch (err) {
+      console.error('Error fetching user listings:', err);
+      setUserListings([]);
+    } finally {
+      setUserListingsLoading(false);
+    }
+  };
+
   const fetchListings = async () => {
     setLoading(true);
     setError('');
     try {
       const params = {
         page: pagination.page,
-        limit: pagination.limit
+        limit: pagination.limit,
+        ...dateFilterParams,
       };
       
       if (selectedSeller) params.sellerId = selectedSeller;
@@ -248,8 +433,9 @@ export default function TemplateDatabasePage() {
     setStatusFilter(status);
     setSelectedTemplate('');
     setSearchQuery('');
+    setSelectedUser('');
     setPagination((prev) => ({ ...prev, page: 1 }));
-    setActiveTab(0);
+    setActiveTab(1);
   };
 
   const handleCopy = (text) => {
@@ -266,28 +452,23 @@ export default function TemplateDatabasePage() {
     setSelectedListing(null);
   };
 
-  const toggleSeller = (sellerName) => {
-    setExpandedSellers(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(sellerName)) {
-        newSet.delete(sellerName);
-      } else {
-        newSet.add(sellerName);
-      }
-      return newSet;
-    });
-  };
-
   const clearAllFilters = () => {
     setSelectedSeller('');
     setSelectedTemplate('');
     setStatusFilter('');
     setOriginFilter('');
     setSearchQuery('');
+    setSelectedUser('');
+    setByUserSeller('');
+    setByUserTemplate('');
+    setDateMode('none');
+    setDateSingle('');
+    setDateFrom('');
+    setDateTo('');
     setPagination(prev => ({ ...prev, page: 1 }));
   };
 
-  const hasActiveFilters = selectedSeller || selectedTemplate || statusFilter || originFilter || searchQuery;
+  const hasActiveFilters = selectedSeller || selectedTemplate || statusFilter || originFilter || searchQuery || hasDateFilter;
 
   // Filter templates based on selected seller
   const filteredTemplates = selectedSeller
@@ -304,7 +485,7 @@ export default function TemplateDatabasePage() {
         justifyContent="space-between"
         alignItems={{ xs: 'stretch', lg: 'center' }}
         spacing={2}
-        sx={{ mb: 3 }}
+        sx={{ mb: 1.5 }}
       >
         <Typography variant="h6">Template Listings Database</Typography>
         <Stack direction="row" spacing={1} flexWrap="wrap">
@@ -322,16 +503,237 @@ export default function TemplateDatabasePage() {
         </Stack>
       </Stack>
 
+      {/* Compact shared filters — date for both tabs; listing filters when Listings is active */}
+      <Paper sx={{ px: 1.5, py: 1, mb: 1.5 }}>
+        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" alignItems="center">
+          <FormControl size="small" sx={{ minWidth: 130 }}>
+            <InputLabel>Created</InputLabel>
+            <Select
+              value={dateMode}
+              label="Created"
+              onChange={(e) => {
+                const mode = e.target.value;
+                setDateMode(mode);
+                setDateSingle('');
+                setDateFrom('');
+                setDateTo('');
+                setPagination((prev) => ({ ...prev, page: 1 }));
+              }}
+            >
+              <MenuItem value="none">All dates</MenuItem>
+              <MenuItem value="single">Single day</MenuItem>
+              <MenuItem value="range">Date range</MenuItem>
+            </Select>
+          </FormControl>
+
+          {dateMode === 'single' && (
+            <TextField
+              size="small"
+              type="date"
+              label="Date"
+              value={dateSingle}
+              onChange={(e) => {
+                setDateSingle(e.target.value);
+                setPagination((prev) => ({ ...prev, page: 1 }));
+              }}
+              InputLabelProps={{ shrink: true }}
+              sx={{ width: 150 }}
+            />
+          )}
+
+          {dateMode === 'range' && (
+            <>
+              <TextField
+                size="small"
+                type="date"
+                label="From"
+                value={dateFrom}
+                onChange={(e) => {
+                  setDateFrom(e.target.value);
+                  setPagination((prev) => ({ ...prev, page: 1 }));
+                }}
+                InputLabelProps={{ shrink: true }}
+                sx={{ width: 150 }}
+              />
+              <TextField
+                size="small"
+                type="date"
+                label="To"
+                value={dateTo}
+                onChange={(e) => {
+                  setDateTo(e.target.value);
+                  setPagination((prev) => ({ ...prev, page: 1 }));
+                }}
+                InputLabelProps={{ shrink: true }}
+                sx={{ width: 150 }}
+              />
+            </>
+          )}
+
+          {activeTab === 2 && (
+            <>
+              <FormControl size="small" sx={{ minWidth: 160 }}>
+                <InputLabel>User</InputLabel>
+                <Select
+                  value={selectedUser}
+                  label="User"
+                  onChange={(e) => setSelectedUser(e.target.value)}
+                >
+                  <MenuItem value="">All listers</MenuItem>
+                  {creators.map((user) => (
+                    <MenuItem key={user._id} value={String(user._id)}>
+                      {user.username || user.email || 'Unknown'}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              <FormControl size="small" sx={{ minWidth: 140 }}>
+                <InputLabel>Store</InputLabel>
+                <Select
+                  value={byUserSeller}
+                  label="Store"
+                  onChange={(e) => {
+                    setByUserSeller(e.target.value);
+                    setByUserTemplate('');
+                  }}
+                >
+                  <MenuItem value="">All stores</MenuItem>
+                  {sortedSellers.map((seller) => (
+                    <MenuItem key={seller._id} value={seller._id}>
+                      {seller.user?.username || seller.user?.email || 'Unknown'}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              <FormControl size="small" sx={{ minWidth: 140 }}>
+                <InputLabel>Template</InputLabel>
+                <Select
+                  value={byUserTemplate}
+                  label="Template"
+                  onChange={(e) => setByUserTemplate(e.target.value)}
+                >
+                  <MenuItem value="">All templates</MenuItem>
+                  {templates.map((template) => (
+                    <MenuItem key={template._id} value={template._id}>
+                      {template.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </>
+          )}
+
+          {activeTab === 1 && (
+            <>
+              <FormControl size="small" sx={{ minWidth: 140 }}>
+                <InputLabel>Seller</InputLabel>
+                <Select
+                  value={selectedSeller}
+                  onChange={(e) => {
+                    setSelectedSeller(e.target.value);
+                    setSelectedTemplate('');
+                    setPagination((prev) => ({ ...prev, page: 1 }));
+                  }}
+                  label="Seller"
+                >
+                  <MenuItem value="">All Sellers</MenuItem>
+                  {sortedSellers.map((seller) => (
+                    <MenuItem key={seller._id} value={seller._id}>
+                      {seller.user?.username || seller.user?.email || 'Unknown'}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              <FormControl size="small" sx={{ minWidth: 140 }}>
+                <InputLabel>Template</InputLabel>
+                <Select
+                  value={selectedTemplate}
+                  onChange={(e) => {
+                    setSelectedTemplate(e.target.value);
+                    setPagination((prev) => ({ ...prev, page: 1 }));
+                  }}
+                  label="Template"
+                >
+                  <MenuItem value="">All Templates</MenuItem>
+                  {filteredTemplates.map((template) => (
+                    <MenuItem key={template._id} value={template._id}>
+                      {template.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              <FormControl size="small" sx={{ minWidth: 110 }}>
+                <InputLabel>Status</InputLabel>
+                <Select
+                  value={statusFilter}
+                  onChange={(e) => {
+                    setStatusFilter(e.target.value);
+                    setPagination((prev) => ({ ...prev, page: 1 }));
+                  }}
+                  label="Status"
+                >
+                  <MenuItem value="">All</MenuItem>
+                  <MenuItem value="draft">Draft</MenuItem>
+                  <MenuItem value="active">Active</MenuItem>
+                  <MenuItem value="inactive">Inactive</MenuItem>
+                </Select>
+              </FormControl>
+
+              <FormControl size="small" sx={{ minWidth: 120 }}>
+                <InputLabel>Source</InputLabel>
+                <Select
+                  value={originFilter}
+                  onChange={(e) => {
+                    setOriginFilter(e.target.value);
+                    setPagination((prev) => ({ ...prev, page: 1 }));
+                  }}
+                  label="Source"
+                >
+                  <MenuItem value="">All</MenuItem>
+                  <MenuItem value="template_listings">CSV Listings</MenuItem>
+                  <MenuItem value="direct_list">Direct List</MenuItem>
+                </Select>
+              </FormControl>
+
+              <TextField
+                size="small"
+                placeholder="ASIN, SKU, or Title…"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setPagination((prev) => ({ ...prev, page: 1 }));
+                }}
+                InputProps={{
+                  startAdornment: <SearchIcon sx={{ mr: 0.5, color: 'text.secondary', fontSize: 18 }} />,
+                }}
+                sx={{ flex: '1 1 180px', minWidth: 160, maxWidth: 320 }}
+              />
+            </>
+          )}
+
+          {hasActiveFilters && (
+            <Button size="small" onClick={clearAllFilters} sx={{ ml: 'auto', whiteSpace: 'nowrap' }}>
+              Clear
+            </Button>
+          )}
+        </Stack>
+      </Paper>
+
       <Tabs
         value={activeTab}
         onChange={(_, value) => setActiveTab(value)}
-        sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}
+        sx={{ mb: 1.5, minHeight: 40, borderBottom: 1, borderColor: 'divider', '& .MuiTab-root': { minHeight: 40, py: 0 } }}
       >
-        <Tab label="Listings" />
         <Tab label="Summary" />
+        <Tab label="Listings" />
+        <Tab label="By User" />
       </Tabs>
 
-      {activeTab === 1 && (
+      {activeTab === 0 && (
         <Box>
           {summaryError && (
             <Alert severity="error" sx={{ mb: 2 }} onClose={() => setSummaryError('')}>
@@ -351,7 +753,7 @@ export default function TemplateDatabasePage() {
               <Table size="small">
                 <TableHead>
                   <TableRow sx={{ bgcolor: 'grey.100' }}>
-                    {SUMMARY_SORT_COLUMNS.map((column) => (
+                    {summaryColumns.map((column) => (
                       <TableCell
                         key={column.id}
                         align={column.align}
@@ -453,152 +855,276 @@ export default function TemplateDatabasePage() {
         </Box>
       )}
 
-      {activeTab === 0 && (
-      <>
-      {/* Filter Bar */}
-      <Paper sx={{ p: 2, mb: 3 }}>
-        <Stack spacing={2}>
-          {/* Filter Controls */}
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-            <FormControl sx={{ minWidth: 200 }}>
-              <InputLabel>Seller</InputLabel>
-              <Select
-                value={selectedSeller}
-                onChange={(e) => {
-                  setSelectedSeller(e.target.value);
-                  setSelectedTemplate(''); // Reset template when seller changes
-                  setPagination(prev => ({ ...prev, page: 1 }));
-                }}
-                label="Seller"
-              >
-                <MenuItem value="">All Sellers</MenuItem>
-                {sellers.map(seller => (
-                  <MenuItem key={seller._id} value={seller._id}>
-                    {seller.user?.username || seller.user?.email || 'Unknown'}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            <FormControl sx={{ minWidth: 200 }}>
-              <InputLabel>Template</InputLabel>
-              <Select
-                value={selectedTemplate}
-                onChange={(e) => {
-                  setSelectedTemplate(e.target.value);
-                  setPagination(prev => ({ ...prev, page: 1 }));
-                }}
-                label="Template"
-              >
-                <MenuItem value="">All Templates</MenuItem>
-                {filteredTemplates.map(template => (
-                  <MenuItem key={template._id} value={template._id}>
-                    {template.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            <FormControl sx={{ minWidth: 150 }}>
-              <InputLabel>Status</InputLabel>
-              <Select
-                value={statusFilter}
-                onChange={(e) => {
-                  setStatusFilter(e.target.value);
-                  setPagination(prev => ({ ...prev, page: 1 }));
-                }}
-                label="Status"
-              >
-                <MenuItem value="">All Status</MenuItem>
-                <MenuItem value="draft">Draft</MenuItem>
-                <MenuItem value="active">Active</MenuItem>
-                <MenuItem value="inactive">Inactive</MenuItem>
-              </Select>
-            </FormControl>
-
-            <FormControl sx={{ minWidth: 180 }}>
-              <InputLabel>Source</InputLabel>
-              <Select
-                value={originFilter}
-                onChange={(e) => {
-                  setOriginFilter(e.target.value);
-                  setPagination(prev => ({ ...prev, page: 1 }));
-                }}
-                label="Source"
-              >
-                <MenuItem value="">All Sources</MenuItem>
-                <MenuItem value="template_listings">CSV Listings</MenuItem>
-                <MenuItem value="direct_list">Direct List</MenuItem>
-              </Select>
-            </FormControl>
-          </Stack>
-
-          {/* Search Bar */}
-          <TextField
-            fullWidth
-            placeholder="Search by ASIN, SKU, or Title..."
-            value={searchQuery}
-            onChange={(e) => {
-              setSearchQuery(e.target.value);
-              setPagination(prev => ({ ...prev, page: 1 }));
-            }}
-            InputProps={{
-              startAdornment: <SearchIcon sx={{ mr: 1, color: 'text.secondary' }} />
-            }}
-          />
-
-          {/* Active Filters */}
-          {hasActiveFilters && (
-            <Stack direction="row" spacing={1} flexWrap="wrap" alignItems="center">
-              <Typography variant="body2" color="text.secondary">Active filters:</Typography>
-              {selectedSeller && (
-                <Chip
-                  label={`Seller: ${sellers.find(s => s._id === selectedSeller)?.user?.username || 'Unknown'}`}
-                  onDelete={() => setSelectedSeller('')}
-                  size="small"
-                  color="primary"
-                />
-              )}
-              {selectedTemplate && (
-                <Chip
-                  label={`Template: ${templates.find(t => t._id === selectedTemplate)?.name || 'Unknown'}`}
-                  onDelete={() => setSelectedTemplate('')}
-                  size="small"
-                  color="primary"
-                />
-              )}
-              {statusFilter && (
-                <Chip
-                  label={`Status: ${statusFilter}`}
-                  onDelete={() => setStatusFilter('')}
-                  size="small"
-                  color="primary"
-                />
-              )}
-              {originFilter && (
-                <Chip
-                  label={`Source: ${originFilter === 'direct_list' ? 'Direct List' : 'CSV Listings'}`}
-                  onDelete={() => setOriginFilter('')}
-                  size="small"
-                  color="primary"
-                />
-              )}
-              {searchQuery && (
-                <Chip
-                  label={`Search: "${searchQuery}"`}
-                  onDelete={() => setSearchQuery('')}
-                  size="small"
-                  color="primary"
-                />
-              )}
-              <Button size="small" onClick={clearAllFilters}>
-                Clear All
-              </Button>
-            </Stack>
+      {activeTab === 2 && (
+        <Box>
+          {userSummaryError && (
+            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setUserSummaryError('')}>
+              {userSummaryError}
+            </Alert>
           )}
-        </Stack>
-      </Paper>
 
+          {!selectedUser ? (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                Select a lister from the table or User filter to see store-level listings.
+              </Typography>
+              {userSummaryLoading ? (
+                <Paper sx={{ p: 3, textAlign: 'center' }}>
+                  <Typography>Loading user activity...</Typography>
+                </Paper>
+              ) : userSummaryRows.length === 0 ? (
+                <Paper sx={{ p: 3, textAlign: 'center' }}>
+                  <Typography color="text.secondary">No user listing activity for this filter.</Typography>
+                </Paper>
+              ) : (
+                <TableContainer component={Paper} sx={{ overflowX: 'auto' }}>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow sx={{ bgcolor: 'grey.100' }}>
+                        {userSummaryColumns.map((column) => (
+                          <TableCell
+                            key={column.id}
+                            align={column.align}
+                            sortDirection={summarySortBy === column.id ? summarySortOrder : false}
+                            sx={{ fontWeight: 'bold' }}
+                          >
+                            <TableSortLabel
+                              active={summarySortBy === column.id}
+                              direction={summarySortBy === column.id ? summarySortOrder : 'asc'}
+                              onClick={() => handleSummarySort(column.id)}
+                            >
+                              {column.label}
+                            </TableSortLabel>
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {sortedUserSummaryRows.map((row) => (
+                        <TableRow
+                          key={String(row.userId)}
+                          hover
+                          sx={{ cursor: 'pointer' }}
+                          onClick={() => setSelectedUser(String(row.userId || ''))}
+                        >
+                          <TableCell>
+                            <Typography variant="body2" fontWeight={600}>{row.sellerName}</Typography>
+                          </TableCell>
+                          <TableCell align="right">{row.csvActive || 0}</TableCell>
+                          <TableCell align="right">{row.csvDraft || 0}</TableCell>
+                          <TableCell align="right">{row.csvTotal || 0}</TableCell>
+                          <TableCell align="right">{row.directTotal || 0}</TableCell>
+                          <TableCell align="right">{row.directDraft || 0}</TableCell>
+                          <TableCell align="right">
+                            <Typography variant="body2" fontWeight="bold">{row.total || 0}</Typography>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {userSummaryTotals && (
+                        <TableRow sx={{ bgcolor: 'grey.50' }}>
+                          <TableCell sx={{ fontWeight: 'bold' }}>All listers</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 'bold' }}>{userSummaryTotals.csvActive || 0}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 'bold' }}>{userSummaryTotals.csvDraft || 0}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 'bold' }}>{userSummaryTotals.csvTotal || 0}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 'bold' }}>{userSummaryTotals.directTotal || 0}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 'bold' }}>{userSummaryTotals.directDraft || 0}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 'bold' }}>{userSummaryTotals.total || 0}</TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              )}
+            </>
+          ) : (
+            <Box>
+              <Stack
+                direction={{ xs: 'column', sm: 'row' }}
+                spacing={1}
+                alignItems={{ xs: 'stretch', sm: 'center' }}
+                justifyContent="space-between"
+                sx={{ mb: 1.5 }}
+              >
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Button
+                    size="small"
+                    startIcon={<ArrowBackIcon />}
+                    onClick={() => setSelectedUser('')}
+                  >
+                    All listers
+                  </Button>
+                  <Typography variant="h6" component="h2" sx={{ fontSize: '1.1rem', fontWeight: 700 }}>
+                    {selectedUserLabel}
+                  </Typography>
+                  <Chip size="small" label={`${userListings.length} shown`} variant="outlined" />
+                </Stack>
+                {userListings.length > 0 && (
+                  <Stack direction="row" spacing={1}>
+                    <Button size="small" onClick={expandAllUserStores}>Expand all</Button>
+                    <Button size="small" onClick={collapseAllUserStores}>Collapse all</Button>
+                  </Stack>
+                )}
+              </Stack>
+
+              {selectedUserStats && (
+                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
+                  <Chip size="small" label={`Total: ${selectedUserStats.total || 0}`} />
+                  <Chip size="small" label={`CSV: ${selectedUserStats.csvTotal || 0}`} variant="outlined" />
+                  <Chip size="small" label={`Direct: ${selectedUserStats.directTotal || 0}`} variant="outlined" />
+                  <Chip
+                    size="small"
+                    label={`Draft: ${
+                      selectedUserStats.draft
+                      ?? ((selectedUserStats.csvDraft || 0) + (selectedUserStats.directDraft || 0))
+                    }`}
+                  />
+                  <Chip
+                    size="small"
+                    color="success"
+                    label={`Active: ${
+                      selectedUserStats.active
+                      ?? ((selectedUserStats.csvActive || 0) + (selectedUserStats.directActive || 0))
+                    }`}
+                  />
+                </Stack>
+              )}
+
+              {userSummaryLoading || userListingsLoading ? (
+                <Paper sx={{ p: 2.5, textAlign: 'center' }}>
+                  <Typography>Loading listings for {selectedUserLabel}...</Typography>
+                </Paper>
+              ) : userListings.length === 0 ? (
+                <Paper sx={{ p: 2.5, textAlign: 'center' }}>
+                  <Typography color="text.secondary">
+                    No listings for this user with the current filters.
+                  </Typography>
+                </Paper>
+              ) : (
+                <Stack spacing={0}>
+                  {Object.entries(groupedUserListings).map(([sellerName, sellerListings]) => {
+                    const isExpanded = expandedUserStores.has(sellerName);
+                    return (
+                      <Paper
+                        key={sellerName}
+                        variant="outlined"
+                        square
+                        sx={{
+                          borderRadius: 0,
+                          borderBottom: 'none',
+                          '&:first-of-type': { borderTopLeftRadius: 8, borderTopRightRadius: 8 },
+                          '&:last-of-type': {
+                            borderBottom: (t) => `1px solid ${t.palette.divider}`,
+                            borderBottomLeftRadius: 8,
+                            borderBottomRightRadius: 8,
+                          },
+                        }}
+                      >
+                        <Stack
+                          direction="row"
+                          alignItems="center"
+                          justifyContent="space-between"
+                          onClick={() => toggleUserStore(sellerName)}
+                          sx={{
+                            px: 1.5,
+                            py: 1.25,
+                            cursor: 'pointer',
+                            userSelect: 'none',
+                            bgcolor: isExpanded ? 'action.selected' : 'transparent',
+                            '&:hover': { bgcolor: 'action.hover' },
+                          }}
+                        >
+                          <Stack direction="row" spacing={1} alignItems="center">
+                            <Typography variant="subtitle2" fontWeight={700}>
+                              {sellerName}
+                            </Typography>
+                            <Chip size="small" label={sellerListings.length} sx={{ height: 22, fontWeight: 600 }} />
+                          </Stack>
+                          <IconButton size="small" aria-label={isExpanded ? 'Collapse store' : 'Expand store'}>
+                            {isExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                          </IconButton>
+                        </Stack>
+                        <Collapse in={isExpanded}>
+                          <TableContainer sx={{ overflowX: 'auto', borderTop: 1, borderColor: 'divider' }}>
+                            <Table size="small">
+                              <TableHead>
+                                <TableRow sx={{ bgcolor: 'grey.50' }}>
+                                  <TableCell>ASIN</TableCell>
+                                  <TableCell>SKU</TableCell>
+                                  <TableCell>Title</TableCell>
+                                  <TableCell>Template</TableCell>
+                                  <TableCell>Source</TableCell>
+                                  <TableCell>Status</TableCell>
+                                  <TableCell sortDirection={userListingCreatedSort}>
+                                    <TableSortLabel
+                                      active
+                                      direction={userListingCreatedSort}
+                                      onClick={() =>
+                                        setUserListingCreatedSort((prev) => (prev === 'desc' ? 'asc' : 'desc'))
+                                      }
+                                    >
+                                      Created
+                                    </TableSortLabel>
+                                  </TableCell>
+                                  <TableCell align="right">Actions</TableCell>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {sellerListings.map((listing) => (
+                                  <TableRow key={listing._id} hover>
+                                    <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>
+                                      {listing._asinReference || '—'}
+                                    </TableCell>
+                                    <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>
+                                      {listing.customLabel}
+                                    </TableCell>
+                                    <TableCell sx={{ maxWidth: 280 }}>
+                                      <Typography variant="body2" noWrap title={listing.title}>
+                                        {listing.title}
+                                      </Typography>
+                                    </TableCell>
+                                    <TableCell>
+                                      <Chip
+                                        size="small"
+                                        label={listing.templateId?.name || 'N/A'}
+                                        variant="outlined"
+                                        sx={{ fontSize: '0.75rem' }}
+                                      />
+                                    </TableCell>
+                                    <TableCell>
+                                      <Chip
+                                        size="small"
+                                        label={getListingSource(listing).label}
+                                        color={getListingSource(listing).color}
+                                        variant="outlined"
+                                      />
+                                    </TableCell>
+                                    <TableCell>
+                                      <Chip size="small" label={listing.status || '—'} />
+                                    </TableCell>
+                                    <TableCell>{formatListedDate(listing.createdAt)}</TableCell>
+                                    <TableCell align="right">
+                                      <IconButton size="small" onClick={() => handleViewDetails(listing)}>
+                                        <VisibilityIcon fontSize="small" />
+                                      </IconButton>
+                                    </TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </TableContainer>
+                        </Collapse>
+                      </Paper>
+                    );
+                  })}
+                </Stack>
+              )}
+            </Box>
+          )}
+        </Box>
+      )}
+
+      {activeTab === 1 && (
+      <>
       {/* Error */}
       {error && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
@@ -611,7 +1137,7 @@ export default function TemplateDatabasePage() {
         <Paper sx={{ p: 3, textAlign: 'center' }}>
           <Typography>Loading listings...</Typography>
         </Paper>
-      ) : Object.keys(groupedListings).length === 0 ? (
+      ) : listings.length === 0 ? (
         <Paper sx={{ p: 3, textAlign: 'center' }}>
           <Typography color="text.secondary">
             {hasActiveFilters 
@@ -625,402 +1151,372 @@ export default function TemplateDatabasePage() {
           )}
         </Paper>
       ) : (
-        <Stack spacing={3}>
-          {Object.entries(groupedListings).map(([sellerName, sellerListings]) => {
-            const isExpanded = expandedSellers.has(sellerName);
-            
-            return (
-              <Box key={sellerName}>
-                {/* Seller Header */}
-                <Paper 
-                  sx={{ 
-                    p: 2, 
-                    mb: 1, 
-                    bgcolor: 'primary.main', 
-                    color: 'white',
-                    cursor: 'pointer',
-                    '&:hover': { bgcolor: 'primary.dark' }
-                  }}
-                  onClick={() => toggleSeller(sellerName)}
-                >
-                  <Stack
-                    direction={{ xs: 'column', sm: 'row' }}
-                    justifyContent="space-between"
-                    alignItems={{ xs: 'flex-start', sm: 'center' }}
-                    spacing={1}
-                  >
-                    <Typography variant="h6" fontWeight="bold">
-                      {sellerName}
+        <>
+          {/* MOBILE: Card view */}
+          <Stack spacing={1.5} sx={{ display: { xs: 'flex', md: 'none' }, mb: 2 }}>
+            {listings.map((listing, index) => (
+              <Paper key={listing._id} sx={{ p: 2, border: 1, borderColor: 'divider' }}>
+                <Stack spacing={1.5}>
+                  <Typography variant="caption" color="text.secondary" fontWeight="medium">
+                    #{(pagination.page - 1) * pagination.limit + index + 1}
+                  </Typography>
+
+                  <Typography variant="body2">
+                    <Typography component="span" variant="caption" color="text.secondary">Store: </Typography>
+                    <strong>{listingStoreName(listing)}</strong>
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Listed: <strong>{formatListedDate(listingListedAt(listing))}</strong>
+                  </Typography>
+
+                  <Stack direction="row" spacing={0.5} alignItems="center">
+                    <Typography variant="caption" color="text.secondary" sx={{ minWidth: 50 }}>
+                      ASIN:
                     </Typography>
-                    <Stack direction="row" spacing={1} alignItems="center">
-                      <Chip
-                        label={`${sellerListings.length} listing${sellerListings.length !== 1 ? 's' : ''}`}
-                        size="small"
-                        sx={{ bgcolor: 'white', color: 'primary.main' }}
-                      />
-                      <IconButton size="small" sx={{ color: 'white' }}>
-                        {isExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                    <Typography
+                      variant="body2"
+                      sx={{ fontFamily: 'monospace', fontSize: '0.85rem', fontWeight: 'bold', color: 'primary.main' }}
+                    >
+                      {listing._asinReference || 'N/A'}
+                    </Typography>
+                    {listing._asinReference && (
+                      <IconButton size="small" onClick={() => handleCopy(listing._asinReference)} title="Copy ASIN">
+                        <ContentCopyIcon sx={{ fontSize: 16 }} />
+                      </IconButton>
+                    )}
+                  </Stack>
+
+                  <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 0 }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ minWidth: 50 }}>
+                      SKU:
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      sx={{
+                        fontFamily: 'monospace',
+                        fontSize: '0.85rem',
+                        bgcolor: 'grey.100',
+                        px: 1,
+                        py: 0.5,
+                        borderRadius: 1,
+                        fontWeight: 'medium'
+                      }}
+                    >
+                      {listing.customLabel}
+                    </Typography>
+                    <IconButton size="small" onClick={() => handleCopy(listing.customLabel)} title="Copy SKU">
+                      <ContentCopyIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Stack>
+
+                  {resolveSupplierLink(listing) && (
+                    <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 0 }}>
+                      <Typography variant="caption" color="text.secondary" sx={{ minWidth: 50 }}>
+                        Link:
+                      </Typography>
+                      <MuiLink
+                        href={resolveSupplierLink(listing)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        underline="hover"
+                        sx={{
+                          fontSize: '0.8rem',
+                          fontFamily: 'monospace',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 0.5,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          maxWidth: '100%'
+                        }}
+                      >
+                        {resolveSupplierLink(listing)}
+                        <OpenInNewIcon sx={{ fontSize: 14, flexShrink: 0 }} />
+                      </MuiLink>
+                      <IconButton size="small" onClick={() => handleCopy(resolveSupplierLink(listing))} title="Copy Link">
+                        <ContentCopyIcon sx={{ fontSize: 16 }} />
                       </IconButton>
                     </Stack>
+                  )}
+
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      lineHeight: 1.3,
+                      fontSize: '0.85rem'
+                    }}
+                  >
+                    {listing.title}
+                  </Typography>
+
+                  <Stack direction="row" spacing={1} flexWrap="wrap">
+                    <Chip
+                      label={listing.templateId?.name || 'N/A'}
+                      size="small"
+                      variant="outlined"
+                      sx={{ fontSize: '0.75rem' }}
+                    />
+                    {(() => {
+                      const source = getListingSource(listing);
+                      return (
+                        <Chip
+                          label={source.label}
+                          size="small"
+                          color={source.color}
+                          variant="outlined"
+                          sx={{ fontSize: '0.75rem' }}
+                        />
+                      );
+                    })()}
+                    <Chip
+                      label={`User: ${listingCreatorName(listing)}`}
+                      size="small"
+                      variant="outlined"
+                      sx={{ fontSize: '0.75rem' }}
+                    />
+                    <Chip
+                      label={listing.status || 'draft'}
+                      size="small"
+                      color={listing.status === 'active' ? 'success' : 'default'}
+                      sx={{ fontSize: '0.75rem' }}
+                    />
                   </Stack>
-                </Paper>
 
-                {/* Listings Content */}
-                <Collapse in={isExpanded}>
-                  {/* MOBILE: Card view */}
-                  <Stack spacing={1.5} sx={{ display: { xs: 'flex', md: 'none' }, mb: 2 }}>
-                    {sellerListings.map((listing, index) => (
-                      <Paper key={listing._id} sx={{ p: 2, border: 1, borderColor: 'divider' }}>
-                        <Stack spacing={1.5}>
-                          {/* Row number */}
-                          <Typography variant="caption" color="text.secondary" fontWeight="medium">
-                            #{index + 1}
-                          </Typography>
+                  <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
+                    <Typography variant="body2" color="text.secondary">
+                      Amazon: <strong>{formatListingPrice(listing.amazonScrapedPrice)}</strong>
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      eBay: <strong>{formatListingPrice(listing.startPrice)}</strong>
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Qty: <strong>{listing.quantity || 0}</strong>
+                    </Typography>
+                  </Stack>
 
-                          {/* ASIN */}
-                          <Stack direction="row" spacing={0.5} alignItems="center">
-                            <Typography variant="caption" color="text.secondary" sx={{ minWidth: 50 }}>
-                              ASIN:
-                            </Typography>
-                            <Typography
-                              variant="body2"
-                              sx={{ fontFamily: 'monospace', fontSize: '0.85rem', fontWeight: 'bold', color: 'primary.main' }}
-                            >
-                              {listing._asinReference || 'N/A'}
-                            </Typography>
-                            {listing._asinReference && (
-                              <IconButton size="small" onClick={() => handleCopy(listing._asinReference)} title="Copy ASIN">
-                                <ContentCopyIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            )}
-                          </Stack>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    startIcon={<VisibilityIcon />}
+                    onClick={() => handleViewDetails(listing)}
+                    fullWidth
+                  >
+                    View Details
+                  </Button>
+                </Stack>
+              </Paper>
+            ))}
+          </Stack>
 
-                          {/* SKU */}
-                          <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 0 }}>
-                            <Typography variant="caption" color="text.secondary" sx={{ minWidth: 50 }}>
-                              SKU:
-                            </Typography>
-                            <Typography
-                              variant="body2"
-                              sx={{
-                                fontFamily: 'monospace',
-                                fontSize: '0.85rem',
-                                bgcolor: 'grey.100',
-                                px: 1,
-                                py: 0.5,
-                                borderRadius: 1,
-                                fontWeight: 'medium'
-                              }}
-                            >
-                              {listing.customLabel}
-                            </Typography>
-                            <IconButton size="small" onClick={() => handleCopy(listing.customLabel)} title="Copy SKU">
-                              <ContentCopyIcon sx={{ fontSize: 16 }} />
-                            </IconButton>
-                          </Stack>
-
-                          {/* Amazon Link */}
-                          {resolveSupplierLink(listing) && (
-                            <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 0 }}>
-                              <Typography variant="caption" color="text.secondary" sx={{ minWidth: 50 }}>
-                                Link:
-                              </Typography>
-                              <MuiLink
-                                href={resolveSupplierLink(listing)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                underline="hover"
-                                sx={{
-                                  fontSize: '0.8rem',
-                                  fontFamily: 'monospace',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: 0.5,
-                                  overflow: 'hidden',
-                                  textOverflow: 'ellipsis',
-                                  whiteSpace: 'nowrap',
-                                  maxWidth: '100%'
-                                }}
-                              >
-                                {resolveSupplierLink(listing)}
-                                <OpenInNewIcon sx={{ fontSize: 14, flexShrink: 0 }} />
-                              </MuiLink>
-                              <IconButton size="small" onClick={() => handleCopy(resolveSupplierLink(listing))} title="Copy Link">
-                                <ContentCopyIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </Stack>
-                          )}
-
-                          {/* Title */}
-                          <Typography
-                            variant="body2"
+          {/* DESKTOP: Flat table */}
+          <TableContainer component={Paper} sx={{ display: { xs: 'none', md: 'block' }, overflowX: 'auto' }}>
+            <Table size="small" sx={{ '& .MuiTableCell-root': { py: 1.5 } }}>
+              <TableHead>
+                <TableRow sx={{ bgcolor: 'grey.100' }}>
+                  <TableCell sx={{ fontWeight: 'bold', width: 50 }}>#</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 120 }}>Store</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 150 }}>Listed</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 120 }}>ASIN</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 140 }}>SKU</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', minWidth: 300 }}>Link</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', minWidth: 200 }}>Title</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 120 }}>Template</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 120 }}>Source</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 120 }}>User</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 100 }}>Amazon</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 100 }}>eBay</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 80 }}>Qty</TableCell>
+                  <TableCell sx={{ fontWeight: 'bold', width: 100 }}>Status</TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 'bold', width: 100 }}>Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {listings.map((listing, index) => (
+                  <TableRow key={listing._id} hover sx={{ '&:hover': { bgcolor: 'action.hover' } }}>
+                    <TableCell>
+                      <Typography variant="body2" color="text.secondary" fontWeight="medium">
+                        {(pagination.page - 1) * pagination.limit + index + 1}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" fontWeight={600} sx={{ fontSize: '0.85rem' }}>
+                        {listingStoreName(listing)}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
+                        {formatListedDate(listingListedAt(listing))}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          fontFamily: 'monospace',
+                          fontSize: '0.85rem',
+                          fontWeight: 'bold',
+                          color: 'primary.main'
+                        }}
+                      >
+                        {listing._asinReference || 'N/A'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Stack direction="row" spacing={0.5} alignItems="center">
+                        <Typography
+                          variant="body2"
+                          sx={{
+                            fontFamily: 'monospace',
+                            fontSize: '0.85rem',
+                            bgcolor: 'grey.100',
+                            px: 1,
+                            py: 0.5,
+                            borderRadius: 1,
+                            fontWeight: 'medium'
+                          }}
+                        >
+                          {listing.customLabel}
+                        </Typography>
+                        <IconButton
+                          size="small"
+                          onClick={() => handleCopy(listing.customLabel)}
+                          title="Copy SKU"
+                        >
+                          <ContentCopyIcon sx={{ fontSize: 16 }} />
+                        </IconButton>
+                      </Stack>
+                    </TableCell>
+                    <TableCell>
+                      {resolveSupplierLink(listing) ? (
+                        <Stack direction="row" spacing={0.5} alignItems="center">
+                          <MuiLink
+                            href={resolveSupplierLink(listing)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            underline="hover"
                             sx={{
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              display: '-webkit-box',
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: 'vertical',
-                              lineHeight: 1.3,
-                              fontSize: '0.85rem'
+                              fontSize: '0.8rem',
+                              fontFamily: 'monospace',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 0.5
                             }}
                           >
-                            {listing.title}
-                          </Typography>
-
-                          {/* Template, Source & Status */}
-                          <Stack direction="row" spacing={1} flexWrap="wrap">
-                            <Chip
-                              label={listing.templateId?.name || 'N/A'}
-                              size="small"
-                              variant="outlined"
-                              sx={{ fontSize: '0.75rem' }}
-                            />
-                            {(() => {
-                              const source = getListingSource(listing);
-                              return (
-                                <Chip
-                                  label={source.label}
-                                  size="small"
-                                  color={source.color}
-                                  variant="outlined"
-                                  sx={{ fontSize: '0.75rem' }}
-                                />
-                              );
-                            })()}
-                            <Chip
-                              label={listing.status || 'draft'}
-                              size="small"
-                              color={listing.status === 'active' ? 'success' : 'default'}
-                              sx={{ fontSize: '0.75rem' }}
-                            />
-                          </Stack>
-
-                          {/* Price & Quantity */}
-                          <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
-                            <Typography variant="body2" color="text.secondary">
-                              Amazon: <strong>{formatListingPrice(listing.amazonScrapedPrice)}</strong>
-                            </Typography>
-                            <Typography variant="body2" color="text.secondary">
-                              eBay: <strong>{formatListingPrice(listing.startPrice)}</strong>
-                            </Typography>
-                            <Typography variant="body2" color="text.secondary">
-                              Qty: <strong>{listing.quantity || 0}</strong>
-                            </Typography>
-                            <Typography variant="body2" color="text.secondary">
-                              Listed: <strong>{formatListedDate(listing.ebayPublishedAt)}</strong>
-                            </Typography>
-                          </Stack>
-
-                          {/* Actions */}
-                          <Button
-                            variant="outlined"
+                            {resolveSupplierLink(listing)}
+                            <OpenInNewIcon sx={{ fontSize: 14 }} />
+                          </MuiLink>
+                          <IconButton
                             size="small"
-                            startIcon={<VisibilityIcon />}
-                            onClick={() => handleViewDetails(listing)}
-                            fullWidth
+                            onClick={() => handleCopy(resolveSupplierLink(listing))}
+                            title="Copy Link"
                           >
-                            View Details
-                          </Button>
+                            <ContentCopyIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
                         </Stack>
-                      </Paper>
-                    ))}
-                  </Stack>
-
-                  {/* DESKTOP: Table view */}
-                  <TableContainer component={Paper} sx={{ display: { xs: 'none', md: 'block' }, overflowX: 'auto' }}>
-                    <Table size="small" sx={{ '& .MuiTableCell-root': { py: 1.5 } }}>
-                      <TableHead>
-                        <TableRow sx={{ bgcolor: 'grey.100' }}>
-                          <TableCell sx={{ fontWeight: 'bold', width: 50 }}>#</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 120 }}>ASIN</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 140 }}>SKU</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', minWidth: 300 }}>Link</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', minWidth: 200 }}>Title</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 120 }}>Template</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 120 }}>Source</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 100 }}>Amazon</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 100 }}>eBay</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 80 }}>Qty</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 100 }}>Status</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold', width: 150 }}>Listed</TableCell>
-                          <TableCell align="right" sx={{ fontWeight: 'bold', width: 100 }}>Actions</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {sellerListings.map((listing, index) => (
-                          <TableRow key={listing._id} hover sx={{ '&:hover': { bgcolor: 'action.hover' } }}>
-                            <TableCell>
-                              <Typography variant="body2" color="text.secondary" fontWeight="medium">
-                                {index + 1}
-                              </Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Typography
-                                variant="body2"
-                                sx={{
-                                  fontFamily: 'monospace',
-                                  fontSize: '0.85rem',
-                                  fontWeight: 'bold',
-                                  color: 'primary.main'
-                                }}
-                              >
-                                {listing._asinReference || 'N/A'}
-                              </Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Stack direction="row" spacing={0.5} alignItems="center">
-                                <Typography
-                                  variant="body2"
-                                  sx={{
-                                    fontFamily: 'monospace',
-                                    fontSize: '0.85rem',
-                                    bgcolor: 'grey.100',
-                                    px: 1,
-                                    py: 0.5,
-                                    borderRadius: 1,
-                                    fontWeight: 'medium'
-                                  }}
-                                >
-                                  {listing.customLabel}
-                                </Typography>
-                                <IconButton
-                                  size="small"
-                                  onClick={() => handleCopy(listing.customLabel)}
-                                  title="Copy SKU"
-                                >
-                                  <ContentCopyIcon sx={{ fontSize: 16 }} />
-                                </IconButton>
-                              </Stack>
-                            </TableCell>
-                            <TableCell>
-                              {resolveSupplierLink(listing) ? (
-                                <Stack direction="row" spacing={0.5} alignItems="center">
-                                  <MuiLink
-                                    href={resolveSupplierLink(listing)}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    underline="hover"
-                                    sx={{
-                                      fontSize: '0.8rem',
-                                      fontFamily: 'monospace',
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: 0.5
-                                    }}
-                                  >
-                                    {resolveSupplierLink(listing)}
-                                    <OpenInNewIcon sx={{ fontSize: 14 }} />
-                                  </MuiLink>
-                                  <IconButton
-                                    size="small"
-                                    onClick={() => handleCopy(resolveSupplierLink(listing))}
-                                    title="Copy Link"
-                                  >
-                                    <ContentCopyIcon sx={{ fontSize: 16 }} />
-                                  </IconButton>
-                                </Stack>
-                              ) : (
-                                <Typography variant="body2" color="text.secondary">-</Typography>
-                              )}
-                            </TableCell>
-                            <TableCell>
-                              <Typography
-                                variant="body2"
-                                sx={{
-                                  overflow: 'hidden',
-                                  textOverflow: 'ellipsis',
-                                  display: '-webkit-box',
-                                  WebkitLineClamp: 2,
-                                  WebkitBoxOrient: 'vertical',
-                                  lineHeight: 1.3,
-                                  fontSize: '0.85rem'
-                                }}
-                              >
-                                {listing.title}
-                              </Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Chip
-                                label={listing.templateId?.name || 'N/A'}
-                                size="small"
-                                variant="outlined"
-                                sx={{ fontSize: '0.75rem' }}
-                              />
-                            </TableCell>
-                            <TableCell>
-                              {(() => {
-                                const source = getListingSource(listing);
-                                return (
-                                  <Chip
-                                    label={source.label}
-                                    size="small"
-                                    color={source.color}
-                                    variant="outlined"
-                                    sx={{ fontSize: '0.75rem' }}
-                                  />
-                                );
-                              })()}
-                            </TableCell>
-                            <TableCell>
-                              <Typography variant="body2" fontWeight="medium" color="text.secondary">
-                                {formatListingPrice(listing.amazonScrapedPrice)}
-                              </Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Typography variant="body2" fontWeight="medium">
-                                {formatListingPrice(listing.startPrice)}
-                              </Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Typography variant="body2">
-                                {listing.quantity || 0}
-                              </Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Chip
-                                label={listing.status || 'draft'}
-                                size="small"
-                                color={listing.status === 'active' ? 'success' : 'default'}
-                                sx={{ fontSize: '0.75rem' }}
-                              />
-                            </TableCell>
-                            <TableCell>
-                              <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
-                                {formatListedDate(listing.ebayPublishedAt)}
-                              </Typography>
-                            </TableCell>
-                            <TableCell align="right">
-                              <Stack direction="row" spacing={0.5} justifyContent="flex-end">
-                                <IconButton
-                                  size="small"
-                                  onClick={() => handleViewDetails(listing)}
-                                  title="View Details"
-                                  color="primary"
-                                >
-                                  <VisibilityIcon sx={{ fontSize: 18 }} />
-                                </IconButton>
-                                {listing._asinReference && (
-                                  <IconButton
-                                    size="small"
-                                    onClick={() => handleCopy(listing._asinReference)}
-                                    title="Copy ASIN"
-                                    color="primary"
-                                  >
-                                    <ContentCopyIcon sx={{ fontSize: 16 }} />
-                                  </IconButton>
-                                )}
-                              </Stack>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                </Collapse>
-              </Box>
-            );
-          })}
-        </Stack>
+                      ) : (
+                        <Typography variant="body2" color="text.secondary">-</Typography>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: 'vertical',
+                          lineHeight: 1.3,
+                          fontSize: '0.85rem'
+                        }}
+                      >
+                        {listing.title}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={listing.templateId?.name || 'N/A'}
+                        size="small"
+                        variant="outlined"
+                        sx={{ fontSize: '0.75rem' }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      {(() => {
+                        const source = getListingSource(listing);
+                        return (
+                          <Chip
+                            label={source.label}
+                            size="small"
+                            color={source.color}
+                            variant="outlined"
+                            sx={{ fontSize: '0.75rem' }}
+                          />
+                        );
+                      })()}
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" sx={{ fontSize: '0.85rem' }}>
+                        {listingCreatorName(listing)}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" fontWeight="medium" color="text.secondary">
+                        {formatListingPrice(listing.amazonScrapedPrice)}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" fontWeight="medium">
+                        {formatListingPrice(listing.startPrice)}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2">
+                        {listing.quantity || 0}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={listing.status || 'draft'}
+                        size="small"
+                        color={listing.status === 'active' ? 'success' : 'default'}
+                        sx={{ fontSize: '0.75rem' }}
+                      />
+                    </TableCell>
+                    <TableCell align="right">
+                      <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                        <IconButton
+                          size="small"
+                          onClick={() => handleViewDetails(listing)}
+                          title="View Details"
+                          color="primary"
+                        >
+                          <VisibilityIcon sx={{ fontSize: 18 }} />
+                        </IconButton>
+                        {listing._asinReference && (
+                          <IconButton
+                            size="small"
+                            onClick={() => handleCopy(listing._asinReference)}
+                            title="Copy ASIN"
+                            color="primary"
+                          >
+                            <ContentCopyIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        )}
+                      </Stack>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </>
       )}
 
       {/* Pagination */}
@@ -1134,6 +1630,10 @@ export default function TemplateDatabasePage() {
                     <Typography variant="body2">
                       {selectedListing.sellerId?.user?.username || selectedListing.sellerId?.user?.email || 'N/A'}
                     </Typography>
+                  </Grid>
+                  <Grid item xs={12} sm={6}>
+                    <Typography variant="caption" color="text.secondary">Created by</Typography>
+                    <Typography variant="body2">{listingCreatorName(selectedListing)}</Typography>
                   </Grid>
                 </Grid>
               </Box>

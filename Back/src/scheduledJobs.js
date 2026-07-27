@@ -7,6 +7,7 @@ import {
   scheduledRunAutoCompatForDate,
   scheduledPollNewOrders,
   scheduledSyncBuyerInbox,
+  scheduledFetchCancellations,
   refreshPayoneerFeedCache,
   processPendingPolicyMessages,
   processPendingListingQtyUpdates,
@@ -61,6 +62,14 @@ export const CRON_JOB_DEFINITIONS = [
     cronExpr: '*/10 * * * *',
     timezone: 'Asia/Kolkata',
     enabled: false,
+  },
+  {
+    jobKey: 'fetchCancellations',
+    label: 'Fetch cancellations',
+    description: 'Sync eBay Post-Order cancellation/search (last 30 days) into Cancellation Search for all connected sellers.',
+    cronExpr: '*/15 * * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: true,
   },
   {
     jobKey: 'orderListingQtyUpdate',
@@ -185,6 +194,14 @@ async function runPollNewOrders() {
   await withEbayPollRun('poll-new-orders', 'cron', null, scheduledPollNewOrders);
 }
 
+async function runFetchCancellations() {
+  console.log('[CRON] Scheduled Fetch Cancellations starting...');
+  const result = await scheduledFetchCancellations();
+  console.log(
+    `[CRON] Fetch Cancellations done: new=${result?.totalNewCancellations || 0}, updated=${result?.totalUpdatedCancellations || 0}, sellers=${(result?.results || []).length}${result?.errors?.length ? `, errors=${result.errors.length}` : ''}`
+  );
+}
+
 async function runOrderListingQtyUpdate() {
   console.log('[CRON] Listing qty update starting…');
   const result = await processPendingListingQtyUpdates(50);
@@ -252,6 +269,7 @@ const CRON_JOB_HANDLERS = {
   directListBulkJobs: runDirectListBulkJobs,
   pollAllSellers: runPollAllSellers,
   pollNewOrders: runPollNewOrders,
+  fetchCancellations: runFetchCancellations,
   orderListingQtyUpdate: runOrderListingQtyUpdate,
   policyMessages: runPolicyMessages,
   autoCompatRunForDate: runAutoCompatForDate,

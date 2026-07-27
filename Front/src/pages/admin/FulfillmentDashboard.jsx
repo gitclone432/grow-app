@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, memo, useCallback, useMemo, useSyncExternalStore } from 'react';
+import React, { useEffect, useState, useRef, memo, useCallback, useMemo, useSyncExternalStore, forwardRef, useImperativeHandle } from 'react';
 import Snackbar from '@mui/material/Snackbar';
 import MuiAlert from '@mui/material/Alert';
 import {
@@ -64,7 +64,6 @@ import InfoIcon from '@mui/icons-material/Info';
 import SettingsIcon from '@mui/icons-material/Settings';
 import SyncIcon from '@mui/icons-material/Sync';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
-import HistoryIcon from '@mui/icons-material/History';
 import SearchIcon from '@mui/icons-material/Search';
 import DownloadIcon from '@mui/icons-material/Download';
 import UploadIcon from '@mui/icons-material/Upload';
@@ -1014,17 +1013,147 @@ const normalizeDateFilter = (value) => (
     : createEmptyDateFilter()
 );
 
-const SearchFiltersPanel = memo(function SearchFiltersPanel({
+const DateModeSearchBar = memo(function DateModeSearchBar({
+  sellers = [],
+  draftSelectedSeller,
+  setDraftSelectedSeller,
+  draftDateFilter,
+  setDraftDateFilter,
+  onSearch,
+  onClear,
+  fullWidth = false,
+  sellerFullWidth = false,
+}) {
+  return (
+    <Stack
+      direction={{ xs: 'column', sm: 'row' }}
+      spacing={1}
+      alignItems={{ xs: 'stretch', sm: 'center' }}
+      sx={{ flexWrap: 'wrap', flex: fullWidth ? 1 : 'none' }}
+    >
+      {sellerFullWidth ? (
+        <FormControl size="small" fullWidth>
+          <InputLabel id="seller-select-label">Select Seller</InputLabel>
+          <Select
+            labelId="seller-select-label"
+            value={draftSelectedSeller}
+            label="Select Seller"
+            onChange={(e) => setDraftSelectedSeller(e.target.value)}
+          >
+            <MenuItem value="">
+              <em>-- Select Seller --</em>
+            </MenuItem>
+            {sellers.map((s) => (
+              <MenuItem key={s._id} value={s._id}>
+                {s.user?.username || s.user?.email || s._id}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      ) : (
+        <Select
+          value={draftSelectedSeller}
+          onChange={(e) => setDraftSelectedSeller(e.target.value)}
+          displayEmpty
+          size="small"
+          renderValue={(val) => val ? (sellers.find(s => s._id === val)?.user?.username || sellers.find(s => s._id === val)?.user?.email || val) : 'Select Seller'}
+          sx={{ minWidth: 140, fontSize: '0.8rem', color: draftSelectedSeller ? 'inherit' : 'text.secondary' }}
+        >
+          <MenuItem value="">
+            <em>All Sellers</em>
+          </MenuItem>
+          {sellers.map((s) => (
+            <MenuItem key={s._id} value={s._id}>
+              {s.user?.username || s.user?.email || s._id}
+            </MenuItem>
+          ))}
+        </Select>
+      )}
+
+      <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 130 } }}>
+        <InputLabel id="date-mode-label">Date Mode</InputLabel>
+        <Select
+          labelId="date-mode-label"
+          value={draftDateFilter.mode}
+          label="Date Mode"
+          onChange={(e) => setDraftDateFilter((prev) => ({ ...prev, mode: e.target.value }))}
+        >
+          <MenuItem value="none">None</MenuItem>
+          <MenuItem value="single">Single Day</MenuItem>
+          <MenuItem value="range">Date Range</MenuItem>
+        </Select>
+      </FormControl>
+
+      {draftDateFilter.mode === 'single' && (
+        <TextField
+          size="small"
+          label="Date"
+          type="date"
+          value={draftDateFilter.single}
+          onChange={(e) => setDraftDateFilter((prev) => ({ ...prev, single: e.target.value }))}
+          InputLabelProps={{ shrink: true }}
+          sx={{ width: { xs: '100%', sm: 150 } }}
+        />
+      )}
+
+      {draftDateFilter.mode === 'range' && (
+        <Stack direction="row" spacing={1} sx={{ flex: { xs: 1, sm: 'none' } }}>
+          <TextField
+            size="small"
+            label="From"
+            type="date"
+            value={draftDateFilter.from}
+            onChange={(e) => setDraftDateFilter((prev) => ({ ...prev, from: e.target.value }))}
+            InputLabelProps={{ shrink: true }}
+            sx={{ width: { xs: '50%', sm: 150 } }}
+          />
+          <TextField
+            size="small"
+            label="To"
+            type="date"
+            value={draftDateFilter.to}
+            onChange={(e) => setDraftDateFilter((prev) => ({ ...prev, to: e.target.value }))}
+            InputLabelProps={{ shrink: true }}
+            sx={{ width: { xs: '50%', sm: 150 } }}
+          />
+        </Stack>
+      )}
+
+      <Button
+        size="small"
+        variant="contained"
+        onClick={onSearch}
+        startIcon={<SearchIcon />}
+        sx={{ ...yellowFilledButtonSx, minWidth: { xs: '100%', sm: 90 }, height: 40 }}
+      >
+        Search
+      </Button>
+
+      <Button
+        size="small"
+        variant="outlined"
+        onClick={onClear}
+        sx={{ ...yellowOutlinedButtonSx, minWidth: { xs: '100%', sm: 80 }, height: 40 }}
+      >
+        Clear
+      </Button>
+    </Stack>
+  );
+});
+
+const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
   searchOrderId, setSearchOrderId,
   searchAzOrderId, setSearchAzOrderId,
   searchBuyerName, setSearchBuyerName,
   searchItemId, setSearchItemId,
   searchSku, setSearchSku,
   searchProductName, setSearchProductName,
-  setSearchPaymentStatus,
-  dateFilter, setDateFilter,
+  searchPaymentStatus, setSearchPaymentStatus,
+  draftSelectedSeller, setDraftSelectedSeller, setSelectedSeller,
+  draftDateFilter, setDraftDateFilter,
+  setDateFilter,
   isSmallMobile,
-}) {
+}, ref) {
   const [filtersExpanded, setFiltersExpanded] = useState(() => {
     try {
       const stored = sessionStorage.getItem('fulfillment_dashboard_state');
@@ -1050,7 +1179,6 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
   const [localItemId, setLocalItemId] = useState(searchItemId);
   const [localSku, setLocalSku] = useState(searchSku);
   const [localProductName, setLocalProductName] = useState(searchProductName);
-  const [localDateFilter, setLocalDateFilter] = useState(() => normalizeDateFilter(dateFilter));
 
   // Sync local state when parent resets externally (e.g. Clear button calling parent setters).
   useEffect(() => { setLocalOrderId(searchOrderId); }, [searchOrderId]);
@@ -1059,20 +1187,25 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
   useEffect(() => { setLocalItemId(searchItemId); }, [searchItemId]);
   useEffect(() => { setLocalSku(searchSku); }, [searchSku]);
   useEffect(() => { setLocalProductName(searchProductName); }, [searchProductName]);
-  useEffect(() => { setLocalDateFilter(normalizeDateFilter(dateFilter)); }, [dateFilter]);
 
   // Push all local values to parent → triggers the API fetch in parent's filter useEffect.
-  const handleSearch = () => {
+  const handleSearch = useCallback(() => {
     setSearchOrderId(localOrderId);
     setSearchAzOrderId(localAzOrderId);
     setSearchBuyerName(localBuyerName);
     setSearchItemId(localItemId);
     setSearchSku(localSku);
     setSearchProductName(localProductName);
-    setDateFilter(normalizeDateFilter(localDateFilter));
-  };
+    setSelectedSeller(draftSelectedSeller);
+    setDateFilter(normalizeDateFilter(draftDateFilter));
+  }, [
+    localOrderId, localAzOrderId, localBuyerName, localItemId, localSku, localProductName,
+    draftSelectedSeller, draftDateFilter,
+    setSearchOrderId, setSearchAzOrderId, setSearchBuyerName, setSearchItemId, setSearchSku, setSearchProductName,
+    setSelectedSeller, setDateFilter,
+  ]);
 
-  const handleClear = () => {
+  const handleClear = useCallback(() => {
     const clearedDateFilter = createEmptyDateFilter();
 
     setLocalOrderId('');
@@ -1081,7 +1214,8 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
     setLocalItemId('');
     setLocalSku('');
     setLocalProductName('');
-    setLocalDateFilter(clearedDateFilter);
+    setDraftSelectedSeller('');
+    setDraftDateFilter(clearedDateFilter);
 
     setSearchOrderId('');
     setSearchAzOrderId('');
@@ -1089,8 +1223,20 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
     setSearchItemId('');
     setSearchSku('');
     setSearchProductName('');
+    setSearchPaymentStatus('');
+    setSelectedSeller('');
     setDateFilter(clearedDateFilter);
-  };
+  }, [
+    setDraftSelectedSeller, setDraftDateFilter,
+    setSearchOrderId, setSearchAzOrderId, setSearchBuyerName, setSearchItemId, setSearchSku, setSearchProductName,
+    setSearchPaymentStatus, setSelectedSeller,
+    setDateFilter,
+  ]);
+
+  useImperativeHandle(ref, () => ({
+    search: handleSearch,
+    clear: handleClear,
+  }), [handleSearch, handleClear]);
 
   const handleKeyDown = (e) => { if (e.key === 'Enter') handleSearch(); };
 
@@ -1109,7 +1255,6 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
       </Box>
       <Collapse in={filtersExpanded}>
         <Stack spacing={{ xs: 1, sm: 1.25 }} sx={{ mt: 1 }}>
-          {/* Row 1: Text searches */}
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={{ xs: 1, sm: 2 }}>
             <TextField
               size="small"
@@ -1173,86 +1318,26 @@ const SearchFiltersPanel = memo(function SearchFiltersPanel({
             />
           </Stack>
 
-          {/* Row 2: Date filters */}
-          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={{ xs: 1, sm: 2 }} alignItems={{ xs: 'stretch', sm: 'center' }}>
-            {/* DATE MODE SELECTOR */}
-            <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 130 } }}>
-              <InputLabel id="date-mode-label">Date Mode</InputLabel>
-              <Select
-                labelId="date-mode-label"
-                value={localDateFilter.mode}
-                label="Date Mode"
-                onChange={(e) => setLocalDateFilter(prev => ({ ...prev, mode: e.target.value }))}
-              >
-                <MenuItem value="none">None</MenuItem>
-                <MenuItem value="single">Single Day</MenuItem>
-                <MenuItem value="range">Date Range</MenuItem>
-              </Select>
-            </FormControl>
-
-            {/* SINGLE DATE INPUT */}
-            {localDateFilter.mode === 'single' && (
-              <TextField
-                size="small"
-                label="Date"
-                type="date"
-                value={localDateFilter.single}
-                onChange={(e) => setLocalDateFilter(prev => ({ ...prev, single: e.target.value }))}
-                InputLabelProps={{ shrink: true }}
-                sx={{ width: { xs: '100%', sm: 150 } }}
-              />
-            )}
-
-            {/* RANGE INPUTS */}
-            {localDateFilter.mode === 'range' && (
-              <Stack direction="row" spacing={1} sx={{ flex: { xs: 1, sm: 'none' } }}>
-                <TextField
-                  size="small"
-                  label="From"
-                  type="date"
-                  value={localDateFilter.from}
-                  onChange={(e) => setLocalDateFilter(prev => ({ ...prev, from: e.target.value }))}
-                  InputLabelProps={{ shrink: true }}
-                  sx={{ width: { xs: '50%', sm: 150 } }}
-                />
-                <TextField
-                  size="small"
-                  label="To"
-                  type="date"
-                  value={localDateFilter.to}
-                  onChange={(e) => setLocalDateFilter(prev => ({ ...prev, to: e.target.value }))}
-                  InputLabelProps={{ shrink: true }}
-                  sx={{ width: { xs: '50%', sm: 150 } }}
-                />
-              </Stack>
-            )}
-
-            {/* SEARCH BUTTON */}
-            <Button
-              size="small"
-              variant="contained"
-              onClick={handleSearch}
-              startIcon={<SearchIcon />}
-              sx={{ ...yellowFilledButtonSx, minWidth: { xs: '100%', sm: 90 }, height: 40 }}
+          <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 200 }, maxWidth: { sm: 240 } }}>
+            <InputLabel id="payment-status-filter-label">Payment Status</InputLabel>
+            <Select
+              labelId="payment-status-filter-label"
+              value={searchPaymentStatus}
+              label="Payment Status"
+              onChange={(e) => setSearchPaymentStatus(e.target.value)}
             >
-              Search
-            </Button>
-
-            {/* CLEAR BUTTON — resets local + parent filters so the unfiltered list reloads immediately */}
-            <Button
-              size="small"
-              variant="outlined"
-              onClick={handleClear}
-              sx={{ ...yellowOutlinedButtonSx, minWidth: { xs: '100%', sm: 80 }, height: 40 }}
-            >
-              Clear
-            </Button>
-          </Stack>
+              <MenuItem value="">
+                <em>All</em>
+              </MenuItem>
+              <MenuItem value="FULLY_REFUNDED">FULLY_REFUNDED</MenuItem>
+              <MenuItem value="PARTIALLY_REFUNDED">PARTIALLY_REFUNDED</MenuItem>
+            </Select>
+          </FormControl>
         </Stack>
       </Collapse>
     </Box>
   );
-});
+}));
 
 function FulfillmentDashboard() {
   // Get user role for permission checks
@@ -1269,8 +1354,6 @@ function FulfillmentDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [pollResults, setPollResults] = useState(null);
-  const [pollRunStatus, setPollRunStatus] = useState({});
-  const [pollRunDetail, setPollRunDetail] = useState(null);
   const [copied, setCopied] = useState(false);
   const [copiedText, setCopiedText] = useState('');
 
@@ -1304,6 +1387,7 @@ function FulfillmentDashboard() {
 
   // Search filters - restored from sessionStorage
   const [selectedSeller, setSelectedSeller] = useState(() => getInitialState('selectedSeller', ''));
+  const [draftSelectedSeller, setDraftSelectedSeller] = useState(() => getInitialState('selectedSeller', ''));
   const [searchOrderId, setSearchOrderId] = useState(() => getInitialState('searchOrderId', ''));
   const [searchAzOrderId, setSearchAzOrderId] = useState(() => getInitialState('searchAzOrderId', ''));
   const [searchBuyerName, setSearchBuyerName] = useState(() => getInitialState('searchBuyerName', ''));
@@ -1330,6 +1414,17 @@ function FulfillmentDashboard() {
     }
     return createEmptyDateFilter();
   });
+  const [draftDateFilter, setDraftDateFilter] = useState(() => normalizeDateFilter(dateFilter));
+  const searchFiltersRef = useRef(null);
+
+  useEffect(() => {
+    setDraftDateFilter(normalizeDateFilter(dateFilter));
+  }, [dateFilter]);
+
+  useEffect(() => {
+    setDraftSelectedSeller(selectedSeller);
+  }, [selectedSeller]);
+
   const [scopeWarning, setScopeWarning] = useState('');
 
   // Pagination state - restored from sessionStorage
@@ -1833,17 +1928,12 @@ function FulfillmentDashboard() {
     return () => clearTimeout(timer);
   }, []);
 
-  // Initial load - fetch sellers and orders once (poll status is non-blocking secondary)
+  // Initial load - fetch sellers and orders once
   useEffect(() => {
     if (!hasFetchedInitialData.current) {
       hasFetchedInitialData.current = true;
       fetchSellers();
       loadStoredOrders();
-      if (typeof requestIdleCallback === 'function') {
-        requestIdleCallback(() => { fetchPollRunStatus(); }, { timeout: 2000 });
-      } else {
-        setTimeout(() => { fetchPollRunStatus(); }, 200);
-      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1923,81 +2013,6 @@ function FulfillmentDashboard() {
   // orderEarnings is now read-only (auto-calculated server-side)
   // No manual editing handlers needed
 
-  const formatPollRunTime = useCallback((value) => {
-    if (!value) return 'Never';
-    try {
-      return new Date(value).toLocaleString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-        day: '2-digit',
-        month: 'short',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true
-      });
-    } catch {
-      return 'Unknown';
-    }
-  }, []);
-
-  const formatPollRunSummary = useCallback((run) => {
-    if (!run) return 'Never';
-    const pieces = [];
-    if (run.totalNewOrders) pieces.push(`${run.totalNewOrders} new`);
-    if (run.totalUpdatedOrders) pieces.push(`${run.totalUpdatedOrders} updated`);
-    if (run.totalNewMessages) pieces.push(`${run.totalNewMessages} messages`);
-    if (run.status && run.status !== 'completed') pieces.push(run.status);
-    return `${formatPollRunTime(run.completedAt || run.startedAt)}${pieces.length ? ` (${pieces.join(', ')})` : ''}`;
-  }, [formatPollRunTime]);
-
-  const getPollRunRows = useCallback((run) => {
-    if (!run?.results || !Array.isArray(run.results)) return [];
-
-    return run.results.flatMap((result) => {
-      const sellerName = result.sellerName || result.username || result.sellerId || 'Unknown seller';
-
-      if (Array.isArray(result.newOrders) && result.newOrders.length > 0) {
-        return result.newOrders.map((orderId) => ({
-          sellerName,
-          orderId,
-          detail: 'New order'
-        }));
-      }
-
-      if (Array.isArray(result.updatedOrders) && result.updatedOrders.length > 0) {
-        return result.updatedOrders.map((order) => ({
-          sellerName,
-          orderId: order.orderId,
-          detail: Array.isArray(order.changedFields) && order.changedFields.length > 0
-            ? order.changedFields.join(', ')
-            : 'Updated'
-        }));
-      }
-
-      if (Number(result.newMessages || 0) > 0) {
-        return [{
-          sellerName,
-          orderId: '-',
-          detail: `${result.newMessages} new message${result.newMessages > 1 ? 's' : ''}${result.fetched !== undefined ? ` (${result.fetched} fetched)` : ''}`
-        }];
-      }
-
-      if (result.error) {
-        return [{ sellerName, orderId: '-', detail: result.error }];
-      }
-
-      return [];
-    });
-  }, []);
-
-  async function fetchPollRunStatus() {
-    try {
-      const { data } = await api.get('/ebay/poll-runs/latest');
-      setPollRunStatus(data?.latest || {});
-    } catch (e) {
-      console.debug('Failed to load poll run status', e);
-    }
-  }
-
   async function fetchSellers() {
     setError('');
     try {
@@ -2044,7 +2059,8 @@ function FulfillmentDashboard() {
       // --- NEW DATE LOGIC END ---
 
       const { data } = await api.get('/ebay/stored-orders', { params });
-      setOrders(data?.orders || []);
+      const loadedOrders = data?.orders || [];
+      setOrders(loadedOrders);
       setScopeWarning(data?.meta?.warning || '');
 
       // Update pagination metadata
@@ -2052,10 +2068,12 @@ function FulfillmentDashboard() {
         setTotalPages(data.pagination.totalPages);
         setTotalOrders(data.pagination.totalOrders);
       }
+      return loadedOrders;
     } catch (e) {
       setOrders([]);
       setScopeWarning('');
       setError(e?.response?.data?.error || 'Failed to load orders');
+      return [];
     } finally {
       setLoading(false);
     }
@@ -2262,7 +2280,105 @@ function FulfillmentDashboard() {
     setSnackbarOpen(true);
   }, []);
 
-  // Poll for NEW orders only
+  // After order polls: TDS only for touched eBay order IDs (never the whole table page).
+  async function pollTdsForEbayOrderIds(ebayOrderIds) {
+    const ids = [...new Set((ebayOrderIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    if (!ids.length) return null;
+
+    try {
+      const { data } = await api.post(
+        '/ebay/poll-tds',
+        { ebayOrderIds: ids.slice(0, 100), skipAlreadySet: true },
+        { timeout: 600000 },
+      );
+      if ((data?.results?.updated || 0) > 0) {
+        await loadStoredOrders();
+      }
+      return data;
+    } catch (e) {
+      console.error('Poll TDS (merged) error:', e);
+      return { error: e?.response?.data?.error || e?.message || 'Failed to poll TDS' };
+    }
+  }
+
+  function appendTdsSummary(baseMsg, tdsData) {
+    if (!tdsData) return baseMsg;
+    if (tdsData.error) return `${baseMsg}\n\nTDS: ${tdsData.error}`;
+    const updated = tdsData?.results?.updated || 0;
+    const skipped = tdsData?.results?.skipped || 0;
+    const failed = tdsData?.results?.failed || 0;
+    return `${baseMsg}\n\nTDS: ${updated} updated, ${skipped} skipped, ${failed} failed`;
+  }
+
+  // Standalone Poll TDS for ALL orders in DB (More actions) — batched until done
+  async function pollTds() {
+    const confirmed = window.confirm(
+      'Fetch Finances TDS for ALL orders in the database?\n\n' +
+      '• Skips orders that already have Finances TDS\n' +
+      '• Skips FULLY/PARTIALLY refunded orders\n' +
+      '• Runs in batches (can take a long time for 10k+ orders)\n\n' +
+      'Continue?'
+    );
+    if (!confirmed) return;
+
+    setPollTdsLoading(true);
+    setError('');
+    setSnackbarMsg('Polling TDS for all DB orders…');
+    setSnackbarSeverity('info');
+    setSnackbarOpen(true);
+
+    const grand = { updated: 0, skipped: 0, failed: 0, total: 0 };
+    let remaining = null;
+    let rounds = 0;
+    const maxRounds = 500;
+
+    try {
+      while (rounds < maxRounds) {
+        rounds += 1;
+        const { data } = await api.post(
+          '/ebay/poll-tds',
+          { allOrders: true, skipAlreadySet: true, limit: 50 },
+          { timeout: 600000 },
+        );
+        const r = data?.results || {};
+        grand.updated += r.updated || 0;
+        grand.skipped += r.skipped || 0;
+        grand.failed += r.failed || 0;
+        grand.total += r.total || 0;
+        remaining = typeof data?.remaining === 'number' ? data.remaining : null;
+
+        setSnackbarMsg(
+          `TDS batch ${rounds}: ${grand.updated} updated, ${grand.skipped} no-TDS, ${grand.failed} failed` +
+          (remaining != null ? ` — ${remaining} remaining` : '')
+        );
+        setSnackbarSeverity('info');
+        setSnackbarOpen(true);
+
+        // Done when nothing checked this round, or remaining hit 0
+        if ((r.total || 0) === 0 || remaining === 0) break;
+      }
+
+      await loadStoredOrders();
+      setSnackbarMsg(
+        `TDS complete: ${grand.updated} updated, ${grand.skipped} no TAX_DEDUCTION_AT_SOURCE, ${grand.failed} failed (${grand.total} checked)` +
+        (remaining != null ? `. Remaining: ${remaining}` : '')
+      );
+      setSnackbarSeverity(grand.failed > 0 ? 'warning' : 'success');
+      setSnackbarOpen(true);
+    } catch (e) {
+      console.error('Poll TDS (all DB) error:', e);
+      setSnackbarMsg(
+        `${e?.response?.data?.error || e?.message || 'Failed to poll TDS'}` +
+        ` (progress: ${grand.updated} updated / ${grand.total} checked)`
+      );
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setPollTdsLoading(false);
+    }
+  }
+
+  // Poll for NEW orders, then TDS only for those new order IDs
   async function pollNewOrders() {
     setLoading(true);
     setError('');
@@ -2272,7 +2388,6 @@ function FulfillmentDashboard() {
     try {
       const { data } = await api.post('/ebay/poll-new-orders');
       setPollResults(data || null);
-      await fetchPollRunStatus();
 
       // Reset filters to show all sellers and go to page 1
       setSelectedSeller('');
@@ -2281,46 +2396,63 @@ function FulfillmentDashboard() {
       // Reload orders with reset filters
       await loadStoredOrders();
 
+      const newOrderIds = (data?.pollResults || [])
+        .filter((r) => r.success && Array.isArray(r.newOrders) && r.newOrders.length > 0)
+        .flatMap((r) => r.newOrders);
+
+      let severity = 'info';
+      let msg = '';
       if (data && data.totalNewOrders > 0) {
-        // Build summary by seller (don't show individual order IDs)
         const sellerSummary = data.pollResults
           .filter(r => r.success && r.newOrders && r.newOrders.length > 0)
           .map(r => `${r.sellerName}: ${r.newOrders.length} new order${r.newOrders.length > 1 ? 's' : ''}`)
           .join('\n');
-
-        setSnackbarMsg(`Found ${data.totalNewOrders} new order${data.totalNewOrders > 1 ? 's' : ''}!\n\n${sellerSummary}`);
-        setSnackbarSeverity('success');
-        setSnackbarOpen(true);
+        msg = `Found ${data.totalNewOrders} new order${data.totalNewOrders > 1 ? 's' : ''}!\n\n${sellerSummary}`;
+        severity = 'success';
       } else if (data) {
         const failures = (data.pollResults || []).filter((r) => !r.success && r.error);
         const fetched = Number(data.totalEbayFetched) || 0;
         if (failures.length > 0) {
-          setSnackbarMsg(`Poll failed: ${failures.map((f) => `${f.sellerName}: ${f.error}`).join('; ')}`);
-          setSnackbarSeverity('error');
+          msg = `Poll failed: ${failures.map((f) => `${f.sellerName}: ${f.error}`).join('; ')}`;
+          severity = 'error';
         } else if (fetched > 0) {
-          setSnackbarMsg(`eBay returned ${fetched} order(s) in range; all are already in the database.`);
-          setSnackbarSeverity('info');
+          msg = `eBay returned ${fetched} order(s) in range; all are already in the database.`;
+          severity = 'info';
         } else {
           const skipped = (data.pollResults || []).find((r) => r.skippedReason === 'poll_window_too_recent');
-          setSnackbarMsg(
-            skipped
-              ? 'Poll skipped — last sync was less than 1 minute ago. Try again shortly or use Resync.'
-              : 'No new orders from eBay for this window — you are likely already up to date. Poll only checks after your latest stored order (end time is ~5 minutes before now). Use Resync 30D if you expect missing orders. If polls never return anything, verify server/PC date and time are correct.'
-          );
-          setSnackbarSeverity('info');
+          msg = skipped
+            ? 'Poll skipped — last sync was less than 1 minute ago. Try again shortly or use Resync.'
+            : 'No new orders from eBay for this window — you are likely already up to date. Poll only checks after your latest stored order (end time is ~5 minutes before now). Use Resync 30D if you expect missing orders. If polls never return anything, verify server/PC date and time are correct.';
+          severity = 'info';
         }
+      }
+
+      // Finish poll UI first — TDS must not keep the button stuck on "Polling..."
+      if (msg) {
+        setSnackbarMsg(msg);
+        setSnackbarSeverity(severity);
         setSnackbarOpen(true);
+      }
+      setLoading(false);
+
+      if (newOrderIds.length) {
+        const tdsData = await pollTdsForEbayOrderIds(newOrderIds);
+        if (msg && tdsData) {
+          if (tdsData.error) severity = severity === 'error' ? 'error' : 'warning';
+          else if ((tdsData?.results?.failed || 0) > 0 && severity === 'success') severity = 'warning';
+          setSnackbarMsg(appendTdsSummary(msg, tdsData));
+          setSnackbarSeverity(severity);
+          setSnackbarOpen(true);
+        }
       }
       publishOrderSyncEvent('FulfillmentDashboard', 'poll-new-orders');
     } catch (e) {
       setError(e?.response?.data?.error || 'Failed to poll new orders');
-      await fetchPollRunStatus();
-    } finally {
       setLoading(false);
     }
   }
 
-  // Poll for order UPDATES only
+  // Poll for order UPDATES, then TDS only for touched order IDs
   async function pollOrderUpdates() {
     setLoading(true);
     setError('');
@@ -2330,7 +2462,6 @@ function FulfillmentDashboard() {
     try {
       const { data } = await api.post('/ebay/poll-order-updates');
       setPollResults(data || null);
-      await fetchPollRunStatus();
 
       // Reset filters to show all sellers and go to page 1
       setSelectedSeller('');
@@ -2339,18 +2470,30 @@ function FulfillmentDashboard() {
       // Reload orders with reset filters
       await loadStoredOrders();
 
-      if (data && data.totalUpdatedOrders > 0) {
-        // Collect all updated order details (orderId + changedFields)
-        const updatedDetails = data.pollResults
-          .filter(r => r.success && r.updatedOrders && r.updatedOrders.length > 0)
-          .flatMap(r => r.updatedOrders); // Each is { orderId, changedFields }
+      const updatedDetails = (data?.pollResults || [])
+        .filter(r => r.success && r.updatedOrders && r.updatedOrders.length > 0)
+        .flatMap(r => r.updatedOrders);
 
-        const orderIds = updatedDetails.map(u => u.orderId);
-        setSnackbarOrderIds(orderIds);
-        setUpdatedOrderDetails(updatedDetails); // Store full details
-        setSnackbarMsg(
-          `Updated ${data.totalUpdatedOrders} order${data.totalUpdatedOrders > 1 ? 's' : ''}!`
-        );
+      const newOrderIds = (data?.pollResults || [])
+        .filter(r => r.success && Array.isArray(r.newOrders) && r.newOrders.length > 0)
+        .flatMap(r => r.newOrders);
+
+      const touchedOrderIds = [
+        ...newOrderIds,
+        ...updatedDetails.map(u => u.orderId)
+      ].filter(Boolean);
+
+      if (data && (data.totalUpdatedOrders > 0 || data.totalNewOrders > 0)) {
+        setSnackbarOrderIds(touchedOrderIds);
+        setUpdatedOrderDetails(updatedDetails);
+        const parts = [];
+        if (data.totalUpdatedOrders > 0) {
+          parts.push(`Updated ${data.totalUpdatedOrders} order${data.totalUpdatedOrders > 1 ? 's' : ''}`);
+        }
+        if (data.totalNewOrders > 0) {
+          parts.push(`imported ${data.totalNewOrders} missing`);
+        }
+        setSnackbarMsg(`${parts.join(', ')}!`);
         setSnackbarSeverity('success');
         setSnackbarOpen(true);
       } else if (data) {
@@ -2360,11 +2503,30 @@ function FulfillmentDashboard() {
         setSnackbarSeverity('info');
         setSnackbarOpen(true);
       }
+
+      // Finish poll UI first — TDS must not keep the button stuck on "Updating..."
+      setLoading(false);
+
+      if (touchedOrderIds.length) {
+        const tdsData = await pollTdsForEbayOrderIds(touchedOrderIds);
+        if (tdsData) {
+          const base = (data && (data.totalUpdatedOrders > 0 || data.totalNewOrders > 0))
+            ? [
+                data.totalUpdatedOrders > 0 ? `Updated ${data.totalUpdatedOrders} order${data.totalUpdatedOrders > 1 ? 's' : ''}` : null,
+                data.totalNewOrders > 0 ? `imported ${data.totalNewOrders} missing` : null,
+              ].filter(Boolean).join(', ') + '!'
+            : 'No order updates found.';
+          const severity = tdsData.error || (tdsData?.results?.failed || 0) > 0
+            ? 'warning'
+            : ((data?.totalUpdatedOrders || 0) > 0 || (data?.totalNewOrders || 0) > 0 ? 'success' : 'info');
+          setSnackbarMsg(appendTdsSummary(base, tdsData));
+          setSnackbarSeverity(severity);
+          setSnackbarOpen(true);
+        }
+      }
       publishOrderSyncEvent('FulfillmentDashboard', 'poll-order-updates');
     } catch (e) {
       setError(e?.response?.data?.error || 'Failed to poll order updates');
-      await fetchPollRunStatus();
-    } finally {
       setLoading(false);
     }
   }
@@ -2643,47 +2805,6 @@ function FulfillmentDashboard() {
       setFetchingAdFeeGeneral(prev => ({ ...prev, [order._id]: false }));
     }
   }, []);
-
-  const pollTds = async () => {
-    const pending = (orders || []).filter((o) => (
-      o.tdsSource !== 'finances'
-      && o.orderPaymentStatus !== 'FULLY_REFUNDED'
-      && o.orderPaymentStatus !== 'PARTIALLY_REFUNDED'
-    ));
-
-    if (!pending.length) {
-      setSnackbarMsg(orders?.length
-        ? 'All visible orders already have Finances TDS (or are refunded).'
-        : 'No orders loaded — wait for the table to load, then try again.');
-      setSnackbarSeverity('info');
-      setSnackbarOpen(true);
-      return;
-    }
-
-    setPollTdsLoading(true);
-    setSnackbarMsg(`Polling TDS for ${pending.length} visible order(s)…`);
-    setSnackbarSeverity('info');
-    setSnackbarOpen(true);
-
-    try {
-      const { data } = await api.post(
-        '/ebay/poll-tds',
-        { orderIds: pending.map((o) => o._id), skipAlreadySet: true },
-        { timeout: 600000 },
-      );
-      await loadStoredOrders();
-      setSnackbarMsg(data?.message || 'TDS poll complete');
-      setSnackbarSeverity((data?.results?.failed || 0) > 0 ? 'warning' : 'success');
-      setSnackbarOpen(true);
-    } catch (e) {
-      console.error('Poll TDS error:', e);
-      setSnackbarMsg(e?.response?.data?.error || e?.message || 'Failed to poll TDS');
-      setSnackbarSeverity('error');
-      setSnackbarOpen(true);
-    } finally {
-      setPollTdsLoading(false);
-    }
-  };
 
   // Recalculate Earnings for all orders of selected seller
   const recalculateEarnings = async () => {
@@ -3369,62 +3490,6 @@ function FulfillmentDashboard() {
     }
   }, []);
 
-  const [pollStatusAnchor, setPollStatusAnchor] = useState(null);
-
-  const PollStatusControl = () => {
-    const newOrders = pollRunStatus['poll-new-orders'] || {};
-    const updates = pollRunStatus['poll-order-updates'] || {};
-    const messages = pollRunStatus['buyer-chat-check-new'] || {};
-    const openRunDetail = (title, run) => {
-      if (!run) return;
-      setPollRunDetail({ title, run });
-    };
-    const items = [
-      { label: 'Cron new orders', title: 'Cron New Orders', run: newOrders.cron },
-      { label: 'Cron updates', title: 'Cron Order Updates', run: updates.cron },
-      { label: 'Manual new orders', title: 'Manual New Orders', run: newOrders.manual },
-      { label: 'Manual updates', title: 'Manual Order Updates', run: updates.manual },
-      { label: 'Cron messages', title: 'Cron Buyer Messages', run: messages.cron },
-      { label: 'Manual messages', title: 'Manual Buyer Messages', run: messages.manual },
-    ];
-
-    return (
-      <>
-        <Chip
-          size="small"
-          variant="outlined"
-          icon={<HistoryIcon sx={{ fontSize: '0.9rem !important' }} />}
-          label="Poll Status"
-          onClick={(e) => setPollStatusAnchor(e.currentTarget)}
-          sx={{ height: 24, fontSize: '0.7rem', cursor: 'pointer' }}
-        />
-        <Menu
-          anchorEl={pollStatusAnchor}
-          open={Boolean(pollStatusAnchor)}
-          onClose={() => setPollStatusAnchor(null)}
-          anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-          transformOrigin={{ vertical: 'top', horizontal: 'right' }}
-        >
-          {items.map((item) => (
-            <MenuItem
-              key={item.label}
-              onClick={() => { setPollStatusAnchor(null); openRunDetail(item.title, item.run); }}
-              disabled={!item.run}
-              sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', minWidth: 220 }}
-            >
-              <Typography variant="caption" fontWeight={700} sx={{ fontSize: '0.72rem' }}>
-                {item.label}
-              </Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.68rem' }}>
-                {formatPollRunSummary(item.run)}
-              </Typography>
-            </MenuItem>
-          ))}
-        </Menu>
-      </>
-    );
-  };
-
   if (loading && orders.length === 0) return <FulfillmentSkeleton />;
 
   return (
@@ -3543,25 +3608,18 @@ function FulfillmentDashboard() {
           {isMobile ? (
             /* MOBILE LAYOUT - Compact Vertical Stack */
             <Stack spacing={1}>
-              {/* Row 1: Seller Select */}
-              <FormControl size="small" fullWidth>
-                <InputLabel id="seller-select-label">Select Seller</InputLabel>
-                <Select
-                  labelId="seller-select-label"
-                  value={selectedSeller}
-                  label="Select Seller"
-                  onChange={(e) => setSelectedSeller(e.target.value)}
-                >
-                  <MenuItem value="">
-                    <em>-- Select Seller --</em>
-                  </MenuItem>
-                  {sellers.map((s) => (
-                    <MenuItem key={s._id} value={s._id}>
-                      {s.user?.username || s.user?.email || s._id}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
+              {/* Row 1: Seller + Date Mode / Search / Clear */}
+              <DateModeSearchBar
+                sellers={sellers}
+                draftSelectedSeller={draftSelectedSeller}
+                setDraftSelectedSeller={setDraftSelectedSeller}
+                draftDateFilter={draftDateFilter}
+                setDraftDateFilter={setDraftDateFilter}
+                onSearch={() => searchFiltersRef.current?.search()}
+                onClear={() => searchFiltersRef.current?.clear()}
+                fullWidth
+                sellerFullWidth
+              />
 
               {/* Row 2: Poll Buttons + More actions */}
               <Stack direction="row" spacing={1}>
@@ -3595,22 +3653,6 @@ function FulfillmentDashboard() {
                   }}
                 >
                   {loading ? 'Updating...' : isSmallMobile ? 'Poll Updates' : 'Poll Order Updates'}
-                </Button>
-
-                <Button
-                  variant="contained"
-                  startIcon={!isSmallMobile && (pollTdsLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />)}
-                  onClick={pollTds}
-                  disabled={pollTdsLoading}
-                  size="small"
-                  fullWidth
-                  sx={{
-                    ...yellowFilledButtonSx,
-                    fontSize: { xs: '0.7rem', sm: '0.8rem' },
-                    px: { xs: 0.5, sm: 1 }
-                  }}
-                >
-                  {pollTdsLoading ? 'Polling TDS...' : isSmallMobile ? 'Poll TDS' : 'Poll TDS'}
                 </Button>
 
                 {isSuperAdmin && (
@@ -3655,6 +3697,12 @@ function FulfillmentDashboard() {
                         {loading ? 'Syncing...' : `Resync ${resyncDays} Days`}
                       </MenuItem>
                       <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); pollTds(); }}
+                        disabled={pollTdsLoading}
+                      >
+                        {pollTdsLoading ? 'Polling TDS...' : 'Poll TDS (All DB)'}
+                      </MenuItem>
+                      <MenuItem
                         onClick={() => { setMoreActionsAnchor(null); recalculateEarnings(); }}
                         disabled={recalcEarningsLoading}
                       >
@@ -3677,83 +3725,7 @@ function FulfillmentDashboard() {
                 )}
               </Stack>
 
-              {isSuperAdmin && (
-                <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
-                  <PollStatusControl />
-                  <FormControl size="small" sx={{ flex: '1 1 120px' }}>
-                    <InputLabel id="utc-refresh-mode-mobile-label">PT Mode</InputLabel>
-                    <Select
-                      labelId="utc-refresh-mode-mobile-label"
-                      label="PT Mode"
-                      value={utcRefreshMode}
-                      onChange={(e) => {
-                        setUtcRefreshMode(e.target.value);
-                        if (e.target.value === 'single') setUtcRefreshEndDate(utcRefreshStartDate);
-                      }}
-                    >
-                      <MenuItem value="single">Single Date</MenuItem>
-                      <MenuItem value="range">Date Range</MenuItem>
-                    </Select>
-                  </FormControl>
-                  <TextField
-                    label={utcRefreshMode === 'single' ? 'PT Date' : 'PT Start'}
-                    type="date"
-                    size="small"
-                    value={utcRefreshStartDate}
-                    onChange={(e) => {
-                      const nextDate = e.target.value;
-                      setUtcRefreshStartDate(nextDate);
-                      if (!utcRefreshEndDate || utcRefreshEndDate === utcRefreshStartDate) setUtcRefreshEndDate(nextDate);
-                    }}
-                    InputLabelProps={{ shrink: true }}
-                    sx={{ flex: '1 1 135px' }}
-                  />
-                  {utcRefreshMode === 'range' && (
-                    <TextField
-                      label="PT End"
-                      type="date"
-                      size="small"
-                      value={utcRefreshEndDate}
-                      onChange={(e) => setUtcRefreshEndDate(e.target.value)}
-                      InputLabelProps={{ shrink: true }}
-                      sx={{ flex: '1 1 135px' }}
-                    />
-                  )}
-                  <Button
-                    variant="outlined"
-                    color="secondary"
-                    startIcon={!isSmallMobile && (loading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />)}
-                    onClick={handleOpenUtcRefreshConfirm}
-                    disabled={loading || !utcRefreshStartDate || (utcRefreshMode === 'range' && !utcRefreshEndDate)}
-                    size="small"
-                    fullWidth
-                    sx={{
-                      fontSize: { xs: '0.7rem', sm: '0.8rem' },
-                      px: { xs: 0.5, sm: 1 },
-                      flex: '1 1 180px'
-                    }}
-                  >
-                    {loading ? 'Refreshing...' : isSmallMobile ? 'PT Refresh' : utcRefreshMode === 'single' ? 'Refresh PT Date' : 'Refresh PT Range'}
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    color="info"
-                    startIcon={<HistoryIcon />}
-                    onClick={handleOpenHistoryDialog}
-                    size="small"
-                    fullWidth
-                    sx={{
-                      fontSize: { xs: '0.7rem', sm: '0.8rem' },
-                      px: { xs: 0.5, sm: 1 },
-                      flex: '1 1 120px'
-                    }}
-                  >
-                    See History
-                  </Button>
-                </Stack>
-              )}
-
-              {/* Row 3: Filters side by side */}
+              {/* Row 3: Marketplace filter */}
               <Stack direction="row" spacing={1}>
                 <FormControl size="small" fullWidth>
                   <InputLabel id="marketplace-filter-label">Marketplace</InputLabel>
@@ -3770,22 +3742,6 @@ function FulfillmentDashboard() {
                     <MenuItem value="EBAY_ENCA">CA</MenuItem>
                     <MenuItem value="EBAY_AU">AUS</MenuItem>
                     <MenuItem value="EBAY_GB">UK</MenuItem>
-                  </Select>
-                </FormControl>
-
-                <FormControl size="small" fullWidth>
-                  <InputLabel id="payment-status-filter-label">Payment Status</InputLabel>
-                  <Select
-                    labelId="payment-status-filter-label"
-                    value={searchPaymentStatus}
-                    label="Payment Status"
-                    onChange={(e) => setSearchPaymentStatus(e.target.value)}
-                  >
-                    <MenuItem value="">
-                      <em>All</em>
-                    </MenuItem>
-                    <MenuItem value="FULLY_REFUNDED">FULLY_REFUNDED</MenuItem>
-                    <MenuItem value="PARTIALLY_REFUNDED">PARTIALLY_REFUNDED</MenuItem>
                   </Select>
                 </FormControl>
               </Stack>
@@ -3855,23 +3811,15 @@ function FulfillmentDashboard() {
                 sx={{ flexWrap: 'wrap', rowGap: 1 }}
               >
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
-                  <Select
-                    value={selectedSeller}
-                    onChange={(e) => setSelectedSeller(e.target.value)}
-                    displayEmpty
-                    size="small"
-                    renderValue={(val) => val ? (sellers.find(s => s._id === val)?.user?.username || sellers.find(s => s._id === val)?.user?.email || val) : 'Select Seller'}
-                    sx={{ minWidth: 140, fontSize: '0.8rem', color: selectedSeller ? 'inherit' : 'text.secondary' }}
-                  >
-                    <MenuItem value="">
-                      <em>All Sellers</em>
-                    </MenuItem>
-                    {sellers.map((s) => (
-                      <MenuItem key={s._id} value={s._id}>
-                        {s.user?.username || s.user?.email || s._id}
-                      </MenuItem>
-                    ))}
-                  </Select>
+                  <DateModeSearchBar
+                    sellers={sellers}
+                    draftSelectedSeller={draftSelectedSeller}
+                    setDraftSelectedSeller={setDraftSelectedSeller}
+                    draftDateFilter={draftDateFilter}
+                    setDraftDateFilter={setDraftDateFilter}
+                    onSearch={() => searchFiltersRef.current?.search()}
+                    onClear={() => searchFiltersRef.current?.clear()}
+                  />
 
                   <Button
                     variant="contained"
@@ -3893,17 +3841,6 @@ function FulfillmentDashboard() {
                     sx={{ ...yellowFilledButtonSx, minWidth: 'auto' }}
                   >
                     {loading ? 'Updating...' : 'Poll Order Updates'}
-                  </Button>
-
-                  <Button
-                    variant="contained"
-                    size="small"
-                    startIcon={pollTdsLoading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
-                    onClick={pollTds}
-                    disabled={pollTdsLoading}
-                    sx={{ ...yellowFilledButtonSx, minWidth: 'auto' }}
-                  >
-                    {pollTdsLoading ? 'Polling TDS...' : 'Poll TDS'}
                   </Button>
 
                   {isSuperAdmin && (
@@ -3947,6 +3884,12 @@ function FulfillmentDashboard() {
                           {loading ? 'Syncing...' : `Resync ${resyncDays} Days`}
                         </MenuItem>
                         <MenuItem
+                          onClick={() => { setMoreActionsAnchor(null); pollTds(); }}
+                          disabled={pollTdsLoading}
+                        >
+                          {pollTdsLoading ? 'Polling TDS...' : 'Poll TDS (All DB)'}
+                        </MenuItem>
+                        <MenuItem
                           onClick={() => { setMoreActionsAnchor(null); recalculateEarnings(); }}
                           disabled={recalcEarningsLoading}
                         >
@@ -3987,19 +3930,6 @@ function FulfillmentDashboard() {
                     <MenuItem value="EBAY_ENCA">CA</MenuItem>
                     <MenuItem value="EBAY_AU">AUS</MenuItem>
                     <MenuItem value="EBAY_GB">UK</MenuItem>
-                  </Select>
-
-                  <Select
-                    value={searchPaymentStatus}
-                    onChange={(e) => setSearchPaymentStatus(e.target.value)}
-                    displayEmpty
-                    size="small"
-                    renderValue={(val) => val ? val : 'Payment Status'}
-                    sx={{ minWidth: 140, fontSize: '0.8rem', color: searchPaymentStatus ? 'inherit' : 'text.secondary' }}
-                  >
-                    <MenuItem value=""><em>All</em></MenuItem>
-                    <MenuItem value="FULLY_REFUNDED">FULLY_REFUNDED</MenuItem>
-                    <MenuItem value="PARTIALLY_REFUNDED">PARTIALLY_REFUNDED</MenuItem>
                   </Select>
 
                   <FormControlLabel
@@ -4050,82 +3980,6 @@ function FulfillmentDashboard() {
                   />
                 </Stack>
               </Stack>
-
-              {/* Row 2 (superadmin only): PT refresh controls (left) | compact poll status (right) */}
-              {isSuperAdmin && (
-                <Stack
-                  direction="row"
-                  spacing={1.5}
-                  alignItems="center"
-                  justifyContent="space-between"
-                  sx={{ flexWrap: 'wrap', rowGap: 1 }}
-                >
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
-                    <FormControl size="small" sx={{ minWidth: 120 }}>
-                      <InputLabel id="utc-refresh-mode-label">PT Mode</InputLabel>
-                      <Select
-                        labelId="utc-refresh-mode-label"
-                        label="PT Mode"
-                        value={utcRefreshMode}
-                        onChange={(e) => {
-                          setUtcRefreshMode(e.target.value);
-                          if (e.target.value === 'single') setUtcRefreshEndDate(utcRefreshStartDate);
-                        }}
-                      >
-                        <MenuItem value="single">Single Date</MenuItem>
-                        <MenuItem value="range">Date Range</MenuItem>
-                      </Select>
-                    </FormControl>
-                    <TextField
-                      label={utcRefreshMode === 'single' ? 'PT Date' : 'PT Start'}
-                      type="date"
-                      size="small"
-                      value={utcRefreshStartDate}
-                      onChange={(e) => {
-                        const nextDate = e.target.value;
-                        setUtcRefreshStartDate(nextDate);
-                        if (!utcRefreshEndDate || utcRefreshEndDate === utcRefreshStartDate) setUtcRefreshEndDate(nextDate);
-                      }}
-                      InputLabelProps={{ shrink: true }}
-                      sx={{ minWidth: 140 }}
-                    />
-                    {utcRefreshMode === 'range' && (
-                      <TextField
-                        label="PT End"
-                        type="date"
-                        size="small"
-                        value={utcRefreshEndDate}
-                        onChange={(e) => setUtcRefreshEndDate(e.target.value)}
-                        InputLabelProps={{ shrink: true }}
-                        sx={{ minWidth: 140 }}
-                      />
-                    )}
-                    <Button
-                      variant="outlined"
-                      color="secondary"
-                      size="small"
-                      startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
-                      onClick={handleOpenUtcRefreshConfirm}
-                      disabled={loading || !utcRefreshStartDate || (utcRefreshMode === 'range' && !utcRefreshEndDate)}
-                      sx={{ minWidth: 'auto' }}
-                    >
-                      {loading ? 'Refreshing...' : utcRefreshMode === 'single' ? 'Refresh PT Date' : 'Refresh PT Range'}
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      color="info"
-                      size="small"
-                      startIcon={<HistoryIcon />}
-                      onClick={handleOpenHistoryDialog}
-                      sx={{ minWidth: 'auto' }}
-                    >
-                      See History
-                    </Button>
-                  </Stack>
-
-                  <PollStatusControl />
-                </Stack>
-              )}
             </Box>
           )}
 
@@ -4143,6 +3997,7 @@ function FulfillmentDashboard() {
 
           {/* SEARCH FILTERS */}
           <SearchFiltersPanel
+            ref={searchFiltersRef}
             searchOrderId={searchOrderId}
             setSearchOrderId={setSearchOrderId}
             searchAzOrderId={searchAzOrderId}
@@ -4155,8 +4010,13 @@ function FulfillmentDashboard() {
             setSearchSku={setSearchSku}
             searchProductName={searchProductName}
             setSearchProductName={setSearchProductName}
+            searchPaymentStatus={searchPaymentStatus}
             setSearchPaymentStatus={setSearchPaymentStatus}
-            dateFilter={dateFilter}
+            draftSelectedSeller={draftSelectedSeller}
+            setDraftSelectedSeller={setDraftSelectedSeller}
+            setSelectedSeller={setSelectedSeller}
+            draftDateFilter={draftDateFilter}
+            setDraftDateFilter={setDraftDateFilter}
             setDateFilter={setDateFilter}
             isSmallMobile={isSmallMobile}
           />
@@ -5610,71 +5470,6 @@ function FulfillmentDashboard() {
           </DialogContent>
           <DialogActions sx={{ p: 2 }}>
             <Button onClick={() => setHistoryDialogOpen(false)} color="inherit">
-              Close
-            </Button>
-          </DialogActions>
-        </Dialog>
-
-        <Dialog
-          open={!!pollRunDetail}
-          onClose={() => setPollRunDetail(null)}
-          maxWidth="md"
-          fullWidth
-        >
-          <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Box>
-              <Typography variant="h6" fontWeight="bold">
-                {pollRunDetail?.title || 'Poll Run Details'}
-              </Typography>
-              {pollRunDetail?.run && (
-                <Typography variant="body2" color="text.secondary">
-                  {formatPollRunTime(pollRunDetail.run.completedAt || pollRunDetail.run.startedAt)}
-                </Typography>
-              )}
-            </Box>
-            <IconButton onClick={() => setPollRunDetail(null)} size="small">
-              <CloseIcon />
-            </IconButton>
-          </DialogTitle>
-          <DialogContent dividers>
-            {pollRunDetail?.run?.error && (
-              <Alert severity={pollRunDetail.run.status === 'skipped' ? 'warning' : 'error'} sx={{ mb: 2 }}>
-                {pollRunDetail.run.error}
-              </Alert>
-            )}
-            {pollRunDetail?.run && getPollRunRows(pollRunDetail.run).length > 0 ? (
-              <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
-                  <TableHead>
-                    <TableRow sx={{ backgroundColor: 'action.hover' }}>
-                      <TableCell>Seller</TableCell>
-                      <TableCell>Order ID</TableCell>
-                      <TableCell>Details</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {getPollRunRows(pollRunDetail.run).map((row, index) => (
-                      <TableRow key={`${row.sellerName}-${row.orderId}-${index}`}>
-                        <TableCell>{row.sellerName}</TableCell>
-                        <TableCell>
-                          <Typography variant="body2" fontFamily="monospace">
-                            {row.orderId || '-'}
-                          </Typography>
-                        </TableCell>
-                        <TableCell>{row.detail}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-            ) : (
-              <Typography variant="body2" color="text.secondary" align="center" sx={{ py: 3 }}>
-                No order-level details were recorded for this run.
-              </Typography>
-            )}
-          </DialogContent>
-          <DialogActions sx={{ p: 2 }}>
-            <Button onClick={() => setPollRunDetail(null)} color="inherit">
               Close
             </Button>
           </DialogActions>
