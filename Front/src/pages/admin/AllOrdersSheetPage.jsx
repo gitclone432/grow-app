@@ -334,6 +334,12 @@ export default function AllOrdersSheetPage() {
   const [ordersPerPage] = useState(50);
   const [rawCount, setRawCount] = useState(null);
   const [filteredTotals, setFilteredTotals] = useState(null);
+  const [accountProfitRows, setAccountProfitRows] = useState([]);
+  const [accountProfitLoading, setAccountProfitLoading] = useState(false);
+  const [accountProfitError, setAccountProfitError] = useState('');
+  const [showAccountRanking, setShowAccountRanking] = useState(false);
+  const [rankingMarketplace, setRankingMarketplace] = useState('');
+  const [rankingDateFilter, setRankingDateFilter] = useState({ mode: 'none', single: '', from: '', to: '' });
 
   // Date filter
   const [dateFilter, setDateFilter] = useState(() => getInitialState('dateFilter', {
@@ -708,54 +714,87 @@ export default function AllOrdersSheetPage() {
     }
   }
 
+  function buildAllOrdersUsdParams({ includePagination = true, overrides = {} } = {}) {
+    const activeDateFilter = overrides.dateFilter || dateFilter;
+    const activeMarketplace = overrides.searchMarketplace !== undefined ? overrides.searchMarketplace : searchMarketplace;
+    const isSingleDate = activeDateFilter.mode === 'single' && activeDateFilter.single;
+    const params = {
+      excludeCancelled: true,
+    };
+
+    if (includePagination) {
+      params.page = isSingleDate ? 1 : currentPage;
+      params.limit = isSingleDate ? 10000 : ordersPerPage;
+    }
+
+    if (selectedSeller) params.sellerId = selectedSeller;
+    if (searchOrderId.trim()) params.searchOrderId = searchOrderId.trim();
+    if (searchBuyerName.trim()) params.searchBuyerName = searchBuyerName.trim();
+    if (searchItemNumber.trim()) params.searchItemNumber = searchItemNumber.trim();
+    if (searchProductName.trim()) params.productName = searchProductName.trim();
+    if (activeMarketplace) params.searchMarketplace = activeMarketplace;
+    if (excludeLowValue) params.excludeLowValue = true;
+    if (excludeNoAmazonAccount) params.excludeNoAmazonAccount = true;
+
+    if (activeDateFilter.mode === 'single' && activeDateFilter.single) {
+      params.startDate = activeDateFilter.single;
+      params.endDate = activeDateFilter.single;
+    } else if (activeDateFilter.mode === 'range') {
+      if (activeDateFilter.from) params.startDate = activeDateFilter.from;
+      if (activeDateFilter.to) params.endDate = activeDateFilter.to;
+    }
+
+    if (profitFilter.mode === 'single' && profitFilter.single !== '') {
+      params.maxProfit = profitFilter.single;
+    } else if (profitFilter.mode === 'range') {
+      if (profitFilter.from !== '') params.minProfit = profitFilter.from;
+      if (profitFilter.to !== '') params.maxProfit = profitFilter.to;
+    }
+
+    if (subtotalFilter.mode === 'single' && subtotalFilter.single !== '') {
+      params.maxSubtotal = subtotalFilter.single;
+    } else if (subtotalFilter.mode === 'range') {
+      if (subtotalFilter.from !== '') params.minSubtotal = subtotalFilter.from;
+      if (subtotalFilter.to !== '') params.maxSubtotal = subtotalFilter.to;
+    }
+
+    return params;
+  }
+
+  async function loadAccountProfit(overrides = {}) {
+    setAccountProfitLoading(true);
+    setAccountProfitError('');
+    try {
+      const params = buildAllOrdersUsdParams({ includePagination: false, overrides });
+      const { data } = await api.get('/ebay/all-orders-usd/account-profit', { params, timeout: 120000 });
+      setAccountProfitRows(data?.rows || []);
+    } catch (err) {
+      setAccountProfitRows([]);
+      setAccountProfitError(err?.response?.data?.error || err?.message || 'Failed to load account profit view');
+    } finally {
+      setAccountProfitLoading(false);
+    }
+  }
+
   async function loadOrders() {
     setLoading(true);
+    setAccountProfitLoading(true);
     setError('');
+    setAccountProfitError('');
     
     try {
-      // For single date, fetch all orders without pagination (mirrors Grow's behavior)
-      const isSingleDate = dateFilter.mode === 'single' && dateFilter.single;
+      const params = buildAllOrdersUsdParams({ includePagination: true });
+      const accountProfitParams = buildAllOrdersUsdParams({ includePagination: false });
+      const [ordersResult, accountProfitResult] = await Promise.allSettled([
+        api.get('/ebay/all-orders-usd', { params, timeout: 120000 }),
+        api.get('/ebay/all-orders-usd/account-profit', { params: accountProfitParams, timeout: 120000 })
+      ]);
 
-      const params = {
-        page: isSingleDate ? 1 : currentPage,
-        limit: isSingleDate ? 10000 : ordersPerPage, // High limit for single date to get all
-        excludeCancelled: true, // Exclude cancelled orders
-      };
-      
-      if (selectedSeller) params.sellerId = selectedSeller;
-      if (searchOrderId.trim()) params.searchOrderId = searchOrderId.trim();
-      if (searchBuyerName.trim()) params.searchBuyerName = searchBuyerName.trim();
-      if (searchItemNumber.trim()) params.searchItemNumber = searchItemNumber.trim();
-      if (searchProductName.trim()) params.productName = searchProductName.trim();
-      if (searchMarketplace) params.searchMarketplace = searchMarketplace;
-      if (excludeLowValue) params.excludeLowValue = true;
-      if (excludeNoAmazonAccount) params.excludeNoAmazonAccount = true;
-
-      if (dateFilter.mode === 'single' && dateFilter.single) {
-        params.startDate = dateFilter.single;
-        params.endDate = dateFilter.single;
-      } else if (dateFilter.mode === 'range') {
-        if (dateFilter.from) params.startDate = dateFilter.from;
-        if (dateFilter.to) params.endDate = dateFilter.to;
+      if (ordersResult.status === 'rejected') {
+        throw ordersResult.reason;
       }
 
-      // Add profit filter parameters
-      if (profitFilter.mode === 'single' && profitFilter.single !== '') {
-        params.maxProfit = profitFilter.single;
-      } else if (profitFilter.mode === 'range') {
-        if (profitFilter.from !== '') params.minProfit = profitFilter.from;
-        if (profitFilter.to !== '') params.maxProfit = profitFilter.to;
-      }
-
-      // Add subtotal filter parameters
-      if (subtotalFilter.mode === 'single' && subtotalFilter.single !== '') {
-        params.maxSubtotal = subtotalFilter.single;
-      } else if (subtotalFilter.mode === 'range') {
-        if (subtotalFilter.from !== '') params.minSubtotal = subtotalFilter.from;
-        if (subtotalFilter.to !== '') params.maxSubtotal = subtotalFilter.to;
-      }
-
-      const { data } = await api.get('/ebay/all-orders-usd', { params, timeout: 120000 });
+      const { data } = ordersResult.value;
       setOrders(data?.orders || []);
       
       if (data?.pagination) {
@@ -769,18 +808,38 @@ export default function AllOrdersSheetPage() {
       }
 
       setFilteredTotals(data?.filteredTotals || null);
+
+      if (accountProfitResult.status === 'fulfilled') {
+        setAccountProfitRows(accountProfitResult.value?.data?.rows || []);
+      } else {
+        setAccountProfitRows([]);
+        setAccountProfitError(accountProfitResult.reason?.response?.data?.error || accountProfitResult.reason?.message || 'Failed to load account profit view');
+      }
     } catch (e) {
       setOrders([]);
       setCounts({ uniqueCategories: 0, uniqueRanges: 0, uniqueProducts: 0, categoryData: [], rangeData: [], productData: [] });
       setRawCount(null);
       setFilteredTotals(null);
+      setAccountProfitRows([]);
       const status = e.response?.status;
       const detail = e.response?.data?.error || e.message || 'Failed to load orders';
       setError(status ? `Failed to load orders (${status}): ${detail}` : detail);
     } finally {
       setLoading(false);
+      setAccountProfitLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (!showAccountRanking) return undefined;
+    const timeoutId = setTimeout(() => {
+      loadAccountProfit({
+        searchMarketplace: rankingMarketplace,
+        dateFilter: rankingDateFilter
+      });
+    }, 150);
+    return () => clearTimeout(timeoutId);
+  }, [showAccountRanking, rankingMarketplace, rankingDateFilter]);
 
   async function pollTds() {
     const pending = (orders || []).filter((o) => (
@@ -827,6 +886,12 @@ export default function AllOrdersSheetPage() {
     const num = parseFloat(value);
     if (isNaN(num)) return '-';
     return `$${num.toFixed(2)}`;
+  };
+
+  const formatInr = (value) => {
+    const num = parseFloat(value);
+    if (isNaN(num)) return 'Rs 0.00';
+    return `Rs ${num.toFixed(2)}`;
   };
 
   // Handler for opening price update modal
@@ -1135,6 +1200,18 @@ export default function AllOrdersSheetPage() {
           sx={{ pt: 0, pb: 1, mb: 1, borderBottom: '1px solid', borderColor: 'divider' }}
           actions={
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => {
+                  setRankingMarketplace(searchMarketplace);
+                  setRankingDateFilter(dateFilter);
+                  setShowAccountRanking(true);
+                }}
+                sx={yellowOutlinedButtonSx}
+              >
+                Account Ranking
+              </Button>
               <Button
                 variant="outlined"
                 size="small"
@@ -1894,6 +1971,194 @@ export default function AllOrdersSheetPage() {
           </Stack>
         </SectionCard>
       )}
+
+      <Dialog
+        open={showAccountRanking}
+        onClose={() => setShowAccountRanking(false)}
+        maxWidth="md"
+        fullWidth
+        PaperProps={{
+          sx: {
+            width: { xs: 'calc(100% - 24px)', md: 760 },
+            maxWidth: 760,
+            borderRadius: 1,
+          }
+        }}
+      >
+        <DialogTitle sx={{ pb: 1 }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={2}>
+            <Box>
+              <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>
+                Account Ranking
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Seller accounts ranked by profit for the current All Orders USD date filters.
+              </Typography>
+            </Box>
+            {accountProfitLoading && <CircularProgress size={20} />}
+          </Stack>
+          <Stack direction="row" spacing={1.25} alignItems="center" flexWrap="wrap" sx={{ mt: 1.5 }}>
+            <FormControl size="small" sx={{ width: 150 }}>
+              <InputLabel>Marketplace</InputLabel>
+              <Select
+                value={rankingMarketplace}
+                label="Marketplace"
+                onChange={(e) => setRankingMarketplace(e.target.value)}
+              >
+                <MenuItem value="">All Marketplaces</MenuItem>
+                <MenuItem value="EBAY_US">eBay US</MenuItem>
+                <MenuItem value="EBAY_AU">eBay Australia</MenuItem>
+                <MenuItem value="EBAY_CA">eBay Canada</MenuItem>
+                <MenuItem value="EBAY_GB">eBay UK</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ width: 145 }}>
+              <InputLabel>Date Mode</InputLabel>
+              <Select
+                value={rankingDateFilter.mode}
+                label="Date Mode"
+                onChange={(e) => setRankingDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+              >
+                <MenuItem value="none">None</MenuItem>
+                <MenuItem value="single">Single Day</MenuItem>
+                <MenuItem value="range">Date Range</MenuItem>
+              </Select>
+            </FormControl>
+            {rankingDateFilter.mode === 'single' && (
+              <TextField
+                size="small"
+                label="Date"
+                type="date"
+                value={rankingDateFilter.single}
+                onChange={(e) => setRankingDateFilter(prev => ({ ...prev, single: e.target.value }))}
+                InputLabelProps={{ shrink: true }}
+                sx={{ width: 150 }}
+              />
+            )}
+            {rankingDateFilter.mode === 'range' && (
+              <>
+                <TextField
+                  size="small"
+                  label="From"
+                  type="date"
+                  value={rankingDateFilter.from}
+                  onChange={(e) => setRankingDateFilter(prev => ({ ...prev, from: e.target.value }))}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ width: 150 }}
+                />
+                <TextField
+                  size="small"
+                  label="To"
+                  type="date"
+                  value={rankingDateFilter.to}
+                  onChange={(e) => setRankingDateFilter(prev => ({ ...prev, to: e.target.value }))}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ width: 150 }}
+                />
+              </>
+            )}
+          </Stack>
+        </DialogTitle>
+        <DialogContent sx={{ p: 0 }}>
+          {accountProfitError ? (
+            <Alert severity="warning" sx={{ m: 2 }}>{accountProfitError}</Alert>
+          ) : accountProfitRows.length === 0 ? (
+            <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>No account profit data found.</Typography>
+          ) : (() => {
+            const totals = accountProfitRows.reduce((acc, row) => {
+              acc.profit += Number(row.totalProfit || 0);
+              acc.orders += Number(row.orderCount || 0);
+              return acc;
+            }, { profit: 0, orders: 0 });
+
+            const numericCellSx = {
+              textAlign: 'right',
+              fontVariantNumeric: 'tabular-nums',
+            };
+
+            return (
+              <Box>
+                <TableContainer sx={{ maxHeight: '68vh', overflowY: 'auto' }}>
+                  <Table
+                    size="small"
+                    stickyHeader
+                    sx={{
+                      tableLayout: 'fixed',
+                      '& th, & td': {
+                        px: 1.5,
+                        py: 1.35,
+                        whiteSpace: 'nowrap',
+                      },
+                      '& thead th': {
+                        backgroundColor: BRAND_DARK,
+                        color: 'white',
+                        fontWeight: 800,
+                        fontSize: '0.78rem',
+                      },
+                      '& tbody tr:nth-of-type(even) td': {
+                        backgroundColor: dashboardSignatureTokens.table.rowStripe,
+                      },
+                    }}
+                  >
+                    <TableHead>
+                      <TableRow>
+                        <TableCell sx={{ width: 56 }}>#</TableCell>
+                        <TableCell>Seller</TableCell>
+                        <TableCell sx={{ width: 170, ...numericCellSx }}>Profit (INR)</TableCell>
+                        <TableCell sx={{ width: 95, ...numericCellSx }}>Orders</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {accountProfitRows.map((row, index) => {
+                        const profit = Number(row.totalProfit || 0);
+                        return (
+                          <TableRow key={row.sellerId || row.accountName || index} hover>
+                            <TableCell sx={{ color: 'text.secondary' }}>{index + 1}</TableCell>
+                            <TableCell sx={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {row.accountName}
+                            </TableCell>
+                            <TableCell sx={numericCellSx}>
+                              <Typography
+                                component="span"
+                                variant="body2"
+                                sx={{ display: 'block', width: '100%', textAlign: 'right', fontWeight: 800, color: profit < 0 ? 'error.main' : 'success.main' }}
+                              >
+                                {formatInr(profit)}
+                              </Typography>
+                            </TableCell>
+                            <TableCell sx={{ ...numericCellSx, fontWeight: 700 }}>{row.orderCount || 0}</TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+                <Box
+                  sx={{
+                    display: 'grid',
+                    gridTemplateColumns: '56px minmax(0, 1fr) 170px 95px',
+                    alignItems: 'center',
+                    px: 1.5,
+                    py: 1.1,
+                    borderTop: `2px solid ${BRAND_YELLOW}`,
+                    backgroundColor: BRAND_DARK,
+                    color: 'white',
+                    fontWeight: 900,
+                  }}
+                >
+                  <Box />
+                  <Box>Total</Box>
+                  <Box sx={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{formatInr(totals.profit)}</Box>
+                  <Box sx={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{totals.orders}</Box>
+                </Box>
+              </Box>
+            );
+          })()}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setShowAccountRanking(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Orders Table */}
       {orders.length === 0 ? (
