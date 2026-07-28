@@ -44,6 +44,7 @@ import DirectListJob, {
   DIRECT_LIST_JOB_MAX_DELAY_SECONDS,
 } from '../models/DirectListJob.js';
 import { chunkDirectListAsins } from '../lib/directListJobRunner.js';
+import { recordDirectListBatchHistory, listDirectListBatchHistory, getDerivedDirectListBatchDetail, decodeDerivedBatchId } from '../lib/directListBatchHistory.js';
 import { enrichListingItemSpecifics, applyCustomColumnDefaults } from '../utils/ebayItemSpecificsEnrichment.js';
 import { joinItemPhotoUrls, mergeItemPhotoUrls, normalizeItemPhotoUrl } from '../utils/itemPhotoUrls.js';
 import {
@@ -574,7 +575,11 @@ router.get('/database-view', requireAuth, async (req, res) => {
     // Build query - exclude soft-deleted items
     const query = { deletedAt: null };
     
-    if (sellerId) query.sellerId = sellerId;
+    if (sellerId === 'unassigned' || sellerId === 'null') {
+      query.sellerId = null;
+    } else if (sellerId) {
+      query.sellerId = sellerId;
+    }
     if (templateId) query.templateId = templateId;
     if (status) query.status = status;
 
@@ -627,12 +632,20 @@ router.get('/database-view', requireAuth, async (req, res) => {
       ];
     }
     
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const light = String(req.query.light || '') === '1' || String(req.query.light || '').toLowerCase() === 'true';
+    const limitNum = Math.min(
+      Math.max(parseInt(limit, 10) || 50, 1),
+      light ? 1000 : 200
+    );
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const skipNum = (pageNum - 1) * limitNum;
     
     // Sort by createdAt (always set). UI Listed column shows ebayPublishedAt || createdAt.
     const [listings, total] = await Promise.all([
       TemplateListing.find(query)
-        .select('+_asinReference')
+        .select(light
+          ? '+_asinReference customLabel title status listingOrigin ebayPublishedAt createdAt sellerId templateId'
+          : '+_asinReference')
         .populate({
           path: 'sellerId',
           populate: {
@@ -643,20 +656,23 @@ router.get('/database-view', requireAuth, async (req, res) => {
         .populate('templateId', 'name')
         .populate('createdBy', 'username email role')
         .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit)),
+        .skip(skipNum)
+        .limit(limitNum)
+        .lean(),
       TemplateListing.countDocuments(query)
     ]);
 
-    const listingsWithPrices = await attachAmazonScrapedPriceFallback(listings);
+    const listingsWithPrices = light
+      ? listings
+      : await attachAmazonScrapedPriceFallback(listings);
     
     res.json({
       listings: listingsWithPrices,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
         total,
-        pages: Math.ceil(total / parseInt(limit))
+        pages: Math.ceil(total / limitNum)
       }
     });
   } catch (error) {
@@ -1580,12 +1596,520 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
   }
 });
 
+// GET /api/template-listings/direct-list/store-lister-defaults — Store location + business policies for UI
+router.get('/direct-list/store-lister-defaults', requireAuth, async (req, res) => {
+  try {
+    const sellerId = String(req.query.sellerId || '').trim();
+    const templateId = String(req.query.templateId || '').trim();
+    let region = String(req.query.region || 'US').trim().toUpperCase() || 'US';
+
+    if (!sellerId) {
+      return res.status(400).json({ error: 'sellerId is required' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    let ebayMarketplace = null;
+    if (templateId) {
+      const template = await getEffectiveTemplate(templateId, sellerId);
+      if (template) {
+        ebayMarketplace = resolveTemplateEbayMarketplace(template);
+        region = ebayMarketplace.storeListerRegion;
+      }
+    }
+
+    const storeListerApplied = await getDirectListStoreListerDefaults(sellerId, region);
+    res.json({ storeListerApplied, ebayMarketplace, storeListerRegion: region });
+  } catch (error) {
+    console.error('[Direct List Store Defaults] Error:', error);
+    res.status(500).json({ error: error.message || 'Failed to load store lister defaults' });
+  }
+});
+
+// POST /api/template-listings/direct-list/preview — Prepare single listing without eBay submit
+router.post('/direct-list/preview', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, listing, asin, region = 'US', defaults = {} } = req.body;
+
+    if (!templateId || !sellerId) {
+      return res.status(400).json({ error: 'templateId and sellerId are required' });
+    }
+
+    if (!listing && !asin) {
+      return res.status(400).json({ error: 'listing object or asin is required' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const result = await previewDirectListPayload({
+      templateId,
+      sellerId,
+      listing,
+      asin,
+      region,
+      defaults,
+      createdBy: req.user?.userId,
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error('[Direct List Preview] Error:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.message || 'Failed to prepare listing preview',
+      missing: error.missing,
+      details: error.response?.data || undefined,
+    });
+  }
+});
+
+// POST /api/template-listings/direct-list-bulk/preview — Prepare bulk listings without eBay submit
+router.post('/direct-list-bulk/preview', requireAuth, async (req, res) => {
+  try {
+    const {
+      templateId,
+      sellerId,
+      asins,
+      region = 'US',
+      defaults = {},
+      listingOverrides = {},
+      concurrency = 2,
+    } = req.body;
+
+    if (!templateId || !sellerId) {
+      return res.status(400).json({ error: 'templateId and sellerId are required' });
+    }
+
+    const cleanedAsins = Array.isArray(asins)
+      ? [...new Set(asins.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean))]
+      : parseDirectListAsins(asins);
+
+    if (cleanedAsins.length === 0) {
+      return res.status(400).json({ error: 'At least one valid ASIN is required' });
+    }
+
+    if (cleanedAsins.length > 25) {
+      return res.status(400).json({ error: 'Maximum 25 ASINs allowed per bulk preview batch' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const previewResult = await previewDirectListBulk({
+      templateId,
+      sellerId,
+      asins: cleanedAsins,
+      region,
+      defaults,
+      listingOverrides,
+      concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 2, 1), 3),
+      createdBy: req.user?.userId,
+    });
+
+    try {
+      await recordDirectListBatchHistory({
+        sellerId,
+        templateId,
+        region,
+        runType: 'draft',
+        asins: cleanedAsins,
+        results: previewResult.results || [],
+        createdBy: req.user?.userId,
+      });
+    } catch (historyErr) {
+      console.warn('[Direct List Bulk Preview] Failed to save batch history:', historyErr.message);
+    }
+
+    res.json(previewResult);
+  } catch (error) {
+    console.error('[Direct List Bulk Preview] Error:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.message || 'Failed to prepare bulk listing preview',
+      details: error.response?.data || undefined,
+    });
+  }
+});
+
+// POST /api/template-listings/direct-list — Single SKU → eBay Trading API (AddFixedPriceItem)
+router.post('/direct-list', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, listing, asin, region = 'US', verifyOnly = false, defaults = {} } = req.body;
+
+    if (!templateId || !sellerId) {
+      return res.status(400).json({ error: 'templateId and sellerId are required' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const { listingPayload, storeListerApplied, amazonData, ebayMarketplace } = await prepareDirectListPayload({
+      templateId,
+      sellerId,
+      listing,
+      asin,
+      region,
+      defaults,
+    });
+
+    const token = await ensureValidToken(seller);
+    const result = await submitDirectListPayload({
+      token,
+      listingPayload,
+      verifyOnly: Boolean(verifyOnly),
+      templateId,
+      sellerId,
+      asin,
+      storeListerApplied,
+      createdBy: req.user?.userId,
+      amazonData,
+      region,
+      ebayMarketplace,
+    });
+
+    res.json({ ...result, ebayMarketplace });
+  } catch (error) {
+    console.error('[Direct List] Error:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.message || 'Failed to list on eBay',
+      missing: error.missing,
+      details: error.response?.data || undefined,
+    });
+  }
+});
+
+// POST /api/template-listings/direct-list-bulk — Multiple ASINs → eBay Trading API
+router.post('/direct-list-bulk', requireAuth, async (req, res) => {
+  try {
+    const {
+      templateId,
+      sellerId,
+      asins,
+      region = 'US',
+      verifyOnly = false,
+      defaults = {},
+      listingOverrides = {},
+      listingsByAsin = {},
+      concurrency = 2,
+    } = req.body;
+
+    if (!templateId || !sellerId) {
+      return res.status(400).json({ error: 'templateId and sellerId are required' });
+    }
+
+    const cleanedAsins = Array.isArray(asins)
+      ? [...new Set(asins.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean))]
+      : parseDirectListAsins(asins);
+
+    if (cleanedAsins.length === 0) {
+      return res.status(400).json({ error: 'At least one valid ASIN is required' });
+    }
+
+    if (cleanedAsins.length > 25) {
+      return res.status(400).json({ error: 'Maximum 25 ASINs allowed per bulk direct-list batch' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const token = await ensureValidToken(seller);
+    const bulkResult = await processDirectListBulk({
+      templateId,
+      sellerId,
+      asins: cleanedAsins,
+      region,
+      verifyOnly: Boolean(verifyOnly),
+      defaults,
+      listingOverrides,
+      listingsByAsin,
+      token,
+      concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 2, 1), 3),
+      createdBy: req.user?.userId,
+    });
+
+    try {
+      await recordDirectListBatchHistory({
+        sellerId,
+        templateId,
+        region,
+        runType: Boolean(verifyOnly) ? 'verify' : 'publish',
+        asins: cleanedAsins,
+        results: bulkResult.results || [],
+        createdBy: req.user?.userId,
+      });
+    } catch (historyErr) {
+      console.warn('[Direct List Bulk] Failed to save batch history:', historyErr.message);
+    }
+
+    res.json(bulkResult);
+  } catch (error) {
+    console.error('[Direct List Bulk] Error:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.message || 'Failed to bulk list on eBay',
+      details: error.response?.data || undefined,
+    });
+  }
+});
+
+// POST /api/template-listings/direct-list-jobs — Queue bulk Direct List (scheduled or background)
+router.post('/direct-list-jobs', requireAuth, async (req, res) => {
+  try {
+    const {
+      templateId,
+      sellerId,
+      asins,
+      region = 'US',
+      scheduledAt,
+      delayMinutesBetweenBatches = DIRECT_LIST_JOB_DEFAULT_DELAY_MINUTES,
+      delaySecondsBetweenListings = DIRECT_LIST_JOB_DEFAULT_DELAY_SECONDS,
+      batchSize = DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE,
+    } = req.body;
+
+    if (!templateId || !sellerId) {
+      return res.status(400).json({ error: 'templateId and sellerId are required' });
+    }
+
+    const cleanedAsins = Array.isArray(asins)
+      ? [...new Set(asins.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean))]
+      : parseDirectListAsins(asins);
+
+    if (cleanedAsins.length === 0) {
+      return res.status(400).json({ error: 'At least one valid ASIN is required' });
+    }
+
+    if (cleanedAsins.length > DIRECT_LIST_JOB_MAX_ASINS) {
+      return res.status(400).json({ error: `Maximum ${DIRECT_LIST_JOB_MAX_ASINS} ASINs per scheduled job` });
+    }
+
+    const runAt = scheduledAt ? new Date(scheduledAt) : new Date();
+    if (Number.isNaN(runAt.getTime())) {
+      return res.status(400).json({ error: 'Invalid scheduledAt date' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const normalizedBatchSize = Math.min(Math.max(Number.parseInt(batchSize, 10) || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE, 1), 25);
+    const normalizedDelayMinutes = Math.min(Math.max(Number.parseInt(delayMinutesBetweenBatches, 10) || DIRECT_LIST_JOB_DEFAULT_DELAY_MINUTES, 1), 60);
+    const normalizedDelaySeconds = Math.min(
+      Math.max(Number.parseInt(delaySecondsBetweenListings, 10) || DIRECT_LIST_JOB_DEFAULT_DELAY_SECONDS, DIRECT_LIST_JOB_MIN_DELAY_SECONDS),
+      DIRECT_LIST_JOB_MAX_DELAY_SECONDS
+    );
+    const batchCount = chunkDirectListAsins(cleanedAsins, normalizedBatchSize).length;
+
+    const job = await DirectListJob.create({
+      sellerId,
+      templateId,
+      region,
+      asins: cleanedAsins,
+      scheduledAt: runAt,
+      batchSize: normalizedBatchSize,
+      delayMinutesBetweenBatches: normalizedDelayMinutes,
+      delaySecondsBetweenListings: normalizedDelaySeconds,
+      runType: 'publish',
+      execution: 'queued',
+      createdBy: req.user?._id || req.user?.userId || null,
+    });
+
+    res.json({
+      success: true,
+      job: {
+        _id: job._id,
+        status: job.status,
+        totalAsins: cleanedAsins.length,
+        batchCount,
+        batchSize: normalizedBatchSize,
+        delayMinutesBetweenBatches: normalizedDelayMinutes,
+        delaySecondsBetweenListings: normalizedDelaySeconds,
+        scheduledAt: job.scheduledAt,
+      },
+      message: runAt <= new Date()
+        ? `Queued ${cleanedAsins.length} ASIN(s) in ${batchCount} batch(es). Processing starts shortly — you can close this page.`
+        : `Scheduled ${cleanedAsins.length} ASIN(s) in ${batchCount} batch(es) for ${runAt.toLocaleString()}.`,
+    });
+  } catch (error) {
+    console.error('[Direct List Job] Create error:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.message || 'Failed to create direct list job',
+    });
+  }
+});
+
+// GET /api/template-listings/direct-list-jobs?sellerId=&limit=
+router.get('/direct-list-jobs', requireAuth, async (req, res) => {
+  try {
+    const sellerId = String(req.query.sellerId || '').trim();
+    const filter = {};
+    if (sellerId) filter.sellerId = sellerId;
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
+
+    const jobs = await DirectListJob.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .select('-results')
+      .populate('templateId', 'name')
+      .populate({
+        path: 'sellerId',
+        select: 'user',
+        populate: { path: 'user', select: 'username email' },
+      })
+      .populate('createdBy', 'username email')
+      .lean();
+
+    const enriched = jobs.map((job) => ({
+      ...job,
+      runType: job.runType || 'publish',
+      execution: job.execution || 'queued',
+      templateName: job.templateId?.name || '—',
+      sellerName: job.sellerId?.user?.username || job.sellerId?.user?.email || '—',
+      createdByName: job.createdBy?.username || job.createdBy?.email || '—',
+      totalAsins: job.asins?.length || 0,
+      batchCount: chunkDirectListAsins(job.asins || [], job.batchSize || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE).length,
+      processedAsins: Math.min(
+        (job.currentBatchIndex || 0) * (job.batchSize || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE),
+        job.asins?.length || 0
+      ),
+    }));
+
+    res.json({ jobs: enriched });
+  } catch (error) {
+    console.error('[Direct List Job] List error:', error);
+    res.status(500).json({ error: error.message || 'Failed to list jobs' });
+  }
+});
+
+// GET /api/template-listings/direct-list-history — jobs + derived batches from listings
+router.get('/direct-list-history', requireAuth, async (req, res) => {
+  try {
+    const sellerId = String(req.query.sellerId || '').trim() || null;
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 150, 1), 300);
+    const batches = await listDirectListBatchHistory({ sellerId, limit });
+    res.json({ batches, total: batches.length });
+  } catch (error) {
+    console.error('[Direct List History] List error:', error);
+    res.status(500).json({ error: error.message || 'Failed to load batch history' });
+  }
+});
+
+// GET /api/template-listings/direct-list-history/:id — job or derived listing-batch detail
+router.get('/direct-list-history/:id', requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || '');
+    if (decodeDerivedBatchId(id)) {
+      const batch = await getDerivedDirectListBatchDetail(id);
+      if (!batch) return res.status(404).json({ error: 'Batch not found' });
+      return res.json({ batch });
+    }
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid batch id' });
+    }
+    const job = await DirectListJob.findById(id)
+      .populate('templateId', 'name')
+      .populate({
+        path: 'sellerId',
+        select: 'user',
+        populate: { path: 'user', select: 'username email' },
+      })
+      .populate('createdBy', 'username email')
+      .lean();
+    if (!job) return res.status(404).json({ error: 'Batch not found' });
+    return res.json({
+      batch: {
+        ...job,
+        _id: String(job._id),
+        source: 'job',
+        runType: job.runType || 'publish',
+        execution: job.execution || 'queued',
+        templateName: job.templateId?.name || '—',
+        sellerName: job.sellerId?.user?.username || job.sellerId?.user?.email || '—',
+        createdByName: job.createdBy?.username || job.createdBy?.email || '—',
+        totalAsins: job.asins?.length || 0,
+        batchCount: chunkDirectListAsins(job.asins || [], job.batchSize || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE).length,
+      },
+    });
+  } catch (error) {
+    console.error('[Direct List History] Detail error:', error);
+    res.status(500).json({ error: error.message || 'Failed to load batch detail' });
+  }
+});
+
+// GET /api/template-listings/direct-list-jobs/:id
+router.get('/direct-list-jobs/:id', requireAuth, async (req, res) => {
+  try {
+    const job = await DirectListJob.findById(req.params.id)
+      .populate('templateId', 'name')
+      .populate({
+        path: 'sellerId',
+        select: 'user',
+        populate: { path: 'user', select: 'username email' },
+      })
+      .populate('createdBy', 'username email')
+      .lean();
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    res.json({
+      job: {
+        ...job,
+        runType: job.runType || 'publish',
+        execution: job.execution || 'queued',
+        templateName: job.templateId?.name || '—',
+        sellerName: job.sellerId?.user?.username || job.sellerId?.user?.email || '—',
+        createdByName: job.createdBy?.username || job.createdBy?.email || '—',
+        totalAsins: job.asins?.length || 0,
+        batchCount: chunkDirectListAsins(job.asins || [], job.batchSize || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE).length,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to load job' });
+  }
+});
+
+// DELETE /api/template-listings/direct-list-jobs/:id — Cancel pending job
+router.delete('/direct-list-jobs/:id', requireAuth, async (req, res) => {
+  try {
+    const job = await DirectListJob.findById(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    if (job.status !== 'pending') {
+      return res.status(400).json({ error: 'Only pending jobs can be cancelled' });
+    }
+    job.status = 'cancelled';
+    job.completedAt = new Date();
+    await job.save();
+    res.json({ success: true, message: 'Job cancelled' });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to cancel job' });
+  }
+});
+
 // Get single listing by ID
 router.get('/:id', requireAuth, async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid listing id' });
+    }
     const listing = await TemplateListing.findById(req.params.id)
-      .populate('createdBy', 'name email')
-      .populate('templateId');
+      .select('+_asinReference')
+      .populate({
+        path: 'sellerId',
+        populate: { path: 'user', select: 'username email' },
+      })
+      .populate('createdBy', 'username email name')
+      .populate('templateId', 'name');
     
     if (!listing) {
       return res.status(404).json({ error: 'Listing not found' });
@@ -5150,395 +5674,6 @@ router.post('/cache-invalidate/:asin', requireAuth, async (req, res) => {
       success: false,
       message: error.message
     });
-  }
-});
-
-// GET /api/template-listings/direct-list/store-lister-defaults — Store location + business policies for UI
-router.get('/direct-list/store-lister-defaults', requireAuth, async (req, res) => {
-  try {
-    const sellerId = String(req.query.sellerId || '').trim();
-    const templateId = String(req.query.templateId || '').trim();
-    let region = String(req.query.region || 'US').trim().toUpperCase() || 'US';
-
-    if (!sellerId) {
-      return res.status(400).json({ error: 'sellerId is required' });
-    }
-
-    const seller = await Seller.findById(sellerId);
-    if (!seller) {
-      return res.status(404).json({ error: 'Seller not found' });
-    }
-
-    let ebayMarketplace = null;
-    if (templateId) {
-      const template = await getEffectiveTemplate(templateId, sellerId);
-      if (template) {
-        ebayMarketplace = resolveTemplateEbayMarketplace(template);
-        region = ebayMarketplace.storeListerRegion;
-      }
-    }
-
-    const storeListerApplied = await getDirectListStoreListerDefaults(sellerId, region);
-    res.json({ storeListerApplied, ebayMarketplace, storeListerRegion: region });
-  } catch (error) {
-    console.error('[Direct List Store Defaults] Error:', error);
-    res.status(500).json({ error: error.message || 'Failed to load store lister defaults' });
-  }
-});
-
-// POST /api/template-listings/direct-list/preview — Prepare single listing without eBay submit
-router.post('/direct-list/preview', requireAuth, async (req, res) => {
-  try {
-    const { templateId, sellerId, listing, asin, region = 'US', defaults = {} } = req.body;
-
-    if (!templateId || !sellerId) {
-      return res.status(400).json({ error: 'templateId and sellerId are required' });
-    }
-
-    if (!listing && !asin) {
-      return res.status(400).json({ error: 'listing object or asin is required' });
-    }
-
-    const seller = await Seller.findById(sellerId);
-    if (!seller) {
-      return res.status(404).json({ error: 'Seller not found' });
-    }
-
-    const result = await previewDirectListPayload({
-      templateId,
-      sellerId,
-      listing,
-      asin,
-      region,
-      defaults,
-      createdBy: req.user?.userId,
-    });
-
-    res.json(result);
-  } catch (error) {
-    console.error('[Direct List Preview] Error:', error);
-    res.status(error.statusCode || 500).json({
-      error: error.message || 'Failed to prepare listing preview',
-      missing: error.missing,
-      details: error.response?.data || undefined,
-    });
-  }
-});
-
-// POST /api/template-listings/direct-list-bulk/preview — Prepare bulk listings without eBay submit
-router.post('/direct-list-bulk/preview', requireAuth, async (req, res) => {
-  try {
-    const {
-      templateId,
-      sellerId,
-      asins,
-      region = 'US',
-      defaults = {},
-      listingOverrides = {},
-      concurrency = 2,
-    } = req.body;
-
-    if (!templateId || !sellerId) {
-      return res.status(400).json({ error: 'templateId and sellerId are required' });
-    }
-
-    const cleanedAsins = Array.isArray(asins)
-      ? [...new Set(asins.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean))]
-      : parseDirectListAsins(asins);
-
-    if (cleanedAsins.length === 0) {
-      return res.status(400).json({ error: 'At least one valid ASIN is required' });
-    }
-
-    if (cleanedAsins.length > 25) {
-      return res.status(400).json({ error: 'Maximum 25 ASINs allowed per bulk preview batch' });
-    }
-
-    const seller = await Seller.findById(sellerId);
-    if (!seller) {
-      return res.status(404).json({ error: 'Seller not found' });
-    }
-
-    const previewResult = await previewDirectListBulk({
-      templateId,
-      sellerId,
-      asins: cleanedAsins,
-      region,
-      defaults,
-      listingOverrides,
-      concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 2, 1), 3),
-      createdBy: req.user?.userId,
-    });
-
-    res.json(previewResult);
-  } catch (error) {
-    console.error('[Direct List Bulk Preview] Error:', error);
-    res.status(error.statusCode || 500).json({
-      error: error.message || 'Failed to prepare bulk listing preview',
-      details: error.response?.data || undefined,
-    });
-  }
-});
-
-// POST /api/template-listings/direct-list — Single SKU → eBay Trading API (AddFixedPriceItem)
-router.post('/direct-list', requireAuth, async (req, res) => {
-  try {
-    const { templateId, sellerId, listing, asin, region = 'US', verifyOnly = false, defaults = {} } = req.body;
-
-    if (!templateId || !sellerId) {
-      return res.status(400).json({ error: 'templateId and sellerId are required' });
-    }
-
-    const seller = await Seller.findById(sellerId);
-    if (!seller) {
-      return res.status(404).json({ error: 'Seller not found' });
-    }
-
-    const { listingPayload, storeListerApplied, amazonData, ebayMarketplace } = await prepareDirectListPayload({
-      templateId,
-      sellerId,
-      listing,
-      asin,
-      region,
-      defaults,
-    });
-
-    const token = await ensureValidToken(seller);
-    const result = await submitDirectListPayload({
-      token,
-      listingPayload,
-      verifyOnly: Boolean(verifyOnly),
-      templateId,
-      sellerId,
-      asin,
-      storeListerApplied,
-      createdBy: req.user?.userId,
-      amazonData,
-      region,
-      ebayMarketplace,
-    });
-
-    res.json({ ...result, ebayMarketplace });
-  } catch (error) {
-    console.error('[Direct List] Error:', error);
-    res.status(error.statusCode || 500).json({
-      error: error.message || 'Failed to list on eBay',
-      missing: error.missing,
-      details: error.response?.data || undefined,
-    });
-  }
-});
-
-// POST /api/template-listings/direct-list-bulk — Multiple ASINs → eBay Trading API
-router.post('/direct-list-bulk', requireAuth, async (req, res) => {
-  try {
-    const {
-      templateId,
-      sellerId,
-      asins,
-      region = 'US',
-      verifyOnly = false,
-      defaults = {},
-      listingOverrides = {},
-      listingsByAsin = {},
-      concurrency = 2,
-    } = req.body;
-
-    if (!templateId || !sellerId) {
-      return res.status(400).json({ error: 'templateId and sellerId are required' });
-    }
-
-    const cleanedAsins = Array.isArray(asins)
-      ? [...new Set(asins.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean))]
-      : parseDirectListAsins(asins);
-
-    if (cleanedAsins.length === 0) {
-      return res.status(400).json({ error: 'At least one valid ASIN is required' });
-    }
-
-    if (cleanedAsins.length > 25) {
-      return res.status(400).json({ error: 'Maximum 25 ASINs allowed per bulk direct-list batch' });
-    }
-
-    const seller = await Seller.findById(sellerId);
-    if (!seller) {
-      return res.status(404).json({ error: 'Seller not found' });
-    }
-
-    const token = await ensureValidToken(seller);
-    const bulkResult = await processDirectListBulk({
-      templateId,
-      sellerId,
-      asins: cleanedAsins,
-      region,
-      verifyOnly: Boolean(verifyOnly),
-      defaults,
-      listingOverrides,
-      listingsByAsin,
-      token,
-      concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 2, 1), 3),
-      createdBy: req.user?.userId,
-    });
-
-    res.json(bulkResult);
-  } catch (error) {
-    console.error('[Direct List Bulk] Error:', error);
-    res.status(error.statusCode || 500).json({
-      error: error.message || 'Failed to bulk list on eBay',
-      details: error.response?.data || undefined,
-    });
-  }
-});
-
-// POST /api/template-listings/direct-list-jobs — Queue bulk Direct List (scheduled or background)
-router.post('/direct-list-jobs', requireAuth, async (req, res) => {
-  try {
-    const {
-      templateId,
-      sellerId,
-      asins,
-      region = 'US',
-      scheduledAt,
-      delayMinutesBetweenBatches = DIRECT_LIST_JOB_DEFAULT_DELAY_MINUTES,
-      delaySecondsBetweenListings = DIRECT_LIST_JOB_DEFAULT_DELAY_SECONDS,
-      batchSize = DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE,
-    } = req.body;
-
-    if (!templateId || !sellerId) {
-      return res.status(400).json({ error: 'templateId and sellerId are required' });
-    }
-
-    const cleanedAsins = Array.isArray(asins)
-      ? [...new Set(asins.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean))]
-      : parseDirectListAsins(asins);
-
-    if (cleanedAsins.length === 0) {
-      return res.status(400).json({ error: 'At least one valid ASIN is required' });
-    }
-
-    if (cleanedAsins.length > DIRECT_LIST_JOB_MAX_ASINS) {
-      return res.status(400).json({ error: `Maximum ${DIRECT_LIST_JOB_MAX_ASINS} ASINs per scheduled job` });
-    }
-
-    const runAt = scheduledAt ? new Date(scheduledAt) : new Date();
-    if (Number.isNaN(runAt.getTime())) {
-      return res.status(400).json({ error: 'Invalid scheduledAt date' });
-    }
-
-    const seller = await Seller.findById(sellerId);
-    if (!seller) {
-      return res.status(404).json({ error: 'Seller not found' });
-    }
-
-    const normalizedBatchSize = Math.min(Math.max(Number.parseInt(batchSize, 10) || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE, 1), 25);
-    const normalizedDelayMinutes = Math.min(Math.max(Number.parseInt(delayMinutesBetweenBatches, 10) || DIRECT_LIST_JOB_DEFAULT_DELAY_MINUTES, 1), 60);
-    const normalizedDelaySeconds = Math.min(
-      Math.max(Number.parseInt(delaySecondsBetweenListings, 10) || DIRECT_LIST_JOB_DEFAULT_DELAY_SECONDS, DIRECT_LIST_JOB_MIN_DELAY_SECONDS),
-      DIRECT_LIST_JOB_MAX_DELAY_SECONDS
-    );
-    const batchCount = chunkDirectListAsins(cleanedAsins, normalizedBatchSize).length;
-
-    const job = await DirectListJob.create({
-      sellerId,
-      templateId,
-      region,
-      asins: cleanedAsins,
-      scheduledAt: runAt,
-      batchSize: normalizedBatchSize,
-      delayMinutesBetweenBatches: normalizedDelayMinutes,
-      delaySecondsBetweenListings: normalizedDelaySeconds,
-      createdBy: req.user?._id || null,
-    });
-
-    res.json({
-      success: true,
-      job: {
-        _id: job._id,
-        status: job.status,
-        totalAsins: cleanedAsins.length,
-        batchCount,
-        batchSize: normalizedBatchSize,
-        delayMinutesBetweenBatches: normalizedDelayMinutes,
-        delaySecondsBetweenListings: normalizedDelaySeconds,
-        scheduledAt: job.scheduledAt,
-      },
-      message: runAt <= new Date()
-        ? `Queued ${cleanedAsins.length} ASIN(s) in ${batchCount} batch(es). Processing starts shortly — you can close this page.`
-        : `Scheduled ${cleanedAsins.length} ASIN(s) in ${batchCount} batch(es) for ${runAt.toLocaleString()}.`,
-    });
-  } catch (error) {
-    console.error('[Direct List Job] Create error:', error);
-    res.status(error.statusCode || 500).json({
-      error: error.message || 'Failed to create direct list job',
-    });
-  }
-});
-
-// GET /api/template-listings/direct-list-jobs?sellerId=
-router.get('/direct-list-jobs', requireAuth, async (req, res) => {
-  try {
-    const sellerId = String(req.query.sellerId || '').trim();
-    const filter = {};
-    if (sellerId) filter.sellerId = sellerId;
-
-    const jobs = await DirectListJob.find(filter)
-      .sort({ createdAt: -1 })
-      .limit(30)
-      .select('-results')
-      .lean();
-
-    const enriched = jobs.map((job) => ({
-      ...job,
-      totalAsins: job.asins?.length || 0,
-      batchCount: chunkDirectListAsins(job.asins || [], job.batchSize || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE).length,
-      processedAsins: Math.min(
-        (job.currentBatchIndex || 0) * (job.batchSize || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE),
-        job.asins?.length || 0
-      ),
-    }));
-
-    res.json({ jobs: enriched });
-  } catch (error) {
-    console.error('[Direct List Job] List error:', error);
-    res.status(500).json({ error: error.message || 'Failed to list jobs' });
-  }
-});
-
-// GET /api/template-listings/direct-list-jobs/:id
-router.get('/direct-list-jobs/:id', requireAuth, async (req, res) => {
-  try {
-    const job = await DirectListJob.findById(req.params.id).lean();
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-    res.json({
-      job: {
-        ...job,
-        totalAsins: job.asins?.length || 0,
-        batchCount: chunkDirectListAsins(job.asins || [], job.batchSize || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE).length,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message || 'Failed to load job' });
-  }
-});
-
-// DELETE /api/template-listings/direct-list-jobs/:id — Cancel pending job
-router.delete('/direct-list-jobs/:id', requireAuth, async (req, res) => {
-  try {
-    const job = await DirectListJob.findById(req.params.id);
-    if (!job) {
-      return res.status(404).json({ error: 'Job not found' });
-    }
-    if (job.status !== 'pending') {
-      return res.status(400).json({ error: 'Only pending jobs can be cancelled' });
-    }
-    job.status = 'cancelled';
-    job.completedAt = new Date();
-    await job.save();
-    res.json({ success: true, message: 'Job cancelled' });
-  } catch (error) {
-    res.status(500).json({ error: error.message || 'Failed to cancel job' });
   }
 });
 

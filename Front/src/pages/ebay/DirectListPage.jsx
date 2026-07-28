@@ -9,8 +9,13 @@ import {
   Chip,
   CircularProgress,
   Collapse,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   FormControlLabel,
+  IconButton,
   InputLabel,
   Link,
   LinearProgress,
@@ -37,8 +42,10 @@ import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import AutoFixHighIcon from '@mui/icons-material/AutoFixHigh';
 import ScheduleIcon from '@mui/icons-material/Schedule';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import api from '../../lib/api';
 import { generateSKUFromASIN } from '../../utils/skuGenerator';
 import AsinReviewModal from '../../components/AsinReviewModal.jsx';
@@ -547,6 +554,22 @@ export default function DirectListPage() {
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [bulkBatchProgress, setBulkBatchProgress] = useState(null);
   const [bulkJobs, setBulkJobs] = useState([]);
+  const [batchHistory, setBatchHistory] = useState([]);
+  const [batchHistoryLoading, setBatchHistoryLoading] = useState(false);
+  const [batchHistoryError, setBatchHistoryError] = useState('');
+  const [historyStoreFilter, setHistoryStoreFilter] = useState('all'); // all | sellerId
+  const [historyTypeFilter, setHistoryTypeFilter] = useState('all'); // all | draft | publish | verify
+  const [historyResultFilter, setHistoryResultFilter] = useState('all'); // all | ok | failed | mixed
+  const [historyTemplateFilter, setHistoryTemplateFilter] = useState('all'); // all | template name
+  const [expandedBatchId, setExpandedBatchId] = useState('');
+  const [expandedBatchDetail, setExpandedBatchDetail] = useState(null);
+  const [expandedBatchLoading, setExpandedBatchLoading] = useState(false);
+  const [historyDetailsOpen, setHistoryDetailsOpen] = useState(false);
+  const [historyDetailsBatch, setHistoryDetailsBatch] = useState(null);
+  const [historyDetailsLoading, setHistoryDetailsLoading] = useState(false);
+  const [historyDetailExpandedKey, setHistoryDetailExpandedKey] = useState('');
+  const [historyListTarget, setHistoryListTarget] = useState(null);
+  const [historyListing, setHistoryListing] = useState(false);
   const [bulkScheduleAt, setBulkScheduleAt] = useState(defaultScheduleInputValue);
   const [bulkDelayMinutes, setBulkDelayMinutes] = useState(BULK_JOB_DEFAULT_DELAY_MINUTES);
   const [bulkDelaySeconds, setBulkDelaySeconds] = useState(BULK_JOB_DEFAULT_DELAY_SECONDS);
@@ -630,13 +653,69 @@ export default function DirectListPage() {
     }
     try {
       const { data } = await api.get('/template-listings/direct-list-jobs', {
-        params: { sellerId: selectedSeller },
+        params: { sellerId: selectedSeller, limit: 50 },
       });
-      setBulkJobs(Array.isArray(data.jobs) ? data.jobs : []);
+      const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+      setBulkJobs(jobs.filter((job) => (job.execution || 'queued') === 'queued'));
     } catch {
       // optional
     }
   }, [selectedSeller]);
+
+  const loadBatchHistory = useCallback(async () => {
+    setBatchHistoryLoading(true);
+    setBatchHistoryError('');
+    try {
+      const params = { limit: 200 };
+      if (historyStoreFilter && historyStoreFilter !== 'all') {
+        params.sellerId = historyStoreFilter;
+      }
+      const { data } = await api.get('/template-listings/direct-list-history', { params });
+      setBatchHistory(Array.isArray(data.batches) ? data.batches : []);
+    } catch (err) {
+      setBatchHistory([]);
+      setBatchHistoryError(err?.response?.data?.error || err.message || 'Failed to load batch history');
+    } finally {
+      setBatchHistoryLoading(false);
+    }
+  }, [historyStoreFilter]);
+
+  const historyStoresSorted = useMemo(() => {
+    return [...sellers].sort((a, b) => {
+      const left = String(a.user?.username || a.user?.email || '').toLowerCase();
+      const right = String(b.user?.username || b.user?.email || '').toLowerCase();
+      return left.localeCompare(right, undefined, { sensitivity: 'base' });
+    });
+  }, [sellers]);
+
+  const historyTemplateOptions = useMemo(() => {
+    const names = [...new Set(
+      batchHistory
+        .map((row) => String(row.templateName || '').trim())
+        .filter((name) => name && name !== '—')
+    )];
+    return names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }, [batchHistory]);
+
+  const filteredBatchHistory = useMemo(() => {
+    return batchHistory.filter((job) => {
+      const runType = job.runType || 'publish';
+      if (historyTypeFilter !== 'all' && runType !== historyTypeFilter) return false;
+
+      if (historyTemplateFilter !== 'all') {
+        if (String(job.templateName || '') !== historyTemplateFilter) return false;
+      }
+
+      const ok = Number(job.successfulCount) || 0;
+      const failed = Number(job.failedCount) || 0;
+      if (historyResultFilter === 'ok' && !(ok > 0 && failed === 0)) return false;
+      if (historyResultFilter === 'failed' && !(failed > 0 && ok === 0)) return false;
+      if (historyResultFilter === 'mixed' && !(ok > 0 && failed > 0)) return false;
+      if (historyResultFilter === 'has_failed' && !(failed > 0)) return false;
+
+      return true;
+    });
+  }, [batchHistory, historyTypeFilter, historyTemplateFilter, historyResultFilter]);
 
   useEffect(() => {
     if (tab !== 1) return undefined;
@@ -644,6 +723,119 @@ export default function DirectListPage() {
     const timer = setInterval(() => { void loadBulkJobs(); }, 15000);
     return () => clearInterval(timer);
   }, [tab, loadBulkJobs]);
+
+  useEffect(() => {
+    if (tab !== 2) return undefined;
+    void loadBatchHistory();
+    const timer = setInterval(() => { void loadBatchHistory(); }, 20000);
+    return () => clearInterval(timer);
+  }, [tab, loadBatchHistory]);
+
+  const fetchHistoryBatchDetail = async (jobId) => {
+    const { data } = await api.get(`/template-listings/direct-list-history/${encodeURIComponent(jobId)}`);
+    return data.batch || null;
+  };
+
+  const openHistoryDetails = async (job) => {
+    setHistoryDetailsOpen(true);
+    setHistoryDetailsBatch(null);
+    setHistoryDetailExpandedKey('');
+    setHistoryDetailsLoading(true);
+    try {
+      const batch = await fetchHistoryBatchDetail(job._id);
+      setHistoryDetailsBatch(batch);
+    } catch {
+      setHistoryDetailsBatch(null);
+      setError('Failed to load batch details');
+    } finally {
+      setHistoryDetailsLoading(false);
+    }
+  };
+
+  const openHistoryListConfirm = (job) => {
+    if ((job.runType || 'publish') !== 'draft') return;
+    setHistoryListTarget(job);
+  };
+
+  const confirmHistoryListToEbay = async () => {
+    const target = historyListTarget;
+    if (!target?.sellerId || !target?.templateId) {
+      setError('This batch is missing store or template and cannot be listed.');
+      setHistoryListTarget(null);
+      return;
+    }
+
+    setHistoryListing(true);
+    setError('');
+    setSuccess('');
+    setBulkBatchProgress(null);
+
+    try {
+      const detail = await fetchHistoryBatchDetail(target._id);
+      const asins = [...new Set(
+        (detail?.asins || detail?.results?.map((row) => row.asin) || [])
+          .map((value) => String(value || '').trim().toUpperCase())
+          .filter(Boolean)
+      )];
+
+      if (!asins.length) {
+        setError('No ASINs found in this draft batch.');
+        return;
+      }
+
+      setHistoryListTarget(null);
+      let merged = await runBulkListBatches({
+        asins,
+        phase: 'list',
+        templateId: target.templateId,
+        sellerId: target.sellerId,
+        region: detail?.region && detail.region !== '—' ? detail.region : region,
+      });
+
+      const failedAsins = merged.results
+        .filter((row) => row.status === 'error')
+        .map((row) => row.asin);
+
+      if (failedAsins.length > 0) {
+        const retryMerged = await runBulkListBatches({
+          asins: failedAsins,
+          phase: 'retry',
+          templateId: target.templateId,
+          sellerId: target.sellerId,
+          region: detail?.region && detail.region !== '—' ? detail.region : region,
+        });
+        merged = mergeListResultsWithRetry(merged, retryMerged);
+      }
+
+      setBulkResult(merged);
+      setSuccess(merged.message || `Listed ${merged.successful || 0}/${merged.total || asins.length} from draft batch.`);
+      void loadBatchHistory();
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message || 'Failed to list draft batch on eBay');
+    } finally {
+      setHistoryListing(false);
+      setBulkBatchProgress(null);
+    }
+  };
+
+  const toggleBatchExpand = async (jobId) => {
+    if (expandedBatchId === jobId) {
+      setExpandedBatchId('');
+      setExpandedBatchDetail(null);
+      return;
+    }
+    setExpandedBatchId(jobId);
+    setExpandedBatchDetail(null);
+    setExpandedBatchLoading(true);
+    try {
+      const batch = await fetchHistoryBatchDetail(jobId);
+      setExpandedBatchDetail(batch);
+    } catch {
+      setExpandedBatchDetail(null);
+    } finally {
+      setExpandedBatchLoading(false);
+    }
+  };
 
   useEffect(() => {
     const prefs = readDirectListPrefs();
@@ -795,6 +987,7 @@ export default function DirectListPage() {
         setBulkPreviewCustomColumns(merged.customColumns);
       }
       setSuccess(merged.message);
+      void loadBatchHistory();
     } catch (err) {
       if (batchResponses.length > 0) {
         const partial = mergeBulkPreviewResults(batchResponses);
@@ -890,9 +1083,15 @@ export default function DirectListPage() {
     listingsByAsin = {},
     listingOverrides = {},
     phase = 'list',
+    templateId: templateIdOverride,
+    sellerId: sellerIdOverride,
+    region: regionOverride,
   }) => {
     const batches = chunkAsins(asins);
     const batchResponses = [];
+    const listTemplateId = templateIdOverride || selectedTemplate;
+    const listSellerId = sellerIdOverride || selectedSeller;
+    const listRegion = regionOverride || region;
 
     for (let i = 0; i < batches.length; i += 1) {
       setBulkBatchProgress({ current: i + 1, total: batches.length, phase });
@@ -902,10 +1101,10 @@ export default function DirectListPage() {
         if (listingsByAsin[asin]) batchListingsByAsin[asin] = listingsByAsin[asin];
       }
       const { data } = await api.post('/template-listings/direct-list-bulk', {
-        templateId: selectedTemplate,
-        sellerId: selectedSeller,
+        templateId: listTemplateId,
+        sellerId: listSellerId,
         verifyOnly: false,
-        region,
+        region: listRegion,
         asins: batchAsins,
         listingsByAsin: batchListingsByAsin,
         listingOverrides: pickListingOverridesForAsins(listingOverrides, batchAsins),
@@ -959,6 +1158,7 @@ export default function DirectListPage() {
       setBulkResult(merged);
       setPreviewItems([]);
       setSuccess(merged.message);
+      void loadBatchHistory();
     } catch (err) {
       setError(err.response?.data?.error || 'Bulk direct list failed');
     } finally {
@@ -994,6 +1194,7 @@ export default function DirectListPage() {
 
       setSuccess(data.message || 'Bulk list job queued.');
       void loadBulkJobs();
+      void loadBatchHistory();
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to queue bulk job');
     } finally {
@@ -1025,6 +1226,7 @@ export default function DirectListPage() {
         List SKUs directly on eBay using the Trading API — no CSV or Feed Upload step.
       </Typography>
 
+      {tab !== 2 && (
       <Paper sx={{ p: 3, mb: 3 }}>
         <Stack spacing={2.5}>
           <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
@@ -1085,10 +1287,12 @@ export default function DirectListPage() {
           )}
         </Stack>
       </Paper>
+      )}
 
       <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ mb: 2 }}>
         <Tab label="Single SKU" />
         <Tab label={`Bulk ASINs${parsedBulkAsins.length ? ` (${parsedBulkAsins.length})` : ''}`} />
+        <Tab label={`Batch history${filteredBatchHistory.length ? ` (${filteredBatchHistory.length})` : ''}`} />
       </Tabs>
 
       <Box hidden={tab !== 0}>
@@ -1436,6 +1640,281 @@ export default function DirectListPage() {
         </>
       </Box>
 
+      <Box hidden={tab !== 2}>
+        <Paper sx={{ p: 3, mb: 3 }} variant="outlined">
+          <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
+            <Box>
+              <Typography variant="h6">Batch history</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Shows saved jobs plus Direct List prepares/publishes grouped by day, store, and template (through today).
+              </Typography>
+            </Box>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+              <FormControl size="small" sx={{ minWidth: 150 }}>
+                <InputLabel>Store</InputLabel>
+                <Select
+                  label="Store"
+                  value={historyStoreFilter}
+                  onChange={(e) => {
+                    setHistoryStoreFilter(e.target.value);
+                    setHistoryTemplateFilter('all');
+                  }}
+                >
+                  <MenuItem value="all">All stores</MenuItem>
+                  {historyStoresSorted.map((seller) => (
+                    <MenuItem key={seller._id} value={String(seller._id)}>
+                      {seller.user?.username || seller.user?.email || 'Unknown'}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <FormControl size="small" sx={{ minWidth: 120 }}>
+                <InputLabel>Type</InputLabel>
+                <Select
+                  label="Type"
+                  value={historyTypeFilter}
+                  onChange={(e) => setHistoryTypeFilter(e.target.value)}
+                >
+                  <MenuItem value="all">All types</MenuItem>
+                  <MenuItem value="draft">Draft</MenuItem>
+                  <MenuItem value="publish">Publish</MenuItem>
+                  <MenuItem value="verify">Verify</MenuItem>
+                </Select>
+              </FormControl>
+              <FormControl size="small" sx={{ minWidth: 140 }}>
+                <InputLabel>OK / Failed</InputLabel>
+                <Select
+                  label="OK / Failed"
+                  value={historyResultFilter}
+                  onChange={(e) => setHistoryResultFilter(e.target.value)}
+                >
+                  <MenuItem value="all">All results</MenuItem>
+                  <MenuItem value="ok">All OK</MenuItem>
+                  <MenuItem value="failed">All failed</MenuItem>
+                  <MenuItem value="mixed">Mixed</MenuItem>
+                  <MenuItem value="has_failed">Has failures</MenuItem>
+                </Select>
+              </FormControl>
+              <FormControl size="small" sx={{ minWidth: 180 }}>
+                <InputLabel>Template</InputLabel>
+                <Select
+                  label="Template"
+                  value={historyTemplateFilter}
+                  onChange={(e) => setHistoryTemplateFilter(e.target.value)}
+                >
+                  <MenuItem value="all">All templates</MenuItem>
+                  {historyTemplateOptions.map((name) => (
+                    <MenuItem key={name} value={name}>{name}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <Button
+                size="small"
+                startIcon={batchHistoryLoading ? <CircularProgress size={14} /> : <RefreshIcon />}
+                onClick={() => void loadBatchHistory()}
+                disabled={batchHistoryLoading}
+              >
+                Refresh
+              </Button>
+            </Stack>
+          </Stack>
+
+          {batchHistoryError && (
+            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setBatchHistoryError('')}>
+              {batchHistoryError}
+            </Alert>
+          )}
+
+          {batchHistoryLoading && batchHistory.length === 0 ? (
+            <Typography color="text.secondary">Loading history…</Typography>
+          ) : filteredBatchHistory.length === 0 ? (
+            <Alert severity="info">
+              No batch history found for the current filters.
+              Try All stores / All types, or clear OK/Failed and Template filters.
+            </Alert>
+          ) : (
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell width={40} />
+                    <TableCell>Date</TableCell>
+                    <TableCell>Type</TableCell>
+                    <TableCell>Status</TableCell>
+                    <TableCell>Store</TableCell>
+                    <TableCell>Template</TableCell>
+                    <TableCell>ASINs</TableCell>
+                    <TableCell>OK / Failed</TableCell>
+                    <TableCell>By</TableCell>
+                    <TableCell align="right">Action</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {filteredBatchHistory.map((job) => {
+                    const runType = job.runType || 'publish';
+                    const isExpanded = expandedBatchId === job._id;
+                    return (
+                      <React.Fragment key={job._id}>
+                        <TableRow hover selected={isExpanded}>
+                          <TableCell>
+                            <IconButton size="small" onClick={() => void toggleBatchExpand(job._id)}>
+                              {isExpanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+                            </IconButton>
+                          </TableCell>
+                          <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                            {job.createdAt ? new Date(job.createdAt).toLocaleString() : '—'}
+                          </TableCell>
+                          <TableCell>
+                            <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                              <Chip
+                                size="small"
+                                label={runType === 'draft' ? 'Draft' : runType === 'verify' ? 'Verify' : 'Publish'}
+                                color={runType === 'draft' ? 'default' : runType === 'verify' ? 'secondary' : 'primary'}
+                                variant="outlined"
+                              />
+                              <Chip
+                                size="small"
+                                label={
+                                  job.derived
+                                    ? 'From listings'
+                                    : (job.execution || 'queued') === 'sync'
+                                      ? 'Immediate'
+                                      : 'Background'
+                                }
+                                variant="outlined"
+                              />
+                            </Stack>
+                          </TableCell>
+                          <TableCell>
+                            <Chip
+                              size="small"
+                              label={job.status}
+                              color={
+                                job.status === 'done' ? 'success'
+                                  : job.status === 'failed' ? 'error'
+                                    : job.status === 'processing' ? 'info'
+                                      : 'default'
+                              }
+                            />
+                          </TableCell>
+                          <TableCell>{job.sellerName || '—'}</TableCell>
+                          <TableCell>{job.templateName || '—'}</TableCell>
+                          <TableCell>{job.totalAsins ?? job.asins?.length ?? 0}</TableCell>
+                          <TableCell>{job.successfulCount ?? 0} / {job.failedCount ?? 0}</TableCell>
+                          <TableCell>{job.createdByName || '—'}</TableCell>
+                          <TableCell align="right">
+                            <Stack direction="row" spacing={0.75} justifyContent="flex-end">
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                onClick={() => void openHistoryDetails(job)}
+                                disabled={historyDetailsLoading || historyListing}
+                              >
+                                Details
+                              </Button>
+                              {runType === 'draft' && (
+                                <Button
+                                  size="small"
+                                  variant="contained"
+                                  onClick={() => openHistoryListConfirm(job)}
+                                  disabled={historyListing || !job.sellerId || !job.templateId}
+                                >
+                                  List
+                                </Button>
+                              )}
+                            </Stack>
+                          </TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell colSpan={10} sx={{ py: 0, borderBottom: isExpanded ? undefined : 'none' }}>
+                            <Collapse in={isExpanded} timeout="auto" unmountOnExit>
+                              <Box sx={{ py: 1.5, px: 1 }}>
+                                {expandedBatchLoading ? (
+                                  <Typography variant="body2" color="text.secondary">Loading batch details…</Typography>
+                                ) : !expandedBatchDetail ? (
+                                  <Typography variant="body2" color="text.secondary">Could not load batch details.</Typography>
+                                ) : (
+                                  <Stack spacing={1.5}>
+                                    <Typography variant="caption" color="text.secondary">
+                                      Region: {expandedBatchDetail.region || '—'}
+                                      {' · '}
+                                      Scheduled: {expandedBatchDetail.scheduledAt
+                                        ? new Date(expandedBatchDetail.scheduledAt).toLocaleString()
+                                        : '—'}
+                                      {expandedBatchDetail.completedAt
+                                        ? ` · Completed: ${new Date(expandedBatchDetail.completedAt).toLocaleString()}`
+                                        : ''}
+                                    </Typography>
+                                    <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem', wordBreak: 'break-all' }}>
+                                      ASINs: {(expandedBatchDetail.asins || []).join(', ') || '—'}
+                                    </Typography>
+                                    {(expandedBatchDetail.results || []).length > 0 ? (
+                                      <TableContainer>
+                                        <Table size="small">
+                                          <TableHead>
+                                            <TableRow>
+                                              <TableCell>ASIN</TableCell>
+                                              <TableCell>SKU</TableCell>
+                                              <TableCell>Result</TableCell>
+                                              <TableCell>eBay Item</TableCell>
+                                              <TableCell>Error</TableCell>
+                                            </TableRow>
+                                          </TableHead>
+                                          <TableBody>
+                                            {expandedBatchDetail.results.map((row, idx) => (
+                                              <TableRow key={`${row.asin}-${idx}`}>
+                                                <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{row.asin}</TableCell>
+                                                <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{row.sku || '—'}</TableCell>
+                                                <TableCell>
+                                                  <Chip
+                                                    size="small"
+                                                    label={row.status}
+                                                    color={
+                                                      row.status === 'success' || row.status === 'ready'
+                                                        ? 'success'
+                                                        : 'error'
+                                                    }
+                                                    variant="outlined"
+                                                  />
+                                                </TableCell>
+                                                <TableCell>
+                                                  {row.listingUrl ? (
+                                                    <Link href={row.listingUrl} target="_blank" rel="noopener noreferrer">
+                                                      {row.itemId || 'View'}
+                                                    </Link>
+                                                  ) : (row.itemId || '—')}
+                                                </TableCell>
+                                                <TableCell sx={{ maxWidth: 240 }}>
+                                                  <Typography variant="caption" color="error" noWrap title={row.error || ''}>
+                                                    {row.error || '—'}
+                                                  </Typography>
+                                                </TableCell>
+                                              </TableRow>
+                                            ))}
+                                          </TableBody>
+                                        </Table>
+                                      </TableContainer>
+                                    ) : (
+                                      <Typography variant="body2" color="text.secondary">
+                                        No per-ASIN results stored yet (job may still be pending).
+                                      </Typography>
+                                    )}
+                                  </Stack>
+                                )}
+                              </Box>
+                            </Collapse>
+                          </TableCell>
+                        </TableRow>
+                      </React.Fragment>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </Paper>
+      </Box>
+
       {bulkBatchProgress && (
         <Paper sx={{ p: 2, mb: 2 }} variant="outlined">
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
@@ -1454,6 +1933,297 @@ export default function DirectListPage() {
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
       {success && <Alert severity="success" sx={{ mb: 2 }}>{success}</Alert>}
+
+      <Dialog
+        open={historyDetailsOpen}
+        onClose={() => {
+          if (historyDetailsLoading) return;
+          setHistoryDetailsOpen(false);
+          setHistoryDetailsBatch(null);
+          setHistoryDetailExpandedKey('');
+        }}
+        fullWidth
+        maxWidth="lg"
+      >
+        <DialogTitle>
+          Batch details
+          {historyDetailsBatch?.templateName ? ` — ${historyDetailsBatch.templateName}` : ''}
+        </DialogTitle>
+        <DialogContent dividers>
+          {historyDetailsLoading ? (
+            <Typography color="text.secondary">Loading saved batch data…</Typography>
+          ) : !historyDetailsBatch ? (
+            <Typography color="text.secondary">Could not load batch details.</Typography>
+          ) : (
+            <Stack spacing={1.5}>
+              <Typography variant="body2" color="text.secondary">
+                Store: <strong>{historyDetailsBatch.sellerName || '—'}</strong>
+                {' · '}
+                Type: <strong>{historyDetailsBatch.runType || '—'}</strong>
+                {' · '}
+                By: <strong>{historyDetailsBatch.createdByName || '—'}</strong>
+                {' · '}
+                ASINs: <strong>{historyDetailsBatch.totalAsins ?? historyDetailsBatch.asins?.length ?? 0}</strong>
+                {' · '}
+                Expand a row for images, description, and item specifics.
+              </Typography>
+              {(historyDetailsBatch.results || []).length > 0 ? (
+                <TableContainer sx={{ maxHeight: 620 }}>
+                  <Table size="small" stickyHeader>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell width={40} />
+                        <TableCell width={56}>Img</TableCell>
+                        <TableCell>ASIN</TableCell>
+                        <TableCell>SKU</TableCell>
+                        <TableCell>Title</TableCell>
+                        <TableCell>Price</TableCell>
+                        <TableCell>Qty</TableCell>
+                        <TableCell>Status</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {historyDetailsBatch.results.map((row, idx) => {
+                        const rowKey = `${row.asin}-${idx}`;
+                        const isOpen = historyDetailExpandedKey === rowKey;
+                        const thumb = Array.isArray(row.photoUrls) && row.photoUrls[0]
+                          ? row.photoUrls[0]
+                          : null;
+                        const specEntries = row.specs && typeof row.specs === 'object'
+                          ? Object.entries(row.specs).filter(([, value]) => value != null && String(value).trim() !== '')
+                          : [];
+                        return (
+                          <React.Fragment key={rowKey}>
+                            <TableRow hover selected={isOpen}>
+                              <TableCell>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => setHistoryDetailExpandedKey(isOpen ? '' : rowKey)}
+                                >
+                                  {isOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+                                </IconButton>
+                              </TableCell>
+                              <TableCell>
+                                {thumb ? (
+                                  <Box
+                                    component="img"
+                                    src={thumb}
+                                    alt=""
+                                    sx={{
+                                      width: 40,
+                                      height: 40,
+                                      objectFit: 'cover',
+                                      borderRadius: 1,
+                                      border: '1px solid',
+                                      borderColor: 'divider',
+                                    }}
+                                  />
+                                ) : (
+                                  <Typography variant="caption" color="text.secondary">—</Typography>
+                                )}
+                              </TableCell>
+                              <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{row.asin}</TableCell>
+                              <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>{row.sku || '—'}</TableCell>
+                              <TableCell sx={{ maxWidth: 280 }}>
+                                <Typography variant="body2" noWrap title={row.title || ''}>{row.title || '—'}</Typography>
+                              </TableCell>
+                              <TableCell>{row.startPrice != null && row.startPrice !== '' ? row.startPrice : '—'}</TableCell>
+                              <TableCell>{row.quantity != null && row.quantity !== '' ? row.quantity : '—'}</TableCell>
+                              <TableCell>
+                                <Chip
+                                  size="small"
+                                  label={row.listingStatus || row.status}
+                                  color={row.status === 'success' || row.status === 'ready' ? 'success' : 'default'}
+                                  variant="outlined"
+                                />
+                              </TableCell>
+                            </TableRow>
+                            <TableRow>
+                              <TableCell colSpan={8} sx={{ py: 0, borderBottom: isOpen ? undefined : 'none' }}>
+                                <Collapse in={isOpen} timeout="auto" unmountOnExit>
+                                  <Box sx={{ py: 1.5, px: 1, bgcolor: 'grey.50' }}>
+                                    <Stack spacing={1.5}>
+                                      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+                                        <Box sx={{ minWidth: 220 }}>
+                                          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+                                            Images ({(row.photoUrls || []).length})
+                                          </Typography>
+                                          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                                            {(row.photoUrls || []).length === 0 && (
+                                              <Typography variant="body2" color="text.secondary">No images saved.</Typography>
+                                            )}
+                                            {(row.photoUrls || []).map((url) => (
+                                              <Box
+                                                key={url}
+                                                component="a"
+                                                href={url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                              >
+                                                <Box
+                                                  component="img"
+                                                  src={url}
+                                                  alt=""
+                                                  sx={{
+                                                    width: 64,
+                                                    height: 64,
+                                                    objectFit: 'cover',
+                                                    borderRadius: 1,
+                                                    border: '1px solid',
+                                                    borderColor: 'divider',
+                                                    display: 'block',
+                                                  }}
+                                                />
+                                              </Box>
+                                            ))}
+                                          </Stack>
+                                        </Box>
+                                        <Box sx={{ flex: 1, minWidth: 0 }}>
+                                          <Typography variant="caption" color="text.secondary" display="block">Category</Typography>
+                                          <Typography variant="body2" sx={{ mb: 1, wordBreak: 'break-word' }}>
+                                            {row.categoryId || row.categoryName
+                                              ? `${row.categoryId || ''}${row.categoryName ? ` / ${row.categoryName}` : ''}`
+                                              : '—'}
+                                          </Typography>
+                                          <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
+                                            <Typography variant="body2">Amazon: {row.amazonLink ? (
+                                              <Link href={row.amazonLink} target="_blank" rel="noopener noreferrer">
+                                                {row.amazonPrice != null && row.amazonPrice !== '' ? `$${row.amazonPrice}` : 'Open'}
+                                              </Link>
+                                            ) : (row.amazonPrice != null && row.amazonPrice !== '' ? row.amazonPrice : '—')}</Typography>
+                                            <Typography variant="body2">Condition: {row.conditionId || '—'}</Typography>
+                                            <Typography variant="body2">UPC: {row.upc || '—'}</Typography>
+                                            <Typography variant="body2">Location: {row.location || '—'}</Typography>
+                                            <Typography variant="body2">
+                                              eBay: {row.listingUrl ? (
+                                                <Link href={row.listingUrl} target="_blank" rel="noopener noreferrer">{row.itemId || 'View'}</Link>
+                                              ) : (row.itemId || '—')}
+                                            </Typography>
+                                          </Stack>
+                                          <Typography variant="caption" color="text.secondary" display="block">Policies</Typography>
+                                          <Typography variant="body2" sx={{ mb: 1, wordBreak: 'break-word' }}>
+                                            Ship: {row.shippingProfileName || '—'} · Return: {row.returnProfileName || '—'} · Pay: {row.paymentProfileName || '—'}
+                                          </Typography>
+                                        </Box>
+                                      </Stack>
+
+                                      <Box>
+                                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+                                          Item specifics ({specEntries.length})
+                                        </Typography>
+                                        {specEntries.length === 0 ? (
+                                          <Typography variant="body2" color="text.secondary">No item specifics saved.</Typography>
+                                        ) : (
+                                          <Box
+                                            sx={{
+                                              display: 'grid',
+                                              gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr', md: '1fr 1fr 1fr' },
+                                              gap: 1,
+                                            }}
+                                          >
+                                            {specEntries.map(([key, value]) => (
+                                              <Box
+                                                key={key}
+                                                sx={{
+                                                  p: 1,
+                                                  border: '1px solid',
+                                                  borderColor: 'divider',
+                                                  borderRadius: 1,
+                                                  bgcolor: 'background.paper',
+                                                }}
+                                              >
+                                                <Typography variant="caption" color="text.secondary">{key}</Typography>
+                                                <Typography variant="body2" sx={{ wordBreak: 'break-word' }}>
+                                                  {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                                                </Typography>
+                                              </Box>
+                                            ))}
+                                          </Box>
+                                        )}
+                                      </Box>
+
+                                      <Box>
+                                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+                                          Description
+                                        </Typography>
+                                        {row.description ? (
+                                          <Box
+                                            sx={{
+                                              maxHeight: 220,
+                                              overflow: 'auto',
+                                              p: 1.5,
+                                              border: '1px solid',
+                                              borderColor: 'divider',
+                                              borderRadius: 1,
+                                              bgcolor: 'background.paper',
+                                              '& img': { maxWidth: '100%', height: 'auto' },
+                                            }}
+                                            dangerouslySetInnerHTML={{ __html: row.description }}
+                                          />
+                                        ) : (
+                                          <Typography variant="body2" color="text.secondary">No description saved.</Typography>
+                                        )}
+                                      </Box>
+                                    </Stack>
+                                  </Box>
+                                </Collapse>
+                              </TableCell>
+                            </TableRow>
+                          </React.Fragment>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              ) : (
+                <Typography variant="body2" color="text.secondary">No per-ASIN rows saved for this batch.</Typography>
+              )}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => {
+            setHistoryDetailsOpen(false);
+            setHistoryDetailsBatch(null);
+            setHistoryDetailExpandedKey('');
+          }}
+          >
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(historyListTarget)}
+        onClose={() => {
+          if (historyListing) return;
+          setHistoryListTarget(null);
+        }}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>List draft batch on eBay?</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ mb: 1 }}>
+            Publish <strong>{historyListTarget?.totalAsins || 0}</strong> draft ASIN(s) for{' '}
+            <strong>{historyListTarget?.sellerName || 'store'}</strong> using{' '}
+            <strong>{historyListTarget?.templateName || 'template'}</strong>?
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            This lists directly on eBay (not verify-only). Failed items will be retried once.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setHistoryListTarget(null)} disabled={historyListing}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => void confirmHistoryListToEbay()}
+            disabled={historyListing}
+          >
+            {historyListing ? 'Listing…' : 'List on eBay'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <AsinReviewModal
         open={reviewModalOpen}

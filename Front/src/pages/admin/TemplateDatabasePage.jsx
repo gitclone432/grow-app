@@ -139,8 +139,11 @@ export default function TemplateDatabasePage() {
   const [userSummaryTotals, setUserSummaryTotals] = useState(null);
   const [userSummaryLoading, setUserSummaryLoading] = useState(false);
   const [userSummaryError, setUserSummaryError] = useState('');
-  const [userListings, setUserListings] = useState([]);
-  const [userListingsLoading, setUserListingsLoading] = useState(false);
+  const [userStoreRows, setUserStoreRows] = useState([]);
+  const [userStoresLoading, setUserStoresLoading] = useState(false);
+  const [userListingsTotal, setUserListingsTotal] = useState(0);
+  const [userStoreListings, setUserStoreListings] = useState({}); // sellerId -> listings[]
+  const [userStoreLoading, setUserStoreLoading] = useState({}); // sellerId -> bool
   const [expandedUserStores, setExpandedUserStores] = useState(() => new Set());
   const [userListingCreatedSort, setUserListingCreatedSort] = useState('desc'); // desc = newest first
   
@@ -183,26 +186,19 @@ export default function TemplateDatabasePage() {
     []
   );
 
-  const groupedUserListings = useMemo(() => {
-    const grouped = {};
+  const sortedUserStoreListings = useMemo(() => {
     const direction = userListingCreatedSort === 'asc' ? 1 : -1;
-    userListings.forEach((listing) => {
-      const sellerName = listing.sellerId?.user?.username || listing.sellerId?.user?.email || 'Unassigned';
-      if (!grouped[sellerName]) grouped[sellerName] = [];
-      grouped[sellerName].push(listing);
-    });
-    Object.keys(grouped).forEach((sellerName) => {
-      grouped[sellerName].sort((a, b) => {
+    const sorted = {};
+    Object.entries(userStoreListings).forEach(([sellerId, listings]) => {
+      sorted[sellerId] = [...(listings || [])].sort((a, b) => {
         const left = new Date(a.createdAt || 0).getTime();
         const right = new Date(b.createdAt || 0).getTime();
         if (left === right) return String(a._id || '').localeCompare(String(b._id || ''));
         return (left - right) * direction;
       });
     });
-    return Object.fromEntries(
-      Object.entries(grouped).sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
-    );
-  }, [userListings, userListingCreatedSort]);
+    return sorted;
+  }, [userStoreListings, userListingCreatedSort]);
 
   const selectedUserLabel = useMemo(() => {
     if (!selectedUser) return '';
@@ -222,22 +218,29 @@ export default function TemplateDatabasePage() {
     return null;
   }, [selectedUser, userSummaryRows, userSummaryTotals]);
 
-  // Keep store sections collapsed by default when user listings reload
-  useEffect(() => {
-    setExpandedUserStores(new Set());
-  }, [userListings]);
+  const storeKey = (row) => (row?.sellerId ? String(row.sellerId) : 'unassigned');
 
-  const toggleUserStore = (sellerName) => {
+  const toggleUserStore = (key) => {
+    const storeId = String(key || 'unassigned');
     setExpandedUserStores((prev) => {
       const next = new Set(prev);
-      if (next.has(sellerName)) next.delete(sellerName);
-      else next.add(sellerName);
+      if (next.has(storeId)) next.delete(storeId);
+      else next.add(storeId);
       return next;
     });
+    if (!userStoreListings[storeId] && !userStoreLoading[storeId]) {
+      fetchStoreListings(storeId);
+    }
   };
 
   const expandAllUserStores = () => {
-    setExpandedUserStores(new Set(Object.keys(groupedUserListings)));
+    const keys = userStoreRows.map((row) => storeKey(row));
+    setExpandedUserStores(new Set(keys));
+    keys.forEach((key) => {
+      if (!userStoreListings[key] && !userStoreLoading[key]) {
+        fetchStoreListings(key);
+      }
+    });
   };
 
   const collapseAllUserStores = () => {
@@ -294,9 +297,13 @@ export default function TemplateDatabasePage() {
     if (activeTab === 2) {
       fetchUserSummary();
       if (selectedUser) {
-        fetchUserListings();
+        fetchUserStores();
       } else {
-        setUserListings([]);
+        setUserStoreRows([]);
+        setUserListingsTotal(0);
+        setUserStoreListings({});
+        setUserStoreLoading({});
+        setExpandedUserStores(new Set());
       }
     }
   }, [activeTab, dateFilterParams, selectedUser, byUserSeller, byUserTemplate]);
@@ -375,28 +382,89 @@ export default function TemplateDatabasePage() {
     }
   };
 
-  const fetchUserListings = async () => {
+  const fetchUserStores = async () => {
     if (!selectedUser) {
-      setUserListings([]);
+      setUserStoreRows([]);
+      setUserListingsTotal(0);
+      setUserStoreListings({});
+      setExpandedUserStores(new Set());
       return;
     }
-    setUserListingsLoading(true);
+    setUserStoresLoading(true);
     try {
       const params = {
         ...dateFilterParams,
+        groupBy: 'seller',
         createdBy: selectedUser,
-        page: 1,
-        limit: 200,
       };
       if (byUserSeller) params.sellerId = byUserSeller;
       if (byUserTemplate) params.templateId = byUserTemplate;
-      const { data } = await api.get('/template-listings/database-view', { params });
-      setUserListings(data.listings || []);
+      const { data } = await api.get('/template-listings/database-summary', { params });
+      const rows = data.rows || [];
+      setUserStoreRows(rows);
+      setUserListingsTotal(data.totals?.total || 0);
+      setUserStoreListings({});
+      setUserStoreLoading({});
+      setExpandedUserStores(new Set());
+      // Single-store filter: open it immediately so the table appears without an extra click
+      if (rows.length === 1) {
+        const key = rows[0]?.sellerId ? String(rows[0].sellerId) : 'unassigned';
+        setExpandedUserStores(new Set([key]));
+        fetchStoreListings(key);
+      }
     } catch (err) {
-      console.error('Error fetching user listings:', err);
-      setUserListings([]);
+      console.error('Error fetching user stores:', err);
+      setUserStoreRows([]);
+      setUserListingsTotal(0);
     } finally {
-      setUserListingsLoading(false);
+      setUserStoresLoading(false);
+    }
+  };
+
+  const fetchStoreListings = async (sellerId) => {
+    if (!selectedUser) return;
+    const key = String(sellerId || 'unassigned');
+    setUserStoreLoading((prev) => ({ ...prev, [key]: true }));
+    try {
+      const pageSize = 1000;
+      const baseParams = {
+        ...dateFilterParams,
+        createdBy: selectedUser,
+        sellerId: key,
+        limit: pageSize,
+        light: 1,
+      };
+      if (byUserTemplate) baseParams.templateId = byUserTemplate;
+
+      const first = await api.get('/template-listings/database-view', {
+        params: { ...baseParams, page: 1 },
+      });
+      const total = first.data?.pagination?.total ?? (first.data?.listings || []).length;
+      const pages = Math.max(1, first.data?.pagination?.pages || Math.ceil(total / pageSize) || 1);
+      let all = [...(first.data?.listings || [])];
+
+      if (pages > 1) {
+        const rest = await Promise.all(
+          Array.from({ length: pages - 1 }, (_, i) =>
+            api.get('/template-listings/database-view', {
+              params: { ...baseParams, page: i + 2 },
+            })
+          )
+        );
+        rest.forEach(({ data }) => {
+          all = all.concat(data?.listings || []);
+        });
+      }
+
+      setUserStoreListings((prev) => ({
+        ...prev,
+        [key]: all.map((listing) => ({ ...listing, _light: true })),
+      }));
+    } catch (err) {
+      console.error('Error fetching store listings:', err);
+      setUserStoreListings((prev) => ({ ...prev, [key]: [] }));
+    } finally {
+      setUserStoreLoading((prev) => ({ ...prev, [key]: false }));
     }
   };
 
@@ -442,9 +510,16 @@ export default function TemplateDatabasePage() {
     navigator.clipboard.writeText(text);
   };
 
-  const handleViewDetails = (listing) => {
+  const handleViewDetails = async (listing) => {
     setSelectedListing(listing);
     setDetailsDialogOpen(true);
+    if (!listing?._id || !listing._light) return;
+    try {
+      const { data } = await api.get(`/template-listings/${listing._id}`);
+      setSelectedListing(data);
+    } catch (err) {
+      console.error('Error loading listing details:', err);
+    }
   };
 
   const handleCloseDetails = () => {
@@ -956,9 +1031,13 @@ export default function TemplateDatabasePage() {
                   <Typography variant="h6" component="h2" sx={{ fontSize: '1.1rem', fontWeight: 700 }}>
                     {selectedUserLabel}
                   </Typography>
-                  <Chip size="small" label={`${userListings.length} shown`} variant="outlined" />
+                  <Chip
+                    size="small"
+                    label={`${userListingsTotal} listings · ${userStoreRows.length} stores`}
+                    variant="outlined"
+                  />
                 </Stack>
-                {userListings.length > 0 && (
+                {userStoreRows.length > 0 && (
                   <Stack direction="row" spacing={1}>
                     <Button size="small" onClick={expandAllUserStores}>Expand all</Button>
                     <Button size="small" onClick={collapseAllUserStores}>Collapse all</Button>
@@ -989,11 +1068,11 @@ export default function TemplateDatabasePage() {
                 </Stack>
               )}
 
-              {userSummaryLoading || userListingsLoading ? (
+              {userSummaryLoading || userStoresLoading ? (
                 <Paper sx={{ p: 2.5, textAlign: 'center' }}>
-                  <Typography>Loading listings for {selectedUserLabel}...</Typography>
+                  <Typography>Loading stores for {selectedUserLabel}...</Typography>
                 </Paper>
-              ) : userListings.length === 0 ? (
+              ) : userStoreRows.length === 0 ? (
                 <Paper sx={{ p: 2.5, textAlign: 'center' }}>
                   <Typography color="text.secondary">
                     No listings for this user with the current filters.
@@ -1001,11 +1080,15 @@ export default function TemplateDatabasePage() {
                 </Paper>
               ) : (
                 <Stack spacing={0}>
-                  {Object.entries(groupedUserListings).map(([sellerName, sellerListings]) => {
-                    const isExpanded = expandedUserStores.has(sellerName);
+                  {userStoreRows.map((row) => {
+                    const key = storeKey(row);
+                    const sellerName = row.sellerName || 'Unassigned';
+                    const isExpanded = expandedUserStores.has(key);
+                    const sellerListings = sortedUserStoreListings[key];
+                    const isLoadingStore = Boolean(userStoreLoading[key]);
                     return (
                       <Paper
-                        key={sellerName}
+                        key={key}
                         variant="outlined"
                         square
                         sx={{
@@ -1023,7 +1106,7 @@ export default function TemplateDatabasePage() {
                           direction="row"
                           alignItems="center"
                           justifyContent="space-between"
-                          onClick={() => toggleUserStore(sellerName)}
+                          onClick={() => toggleUserStore(key)}
                           sx={{
                             px: 1.5,
                             py: 1.25,
@@ -1037,13 +1120,26 @@ export default function TemplateDatabasePage() {
                             <Typography variant="subtitle2" fontWeight={700}>
                               {sellerName}
                             </Typography>
-                            <Chip size="small" label={sellerListings.length} sx={{ height: 22, fontWeight: 600 }} />
+                            <Chip size="small" label={row.total || 0} sx={{ height: 22, fontWeight: 600 }} />
                           </Stack>
                           <IconButton size="small" aria-label={isExpanded ? 'Collapse store' : 'Expand store'}>
                             {isExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
                           </IconButton>
                         </Stack>
                         <Collapse in={isExpanded}>
+                          {isLoadingStore || !sellerListings ? (
+                            <Box sx={{ p: 2, textAlign: 'center', borderTop: 1, borderColor: 'divider' }}>
+                              <Typography variant="body2" color="text.secondary">
+                                Loading listings…
+                              </Typography>
+                            </Box>
+                          ) : sellerListings.length === 0 ? (
+                            <Box sx={{ p: 2, textAlign: 'center', borderTop: 1, borderColor: 'divider' }}>
+                              <Typography variant="body2" color="text.secondary">
+                                No listings in this store.
+                              </Typography>
+                            </Box>
+                          ) : (
                           <TableContainer sx={{ overflowX: 'auto', borderTop: 1, borderColor: 'divider' }}>
                             <Table size="small">
                               <TableHead>
@@ -1058,9 +1154,10 @@ export default function TemplateDatabasePage() {
                                     <TableSortLabel
                                       active
                                       direction={userListingCreatedSort}
-                                      onClick={() =>
-                                        setUserListingCreatedSort((prev) => (prev === 'desc' ? 'asc' : 'desc'))
-                                      }
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setUserListingCreatedSort((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+                                      }}
                                     >
                                       Created
                                     </TableSortLabel>
@@ -1103,7 +1200,13 @@ export default function TemplateDatabasePage() {
                                     </TableCell>
                                     <TableCell>{formatListedDate(listing.createdAt)}</TableCell>
                                     <TableCell align="right">
-                                      <IconButton size="small" onClick={() => handleViewDetails(listing)}>
+                                      <IconButton
+                                        size="small"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleViewDetails(listing);
+                                        }}
+                                      >
                                         <VisibilityIcon fontSize="small" />
                                       </IconButton>
                                     </TableCell>
@@ -1112,6 +1215,7 @@ export default function TemplateDatabasePage() {
                               </TableBody>
                             </Table>
                           </TableContainer>
+                          )}
                         </Collapse>
                       </Paper>
                     );
@@ -1355,17 +1459,28 @@ export default function TemplateDatabasePage() {
                       </Typography>
                     </TableCell>
                     <TableCell>
-                      <Typography
-                        variant="body2"
-                        sx={{
-                          fontFamily: 'monospace',
-                          fontSize: '0.85rem',
-                          fontWeight: 'bold',
-                          color: 'primary.main'
-                        }}
-                      >
-                        {listing._asinReference || 'N/A'}
-                      </Typography>
+                      <Stack direction="row" spacing={0.5} alignItems="center">
+                        <Typography
+                          variant="body2"
+                          sx={{
+                            fontFamily: 'monospace',
+                            fontSize: '0.85rem',
+                            fontWeight: 'bold',
+                            color: 'primary.main'
+                          }}
+                        >
+                          {listing._asinReference || 'N/A'}
+                        </Typography>
+                        {listing._asinReference && (
+                          <IconButton
+                            size="small"
+                            onClick={() => handleCopy(listing._asinReference)}
+                            title="Copy ASIN"
+                          >
+                            <ContentCopyIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        )}
+                      </Stack>
                     </TableCell>
                     <TableCell>
                       <Stack direction="row" spacing={0.5} alignItems="center">
@@ -1490,26 +1605,14 @@ export default function TemplateDatabasePage() {
                       />
                     </TableCell>
                     <TableCell align="right">
-                      <Stack direction="row" spacing={0.5} justifyContent="flex-end">
-                        <IconButton
-                          size="small"
-                          onClick={() => handleViewDetails(listing)}
-                          title="View Details"
-                          color="primary"
-                        >
-                          <VisibilityIcon sx={{ fontSize: 18 }} />
-                        </IconButton>
-                        {listing._asinReference && (
-                          <IconButton
-                            size="small"
-                            onClick={() => handleCopy(listing._asinReference)}
-                            title="Copy ASIN"
-                            color="primary"
-                          >
-                            <ContentCopyIcon sx={{ fontSize: 16 }} />
-                          </IconButton>
-                        )}
-                      </Stack>
+                      <IconButton
+                        size="small"
+                        onClick={() => handleViewDetails(listing)}
+                        title="View Details"
+                        color="primary"
+                      >
+                        <VisibilityIcon sx={{ fontSize: 18 }} />
+                      </IconButton>
                     </TableCell>
                   </TableRow>
                 ))}

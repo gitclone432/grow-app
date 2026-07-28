@@ -20,6 +20,19 @@ const directListJobSchema = new mongoose.Schema({
     enum: ['pending', 'processing', 'done', 'failed', 'cancelled'],
     default: 'pending',
   },
+  /** draft = prepare only; publish = listed on eBay; verify = eBay dry-run */
+  runType: {
+    type: String,
+    enum: ['draft', 'publish', 'verify'],
+    default: 'publish',
+    index: true,
+  },
+  /** sync = immediate API batch; queued = background/scheduled job */
+  execution: {
+    type: String,
+    enum: ['sync', 'queued'],
+    default: 'queued',
+  },
   batchSize: { type: Number, default: 25 },
   delayMinutesBetweenBatches: { type: Number, default: 2 },
   delaySecondsBetweenListings: { type: Number, default: 5 },
