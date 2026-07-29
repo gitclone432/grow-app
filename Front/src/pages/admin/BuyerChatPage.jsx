@@ -85,6 +85,12 @@ function isImageMediaAttachment(media) {
   );
 }
 
+function getHighResolutionImageUrl(url) {
+  return String(url || '')
+    .replace(/\$_\d+\.(jpe?g|png|gif|webp)(?=([?#]|$))/i, '$_57.$1')
+    .replace(/\/s-l\d+\.(jpe?g|png|gif|webp)(?=([?#]|$))/i, '/s-l1600.$1');
+}
+
 function getMessageMediaItems(msg) {
   const rawItems = msg?.mediaUrls?.length
     ? msg.mediaUrls.map((url) => ({ url, name: '' }))
@@ -107,6 +113,7 @@ function getMessageMediaItems(msg) {
         ...media,
         key: `${url}-${idx}`,
         url,
+        viewerUrl: isImage ? getHighResolutionImageUrl(url) : url,
         name,
         isImage,
         imageIndex: isImage ? imageIndex : -1
@@ -2138,7 +2145,7 @@ export default function BuyerChatPage() {
                           width: '100%'
                         }}
                       >
-                        <Box sx={{ maxWidth: { xs: '85%', sm: '75%', md: '70%' } }}>
+                        <Box sx={{ maxWidth: { xs: '94%', sm: '86%', md: '82%' } }}>
                         <Paper
                           elevation={1}
                           sx={{
@@ -2209,7 +2216,7 @@ export default function BuyerChatPage() {
                                           const imageIndex = imageItems.findIndex((item) => item.url === url);
                                           setImageViewer({
                                             open: true,
-                                            images: imageItems.map((item) => ({ url: item.url, name: item.name })),
+                                            images: imageItems.map((item) => ({ url: item.viewerUrl || item.url, name: item.name })),
                                             index: Math.max(0, imageIndex),
                                           });
                                         }}
@@ -2240,8 +2247,8 @@ export default function BuyerChatPage() {
                                           loading="lazy"
                                           sx={{
                                             display: 'block',
-                                            maxWidth: { xs: 180, md: 260 },
-                                            maxHeight: 200,
+                                            maxWidth: { xs: 260, sm: 420, md: 560 },
+                                            maxHeight: { xs: 320, sm: 460 },
                                             width: 'auto',
                                             height: 'auto',
                                             objectFit: 'contain',
@@ -2347,13 +2354,13 @@ export default function BuyerChatPage() {
       <Dialog
         open={imageViewer.open}
         onClose={closeImageViewer}
-        maxWidth="lg"
+        maxWidth="xl"
         fullWidth
         PaperProps={{
           sx: {
             bgcolor: '#111827',
             color: '#fff',
-            height: { xs: '92dvh', md: '90vh' },
+            height: { xs: '96dvh', md: '94vh' },
           }
         }}
       >
@@ -2407,10 +2414,10 @@ export default function BuyerChatPage() {
               src={activeViewerImage.url}
               alt={activeViewerImage.name || 'Buyer attachment'}
               sx={{
+                width: 'calc(100vw - 48px)',
+                height: { xs: 'calc(96dvh - 72px)', md: 'calc(94vh - 72px)' },
                 maxWidth: '100%',
                 maxHeight: '100%',
-                width: 'auto',
-                height: 'auto',
                 objectFit: 'contain',
                 display: 'block',
               }}

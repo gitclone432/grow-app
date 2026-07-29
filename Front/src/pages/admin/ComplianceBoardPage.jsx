@@ -439,6 +439,8 @@ function ComplianceBoardPage() {
   const [alertPreviewItems, setAlertPreviewItems] = useState(null);
   const [alertPreviewLoading, setAlertPreviewLoading] = useState(false);
   const [allMessagesForAlerts, setAllMessagesForAlerts] = useState([]);
+  const [chatAgents, setChatAgents] = useState([]);
+  const [savingPickedUpByKey, setSavingPickedUpByKey] = useState('');
 
   const buildDateParams = () => {
     const params = {};
@@ -684,16 +686,26 @@ function ComplianceBoardPage() {
     });
 
     const threadMetaResults = await Promise.all(metaPromises);
+    const enrichedThreads = [];
     threadMetaResults.forEach(({ thread, meta }) => {
+      const enrichedThread = {
+        ...thread,
+        _conversationMeta: meta || thread._conversationMeta || null,
+        category: meta?.category || thread.category || '',
+        status: meta?.status || thread.status || 'Open',
+        caseStatus: meta?.caseStatus || thread.caseStatus || 'Case Not Opened',
+        pickedUpBy: meta?.pickedUpBy || thread.pickedUpBy || null
+      };
+      enrichedThreads.push(enrichedThread);
       if (meta?.category === MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT) {
-        groupedMessages[MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT].push(thread);
+        groupedMessages[MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT].push(enrichedThread);
       }
       if (meta?.category === MESSAGE_CATEGORIES.INQUIRY) {
-        groupedMessages[MESSAGE_CATEGORIES.INQUIRY].push(thread);
+        groupedMessages[MESSAGE_CATEGORIES.INQUIRY].push(enrichedThread);
       }
     });
 
-    return { groupedOrders, groupedMessages, allThreads: threads };
+    return { groupedOrders, groupedMessages, allThreads: enrichedThreads };
   };
 
   const fetchOrders = useCallback(async () => {
@@ -912,6 +924,16 @@ function ComplianceBoardPage() {
     }
   };
 
+  const fetchChatAgents = async () => {
+    try {
+      const { data } = await api.get('/ebay/chat-agents');
+      setChatAgents(data || []);
+    } catch (err) {
+      console.error('Failed to fetch chat agents:', err);
+      setChatAgents([]);
+    }
+  };
+
   // Fetch messages for Order Communication board using existing buyer messages endpoint
   const fetchMessages = async () => {
     setLoading(true);
@@ -1039,29 +1061,39 @@ function ComplianceBoardPage() {
 
       const threadMetaResults = await Promise.all(metaPromises);
 
+      const enrichedThreads = [];
       threadMetaResults.forEach(({ thread, meta }) => {
+        const enrichedThread = {
+          ...thread,
+          _conversationMeta: meta || thread._conversationMeta || null,
+          category: meta?.category || thread.category || '',
+          status: meta?.status || thread.status || 'Open',
+          caseStatus: meta?.caseStatus || thread.caseStatus || 'Case Not Opened',
+          pickedUpBy: meta?.pickedUpBy || thread.pickedUpBy || null
+        };
+        enrichedThreads.push(enrichedThread);
         // If no category assigned, add to "All Messages"
         if (!meta || !meta.category) {
-          grouped[MESSAGE_CATEGORIES.ALL_MESSAGES].push(thread);
+          grouped[MESSAGE_CATEGORIES.ALL_MESSAGES].push(enrichedThread);
         } else {
           // Message has a category - add ONLY to that category, NOT to "All Messages"
           const category = meta.category;
           if (category === 'On Hold') {
-            grouped[MESSAGE_CATEGORIES.ON_HOLD].push(thread);
+            grouped[MESSAGE_CATEGORIES.ON_HOLD].push(enrichedThread);
           } else if (category === 'Return' || category === 'Refund' || category === 'Replace') {
-            grouped[MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE].push(thread);
+            grouped[MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE].push(enrichedThread);
           } else if (category === 'Issue with Delivery') {
-            grouped[MESSAGE_CATEGORIES.ISSUE_WITH_DELIVERY].push(thread);
+            grouped[MESSAGE_CATEGORIES.ISSUE_WITH_DELIVERY].push(enrichedThread);
           } else if (category === 'Issue with Product') {
-            grouped[MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT].push(thread);
+            grouped[MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT].push(enrichedThread);
           } else if (category === 'Out of Stock') {
-            grouped[MESSAGE_CATEGORIES.OUT_OF_STOCK].push(thread);
+            grouped[MESSAGE_CATEGORIES.OUT_OF_STOCK].push(enrichedThread);
           } else if (category === 'INR') {
-            grouped[MESSAGE_CATEGORIES.INR].push(thread);
+            grouped[MESSAGE_CATEGORIES.INR].push(enrichedThread);
           } else if (category === 'Cancellation') {
-            grouped[MESSAGE_CATEGORIES.CANCELLATION].push(thread);
+            grouped[MESSAGE_CATEGORIES.CANCELLATION].push(enrichedThread);
           } else if (category === 'Inquiry') {
-            grouped[MESSAGE_CATEGORIES.INQUIRY].push(thread);
+            grouped[MESSAGE_CATEGORIES.INQUIRY].push(enrichedThread);
           }
         }
       });
@@ -1100,7 +1132,7 @@ function ComplianceBoardPage() {
       setPendingMessageMoves({});
       setVisibleMessageCounts(buildVisibleCountMap(grouped));
       // Store all messages for alert calculations
-      setAllMessagesForAlerts(threads);
+      setAllMessagesForAlerts(enrichedThreads);
     } catch (err) {
       console.error('Failed to fetch messages:', err);
       setError(err.response?.data?.error || 'Failed to load messages');
@@ -1111,7 +1143,7 @@ function ComplianceBoardPage() {
 
   useEffect(() => {
     const init = async () => {
-      await fetchSellers(); // Ensure sellers load first
+      await Promise.all([fetchSellers(), fetchChatAgents()]); // Ensure sellers/agents load first
       fetchOrders();
     };
     init();
@@ -1162,6 +1194,87 @@ function ComplianceBoardPage() {
 
   const getMessageKey = (item) => (
     `${item.sellerId || 'seller'}-${item.orderId || 'no-order'}-${item.buyerUsername || 'buyer'}-${item.itemId || 'item'}`
+  );
+
+  const updateMessageByKey = (messageKey, updater) => {
+    const updateList = (list = []) => list.map((item) => (
+      getMessageKey(item) === messageKey ? updater(item) : item
+    ));
+
+    setMessages((prev) => Object.entries(prev).reduce((acc, [columnId, items]) => ({
+      ...acc,
+      [columnId]: updateList(items)
+    }), {}));
+
+    setPendingMessageMoves((prev) => Object.entries(prev).reduce((acc, [columnId, moves]) => {
+      const nextMoves = Object.entries(moves || {}).reduce((moveAcc, [key, item]) => ({
+        ...moveAcc,
+        [key]: key === messageKey ? updater(item) : item
+      }), {});
+      return { ...acc, [columnId]: nextMoves };
+    }, {}));
+
+    setAllMessagesForAlerts((prev) => updateList(prev));
+    setAlertPreviewItems((prev) => (Array.isArray(prev) ? updateList(prev) : prev));
+    setSelectedOrderForMessage((prev) => (
+      prev && getMessageKey(prev) === messageKey ? updater(prev) : prev
+    ));
+  };
+
+  const handleMessagePickedUpByChange = async (message, nextPickedUpBy) => {
+    const messageKey = getMessageKey(message);
+    const previousPickedUpBy = message.pickedUpBy || '';
+    setSavingPickedUpByKey(messageKey);
+
+    const applyPickedUpBy = (item, pickedUpBy) => ({
+      ...item,
+      pickedUpBy: pickedUpBy || null,
+      _conversationMeta: item._conversationMeta
+        ? { ...item._conversationMeta, pickedUpBy: pickedUpBy || null }
+        : item._conversationMeta
+    });
+
+    updateMessageByKey(messageKey, (item) => applyPickedUpBy(item, nextPickedUpBy));
+
+    try {
+      const category = message.category || message._conversationMeta?.category || '';
+      const { data } = await api.post('/ebay/conversation-meta', {
+        sellerId: message.sellerId,
+        buyerUsername: message.buyerUsername,
+        orderId: message.orderId || null,
+        itemId: message.itemId || 'DIRECT_MESSAGE',
+        category,
+        status: message.status || message._conversationMeta?.status || 'Open',
+        caseStatus: message.caseStatus || message._conversationMeta?.caseStatus || 'Case Not Opened',
+        pickedUpBy: nextPickedUpBy || null
+      });
+
+      if (data?.meta) {
+        updateMessageByKey(messageKey, (item) => ({
+          ...item,
+          _conversationMeta: data.meta,
+          category: data.meta.category || '',
+          status: data.meta.status || 'Open',
+          caseStatus: data.meta.caseStatus || 'Case Not Opened',
+          pickedUpBy: data.meta.pickedUpBy || null
+        }));
+      }
+    } catch (err) {
+      updateMessageByKey(messageKey, (item) => applyPickedUpBy(item, previousPickedUpBy));
+      setSnackbar({
+        open: true,
+        message: `Failed: ${err.response?.data?.error || err.message}`,
+      });
+    } finally {
+      setSavingPickedUpByKey('');
+    }
+  };
+
+  const getPickedUpByLabel = (item) => (
+    item?.pickedUpBy ||
+    item?.conversationInfo?.pickedUpBy ||
+    item?._conversationMeta?.pickedUpBy ||
+    ''
   );
 
   const buildVisibleCountMap = (itemsByColumn) => Object.keys(itemsByColumn || {}).reduce((acc, key) => {
@@ -2349,6 +2462,42 @@ function ComplianceBoardPage() {
     }
   };
 
+  const renderMessagePickedUpByControl = (item) => {
+    const messageKey = getMessageKey(item);
+    return (
+      <FormControl
+        fullWidth
+        size="small"
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <InputLabel shrink sx={{ fontSize: '0.72rem' }}>Picked Up By</InputLabel>
+        <Select
+          value={item.pickedUpBy || ''}
+          label="Picked Up By"
+          displayEmpty
+          disabled={savingPickedUpByKey === messageKey}
+          onChange={(e) => handleMessagePickedUpByChange(item, e.target.value)}
+          renderValue={(selected) => (selected ? selected : <em style={{ color: '#64748b' }}>Unassigned</em>)}
+          sx={{
+            bgcolor: '#fff',
+            borderRadius: 1,
+            fontSize: '0.82rem',
+            '& .MuiSelect-select': { py: 0.75 }
+          }}
+        >
+          <MenuItem value=""><em>Unassigned</em></MenuItem>
+          {chatAgents.map((agent) => (
+            <MenuItem key={agent._id || agent.name} value={agent.name}>
+              {agent.name}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+    );
+  };
+
   // Render message card for Order Communication board
   const renderMessageCard = (item, provided, snapshot) => {
     // Get seller name with fallback chain
@@ -2427,6 +2576,10 @@ function ComplianceBoardPage() {
               </IconButton>
             )}
           </Stack>
+
+          <Box sx={{ mb: 1 }}>
+            {renderMessagePickedUpByControl(item)}
+          </Box>
 
           <Typography
             variant="caption"
@@ -2742,6 +2895,7 @@ function ComplianceBoardPage() {
     );
     const trackingNumber = order.manualTrackingNumber || order.trackingNumber || '';
     const unreadMessageCount = getUnreadMessageCountForOrder(order);
+    const pickedUpByLabel = getPickedUpByLabel(order);
 
     return (
       <Card
@@ -2855,6 +3009,14 @@ function ComplianceBoardPage() {
                       label={`${unreadMessageCount} unread`}
                       size="small"
                       sx={{ bgcolor: '#dc2626', color: '#fff', fontSize: '0.75rem', height: 24, fontWeight: 800 }}
+                    />
+                  )}
+                  {pickedUpByLabel && (
+                    <Chip
+                      icon={<PersonIcon sx={{ color: '#1e40af !important', fontSize: 14 }} />}
+                      label={`Picked Up By: ${pickedUpByLabel}`}
+                      size="small"
+                      sx={{ bgcolor: '#dbeafe', color: '#1e40af', fontSize: '0.75rem', height: 24, fontWeight: 800 }}
                     />
                   )}
                   {selectedCategory === 'inr' && trackingNumber && (
@@ -3062,6 +3224,8 @@ function ComplianceBoardPage() {
               </Stack>
             </Stack>
 
+            {renderMessagePickedUpByControl(item)}
+
             {/* Item Title */}
             <Stack spacing={0.25}>
               <Typography variant="caption" sx={{ fontSize: '0.75rem', color: '#64748b', textTransform: 'uppercase', fontWeight: 600 }}>
@@ -3151,6 +3315,7 @@ function ComplianceBoardPage() {
       order.fulfillmentStartInstructions?.shipTo?.country
     ].filter(Boolean).join(', ');
     const overdueInfo = order._overdueInfo;
+    const pickedUpByLabel = getPickedUpByLabel(order);
     const returnStatusChip = overdueInfo?.sourceStatus || (
       order.complianceBoardStatus === COLUMN_STATUS.CASE_OPENED
         ? 'Case Opened'
@@ -3294,6 +3459,14 @@ function ComplianceBoardPage() {
                   label={`${unreadMessageCount} unread`}
                   size="small"
                   sx={{ bgcolor: '#dc2626', color: '#fff', fontSize: '0.75rem', height: 24, fontWeight: 800 }}
+                />
+              )}
+              {pickedUpByLabel && (
+                <Chip
+                  icon={<PersonIcon sx={{ color: '#1e40af !important', fontSize: 14 }} />}
+                  label={`Picked Up By: ${pickedUpByLabel}`}
+                  size="small"
+                  sx={{ bgcolor: '#dbeafe', color: '#1e40af', fontSize: '0.75rem', height: 24, fontWeight: 800 }}
                 />
               )}
               {selectedCategory === 'inr' && trackingNumber && (

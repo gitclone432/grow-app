@@ -122,6 +122,53 @@ import {
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
+
+async function enrichCaseLikeRowsWithConversationMeta(rows = []) {
+  const orderIds = [...new Set(
+    rows
+      .map((row) => row?.orderId || row?.legacyOrderId || row?.originalOrderId || row?.caseOrderId)
+      .filter(Boolean)
+      .map(String)
+  )];
+
+  if (orderIds.length === 0) return rows;
+
+  const metas = await ConversationMeta.find(
+    { orderId: { $in: orderIds } },
+    { orderId: 1, category: 1, caseStatus: 1, status: 1, pickedUpBy: 1, updatedAt: 1 }
+  )
+    .sort({ updatedAt: -1 })
+    .lean();
+
+  const metaByOrderId = new Map();
+  metas.forEach((meta) => {
+    if (meta.orderId && !metaByOrderId.has(meta.orderId)) {
+      metaByOrderId.set(meta.orderId, meta);
+    }
+  });
+
+  return rows.map((row) => {
+    const meta = metaByOrderId.get(String(row?.orderId || '')) ||
+      metaByOrderId.get(String(row?.legacyOrderId || '')) ||
+      metaByOrderId.get(String(row?.originalOrderId || '')) ||
+      metaByOrderId.get(String(row?.caseOrderId || ''));
+
+    if (!meta) return row;
+
+    return {
+      ...row,
+      pickedUpBy: meta.pickedUpBy || row.pickedUpBy || null,
+      conversationInfo: {
+        ...(row.conversationInfo || {}),
+        category: row.conversationInfo?.category || meta.category,
+        caseStatus: row.conversationInfo?.caseStatus || meta.caseStatus,
+        status: row.conversationInfo?.status || meta.status,
+        pickedUpBy: meta.pickedUpBy || row.conversationInfo?.pickedUpBy || null,
+        updatedAt: row.conversationInfo?.updatedAt || meta.updatedAt,
+      },
+    };
+  });
+}
 const activeAutoCompatBatchRuns = new Set();
 const PAYONEER_FEED_CACHE_ID = 'singleton';
 /** Shown in UI; page loads always read Mongo — no auto eBay call on open. */
@@ -2983,10 +3030,14 @@ router.get('/cancelled-orders', async (req, res) => {
       .skip(skip)
       .limit(limitNum);
 
-    console.log(`[Cancelled Orders] Found ${cancelledOrders.length} cancellation orders (page ${pageNum}/${totalPages})`);
+    const enrichedCancelledOrders = await enrichCaseLikeRowsWithConversationMeta(
+      cancelledOrders.map((order) => order.toObject())
+    );
+
+    console.log(`[Cancelled Orders] Found ${enrichedCancelledOrders.length} cancellation orders (page ${pageNum}/${totalPages})`);
 
     res.json({
-      orders: cancelledOrders,
+      orders: enrichedCancelledOrders,
       totalOrders: totalCount,
       pagination: {
         currentPage: pageNum,
@@ -10559,7 +10610,9 @@ router.get('/stored-inr-cases', async (req, res) => {
       })
     );
 
-    res.json({ cases: enriched, totalCases: enriched.length, totalCount });
+    const enrichedWithMeta = await enrichCaseLikeRowsWithConversationMeta(enriched);
+
+    res.json({ cases: enrichedWithMeta, totalCases: enrichedWithMeta.length, totalCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

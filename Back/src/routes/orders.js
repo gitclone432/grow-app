@@ -17,6 +17,53 @@ const router = Router();
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
 const FINAL_CANCELLED_STATES = ['CANCELED', 'CANCELLED'];
 
+async function enrichOrdersWithConversationMeta(orders = []) {
+  const orderIds = [...new Set(
+    orders
+      .map((order) => order?.orderId || order?.legacyOrderId || order?.originalOrderId || order?.caseOrderId)
+      .filter(Boolean)
+      .map(String)
+  )];
+
+  if (orderIds.length === 0) return orders;
+
+  const metas = await ConversationMeta.find(
+    { orderId: { $in: orderIds } },
+    { orderId: 1, category: 1, caseStatus: 1, status: 1, pickedUpBy: 1, updatedAt: 1 }
+  )
+    .sort({ updatedAt: -1 })
+    .lean();
+
+  const metaByOrderId = new Map();
+  metas.forEach((meta) => {
+    if (meta.orderId && !metaByOrderId.has(meta.orderId)) {
+      metaByOrderId.set(meta.orderId, meta);
+    }
+  });
+
+  return orders.map((order) => {
+    const meta = metaByOrderId.get(String(order?.orderId || '')) ||
+      metaByOrderId.get(String(order?.legacyOrderId || '')) ||
+      metaByOrderId.get(String(order?.originalOrderId || '')) ||
+      metaByOrderId.get(String(order?.caseOrderId || ''));
+
+    if (!meta) return order;
+
+    return {
+      ...order,
+      pickedUpBy: meta.pickedUpBy || order.pickedUpBy || null,
+      conversationInfo: {
+        ...(order.conversationInfo || {}),
+        category: order.conversationInfo?.category || meta.category,
+        caseStatus: order.conversationInfo?.caseStatus || meta.caseStatus,
+        status: order.conversationInfo?.status || meta.status,
+        pickedUpBy: meta.pickedUpBy || order.conversationInfo?.pickedUpBy || null,
+        updatedAt: order.conversationInfo?.updatedAt || meta.updatedAt,
+      },
+    };
+  });
+}
+
 const PT_TIMEZONE = 'America/Los_Angeles';
 const SNAD_RETURN_REASONS = [
   'NOT_AS_DESCRIBED',
@@ -2053,7 +2100,10 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         cardsById.set(key, makeOrderCard(order, meta, 'case_not_opened', 'conversation'));
       });
 
-      let returnBoardOrders = [...returnRequestCards, ...Array.from(cardsById.values())];
+      let returnBoardOrders = await enrichOrdersWithConversationMeta([
+        ...returnRequestCards,
+        ...Array.from(cardsById.values())
+      ]);
       if (dateFilter.dateSold) {
         returnBoardOrders = returnBoardOrders.filter((order) => {
           if (order.returnBoardSource === 'return_request') return true;
@@ -2353,7 +2403,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     }
 
     // Return orders with updated categories (convert old format to new for consistency)
-    const updatedOrders = orders.map(o => {
+    const updatedOrders = await enrichOrdersWithConversationMeta(orders.map(o => {
       let categories = [];
       if (o.complianceBoardCategories && Array.isArray(o.complianceBoardCategories) && o.complianceBoardCategories.length > 0) {
         categories = o.complianceBoardCategories;
@@ -2367,7 +2417,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         complianceBoardCategories: categories,
         complianceBoardStatus: o.complianceBoardStatus || 'todo'
       };
-    });
+    }));
 
     res.json({
       orders: updatedOrders,
