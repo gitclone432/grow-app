@@ -112,6 +112,12 @@ export default function ChatModal({
     }));
   }, []);
 
+  const getHighResolutionImageUrl = useCallback((url) => (
+    String(url || '')
+      .replace(/\$_\d+\.(jpe?g|png|gif|webp)(?=([?#]|$))/i, '$_57.$1')
+      .replace(/\/s-l\d+\.(jpe?g|png|gif|webp)(?=([?#]|$))/i, '/s-l1600.$1')
+  ), []);
+
   const getMessageMediaItems = useCallback((message) => {
     const rawMedia = Array.isArray(message?.mediaUrls) && message.mediaUrls.length
       ? message.mediaUrls.map((url) => ({ url, name: '' }))
@@ -143,9 +149,15 @@ export default function ChatModal({
           /i\.ebayimg\.com/i.test(url) ||
           /\$_\d+\.(jpe?g|png|gif|webp)/i.test(url);
 
-        return { ...item, url, name, isImage };
+        return {
+          ...item,
+          url,
+          viewerUrl: isImage ? getHighResolutionImageUrl(url) : url,
+          name,
+          isImage
+        };
       });
-  }, []);
+  }, [getHighResolutionImageUrl]);
 
   const getDisplayMessageBody = useCallback((message, mediaItems = []) => {
     let text = String(message?.body || '');
@@ -762,7 +774,7 @@ export default function ChatModal({
                       key={msg._id || msg.messageId || i}
                       sx={{ display: 'flex', justifyContent: isSeller ? 'flex-end' : 'flex-start', width: '100%' }}
                     >
-                      <Box sx={{ maxWidth: { xs: '88%', sm: '78%', md: '72%' } }}>
+                      <Box sx={{ maxWidth: { xs: '94%', sm: '86%', md: '82%' } }}>
                         <Paper
                           elevation={0}
                           sx={{
@@ -796,7 +808,7 @@ export default function ChatModal({
                                       const imageIndex = imageItems.findIndex((item) => item.url === url);
                                       setImageViewer({
                                         open: true,
-                                        images: imageItems.map((item) => ({ url: item.url, name: item.name })),
+                                        images: imageItems.map((item) => ({ url: item.viewerUrl || item.url, name: item.name })),
                                         index: Math.max(0, imageIndex),
                                       });
                                     }}
@@ -818,7 +830,21 @@ export default function ChatModal({
                                       }
                                     }}
                                   >
-                                    <Box component="img" src={url} alt={name} loading="lazy" sx={{ display: 'block', maxWidth: { xs: 160, sm: 240 }, maxHeight: 180, objectFit: 'contain', bgcolor: '#fff' }} />
+                                    <Box
+                                      component="img"
+                                      src={url}
+                                      alt={name}
+                                      loading="lazy"
+                                      sx={{
+                                        display: 'block',
+                                        maxWidth: { xs: 260, sm: 420, md: 560 },
+                                        maxHeight: { xs: 320, sm: 460 },
+                                        width: 'auto',
+                                        height: 'auto',
+                                        objectFit: 'contain',
+                                        bgcolor: '#fff'
+                                      }}
+                                    />
                                   </Box>
                                 ) : (
                                   <Chip
@@ -1068,13 +1094,13 @@ export default function ChatModal({
     <Dialog
       open={imageViewer.open}
       onClose={closeImageViewer}
-      maxWidth="lg"
+      maxWidth="xl"
       fullWidth
       PaperProps={{
         sx: {
           bgcolor: '#111827',
           color: '#fff',
-          height: { xs: '92dvh', md: '90vh' },
+          height: { xs: '96dvh', md: '94vh' },
         }
       }}
     >
@@ -1128,10 +1154,10 @@ export default function ChatModal({
             src={activeViewerImage.url}
             alt={activeViewerImage.name || 'Buyer attachment'}
             sx={{
+              width: 'calc(100vw - 48px)',
+              height: { xs: 'calc(96dvh - 72px)', md: 'calc(94vh - 72px)' },
               maxWidth: '100%',
               maxHeight: '100%',
-              width: 'auto',
-              height: 'auto',
               objectFit: 'contain',
               display: 'block',
             }}
