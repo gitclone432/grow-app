@@ -12,7 +12,7 @@ import {
   Visibility as VisibilityIcon,
   ContentCopy as CopyIcon,
   Publish as PublishIcon,
-  Search as SearchIcon
+  Search as SearchIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import api from '../../lib/api.js';
@@ -220,7 +220,7 @@ function createEmptyTemplateFormData() {
     customActionField: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
     rangeId: null,
     listProductId: null,
-    pricingConfig: { ...DEFAULT_TEMPLATE_PRICING_CONFIG }
+    pricingConfig: { ...DEFAULT_TEMPLATE_PRICING_CONFIG },
   };
 }
 
@@ -431,7 +431,7 @@ export default function ManageTemplatesPage() {
       customActionField: template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)',
       rangeId: template.rangeId || null,
       listProductId: template.listProductId || null,
-      pricingConfig: template.pricingConfig || { ...DEFAULT_TEMPLATE_PRICING_CONFIG }
+      pricingConfig: template.pricingConfig || { ...DEFAULT_TEMPLATE_PRICING_CONFIG },
     });
     setEditDialog(true);
   };
@@ -470,7 +470,7 @@ export default function ManageTemplatesPage() {
             formData.customColumns,
             formData.asinAutomation?.fieldConfigs || []
           )
-        }
+        },
       };
       if (editingTemplate?._id) {
         await api.put(`/listing-templates/${editingTemplate._id}`, payload);

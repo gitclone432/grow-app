@@ -207,6 +207,80 @@ const listingTemplateSchema = new mongoose.Schema({
     default: null,
     index: true
   },
+  /**
+   * Per-template frame overlay applied to the first scraped Amazon image.
+   * Badge file lives under public/uploads/overlay-badges/{badgeName}.ext
+   */
+  imageOverlay: {
+    enabled: {
+      type: Boolean,
+      default: false,
+    },
+    badgeName: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+    originalFilename: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+    updatedAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  /**
+   * Draw scraped Amazon text onto the first product image (after frame overlay if any).
+   */
+  textOverlay: {
+    enabled: {
+      type: Boolean,
+      default: false,
+    },
+    sourceField: {
+      type: String,
+      enum: ['brand', 'title', 'price', 'custom'],
+      default: 'custom',
+    },
+    customText: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    position: {
+      type: String,
+      enum: ['top', 'bottom', 'center'],
+      default: 'bottom',
+    },
+    fontSize: {
+      type: Number,
+      default: 0, // 0 = auto from image width
+      min: 0,
+      max: 120,
+    },
+    textColor: {
+      type: String,
+      default: '#FFFFFF',
+      trim: true,
+    },
+    backgroundColor: {
+      type: String,
+      default: '#000000',
+      trim: true,
+    },
+    backgroundOpacity: {
+      type: Number,
+      default: 0.55,
+      min: 0,
+      max: 1,
+    },
+    updatedAt: {
+      type: Date,
+      default: null,
+    },
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

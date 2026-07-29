@@ -8,7 +8,7 @@ import AsinPrecheckLog from '../models/AsinPrecheckLog.js';
 import SellerSkuIndex from '../models/SellerSkuIndex.js';
 import ApiUsage from '../models/ApiUsage.js';
 import AiListingRun from '../models/AiListingRun.js';
-import { fetchAmazonData } from '../utils/asinAutofill.js';
+import { fetchAmazonData, getTemplateOverlayFetchOptions } from '../utils/asinAutofill.js';
 import { generateSKUFromASIN } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { generateWithGemini } from '../utils/gemini.js';
@@ -530,7 +530,9 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
         });
 
         const scrapedAt = new Date();
-        const amazonData = await fetchAmazonData(asin, region);
+        const amazonData = await fetchAmazonData(asin, region, {
+          ...getTemplateOverlayFetchOptions(template),
+        });
 
         // Count the missing-stock-info re-fetch (fresh fetches only — cache
         // hits carry availabilityRetry: null) on this batch's stats log.

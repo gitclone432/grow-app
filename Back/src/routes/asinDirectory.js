@@ -15,7 +15,7 @@ async function scrapeAsinsBatched(asinList, region = 'US', batchSize = 5, onAsin
     const batch = asinList.slice(i, i + batchSize);
     const results = await Promise.allSettled(
       batch.map(asin =>
-        fetchAmazonData(asin, region).finally(() => {
+        fetchAmazonData(asin, region, { skipOverlay: true }).finally(() => {
           completed++;
           if (onAsinDone) onAsinDone(completed, asinList.length);
         })

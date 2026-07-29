@@ -1,10 +1,35 @@
 import express from 'express';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs/promises';
 import { requireAuth } from '../middleware/auth.js';
 import ListingTemplate from '../models/ListingTemplate.js';
 import TemplateOverride from '../models/TemplateOverride.js';
 import { mergeDefaultCoreFieldDefaults } from '../constants/defaultDescriptionTemplate.js';
+import {
+  OVERLAY_BADGES_DIR,
+  OVERLAY_EXTENSIONS,
+  ensureOverlayBadgesDir,
+  overlayBadgePublicUrl,
+  resolveOverlayBadgePath,
+  sanitizeOverlayBadgeName,
+} from '../utils/overlaySettings.js';
 
 const router = express.Router();
+
+const overlayUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (OVERLAY_EXTENSIONS.includes(ext)) return cb(null, true);
+    cb(new Error(`Allowed file types: ${OVERLAY_EXTENSIONS.join(', ')}`));
+  },
+});
+
+function templateOverlayBadgeName(templateId) {
+  return `tpl-${String(templateId)}`;
+}
 
 const CUSTOM_COLUMN_NAME_PREFIX = 'C:';
 
@@ -451,11 +476,39 @@ router.post('/:id/duplicate', requireAuth, async (req, res) => {
       coreFieldDefaults: sourceTemplate.coreFieldDefaults ? 
         JSON.parse(JSON.stringify(sourceTemplate.coreFieldDefaults)) : {},
       customActionField: sourceTemplate.customActionField,
+      rangeId: sourceTemplate.rangeId || null,
+      listProductId: sourceTemplate.listProductId || null,
+      imageOverlay: {
+        enabled: Boolean(sourceTemplate.imageOverlay?.enabled),
+        badgeName: null,
+        originalFilename: sourceTemplate.imageOverlay?.originalFilename || null,
+        updatedAt: null,
+      },
       createdBy: req.user.userId
     };
     
     const duplicateTemplate = new ListingTemplate(duplicateData);
     await duplicateTemplate.save();
+
+    // Copy overlay badge file under a new tpl-{id} name when source has one
+    if (sourceTemplate.imageOverlay?.badgeName) {
+      const sourcePath = await resolveOverlayBadgePath(sourceTemplate.imageOverlay.badgeName);
+      if (sourcePath) {
+        await ensureOverlayBadgesDir();
+        const ext = path.extname(sourcePath).toLowerCase() || '.png';
+        const newBadge = templateOverlayBadgeName(duplicateTemplate._id);
+        const destPath = path.join(OVERLAY_BADGES_DIR, `${newBadge}${ext}`);
+        await fs.copyFile(sourcePath, destPath);
+        duplicateTemplate.imageOverlay = {
+          enabled: Boolean(sourceTemplate.imageOverlay?.enabled),
+          badgeName: newBadge,
+          originalFilename: sourceTemplate.imageOverlay?.originalFilename || path.basename(sourcePath),
+          updatedAt: new Date(),
+        };
+        await duplicateTemplate.save();
+      }
+    }
+
     await duplicateTemplate.populate('createdBy', 'name email');
     
     res.status(201).json(duplicateTemplate);
@@ -468,7 +521,7 @@ router.post('/:id/duplicate', requireAuth, async (req, res) => {
 // Update template
 router.put('/:id', requireAuth, async (req, res) => {
   try {
-    const { name, description, category, ebayCategory, customColumns, asinAutomation, pricingConfig, coreFieldDefaults, customActionField, rangeId, listProductId } = req.body;
+    const { name, description, category, ebayCategory, customColumns, asinAutomation, pricingConfig, coreFieldDefaults, customActionField, rangeId, listProductId, imageOverlay } = req.body;
     
     const updateData = { 
       name, 
@@ -494,6 +547,17 @@ router.put('/:id', requireAuth, async (req, res) => {
     // Add hierarchy assignment (allow explicit null to clear)
     if (rangeId !== undefined) updateData.rangeId = rangeId || null;
     if (listProductId !== undefined) updateData.listProductId = listProductId || null;
+
+    // Toggle / metadata only — badge file is managed by overlay upload/delete routes
+    if (imageOverlay !== undefined && imageOverlay !== null) {
+      const existing = await ListingTemplate.findById(req.params.id).select('imageOverlay').lean();
+      updateData.imageOverlay = {
+        enabled: Boolean(imageOverlay.enabled),
+        badgeName: existing?.imageOverlay?.badgeName || null,
+        originalFilename: existing?.imageOverlay?.originalFilename || null,
+        updatedAt: existing?.imageOverlay?.updatedAt || null,
+      };
+    }
     
     const template = await ListingTemplate.findByIdAndUpdate(
       req.params.id,
@@ -658,6 +722,106 @@ router.post('/:id/columns/reorder', requireAuth, async (req, res) => {
     res.json(template);
   } catch (error) {
     console.error('Error reordering columns:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Upload / replace per-template overlay frame (applied to 1st scraped image)
+router.post(
+  '/:id/overlay-image',
+  requireAuth,
+  (req, res, next) => {
+    overlayUpload.single('file')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message || 'Upload failed' });
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      const template = await ListingTemplate.findById(req.params.id);
+      if (!template) {
+        return res.status(404).json({ error: 'Template not found' });
+      }
+      if (!req.file?.buffer) {
+        return res.status(400).json({ error: 'file is required (PNG recommended)' });
+      }
+
+      const ext = path.extname(req.file.originalname || '').toLowerCase() || '.png';
+      if (!OVERLAY_EXTENSIONS.includes(ext)) {
+        return res.status(400).json({ error: `Allowed types: ${OVERLAY_EXTENSIONS.join(', ')}` });
+      }
+
+      await ensureOverlayBadgesDir();
+      const badgeName = templateOverlayBadgeName(template._id);
+
+      // Remove prior files for this template (any extension)
+      for (const oldExt of OVERLAY_EXTENSIONS) {
+        try {
+          await fs.unlink(path.join(OVERLAY_BADGES_DIR, `${badgeName}${oldExt}`));
+        } catch {
+          // ignore missing
+        }
+      }
+
+      const destPath = path.join(OVERLAY_BADGES_DIR, `${badgeName}${ext}`);
+      await fs.writeFile(destPath, req.file.buffer);
+
+      template.imageOverlay = {
+        enabled: true,
+        badgeName,
+        originalFilename: req.file.originalname || `${badgeName}${ext}`,
+        updatedAt: new Date(),
+      };
+      await template.save();
+      await template.populate('createdBy', 'name email');
+
+      res.json({
+        template,
+        badge: {
+          name: badgeName,
+          filename: `${badgeName}${ext}`,
+          previewUrl: overlayBadgePublicUrl(req, badgeName, ext),
+        },
+      });
+    } catch (error) {
+      console.error('Error uploading template overlay:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Clear per-template overlay image
+router.delete('/:id/overlay-image', requireAuth, async (req, res) => {
+  try {
+    const template = await ListingTemplate.findById(req.params.id);
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    const badgeName =
+      sanitizeOverlayBadgeName(template.imageOverlay?.badgeName) ||
+      templateOverlayBadgeName(template._id);
+
+    for (const ext of OVERLAY_EXTENSIONS) {
+      try {
+        await fs.unlink(path.join(OVERLAY_BADGES_DIR, `${badgeName}${ext}`));
+      } catch {
+        // ignore
+      }
+    }
+
+    template.imageOverlay = {
+      enabled: false,
+      badgeName: null,
+      originalFilename: null,
+      updatedAt: new Date(),
+    };
+    await template.save();
+    await template.populate('createdBy', 'name email');
+
+    res.json({ template, message: 'Template overlay removed' });
+  } catch (error) {
+    console.error('Error deleting template overlay:', error);
     res.status(500).json({ error: error.message });
   }
 });

@@ -1,6 +1,6 @@
 import TemplateListing from '../models/TemplateListing.js';
 import SellerPricingConfig from '../models/SellerPricingConfig.js';
-import { fetchAmazonData, applyFieldConfigs } from '../utils/asinAutofill.js';
+import { fetchAmazonData, applyFieldConfigs, getTemplateOverlayFetchOptions } from '../utils/asinAutofill.js';
 import {
   ensureCustomColumnFieldConfigs,
   filterAutofillConfigsForColumnDefaults,
@@ -483,7 +483,9 @@ export async function prepareDirectListPayload({
     listingReuseOptions = reuseOptions;
     reusedFromDatabase = isReuse;
 
-    amazonData = await fetchAmazonData(normalizedAsin, region);
+    amazonData = await fetchAmazonData(normalizedAsin, region, {
+      ...getTemplateOverlayFetchOptions(template),
+    });
 
     const { coreFields, customFields, reusedFromDatabase: autofillReuse, pricingCalculation: pricingCalc } = await applyFieldConfigs(
       amazonData,
@@ -553,7 +555,9 @@ export async function prepareDirectListPayload({
 
   if (!amazonData && normalizedAsin) {
     try {
-      amazonData = await fetchAmazonData(normalizedAsin, region);
+      amazonData = await fetchAmazonData(normalizedAsin, region, {
+        ...getTemplateOverlayFetchOptions(template),
+      });
     } catch (fetchErr) {
       console.warn('[Direct List] Could not fetch Amazon data for item specifics:', fetchErr.message);
     }

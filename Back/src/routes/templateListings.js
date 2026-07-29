@@ -5,7 +5,7 @@ import TemplateListing from '../models/TemplateListing.js';
 import ListingTemplate from '../models/ListingTemplate.js';
 import Seller from '../models/Seller.js';
 import SellerPricingConfig from '../models/SellerPricingConfig.js';
-import { fetchAmazonData, applyFieldConfigs, applyOverlayToScrapedImages } from '../utils/asinAutofill.js';
+import { fetchAmazonData, applyFieldConfigs, applyOverlayToScrapedImages, getTemplateOverlayFetchOptions, resolveTextOverlayContent } from '../utils/asinAutofill.js';
 import {
   ensureCustomColumnFieldConfigs,
   filterAutofillConfigsForColumnDefaults,
@@ -198,9 +198,26 @@ async function runTemplateAutofill(template, amazonData, fieldConfigs, pricingCo
   };
 }
 
-async function buildAmazonDataFromDirectoryDoc(asin, region, doc) {
+async function buildAmazonDataFromDirectoryDoc(asin, region, doc, template = null) {
   const directoryImages = doc?.images || [];
-  const processedDirectoryImages = await applyOverlayToScrapedImages(directoryImages);
+  const opts = getTemplateOverlayFetchOptions(template);
+  const textOverlay = opts.textOverlay
+    ? {
+        ...opts.textOverlay,
+        text: resolveTextOverlayContent(
+          {
+            title: doc?.title || '',
+            brand: doc?.brand || '',
+            price: doc?.price || '',
+          },
+          opts.textOverlay
+        ),
+      }
+    : null;
+  const processedDirectoryImages = await applyOverlayToScrapedImages(directoryImages, {
+    templateOverlay: opts.templateOverlay,
+    textOverlay,
+  });
   return doc ? {
     asin,
     title: doc.title || '',
@@ -226,16 +243,18 @@ async function buildAmazonDataFromDirectoryDoc(asin, region, doc) {
   };
 }
 
-async function resolveAmazonDataForPreview(asin, region, directoryDoc, fieldConfigs) {
+async function resolveAmazonDataForPreview(asin, region, directoryDoc, fieldConfigs, template = null) {
   if (fieldConfigsUsePiSources(fieldConfigs)) {
     try {
-      return await fetchAmazonData(asin, region);
+      return await fetchAmazonData(asin, region, {
+        ...getTemplateOverlayFetchOptions(template),
+      });
     } catch (error) {
       console.warn(`[preview] Live scrape failed for ${asin}, using directory data:`, error.message);
     }
   }
   return {
-    ...buildAmazonDataFromDirectoryDoc(asin, region, directoryDoc),
+    ...(await buildAmazonDataFromDirectoryDoc(asin, region, directoryDoc, template)),
     scrapeSource: 'directory',
   };
 }
@@ -248,7 +267,9 @@ async function buildDuplicateUpdateablePreviewItem({
   fieldConfigs,
   pricingConfig,
 }) {
-  const amazonData = await fetchAmazonData(asin, region);
+  const amazonData = await fetchAmazonData(asin, region, {
+    ...getTemplateOverlayFetchOptions(template),
+  });
   const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
   const asinCountDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
   const takenSkus = await loadTakenSkus({
@@ -1321,8 +1342,9 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           return;
         }
         
-        // Fetch and process ASIN (new listing case)
-        const amazonData = await fetchAmazonData(asin, region);
+        const amazonData = await fetchAmazonData(asin, region, {
+          ...getTemplateOverlayFetchOptions(template),
+        });
         const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
         const { coreFields, customFields, customFieldsMerged, mergedCoreFields, pricingCalculation } = autofill;
 
@@ -1515,7 +1537,7 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
 
         // Look up ASIN in the directory; live-scrape when PI catalog fields are configured
         const doc = await AsinDirectory.findOne({ asin }).lean();
-        const amazonData = await resolveAmazonDataForPreview(asin, region, doc, fieldConfigs);
+        const amazonData = await resolveAmazonDataForPreview(asin, region, doc, fieldConfigs, template);
         const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
         const { coreFields, customFields, customFieldsMerged, mergedCoreFields, pricingCalculation } = autofill;
 
@@ -2539,7 +2561,9 @@ router.post('/autofill-from-asin', requireAuth, async (req, res) => {
     
     // 2. Fetch fresh Amazon data
     console.log(`Fetching Amazon data for ASIN: ${asin} (${region})`);
-    const amazonData = await fetchAmazonData(asin, region);
+    const amazonData = await fetchAmazonData(asin, region, {
+      ...getTemplateOverlayFetchOptions(template),
+    });
     
     // 3. Apply field configurations (AI + direct mappings; reuse prior listing when ASIN exists)
     console.log(`Processing ${fieldConfigs.length} field configs`);
@@ -2733,7 +2757,9 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
         
         try {
           // Fetch Amazon data
-          const amazonData = await fetchAmazonData(asin, region);
+          const amazonData = await fetchAmazonData(asin, region, {
+            ...getTemplateOverlayFetchOptions(template),
+          });
           
           // Apply field configurations (reuse prior listing when ASIN exists)
           const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
@@ -3321,7 +3347,9 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         const sku = allocateUniqueSKU(asin, takenSkus, countDoc?.listingCount || 0);
         
         // Fetch Amazon data
-        const amazonData = await fetchAmazonData(asin, region);
+        const amazonData = await fetchAmazonData(asin, region, {
+          ...getTemplateOverlayFetchOptions(template),
+        });
         
         // Apply field configurations (reuse prior listing when ASIN exists)
         const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
@@ -4426,6 +4454,9 @@ router.post('/reprocess-overlay-images', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'templateId is required' });
     }
 
+    const template = await getEffectiveTemplate(templateId, sellerId || null);
+    const { templateOverlay } = getTemplateOverlayFetchOptions(template);
+
     const query = {
       templateId,
       itemPhotoUrl: { $exists: true, $ne: '' }
@@ -4457,7 +4488,9 @@ router.post('/reprocess-overlay-images', requireAuth, async (req, res) => {
           continue;
         }
 
-        const processedUrls = await applyOverlayToScrapedImages(urls);
+        const processedUrls = await applyOverlayToScrapedImages(urls, {
+          templateOverlay,
+        });
         const nextValue = joinItemPhotoUrls(processedUrls);
 
         if (!nextValue || nextValue === String(listing.itemPhotoUrl || '').trim()) {

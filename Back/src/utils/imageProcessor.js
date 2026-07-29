@@ -330,8 +330,145 @@ async function deleteEbayImage(imageUrl) {
   console.log('ImgBB does not support deletion for free tier:', imageUrl);
 }
 
+function escapeXml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function hexToRgb(hex) {
+  const raw = String(hex || '').trim().replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(raw)) return { r: 0, g: 0, b: 0 };
+  return {
+    r: parseInt(raw.slice(0, 2), 16),
+    g: parseInt(raw.slice(2, 4), 16),
+    b: parseInt(raw.slice(4, 6), 16),
+  };
+}
+
+function wrapOverlayText(text, maxCharsPerLine = 36, maxLines = 3) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const lines = [];
+  let current = '';
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= maxCharsPerLine) {
+      current = next;
+      continue;
+    }
+    if (current) lines.push(current);
+    current = word;
+    if (lines.length >= maxLines) break;
+  }
+  if (current && lines.length < maxLines) lines.push(current);
+  if (words.join(' ').length > lines.join(' ').length) {
+    const last = lines[lines.length - 1] || '';
+    lines[lines.length - 1] = `${last.slice(0, Math.max(0, maxCharsPerLine - 1))}…`;
+  }
+  return lines.slice(0, maxLines);
+}
+
+/**
+ * Draws scraped/custom text onto a product image and uploads to ImgBB.
+ */
+async function createEbayImageWithTextOverlay(productImageUrl, text, style = {}) {
+  const label = String(text || '').trim();
+  if (!label) {
+    throw new Error('Text overlay requires non-empty text');
+  }
+
+  await fs.mkdir(EBAY_IMAGES_DIR, { recursive: true });
+
+  const downloadUrl = upgradeAmazonProductImageUrl(productImageUrl);
+  let productImageBuffer;
+  try {
+    productImageBuffer = await downloadImage(downloadUrl);
+  } catch {
+    productImageBuffer = await downloadImage(productImageUrl);
+  }
+
+  const config = await getImageOverlayRuntimeConfig();
+  const outputMaxPx = Math.max(400, Math.min(2400, Number(config.outputMaxPx) || 1600));
+
+  const resized = await sharp(productImageBuffer)
+    .resize(outputMaxPx, outputMaxPx, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 92 })
+    .toBuffer();
+
+  const meta = await sharp(resized).metadata();
+  const width = meta.width || outputMaxPx;
+  const height = meta.height || outputMaxPx;
+
+  const fontSize = Math.max(
+    16,
+    Math.min(
+      96,
+      Number(style.fontSize) > 0
+        ? Number(style.fontSize)
+        : Math.round(width * 0.045)
+    )
+  );
+  const maxChars = Math.max(12, Math.floor(width / (fontSize * 0.55)));
+  const lines = wrapOverlayText(label, maxChars, 3);
+  if (lines.length === 0) {
+    throw new Error('Text overlay requires non-empty text');
+  }
+
+  const paddingY = Math.round(fontSize * 0.55);
+  const lineGap = Math.round(fontSize * 0.25);
+  const barHeight = paddingY * 2 + lines.length * fontSize + (lines.length - 1) * lineGap;
+  const position = ['top', 'bottom', 'center'].includes(style.position)
+    ? style.position
+    : 'bottom';
+  const barY =
+    position === 'top'
+      ? 0
+      : position === 'center'
+        ? Math.max(0, Math.round((height - barHeight) / 2))
+        : Math.max(0, height - barHeight);
+
+  const textColor = String(style.textColor || '#FFFFFF').trim() || '#FFFFFF';
+  const bg = hexToRgb(style.backgroundColor || '#000000');
+  const opacity = Math.max(0, Math.min(1, Number(style.backgroundOpacity) ?? 0.55));
+
+  const textNodes = lines
+    .map((line, index) => {
+      const y = barY + paddingY + fontSize + index * (fontSize + lineGap);
+      return `<text x="50%" y="${y}" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="${fontSize}" font-weight="700" fill="${escapeXml(textColor)}">${escapeXml(line)}</text>`;
+    })
+    .join('');
+
+  const svg = Buffer.from(
+    `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="${barY}" width="${width}" height="${barHeight}" fill="rgb(${bg.r},${bg.g},${bg.b})" fill-opacity="${opacity}" />
+      ${textNodes}
+    </svg>`
+  );
+
+  const outputFilename = `ebay-text-${Date.now()}-${Math.random().toString(36).substring(7)}.jpg`;
+  const outputPath = path.join(EBAY_IMAGES_DIR, outputFilename);
+
+  await sharp(resized)
+    .composite([{ input: svg, top: 0, left: 0 }])
+    .jpeg({ quality: 90 })
+    .toFile(outputPath);
+
+  const publicUrl = await uploadToImgBB(outputPath, outputFilename);
+  try {
+    await fs.unlink(outputPath);
+  } catch {
+    // ignore
+  }
+  return publicUrl;
+}
+
 export {
   createEbayImageWithOverlay,
+  createEbayImageWithTextOverlay,
   deleteEbayImage,
   downloadImage,
   OVERLAY_EXTENSIONS,

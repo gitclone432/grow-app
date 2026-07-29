@@ -21,7 +21,7 @@ import {
   rememberAmazonSourceSnapshot,
   isAiFieldAllowedInReuse,
 } from './listingDatabaseAmazonCache.js';
-import { createEbayImageWithOverlay } from './imageProcessor.js';
+import { createEbayImageWithOverlay, createEbayImageWithTextOverlay } from './imageProcessor.js';
 import { getImageOverlayRuntimeConfig } from './overlaySettings.js';
 import { joinItemPhotoUrls } from './itemPhotoUrls.js';
 
@@ -56,10 +56,33 @@ export function invalidateAmazonPiSourceColumnsAutofillCache() {
   piSourceColCache = { t: 0, rows: null };
 }
 
-export async function applyOverlayToScrapedImages(imageUrls = []) {
-  const overlayConfig = await getImageOverlayRuntimeConfig();
-  if (!overlayConfig.enabled || !Array.isArray(imageUrls) || imageUrls.length === 0) {
+export async function applyOverlayToScrapedImages(imageUrls = [], options = {}) {
+  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
     return Array.isArray(imageUrls) ? imageUrls : [];
+  }
+  if (options.skip) {
+    return imageUrls;
+  }
+
+  const overlayConfig = await getImageOverlayRuntimeConfig();
+  const templateOverlay = options.templateOverlay;
+  const textOverlay = options.textOverlay;
+
+  let frameEnabled = false;
+  let badgeName = overlayConfig.activeBadge || 'usa-seller';
+  let maxImages = Math.min(imageUrls.length, overlayConfig.maxImages || 3);
+
+  if (templateOverlay && typeof templateOverlay === 'object') {
+    frameEnabled = Boolean(templateOverlay.enabled && templateOverlay.badgeName);
+    badgeName = String(templateOverlay.badgeName || '').trim();
+    maxImages = 1; // template overlays always apply to the first image only
+  } else {
+    frameEnabled = Boolean(overlayConfig.enabled);
+  }
+
+  const textEnabled = Boolean(textOverlay?.enabled && String(textOverlay?.text || '').trim());
+  if (!frameEnabled && !textEnabled) {
+    return imageUrls;
   }
 
   if (!overlayConfig.imgbbConfigured) {
@@ -69,24 +92,81 @@ export async function applyOverlayToScrapedImages(imageUrls = []) {
     return imageUrls;
   }
 
-  const badgeName = overlayConfig.activeBadge || 'usa-seller';
-  const maxImages = Math.min(imageUrls.length, overlayConfig.maxImages || 3);
-
   const processed = [...imageUrls];
-  const candidates = imageUrls.slice(0, maxImages);
-  const overlayResults = await Promise.allSettled(
-    candidates.map((url) => createEbayImageWithOverlay(url, badgeName))
-  );
 
-  overlayResults.forEach((result, index) => {
-    if (result.status === 'fulfilled' && result.value) {
-      processed[index] = result.value;
-    } else {
-      console.warn(`[fetchAmazonData] ⚠️ Overlay failed for image ${index + 1}, using original URL`);
+  if (frameEnabled && badgeName) {
+    const candidates = imageUrls.slice(0, Math.min(imageUrls.length, maxImages));
+    const overlayResults = await Promise.allSettled(
+      candidates.map((url) => createEbayImageWithOverlay(url, badgeName))
+    );
+
+    overlayResults.forEach((result, index) => {
+      if (result.status === 'fulfilled' && result.value) {
+        processed[index] = result.value;
+      } else {
+        console.warn(`[fetchAmazonData] ⚠️ Frame overlay failed for image ${index + 1}, using original URL`);
+      }
+    });
+  }
+
+  if (textEnabled) {
+    try {
+      processed[0] = await createEbayImageWithTextOverlay(processed[0], textOverlay.text, textOverlay);
+    } catch (err) {
+      console.warn(`[fetchAmazonData] ⚠️ Text overlay failed for image 1: ${err.message}`);
     }
-  });
+  }
 
   return processed;
+}
+
+/** Build frame overlay options from a ListingTemplate document. */
+export function getTemplateOverlayOptions(template) {
+  const overlay = template?.imageOverlay;
+  if (!overlay?.enabled || !overlay?.badgeName) return null;
+  return {
+    enabled: true,
+    badgeName: String(overlay.badgeName).trim(),
+  };
+}
+
+/** Build text overlay style options from a ListingTemplate (text resolved later from Amazon data). */
+export function getTemplateTextOverlayOptions(template) {
+  const overlay = template?.textOverlay;
+  if (!overlay?.enabled) return null;
+  const sourceField = overlay.sourceField || 'custom';
+  if (sourceField === 'custom' && !String(overlay.customText || '').trim()) return null;
+  return {
+    enabled: true,
+    sourceField,
+    customText: String(overlay.customText || '').trim(),
+    position: overlay.position || 'bottom',
+    fontSize: Number(overlay.fontSize) || 0,
+    textColor: overlay.textColor || '#FFFFFF',
+    backgroundColor: overlay.backgroundColor || '#000000',
+    backgroundOpacity:
+      Number.isFinite(Number(overlay.backgroundOpacity))
+        ? Number(overlay.backgroundOpacity)
+        : 0.55,
+  };
+}
+
+export function resolveTextOverlayContent(amazonData, textOverlay) {
+  if (!textOverlay) return '';
+  const field = String(textOverlay.sourceField || 'brand');
+  if (field === 'custom') return String(textOverlay.customText || '').trim();
+  if (field === 'title') return String(amazonData?.title || '').trim();
+  if (field === 'brand') return String(amazonData?.brand || '').trim();
+  if (field === 'price') return String(amazonData?.price || '').trim();
+  return String(amazonData?.[field] || '').trim();
+}
+
+/** Options to pass into fetchAmazonData / applyOverlayToScrapedImages for a template. */
+export function getTemplateOverlayFetchOptions(template) {
+  return {
+    templateOverlay: getTemplateOverlayOptions(template),
+    textOverlay: getTemplateTextOverlayOptions(template),
+  };
 }
 
 /**
@@ -94,10 +174,36 @@ export async function applyOverlayToScrapedImages(imageUrls = []) {
  * Uses ScraperAPI (default) or Scrapingdog via AMAZON_PRODUCT_PROVIDER
  * for ALL product data (Title, Brand, Description, Images, Price).
  * Replaces PAAPI entirely
+ *
+ * options.templateOverlay — { enabled, badgeName } from template; applies to 1st image
+ * options.textOverlay — template text overlay styles; text resolved from scraped fields
+ * options.skipOverlay — cache/warm paths that should keep raw Amazon URLs
  */
 export async function fetchAmazonData(asin, region = 'US', options = {}) {
   const startTime = Date.now();
-  const { forceRefresh = false } = options;
+  const {
+    forceRefresh = false,
+    skipOverlay = false,
+    templateOverlay = null,
+    textOverlay = null,
+  } = options;
+  const overlayOpts = { skip: skipOverlay, templateOverlay };
+
+  const withOverlayedImages = async (data) => {
+    if (!data || typeof data !== 'object') return data;
+    const resolvedTextOverlay =
+      textOverlay && textOverlay.enabled
+        ? {
+            ...textOverlay,
+            text: resolveTextOverlayContent(data, textOverlay),
+          }
+        : null;
+    const images = await applyOverlayToScrapedImages(data.images || [], {
+      ...overlayOpts,
+      textOverlay: resolvedTextOverlay,
+    });
+    return { ...data, images };
+  };
   
   try {
     console.log(`[fetchAmazonData] 🔍 Fetching product data for ASIN: ${asin} (${region})`);
@@ -109,7 +215,8 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
         const cacheTime = Date.now() - startTime;
         console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${region}, ${cacheTime}ms)`);
         // Cache hits made no fetch — do not re-report availabilityRetry
-        return { ...cached, availabilityRetry: null, scrapeSource: 'cache' };
+        // Overlay is applied after cache so each template can use its own frame.
+        return withOverlayedImages({ ...cached, availabilityRetry: null, scrapeSource: 'cache' });
       }
 
       // Reuse Amazon scrape saved on any Listings Database row for this ASIN
@@ -118,7 +225,11 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
         setCachedAsinData(asin, { ...fromListingsDb, availabilityRetry: null }, region);
         const dbTime = Date.now() - startTime;
         console.log(`[fetchAmazonData] 📚 Listings Database reused for ${asin} (${region}, ${dbTime}ms)`);
-        return { ...fromListingsDb, availabilityRetry: null, scrapeSource: 'listings_db' };
+        return withOverlayedImages({
+          ...fromListingsDb,
+          availabilityRetry: null,
+          scrapeSource: 'listings_db',
+        });
       }
     } else {
       console.log(`[fetchAmazonData] 🔄 Force refresh enabled for ${asin} (${region})`);
@@ -169,12 +280,11 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
       title = title.replace(new RegExp(brand, 'ig'), '').trim();
     }
     
-    // Keep images as array (same as PAAPI format)
+    // Keep raw Amazon URLs in cache; overlay is applied per-request (template or global).
     const rawImagesArray = Array.isArray(images) ? images : [];
-    const imagesArray = await applyOverlayToScrapedImages(rawImagesArray);
     
     console.log(`[fetchAmazonData] ✅ Successfully fetched data for ${asin} in ${responseTime}ms`);
-    console.log(`[fetchAmazonData] 📊 Extracted fields: Title="${title.substring(0, 40)}...", Brand="${brand}", Price="${price}", Images=${imagesArray.length} URLs, Description=${description.split('\n').length} features`);
+    console.log(`[fetchAmazonData] 📊 Extracted fields: Title="${title.substring(0, 40)}...", Brand="${brand}", Price="${price}", Images=${rawImagesArray.length} URLs, Description=${description.split('\n').length} features`);
     if (color) console.log(`[fetchAmazonData] 🎨 Color: "${color}"`);
     if (compatibility) console.log(`[fetchAmazonData] 📱 Compatibility: "${compatibility}"`);
     if (review) {
@@ -182,7 +292,7 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
         `[fetchAmazonData] ⭐ Customer reviews: ${customerReviewCount || 0} row(s), ${review.length} chars`
       );
     }
-    console.log(`[fetchAmazonData] 🖼️ First image: ${imagesArray[0] || 'none'}`);
+    console.log(`[fetchAmazonData] 🖼️ First image: ${rawImagesArray[0] || 'none'}`);
     
     const result = {
       asin,
@@ -190,7 +300,7 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
       price,
       brand,
       description,
-      images: imagesArray, // Return as array (same as PAAPI)
+      images: rawImagesArray,
       color: color || '',
       compatibility: compatibility || '',
       model: model || '',
@@ -241,7 +351,7 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
     const canCache = Boolean(result.description)
       && (provider !== 'scrapingdog' || hasAvailabilityInfo);
     if (canCache) {
-      // Strip retry marker + scrapeSource before caching
+      // Strip retry marker + scrapeSource before caching (raw images, no overlay)
       const { scrapeSource: _scrapeSource, availabilityRetry: _retry, ...toCache } = result;
       setCachedAsinData(asin, { ...toCache, availabilityRetry: null }, region);
       await rememberAmazonSourceSnapshot(asin, region, { ...toCache, availabilityRetry: null });
@@ -251,7 +361,7 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
       console.log(`[fetchAmazonData] ⚠️ Skipping cache for ${asin} (no stock/delivery info) — will retry on next request`);
     }
     
-    return result;
+    return withOverlayedImages(result);
   } catch (error) {
     const responseTime = Date.now() - startTime;
     
