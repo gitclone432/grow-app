@@ -80,6 +80,7 @@ export const createStoreSchema = z.object({
 
 export const createCreditCardSchema = z.object({
   name: z.string().trim().min(1, 'Card name is required'),
+  last4digits: z.string().regex(/^\d{4}$/, 'Last 4 digits must be exactly 4 numbers'),
 });
 
 export const createBankAccountSchema = z.object({

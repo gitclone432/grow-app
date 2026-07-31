@@ -8,6 +8,16 @@ const CreditCardSchema = new mongoose.Schema(
       unique: true,
       trim: true
     },
+    last4digits: {
+      type: String,
+      required: true,
+      trim: true,
+      match: /^\d{4}$/,
+    },
+    balance: {
+      type: Number,
+      default: 0
+    }, // Available balance in INR
   },
   { timestamps: true }
 );

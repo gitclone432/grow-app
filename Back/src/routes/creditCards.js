@@ -20,12 +20,15 @@ router.get('/', requireAuth, async (req, res) => {
 // Create a new credit card
 router.post('/', requireAuth, requirePageAccess('CreditCards'), validate(createCreditCardSchema), async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, last4digits } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Card name is required' });
     }
+    if (!last4digits || !/^\d{4}$/.test(last4digits)) {
+      return res.status(400).json({ error: 'Last 4 digits must be exactly 4 numbers' });
+    }
 
-    const card = new CreditCard({ name: name.trim() });
+    const card = new CreditCard({ name: name.trim(), last4digits });
     await card.save();
     res.status(201).json(card);
   } catch (error) {
