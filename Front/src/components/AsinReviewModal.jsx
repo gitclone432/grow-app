@@ -35,7 +35,8 @@ import {
   Code as CodeIcon,
   Visibility as VisibilityIcon,
   Update as UpdateIcon,
-  Autorenew as AutorenewIcon
+  Autorenew as AutorenewIcon,
+  Undo as UndoIcon
 } from '@mui/icons-material';
 import api from '../lib/api.js';
 import { calcInrProfitFromPricingCalculator } from '../utils/pricingProfitPreview.js';
@@ -456,7 +457,7 @@ export default function AsinReviewModal({
   const checkedSkuIdsRef = useRef(new Set()); // tracks item IDs whose SKU check has already been initiated
   const [currentIndex, setCurrentIndex] = useState(0);
   const [editedItems, setEditedItems] = useState({});
-  const [dismissedItems, setDismissedItems] = useState(new Set());
+  const [dismissedItems, setDismissedItems] = useState([]);
   const [saving, setSaving] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [descriptionViewMode, setDescriptionViewMode] = useState('preview'); // 'code' | 'preview'
@@ -469,7 +470,8 @@ export default function AsinReviewModal({
   const [autoPriceAdjustments, setAutoPriceAdjustments] = useState({}); // { [itemId]: { from, to } }
 
   // Filter out dismissed items
-  const activeItems = previewItems.filter(item => !dismissedItems.has(item.id));
+  const dismissedItemsSet = new Set(dismissedItems);
+  const activeItems = previewItems.filter(item => !dismissedItemsSet.has(item.id));
   const listableCount = activeItems.filter(
     (item) => !['error', 'loading', 'blocked'].includes(item.status)
   ).length;
@@ -591,7 +593,7 @@ export default function AsinReviewModal({
   // Reset transient review state for each new preview run/open
   useEffect(() => {
     if (!open) return;
-    setDismissedItems(new Set());
+    setDismissedItems([]);
     setCurrentIndex(0);
     setHasUnsavedChanges(false);
     setSkuStatus({});
@@ -745,14 +747,34 @@ export default function AsinReviewModal({
   const handleDismiss = () => {
     if (!currentItem) return;
     
-    // Add to dismissed set
-    setDismissedItems(prev => new Set([...prev, currentItem.id]));
+    // Add to dismissed array (most recent at the end)
+    setDismissedItems(prev => [...prev, currentItem.id]);
     
     // Navigate to next item, or previous if we're at the end
     if (currentIndex >= activeItems.length - 1 && currentIndex > 0) {
       setCurrentIndex(currentIndex - 1);
     }
     // If this was the last item, currentIndex stays the same but will show next remaining item
+  };
+
+  const handleUndoDismiss = () => {
+    if (dismissedItems.length === 0) return;
+    
+    // Remove the last dismissed item
+    const lastDismissedId = dismissedItems[dismissedItems.length - 1];
+    setDismissedItems(prev => prev.slice(0, -1));
+    
+    // Find the index of the restored item in the full preview list
+    const restoredItemIndex = previewItems.findIndex(item => item.id === lastDismissedId);
+    
+    // Navigate to the restored item if possible
+    if (restoredItemIndex !== -1) {
+      // Calculate the new active index after restoration
+      const itemsBeforeRestored = previewItems.slice(0, restoredItemIndex).filter(
+        item => !dismissedItems.slice(0, -1).includes(item.id)
+      );
+      setCurrentIndex(itemsBeforeRestored.length);
+    }
   };
 
   const handleFieldChange = (field, value, isCustomField = false) => {
@@ -1116,9 +1138,9 @@ export default function AsinReviewModal({
               color="primary"
               size="small"
             />
-            {dismissedItems.size > 0 && (
+            {dismissedItems.length > 0 && (
               <Chip 
-                label={`${dismissedItems.size} dismissed`}
+                label={`${dismissedItems.length} dismissed`}
                 color="default"
                 size="small"
                 variant="outlined"
@@ -1178,6 +1200,17 @@ export default function AsinReviewModal({
                 ↗ Amazon
               </Button>
             )}
+
+            <Button
+              variant="outlined"
+              startIcon={<UndoIcon />}
+              onClick={handleUndoDismiss}
+              disabled={dismissedItems.length === 0}
+              size="small"
+              sx={{ whiteSpace: 'nowrap' }}
+            >
+              Undo Dismiss
+            </Button>
             
             {showAmazonPreview ? (
               <IconButton
