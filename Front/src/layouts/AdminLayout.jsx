@@ -138,6 +138,9 @@ import {
   MarketingCampaignsPage,
   MarketingPromotionsPage,
   FinanceCashflowPage,
+  DailyCardExpensesPage,
+  CardFundRequestsPage,
+  CardBalanceRecordsPage,
   InvoiceUploadPage,
   StoreSubscriptionPage,
   CompatibilityDashboard,
@@ -331,6 +334,9 @@ const COMPONENT_MAP = {
   'ExtraExpenses': ExtraExpensePage,
   'RevenueGrossNet': RevenueGrossNetPage,
   'Cashflow': FinanceCashflowPage,
+  'DailyCardExpenses': DailyCardExpensesPage,
+  'CardFundRequests': CardFundRequestsPage,
+  'CardBalanceRecords': CardBalanceRecordsPage,
   'InvoiceUpload': InvoiceUploadPage,
   'Affiliate': StoreSubscriptionPage,
   'Salary': SalaryPage,
@@ -1008,7 +1014,8 @@ export default function AdminLayout({ user, onLogout }) {
             if (!hasAccess(page.id)) return null;
             const Component = COMPONENT_MAP[page.id];
             if (!Component) return null;
-            return <Route key={page.id} path={page.path} element={<Component />} />;
+            const pathWithoutSlash = page.path.startsWith('/') ? page.path.slice(1) : page.path;
+            return <Route key={page.id} path={pathWithoutSlash} element={<Component />} />;
           })}
 
           {/* Additional routes that don't map 1:1 to pages but need to exist */}
