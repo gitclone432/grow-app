@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, lazy, Suspense } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Alert,
+  Autocomplete,
   Box,
   CircularProgress,
   MenuItem,
@@ -138,24 +139,19 @@ export default function SelectSellerLabPage() {
               ))}
             </TextField>
 
-            <TextField
-              select
-              label="Template"
-              size="small"
-              value={templateId}
-              onChange={(e) => setFilter('templateId', e.target.value)}
-              sx={{ minWidth: 220, flex: { sm: '1 1 240px' }, maxWidth: 360 }}
+            <Autocomplete
+              options={sortedTemplates}
+              getOptionLabel={(option) => (typeof option === 'string' ? option : option.name || option._id || '')}
+              value={sortedTemplates.find((t) => t._id === templateId) || null}
+              onChange={(_, newValue) => setFilter('templateId', newValue?._id || '')}
+              loading={loading}
               disabled={!sortedTemplates.length}
-            >
-              <MenuItem value="">
-                <em>Select template</em>
-              </MenuItem>
-              {sortedTemplates.map((t) => (
-                <MenuItem key={t._id} value={t._id}>
-                  {t.name || t._id}
-                </MenuItem>
-              ))}
-            </TextField>
+              size="small"
+              sx={{ minWidth: 220, flex: { sm: '1 1 240px' }, maxWidth: 360 }}
+              renderInput={(params) => <TextField {...params} label="Template" placeholder="Search templates..." />}
+              noOptionsText="No templates found"
+              isOptionEqualToValue={(option, value) => option._id === value._id}
+            />
 
             <TextField
               select
