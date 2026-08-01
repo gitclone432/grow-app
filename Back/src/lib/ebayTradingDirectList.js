@@ -89,6 +89,22 @@ function buildBestOfferXml(listing = {}) {
   return xml;
 }
 
+/** Soft eBay notices that often ride along with Failure but are not the real cause. */
+const IGNORABLE_TRADING_ERROR_CODES = new Set([
+  '21917091', // Best Offer auto-accept / auto-decline warning
+  '21917236', // "Funds from your sales may be unavailable..."
+]);
+
+function isIgnorableTradingError(entry) {
+  const code = String(entry?.ErrorCode?.[0] || '').trim();
+  if (IGNORABLE_TRADING_ERROR_CODES.has(code)) return true;
+  const text = String(entry?.LongMessage?.[0] || entry?.ShortMessage?.[0] || '').toLowerCase();
+  return (
+    text.includes('funds from your sales may be unavailable') ||
+    text.includes('best offer auto')
+  );
+}
+
 function parseTradingAck(result, responseKey) {
   const response = result?.[responseKey];
   if (!response) {
@@ -97,18 +113,39 @@ function parseTradingAck(result, responseKey) {
 
   const ack = response.Ack?.[0];
   const errors = response.Errors || [];
-  const errorMessages = errors
-    .filter((entry) => entry.SeverityCode?.[0] === 'Error' || ack === 'Failure')
+  const softNotices = errors.filter((entry) => isIgnorableTradingError(entry));
+  // Do not treat Warning (or soft notices) as failure when Ack is Failure —
+  // previously every Errors[] entry was included, so the funds message hid the real Error.
+  const hardErrors = errors.filter(
+    (entry) => entry.SeverityCode?.[0] === 'Error' && !isIgnorableTradingError(entry)
+  );
+  const errorMessages = hardErrors
     .map((entry) => entry.LongMessage?.[0] || entry.ShortMessage?.[0])
     .filter(Boolean);
 
-  const warningMessages = errors
-    .filter((entry) => entry.SeverityCode?.[0] === 'Warning')
-    .map((entry) => entry.LongMessage?.[0] || entry.ShortMessage?.[0])
-    .filter(Boolean);
+  const warningMessages = [
+    ...errors
+      .filter((entry) => entry.SeverityCode?.[0] === 'Warning')
+      .map((entry) => entry.LongMessage?.[0] || entry.ShortMessage?.[0])
+      .filter(Boolean),
+    ...softNotices
+      .filter((entry) => entry.SeverityCode?.[0] !== 'Warning')
+      .map((entry) => entry.LongMessage?.[0] || entry.ShortMessage?.[0])
+      .filter(Boolean),
+  ];
 
   if (ack === 'Failure') {
-    throw new Error(errorMessages.join('; ') || 'eBay rejected the listing');
+    if (errorMessages.length > 0) {
+      throw new Error(errorMessages.join('; ') || 'eBay rejected the listing');
+    }
+    const fallback = errors
+      .filter((entry) => !isIgnorableTradingError(entry))
+      .map((entry) => entry.LongMessage?.[0] || entry.ShortMessage?.[0])
+      .filter(Boolean);
+    throw new Error(
+      fallback.join('; ') ||
+        'eBay rejected the listing (check seller account / payment hold status)'
+    );
   }
 
   return {

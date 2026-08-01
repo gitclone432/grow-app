@@ -34,6 +34,7 @@ import {
   TableCell,
   TableContainer,
   TableHead,
+  TablePagination,
   TableRow,
   TextField,
   Typography,
@@ -79,11 +80,17 @@ function parseBulkAsins(text) {
 
 /** Must match backend max per API call (templateListings direct-list-bulk routes). */
 const BULK_BATCH_SIZE = 25;
+/** Parallel prepares — matches Scrapingdog plan capacity (AI still dominates per ASIN). */
+const PREPARE_BATCH_SIZE = 1;
+const PREPARE_CONCURRENCY = 20;
 const BULK_JOB_MAX_ASINS = 1000;
 const BULK_JOB_DEFAULT_DELAY_MINUTES = 2;
 const BULK_JOB_DEFAULT_DELAY_SECONDS = 5;
 const BULK_JOB_MIN_DELAY_SECONDS = 3;
 const BULK_JOB_MAX_DELAY_SECONDS = 60;
+const HISTORY_PAGE_SIZE = 25;
+const HISTORY_FETCH_LIMIT = 10000;
+const HISTORY_POLL_MS = 60000;
 
 function defaultScheduleInputValue() {
   const d = new Date();
@@ -116,6 +123,24 @@ function chunkAsins(asins, size = BULK_BATCH_SIZE) {
     chunks.push(asins.slice(i, i + size));
   }
   return chunks;
+}
+
+/** Run async work over items with limited concurrency; onEach fires as each finishes. */
+async function mapPool(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function runner() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }
+
+  const pool = Math.min(Math.max(concurrency, 1), items.length || 1);
+  await Promise.all(Array.from({ length: pool }, () => runner()));
+  return results;
 }
 
 function mergeBulkPreviewResults(batchResults) {
@@ -179,7 +204,19 @@ function createLoadingPreviewItems(asins = []) {
     pricingCalculation: null,
     warnings: [],
     errors: [],
+    fetchDurationMs: null,
   }));
+}
+
+function formatFetchDuration(ms) {
+  if (ms == null || !Number.isFinite(Number(ms)) || Number(ms) < 0) return null;
+  const value = Number(ms);
+  if (value < 1000) return `${Math.round(value)}ms`;
+  const seconds = value / 1000;
+  if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  return `${mins}m ${secs}s`;
 }
 
 function pickListingOverridesForAsins(listingOverrides, asins = []) {
@@ -559,8 +596,12 @@ export default function DirectListPage() {
   const [batchHistoryError, setBatchHistoryError] = useState('');
   const [historyStoreFilter, setHistoryStoreFilter] = useState('all'); // all | sellerId
   const [historyTypeFilter, setHistoryTypeFilter] = useState('all'); // all | draft | publish | verify
+  const [historyStatusFilter, setHistoryStatusFilter] = useState('all'); // all | done | failed | processing | pending | cancelled
   const [historyResultFilter, setHistoryResultFilter] = useState('all'); // all | ok | failed | mixed
   const [historyTemplateFilter, setHistoryTemplateFilter] = useState('all'); // all | template name
+  const [historyIncludeDerived, setHistoryIncludeDerived] = useState(false);
+  const [historyPage, setHistoryPage] = useState(0);
+  const [historyLoadedOnce, setHistoryLoadedOnce] = useState(false);
   const [expandedBatchId, setExpandedBatchId] = useState('');
   const [expandedBatchDetail, setExpandedBatchDetail] = useState(null);
   const [expandedBatchLoading, setExpandedBatchLoading] = useState(false);
@@ -570,6 +611,7 @@ export default function DirectListPage() {
   const [historyDetailExpandedKey, setHistoryDetailExpandedKey] = useState('');
   const [historyListTarget, setHistoryListTarget] = useState(null);
   const [historyListing, setHistoryListing] = useState(false);
+  const [historyDeletingId, setHistoryDeletingId] = useState('');
   const [bulkScheduleAt, setBulkScheduleAt] = useState(defaultScheduleInputValue);
   const [bulkDelayMinutes, setBulkDelayMinutes] = useState(BULK_JOB_DEFAULT_DELAY_MINUTES);
   const [bulkDelaySeconds, setBulkDelaySeconds] = useState(BULK_JOB_DEFAULT_DELAY_SECONDS);
@@ -641,10 +683,17 @@ export default function DirectListPage() {
 
   const parsedBulkAsins = useMemo(() => parseBulkAsins(bulkAsinsText), [bulkAsinsText]);
   const bulkBatchCount = useMemo(
-    () => Math.ceil(parsedBulkAsins.length / BULK_BATCH_SIZE) || 0,
+    () => Math.ceil(parsedBulkAsins.length / PREPARE_BATCH_SIZE) || 0,
     [parsedBulkAsins.length]
   );
   const bulkExceedsJobLimit = parsedBulkAsins.length > BULK_JOB_MAX_ASINS;
+  const readyPreviewCount = useMemo(
+    () => previewItems.filter((item) => item && !['error', 'loading', 'blocked'].includes(item.status)).length,
+    [previewItems]
+  );
+  const canPublishPrepared = Boolean(
+    selectedSeller && selectedTemplate && readyPreviewCount > 0 && readyPreviewCount <= BULK_JOB_MAX_ASINS
+  );
 
   const loadBulkJobs = useCallback(async () => {
     if (!selectedSeller) {
@@ -662,23 +711,35 @@ export default function DirectListPage() {
     }
   }, [selectedSeller]);
 
-  const loadBatchHistory = useCallback(async () => {
-    setBatchHistoryLoading(true);
-    setBatchHistoryError('');
+  const loadBatchHistory = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) {
+      setBatchHistoryLoading(true);
+      setBatchHistoryError('');
+    }
     try {
-      const params = { limit: 200 };
+      const params = {
+        limit: HISTORY_FETCH_LIMIT,
+        includeDerived: historyIncludeDerived ? '1' : '0',
+      };
       if (historyStoreFilter && historyStoreFilter !== 'all') {
         params.sellerId = historyStoreFilter;
       }
       const { data } = await api.get('/template-listings/direct-list-history', { params });
       setBatchHistory(Array.isArray(data.batches) ? data.batches : []);
+      setHistoryLoadedOnce(true);
     } catch (err) {
-      setBatchHistory([]);
-      setBatchHistoryError(err?.response?.data?.error || err.message || 'Failed to load batch history');
+      if (!silent) {
+        setBatchHistory([]);
+        setBatchHistoryError(err?.response?.data?.error || err.message || 'Failed to load batch history');
+      }
     } finally {
-      setBatchHistoryLoading(false);
+      if (!silent) setBatchHistoryLoading(false);
     }
-  }, [historyStoreFilter]);
+  }, [historyStoreFilter, historyIncludeDerived]);
+
+  const refreshHistoryIfVisible = useCallback(() => {
+    if (tab === 2) void loadBatchHistory({ silent: true });
+  }, [tab, loadBatchHistory]);
 
   const historyStoresSorted = useMemo(() => {
     return [...sellers].sort((a, b) => {
@@ -702,6 +763,8 @@ export default function DirectListPage() {
       const runType = job.runType || 'publish';
       if (historyTypeFilter !== 'all' && runType !== historyTypeFilter) return false;
 
+      if (historyStatusFilter !== 'all' && String(job.status || '') !== historyStatusFilter) return false;
+
       if (historyTemplateFilter !== 'all') {
         if (String(job.templateName || '') !== historyTemplateFilter) return false;
       }
@@ -715,19 +778,33 @@ export default function DirectListPage() {
 
       return true;
     });
-  }, [batchHistory, historyTypeFilter, historyTemplateFilter, historyResultFilter]);
+  }, [batchHistory, historyTypeFilter, historyStatusFilter, historyTemplateFilter, historyResultFilter]);
+
+  useEffect(() => {
+    setHistoryPage(0);
+  }, [historyStoreFilter, historyTypeFilter, historyStatusFilter, historyResultFilter, historyTemplateFilter, historyIncludeDerived]);
+
+  const pagedBatchHistory = useMemo(() => {
+    const start = historyPage * HISTORY_PAGE_SIZE;
+    return filteredBatchHistory.slice(start, start + HISTORY_PAGE_SIZE);
+  }, [filteredBatchHistory, historyPage]);
+
+  useEffect(() => {
+    const maxPage = Math.max(0, Math.ceil(filteredBatchHistory.length / HISTORY_PAGE_SIZE) - 1);
+    if (historyPage > maxPage) setHistoryPage(maxPage);
+  }, [filteredBatchHistory.length, historyPage]);
 
   useEffect(() => {
     if (tab !== 1) return undefined;
     void loadBulkJobs();
-    const timer = setInterval(() => { void loadBulkJobs(); }, 15000);
+    const timer = setInterval(() => { void loadBulkJobs(); }, 30000);
     return () => clearInterval(timer);
   }, [tab, loadBulkJobs]);
 
   useEffect(() => {
     if (tab !== 2) return undefined;
     void loadBatchHistory();
-    const timer = setInterval(() => { void loadBatchHistory(); }, 20000);
+    const timer = setInterval(() => { void loadBatchHistory({ silent: true }); }, HISTORY_POLL_MS);
     return () => clearInterval(timer);
   }, [tab, loadBatchHistory]);
 
@@ -757,8 +834,49 @@ export default function DirectListPage() {
     setHistoryListTarget(job);
   };
 
+  const deleteHistoryBatch = async (job) => {
+    if (!job?._id) return;
+    if (job.derived || job.source === 'listings') {
+      setError('Derived listing batches cannot be deleted from history.');
+      return;
+    }
+    const label = [
+      job.templateName || 'batch',
+      job.createdAt ? new Date(job.createdAt).toLocaleString() : '',
+    ].filter(Boolean).join(' · ');
+    if (!window.confirm(`Delete this batch history row?\n\n${label}\n\nThis cannot be undone.`)) {
+      return;
+    }
+
+    setHistoryDeletingId(String(job._id));
+    setError('');
+    setSuccess('');
+    try {
+      await api.delete(`/template-listings/direct-list-history/${encodeURIComponent(job._id)}`);
+      setBatchHistory((prev) => prev.filter((row) => String(row._id) !== String(job._id)));
+      if (expandedBatchId && String(expandedBatchId) === String(job._id)) {
+        setExpandedBatchId('');
+        setExpandedBatchDetail(null);
+      }
+      if (historyDetailsBatch && String(historyDetailsBatch._id) === String(job._id)) {
+        setHistoryDetailsOpen(false);
+        setHistoryDetailsBatch(null);
+      }
+      setSuccess('Batch history deleted.');
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message || 'Failed to delete batch history');
+    } finally {
+      setHistoryDeletingId('');
+    }
+  };
+
   const confirmHistoryListToEbay = async () => {
     const target = historyListTarget;
+    if (!target?._id) {
+      setError('This batch cannot be published.');
+      setHistoryListTarget(null);
+      return;
+    }
     if (!target?.sellerId || !target?.templateId) {
       setError('This batch is missing store or template and cannot be listed.');
       setHistoryListTarget(null);
@@ -768,53 +886,30 @@ export default function DirectListPage() {
     setHistoryListing(true);
     setError('');
     setSuccess('');
-    setBulkBatchProgress(null);
 
     try {
-      const detail = await fetchHistoryBatchDetail(target._id);
-      const asins = [...new Set(
-        (detail?.asins || detail?.results?.map((row) => row.asin) || [])
-          .map((value) => String(value || '').trim().toUpperCase())
-          .filter(Boolean)
-      )];
-
-      if (!asins.length) {
-        setError('No ASINs found in this draft batch.');
-        return;
-      }
+      const { data } = await api.post(
+        `/template-listings/direct-list-history/${encodeURIComponent(target._id)}/publish`
+      );
 
       setHistoryListTarget(null);
-      let merged = await runBulkListBatches({
-        asins,
-        phase: 'list',
-        templateId: target.templateId,
-        sellerId: target.sellerId,
-        region: detail?.region && detail.region !== '—' ? detail.region : region,
+      setBulkResult({
+        success: data.success,
+        total: data.total,
+        successful: data.successful,
+        failed: data.failed,
+        verifyOnly: false,
+        results: data.results || [],
+        message: data.message,
       });
-
-      const failedAsins = merged.results
-        .filter((row) => row.status === 'error')
-        .map((row) => row.asin);
-
-      if (failedAsins.length > 0) {
-        const retryMerged = await runBulkListBatches({
-          asins: failedAsins,
-          phase: 'retry',
-          templateId: target.templateId,
-          sellerId: target.sellerId,
-          region: detail?.region && detail.region !== '—' ? detail.region : region,
-        });
-        merged = mergeListResultsWithRetry(merged, retryMerged);
-      }
-
-      setBulkResult(merged);
-      setSuccess(merged.message || `Listed ${merged.successful || 0}/${merged.total || asins.length} from draft batch.`);
+      setSuccess(data.message || `Published ${data.successful || 0}/${data.total || 0} from draft batch.`);
+      setExpandedBatchId('');
+      setExpandedBatchDetail(null);
       void loadBatchHistory();
     } catch (err) {
-      setError(err?.response?.data?.error || err.message || 'Failed to list draft batch on eBay');
+      setError(err?.response?.data?.error || err.message || 'Failed to publish draft batch on eBay');
     } finally {
       setHistoryListing(false);
-      setBulkBatchProgress(null);
     }
   };
 
@@ -943,55 +1038,145 @@ export default function DirectListPage() {
 
   const handleReviewBulk = async () => {
     if (!canBulk) return;
+    if (bulkExceedsJobLimit) {
+      setError(`Maximum ${BULK_JOB_MAX_ASINS} ASINs per prepare. Split into multiple runs.`);
+      return;
+    }
     setBulkPreviewing(true);
     setError('');
     setSuccess('');
     setBulkResult(null);
-    setBulkBatchProgress(null);
     setBulkPreviewCustomColumns([]);
-    setPreviewItems(createLoadingPreviewItems(parsedBulkAsins));
-    setReviewModalOpen(true);
+    setReviewModalOpen(false);
 
-    const batches = chunkAsins(parsedBulkAsins);
+    const allAsins = parsedBulkAsins;
+    const totalAsins = allAsins.length;
+    setPreviewItems(createLoadingPreviewItems(allAsins));
+    setBulkBatchProgress({
+      phase: 'prepare',
+      current: 0,
+      total: totalAsins,
+      doneAsins: 0,
+      totalAsins,
+      readyAsins: 0,
+      failedAsins: 0,
+      percent: 0,
+    });
+
     const batchResponses = [];
+    let doneAsins = 0;
+    let readyAsins = 0;
+    let failedAsins = 0;
+    let openedReview = false;
+    const fetchDurationByAsin = {};
 
     try {
-      for (let i = 0; i < batches.length; i += 1) {
-        setBulkBatchProgress({ current: i + 1, total: batches.length, phase: 'prepare' });
+      await mapPool(allAsins, PREPARE_CONCURRENCY, async (asin) => {
+        const startedAt = performance.now();
         const { data } = await api.post('/template-listings/direct-list-bulk/preview', {
           templateId: selectedTemplate,
           sellerId: selectedSeller,
           region,
-          asins: batches[i],
+          asins: [asin],
+          concurrency: 1,
+          skipHistory: true,
         });
+        const fetchDurationMs = Math.round(performance.now() - startedAt);
+        fetchDurationByAsin[asin] = fetchDurationMs;
         batchResponses.push(data);
+
+        const batchResults = Array.isArray(data.results) ? data.results : [];
+        const batchReady = batchResults.filter((row) => row.status === 'ready' || row.status === 'success').length;
+        const batchFailed = batchResults.length - batchReady;
+        doneAsins += 1;
+        readyAsins += batchReady;
+        failedAsins += Math.max(0, batchFailed);
 
         if (Array.isArray(data.customColumns) && data.customColumns.length > 0) {
           setBulkPreviewCustomColumns(data.customColumns);
         }
 
-        const batchItems = data.previewItems
+        const batchItems = (data.previewItems
           || data.results?.map((row) => row.reviewItem).filter(Boolean)
-          || [];
+          || []
+        ).map((item) => {
+          const itemAsin = item.asin;
+          const serverTimings = item.fetchTimings
+            || data.results?.find((row) => row.asin === itemAsin)?.fetchTimings
+            || null;
+          return {
+            ...item,
+            fetchTimings: serverTimings,
+            fetchDurationMs: serverTimings?.totalMs ?? fetchDurationByAsin[itemAsin] ?? fetchDurationMs,
+          };
+        });
         if (batchItems.length > 0) {
           setPreviewItems((prev) => {
             const byAsin = Object.fromEntries(batchItems.map((item) => [item.asin, item]));
             return prev.map((item) => byAsin[item.asin] || item);
           });
         }
-      }
+
+        setBulkBatchProgress({
+          phase: 'prepare',
+          current: doneAsins,
+          total: totalAsins,
+          doneAsins,
+          totalAsins,
+          readyAsins,
+          failedAsins,
+          percent: totalAsins > 0 ? Math.round((doneAsins / totalAsins) * 100) : 0,
+          lastFetchDurationMs: batchItems[0]?.fetchDurationMs ?? fetchDurationMs,
+          lastFetchTimings: batchItems[0]?.fetchTimings || null,
+        });
+
+        if (!openedReview && readyAsins > 0) {
+          openedReview = true;
+          setReviewModalOpen(true);
+        }
+
+        return data;
+      });
 
       const merged = mergeBulkPreviewResults(batchResponses);
-      setPreviewItems(merged.previewItems);
+      setPreviewItems(
+        (merged.previewItems || []).map((item) => {
+          const serverTimings = item.fetchTimings || null;
+          return {
+            ...item,
+            fetchTimings: serverTimings,
+            fetchDurationMs: serverTimings?.totalMs ?? fetchDurationByAsin[item.asin] ?? item.fetchDurationMs ?? null,
+          };
+        })
+      );
       if (merged.customColumns?.length) {
         setBulkPreviewCustomColumns(merged.customColumns);
       }
+
+      try {
+        await api.post('/template-listings/direct-list-bulk/preview-history', {
+          templateId: selectedTemplate,
+          sellerId: selectedSeller,
+          region,
+          asins: allAsins,
+          results: merged.results || [],
+        });
+      } catch {
+        // History is best-effort; prepare results already saved as drafts.
+      }
+
       setSuccess(merged.message);
-      void loadBatchHistory();
+      refreshHistoryIfVisible();
+      if (!openedReview && (merged.previewItems || []).some((item) => item && !['error', 'loading', 'blocked'].includes(item.status))) {
+        setReviewModalOpen(true);
+      }
     } catch (err) {
       if (batchResponses.length > 0) {
         const partial = mergeBulkPreviewResults(batchResponses);
         setPreviewItems(partial.previewItems);
+        if (!openedReview && (partial.previewItems || []).some((item) => item && !['error', 'loading', 'blocked'].includes(item.status))) {
+          setReviewModalOpen(true);
+        }
       }
       setError(err.response?.data?.error || 'Failed to prepare bulk preview');
     } finally {
@@ -1115,86 +1300,161 @@ export default function DirectListPage() {
     return mergeBulkListResults(batchResponses);
   };
 
+  const buildJobPacePayload = () => ({
+    delayMinutesBetweenBatches: bulkDelayMinutes,
+    delaySecondsBetweenListings: Math.min(
+      BULK_JOB_MAX_DELAY_SECONDS,
+      Math.max(BULK_JOB_MIN_DELAY_SECONDS, bulkDelaySeconds)
+    ),
+    batchSize: bulkGapMode === 'listing' ? 1 : BULK_BATCH_SIZE,
+  });
+
+  const listingsFromPreviewItems = (items = previewItems) => {
+    return (items || [])
+      .filter((item) => item && !['error', 'loading', 'blocked'].includes(item.status))
+      .map((item) => {
+        const listing = item.generatedListing || item.listing || {};
+        const asin = String(item.asin || listing._asinReference || '').trim().toUpperCase();
+        return listingPayloadForApi({
+          ...listing,
+          _asinReference: asin,
+          asin,
+        });
+      })
+      .filter((listing) => listing?.customLabel && listing?.title);
+  };
+
+  const queuePublishFromReview = async ({ listings, runAt = 'now' } = {}) => {
+    const validListings = (listings || []).filter((listing) => listing?.customLabel && listing?.title);
+    if (!validListings.length) {
+      setError('No ready listings to publish. Prepare and review first.');
+      return null;
+    }
+    if (validListings.length > BULK_JOB_MAX_ASINS) {
+      setError(`Maximum ${BULK_JOB_MAX_ASINS} ASINs per publish job.`);
+      return null;
+    }
+
+    const asinsToList = [...new Set(
+      validListings
+        .map((listing) => String(listing._asinReference || listing.asin || '').trim().toUpperCase())
+        .filter(Boolean)
+    )];
+    const listingsByAsin = buildListingsByAsin(validListings);
+    const scheduledAt = runAt === 'now'
+      ? new Date().toISOString()
+      : new Date(bulkScheduleAt).toISOString();
+
+    const { data } = await api.post('/template-listings/direct-list-jobs/from-review', {
+      templateId: selectedTemplate,
+      sellerId: selectedSeller,
+      region,
+      asins: asinsToList,
+      listingsByAsin,
+      scheduledAt,
+      ...buildJobPacePayload(),
+    });
+    return data;
+  };
+
   const handleListFromReview = async (listings) => {
     const validListings = (listings || []).filter((listing) => listing?.customLabel && listing?.title);
     if (!validListings.length) return;
 
     setReviewModalOpen(false);
-    setBulkProcessing(true);
+    setSchedulingJob(true);
     setError('');
     setSuccess('');
     setBulkResult(null);
-    setBulkBatchProgress(null);
-
-    const asinsToList = validListings
-      .map((listing) => String(listing._asinReference || listing.asin || '').trim().toUpperCase())
-      .filter(Boolean);
-    const listingsByAsin = buildListingsByAsin(validListings);
 
     try {
-      let merged = await runBulkListBatches({
-        asins: asinsToList,
-        listingsByAsin,
-        phase: 'list',
-      });
-
-      const failedAsins = merged.results
-        .filter((row) => row.status === 'error')
-        .map((row) => row.asin);
-
-      if (failedAsins.length > 0) {
-        const retryListingsByAsin = {};
-        for (const asin of failedAsins) {
-          if (listingsByAsin[asin]) retryListingsByAsin[asin] = listingsByAsin[asin];
-        }
-        const retryMerged = await runBulkListBatches({
-          asins: failedAsins,
-          listingsByAsin: retryListingsByAsin,
-          phase: 'retry',
-        });
-        merged = mergeListResultsWithRetry(merged, retryMerged);
-      }
-
-      setBulkResult(merged);
+      const data = await queuePublishFromReview({ listings: validListings, runAt: 'now' });
+      if (!data) return;
       setPreviewItems([]);
-      setSuccess(merged.message);
-      void loadBatchHistory();
+      setSuccess(data.message || `Queued ${data.job?.totalAsins || validListings.length} listing(s) to publish now.`);
+      void loadBulkJobs();
+      refreshHistoryIfVisible();
     } catch (err) {
-      setError(err.response?.data?.error || 'Bulk direct list failed');
+      setError(err.response?.data?.error || 'Failed to queue publish from review');
     } finally {
-      setBulkProcessing(false);
-      setBulkBatchProgress(null);
+      setSchedulingJob(false);
+    }
+  };
+
+  const handlePublishPreparedNow = async () => {
+    if (!canPublishPrepared) {
+      if (readyPreviewCount === 0) {
+        setError('Prepare listings first, then Publish now (or open Review).');
+      }
+      return;
+    }
+    const listings = listingsFromPreviewItems();
+    if (!listings.length) {
+      setReviewModalOpen(true);
+      return;
+    }
+    setSchedulingJob(true);
+    setError('');
+    setSuccess('');
+    try {
+      const data = await queuePublishFromReview({ listings, runAt: 'now' });
+      if (!data) return;
+      setPreviewItems([]);
+      setReviewModalOpen(false);
+      setSuccess(data.message || 'Publish job queued.');
+      void loadBulkJobs();
+      refreshHistoryIfVisible();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to queue publish');
+    } finally {
+      setSchedulingJob(false);
     }
   };
 
   const handleScheduleBulk = async (runAt) => {
-    if (!canBulk || bulkExceedsJobLimit) return;
+    if (!selectedSeller || !selectedTemplate) return;
+    const listings = listingsFromPreviewItems();
+    const asins = listings.length
+      ? listings.map((l) => String(l._asinReference || l.asin || '').trim().toUpperCase()).filter(Boolean)
+      : parsedBulkAsins;
+
+    if (!asins.length) {
+      setError('Prepare listings first, then Schedule.');
+      return;
+    }
+    if (asins.length > BULK_JOB_MAX_ASINS) {
+      setError(`Maximum ${BULK_JOB_MAX_ASINS} ASINs per scheduled job.`);
+      return;
+    }
+
     setSchedulingJob(true);
     setError('');
     setSuccess('');
 
     try {
-      const scheduledAt = runAt === 'now'
-        ? new Date().toISOString()
-        : new Date(bulkScheduleAt).toISOString();
-
-      const { data } = await api.post('/template-listings/direct-list-jobs', {
-        templateId: selectedTemplate,
-        sellerId: selectedSeller,
-        region,
-        asins: parsedBulkAsins,
-        scheduledAt,
-        delayMinutesBetweenBatches: bulkDelayMinutes,
-        delaySecondsBetweenListings: Math.min(
-          BULK_JOB_MAX_DELAY_SECONDS,
-          Math.max(BULK_JOB_MIN_DELAY_SECONDS, bulkDelaySeconds)
-        ),
-        batchSize: bulkGapMode === 'listing' ? 1 : BULK_BATCH_SIZE,
-      });
-
+      let data;
+      if (listings.length) {
+        data = await queuePublishFromReview({ listings, runAt });
+      } else {
+        const scheduledAt = runAt === 'now'
+          ? new Date().toISOString()
+          : new Date(bulkScheduleAt).toISOString();
+        const response = await api.post('/template-listings/direct-list-jobs', {
+          templateId: selectedTemplate,
+          sellerId: selectedSeller,
+          region,
+          asins,
+          scheduledAt,
+          useDrafts: true,
+          ...buildJobPacePayload(),
+        });
+        data = response.data;
+      }
+      if (!data) return;
       setSuccess(data.message || 'Bulk list job queued.');
+      if (listings.length) setPreviewItems([]);
       void loadBulkJobs();
-      void loadBatchHistory();
+      refreshHistoryIfVisible();
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to queue bulk job');
     } finally {
@@ -1218,16 +1478,16 @@ export default function DirectListPage() {
   );
 
   return (
-    <Box sx={{ p: 3, maxWidth: 1100 }}>
-      <Typography variant="h4" gutterBottom>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1100 }}>
+      <Typography variant="h5" gutterBottom sx={{ fontWeight: 600 }}>
         Direct List to eBay
       </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        List SKUs directly on eBay using the Trading API — no CSV or Feed Upload step.
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        List SKUs on eBay via Trading API — no CSV or Feed Upload.
       </Typography>
 
       {tab !== 2 && (
-      <Paper sx={{ p: 3, mb: 3 }}>
+      <Paper sx={{ p: 2, mb: 2 }} variant="outlined">
         <Stack spacing={2.5}>
           <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
             {loadingInit ? (
@@ -1292,10 +1552,17 @@ export default function DirectListPage() {
       <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ mb: 2 }}>
         <Tab label="Single SKU" />
         <Tab label={`Bulk ASINs${parsedBulkAsins.length ? ` (${parsedBulkAsins.length})` : ''}`} />
-        <Tab label={`Batch history${filteredBatchHistory.length ? ` (${filteredBatchHistory.length})` : ''}`} />
+        <Tab
+          label={
+            historyLoadedOnce && filteredBatchHistory.length
+              ? `Batch history (${filteredBatchHistory.length})`
+              : 'Batch history'
+          }
+        />
       </Tabs>
 
-      <Box hidden={tab !== 0}>
+      {tab === 0 && (
+      <Box>
         <>
           <Paper sx={{ p: 3, mb: 3 }}>
             <Stack spacing={2.5}>
@@ -1424,13 +1691,16 @@ export default function DirectListPage() {
           />
         </>
       </Box>
+      )}
 
-      <Box hidden={tab !== 1}>
+      {tab === 1 && (
+      <Box>
         <>
           <Paper sx={{ p: 3, mb: 3 }}>
             <Typography variant="h6" gutterBottom>Bulk ASINs</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Paste ASINs below. Use <strong>Prepare</strong> to open the review modal (Amazon source vs generated listing), then <strong>List on eBay</strong> from there. Use <strong>Run in background / Schedule</strong> for large jobs (up to {BULK_JOB_MAX_ASINS}) without review.
+              Prepare up to {BULK_JOB_MAX_ASINS} → review → <strong>Publish now</strong> (background job starts immediately with your pace) or <strong>Schedule</strong>.
+              Safe to close the page after publish is queued.
             </Typography>
 
             <TextField
@@ -1439,11 +1709,12 @@ export default function DirectListPage() {
               onChange={(e) => setBulkAsinsText(e.target.value.toUpperCase())}
               fullWidth
               multiline
-              minRows={6}
+              minRows={4}
+              maxRows={12}
               placeholder={'B0XXXXXXXX\nB0YYYYYYYY\nB0ZZZZZZZZ'}
               helperText={
                 parsedBulkAsins.length > 0
-                  ? `${parsedBulkAsins.length} valid ASIN(s)${bulkBatchCount > 1 ? ` · ${bulkBatchCount} batches of ${BULK_BATCH_SIZE}` : ''}`
+                  ? `${parsedBulkAsins.length} valid ASIN(s)${bulkBatchCount > 1 ? ` · ${bulkBatchCount} prepare batches of ${PREPARE_BATCH_SIZE}` : ''}${bulkExceedsJobLimit ? ` · over ${BULK_JOB_MAX_ASINS} limit` : ''}`
                   : '0 valid ASIN(s)'
               }
               sx={{ mb: 2 }}
@@ -1456,7 +1727,7 @@ export default function DirectListPage() {
                 onClick={() => setShowListingPace((v) => !v)}
                 sx={{ mb: showListingPace ? 1 : 0 }}
               >
-                {showListingPace ? 'Hide listing pace options' : 'Listing pace (background / schedule)…'}
+                {showListingPace ? 'Hide listing pace options' : 'Listing pace (Publish now / Schedule)…'}
               </Button>
               <Collapse in={showListingPace}>
                 <Paper variant="outlined" sx={{ p: 2 }}>
@@ -1496,7 +1767,7 @@ export default function DirectListPage() {
                       ? { min: BULK_JOB_MIN_DELAY_SECONDS, max: BULK_JOB_MAX_DELAY_SECONDS }
                       : { min: 1, max: 60 }}
                     helperText={formatJobScheduleEstimate(
-                      parsedBulkAsins.length,
+                      readyPreviewCount || parsedBulkAsins.length,
                       bulkGapMode,
                       bulkGapMode === 'listing' ? bulkDelaySeconds : bulkDelayMinutes
                     )}
@@ -1506,37 +1777,76 @@ export default function DirectListPage() {
               </Collapse>
             </Box>
 
+            {bulkBatchProgress?.phase === 'prepare' && (
+              <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: 'action.hover' }}>
+                <Stack spacing={1}>
+                  <Stack direction="row" justifyContent="space-between" alignItems="baseline" flexWrap="wrap" useFlexGap>
+                    <Typography variant="subtitle2">
+                      Preparing {bulkBatchProgress.doneAsins} of {bulkBatchProgress.totalAsins} (
+                      {bulkBatchProgress.percent}%)
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Batch {bulkBatchProgress.current}/{bulkBatchProgress.total}
+                      {bulkBatchProgress.readyAsins != null
+                        ? ` · ready ${bulkBatchProgress.readyAsins}`
+                        : ''}
+                      {bulkBatchProgress.failedAsins
+                        ? ` · failed ${bulkBatchProgress.failedAsins}`
+                        : ''}
+                      {bulkBatchProgress.lastFetchDurationMs != null
+                        ? ` · last ${formatFetchDuration(bulkBatchProgress.lastFetchDurationMs)}`
+                        : ''}
+                      {bulkBatchProgress.lastFetchTimings
+                        ? ` (scrape ${formatFetchDuration(bulkBatchProgress.lastFetchTimings.scrapeMs) || '0'} · overlay ${formatFetchDuration(bulkBatchProgress.lastFetchTimings.overlayMs) || '0'} · AI ${formatFetchDuration(bulkBatchProgress.lastFetchTimings.aiMs) || '0'})`
+                        : ''}
+                    </Typography>
+                  </Stack>
+                  <LinearProgress
+                    variant="determinate"
+                    value={bulkBatchProgress.percent}
+                    sx={{ height: 8, borderRadius: 1 }}
+                  />
+                  <Typography variant="caption" color="text.secondary">
+                    Up to {PREPARE_CONCURRENCY} ASINs in parallel (Scrapingdog + AI). Each row fills when ready; repeats use AI cache.
+                  </Typography>
+                </Stack>
+              </Paper>
+            )}
+
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} flexWrap="wrap" sx={{ mb: 2 }}>
               <Button
                 variant="contained"
                 color="primary"
                 onClick={handleReviewBulk}
-                disabled={!canBulk || bulkPreviewing || bulkProcessing || schedulingJob}
+                disabled={!canBulk || bulkExceedsJobLimit || bulkPreviewing || bulkProcessing || schedulingJob}
                 startIcon={bulkPreviewing ? <CircularProgress size={20} color="inherit" /> : <AutoFixHighIcon />}
               >
-                {bulkPreviewing
-                  ? 'Preparing…'
-                  : `Prepare ${parsedBulkAsins.length || 0} listing${parsedBulkAsins.length === 1 ? '' : 's'}`}
+                {bulkPreviewing && bulkBatchProgress?.phase === 'prepare'
+                  ? `Preparing ${bulkBatchProgress.percent}%`
+                  : bulkPreviewing
+                    ? 'Preparing…'
+                    : `Prepare ${parsedBulkAsins.length || 0} listing${parsedBulkAsins.length === 1 ? '' : 's'}`}
               </Button>
               <Button
                 variant="outlined"
-                disabled={!previewItems.length || reviewModalOpen || bulkProcessing}
+                disabled={!previewItems.length || reviewModalOpen || bulkProcessing || schedulingJob}
                 onClick={() => setReviewModalOpen(true)}
               >
-                Review prepared ({previewItems.filter((item) => item.status === 'success').length})
+                Review prepared ({readyPreviewCount})
               </Button>
               <Button
-                variant="outlined"
-                startIcon={schedulingJob ? <CircularProgress size={18} /> : <CloudUploadIcon />}
-                disabled={!canBulk || bulkPreviewing || bulkProcessing || schedulingJob || bulkExceedsJobLimit}
-                onClick={() => handleScheduleBulk('now')}
+                variant="contained"
+                color="secondary"
+                startIcon={schedulingJob ? <CircularProgress size={18} color="inherit" /> : <CloudUploadIcon />}
+                disabled={!canPublishPrepared || bulkPreviewing || bulkProcessing || schedulingJob}
+                onClick={() => void handlePublishPreparedNow()}
               >
-                Run in background
+                Publish now ({readyPreviewCount})
               </Button>
               <Button
                 variant="outlined"
                 startIcon={<ScheduleIcon />}
-                disabled={!canBulk || bulkPreviewing || bulkProcessing || schedulingJob || bulkExceedsJobLimit}
+                disabled={!canPublishPrepared || bulkPreviewing || bulkProcessing || schedulingJob}
                 onClick={() => setShowScheduleOptions((v) => !v)}
               >
                 Schedule…
@@ -1545,7 +1855,7 @@ export default function DirectListPage() {
 
             {bulkExceedsJobLimit && (
               <Alert severity="warning" sx={{ mb: 2 }}>
-                Maximum {BULK_JOB_MAX_ASINS} ASINs per scheduled job. Split into multiple jobs or use fewer ASINs.
+                Maximum {BULK_JOB_MAX_ASINS} ASINs per prepare/publish. Split into multiple runs.
               </Alert>
             )}
 
@@ -1564,11 +1874,11 @@ export default function DirectListPage() {
                   <Button
                     variant="contained"
                     startIcon={schedulingJob ? <CircularProgress size={18} color="inherit" /> : <ScheduleIcon />}
-                    disabled={!canBulk || schedulingJob || bulkExceedsJobLimit}
+                    disabled={!canPublishPrepared || schedulingJob}
                     onClick={() => handleScheduleBulk('scheduled')}
                     sx={{ alignSelf: 'flex-start' }}
                   >
-                    Schedule {parsedBulkAsins.length || 0} listing{parsedBulkAsins.length === 1 ? '' : 's'}
+                    Schedule {readyPreviewCount || 0} prepared listing{readyPreviewCount === 1 ? '' : 's'}
                   </Button>
                 </Stack>
               </Paper>
@@ -1579,7 +1889,7 @@ export default function DirectListPage() {
             <Paper sx={{ p: 3, mb: 3 }} variant="outlined">
               <Typography variant="h6" gutterBottom>Background jobs</Typography>
               <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
-                Runs on the server — safe to close this page. Refreshes every 15s.
+                Runs on the server with your listing pace — safe to close this page. Refreshes while this tab is open.
               </Typography>
               <TableContainer>
                 <Table size="small">
@@ -1639,17 +1949,30 @@ export default function DirectListPage() {
           )}
         </>
       </Box>
+      )}
 
-      <Box hidden={tab !== 2}>
+      {tab === 2 && (
+      <Box>
         <Paper sx={{ p: 3, mb: 3 }} variant="outlined">
           <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
             <Box>
               <Typography variant="h6">Batch history</Typography>
               <Typography variant="body2" color="text.secondary">
-                Shows saved jobs plus Direct List prepares/publishes grouped by day, store, and template (through today).
+                All Direct List jobs. Open this tab to load; {HISTORY_PAGE_SIZE} per page.
               </Typography>
             </Box>
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+              <FormControlLabel
+                control={(
+                  <Switch
+                    size="small"
+                    checked={historyIncludeDerived}
+                    onChange={(e) => setHistoryIncludeDerived(e.target.checked)}
+                  />
+                )}
+                label="From listings"
+                sx={{ mr: 0.5, '& .MuiFormControlLabel-label': { fontSize: '0.8rem' } }}
+              />
               <FormControl size="small" sx={{ minWidth: 150 }}>
                 <InputLabel>Store</InputLabel>
                 <Select
@@ -1679,6 +2002,21 @@ export default function DirectListPage() {
                   <MenuItem value="draft">Draft</MenuItem>
                   <MenuItem value="publish">Publish</MenuItem>
                   <MenuItem value="verify">Verify</MenuItem>
+                </Select>
+              </FormControl>
+              <FormControl size="small" sx={{ minWidth: 130 }}>
+                <InputLabel>Status</InputLabel>
+                <Select
+                  label="Status"
+                  value={historyStatusFilter}
+                  onChange={(e) => setHistoryStatusFilter(e.target.value)}
+                >
+                  <MenuItem value="all">All statuses</MenuItem>
+                  <MenuItem value="done">done</MenuItem>
+                  <MenuItem value="failed">failed</MenuItem>
+                  <MenuItem value="processing">processing</MenuItem>
+                  <MenuItem value="pending">pending</MenuItem>
+                  <MenuItem value="cancelled">cancelled</MenuItem>
                 </Select>
               </FormControl>
               <FormControl size="small" sx={{ minWidth: 140 }}>
@@ -1730,7 +2068,7 @@ export default function DirectListPage() {
           ) : filteredBatchHistory.length === 0 ? (
             <Alert severity="info">
               No batch history found for the current filters.
-              Try All stores / All types, or clear OK/Failed and Template filters.
+              Try All stores / All types / All statuses, or clear OK/Failed and Template filters.
             </Alert>
           ) : (
             <TableContainer>
@@ -1750,7 +2088,7 @@ export default function DirectListPage() {
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {filteredBatchHistory.map((job) => {
+                  {pagedBatchHistory.map((job) => {
                     const runType = job.runType || 'publish';
                     const isExpanded = expandedBatchId === job._id;
                     return (
@@ -1761,16 +2099,46 @@ export default function DirectListPage() {
                               {isExpanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
                             </IconButton>
                           </TableCell>
-                          <TableCell sx={{ whiteSpace: 'nowrap' }}>
-                            {job.createdAt ? new Date(job.createdAt).toLocaleString() : '—'}
+                          <TableCell sx={{ whiteSpace: 'nowrap', width: 1, py: 0.75 }}>
+                            {job.createdAt ? (
+                              <Box>
+                                <Typography variant="body2" component="div" sx={{ lineHeight: 1.25 }}>
+                                  {new Date(job.createdAt).toLocaleDateString()}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" component="div" sx={{ lineHeight: 1.2, fontSize: '0.7rem' }}>
+                                  {new Date(job.createdAt).toLocaleTimeString()}
+                                </Typography>
+                              </Box>
+                            ) : '—'}
                           </TableCell>
                           <TableCell>
                             <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
                               <Chip
                                 size="small"
                                 label={runType === 'draft' ? 'Draft' : runType === 'verify' ? 'Verify' : 'Publish'}
-                                color={runType === 'draft' ? 'default' : runType === 'verify' ? 'secondary' : 'primary'}
+                                color={
+                                  runType === 'publish' && job.status === 'failed'
+                                    ? 'error'
+                                    : runType === 'publish' && job.status === 'done'
+                                      ? 'success'
+                                      : runType === 'draft' && job.status === 'done'
+                                        ? 'info'
+                                        : runType === 'draft'
+                                          ? 'default'
+                                          : runType === 'verify'
+                                            ? 'secondary'
+                                            : 'primary'
+                                }
                                 variant="outlined"
+                                sx={
+                                  runType === 'publish' && job.status === 'failed'
+                                    ? { color: 'error.main', borderColor: 'error.main', fontWeight: 600 }
+                                    : runType === 'publish' && job.status === 'done'
+                                      ? { color: 'success.main', borderColor: 'success.main', fontWeight: 600 }
+                                      : runType === 'draft' && job.status === 'done'
+                                        ? { color: 'info.main', borderColor: 'info.main', fontWeight: 600 }
+                                        : undefined
+                                }
                               />
                               <Chip
                                 size="small"
@@ -1808,7 +2176,7 @@ export default function DirectListPage() {
                                 size="small"
                                 variant="outlined"
                                 onClick={() => void openHistoryDetails(job)}
-                                disabled={historyDetailsLoading || historyListing}
+                                disabled={historyDetailsLoading || historyListing || Boolean(historyDeletingId)}
                               >
                                 Details
                               </Button>
@@ -1817,9 +2185,20 @@ export default function DirectListPage() {
                                   size="small"
                                   variant="contained"
                                   onClick={() => openHistoryListConfirm(job)}
-                                  disabled={historyListing || !job.sellerId || !job.templateId}
+                                  disabled={historyListing || !job.sellerId || !job.templateId || Boolean(historyDeletingId)}
                                 >
-                                  List
+                                  Publish
+                                </Button>
+                              )}
+                              {!job.derived && job.source !== 'listings' && (
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  color="error"
+                                  onClick={() => void deleteHistoryBatch(job)}
+                                  disabled={historyListing || historyDeletingId === String(job._id)}
+                                >
+                                  {historyDeletingId === String(job._id) ? 'Deleting…' : 'Delete'}
                                 </Button>
                               )}
                             </Stack>
@@ -1910,23 +2289,31 @@ export default function DirectListPage() {
                   })}
                 </TableBody>
               </Table>
+              <TablePagination
+                component="div"
+                count={filteredBatchHistory.length}
+                page={historyPage}
+                onPageChange={(_e, nextPage) => setHistoryPage(nextPage)}
+                rowsPerPage={HISTORY_PAGE_SIZE}
+                rowsPerPageOptions={[HISTORY_PAGE_SIZE]}
+                onRowsPerPageChange={() => {}}
+              />
             </TableContainer>
           )}
         </Paper>
       </Box>
+      )}
 
-      {bulkBatchProgress && (
+      {bulkBatchProgress && bulkBatchProgress.phase !== 'prepare' && (
         <Paper sx={{ p: 2, mb: 2 }} variant="outlined">
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
             {bulkBatchProgress.phase === 'retry'
               ? 'Retrying failed ASINs'
-              : bulkBatchProgress.phase === 'list'
-                ? 'Listing'
-                : 'Preparing'} batch {bulkBatchProgress.current} of {bulkBatchProgress.total}…
+              : 'Listing'} batch {bulkBatchProgress.current} of {bulkBatchProgress.total}…
           </Typography>
           <LinearProgress
             variant="determinate"
-            value={(bulkBatchProgress.current / bulkBatchProgress.total) * 100}
+            value={(bulkBatchProgress.current / Math.max(bulkBatchProgress.total, 1)) * 100}
           />
         </Paper>
       )}
@@ -2182,6 +2569,18 @@ export default function DirectListPage() {
           )}
         </DialogContent>
         <DialogActions>
+          {historyDetailsBatch?.runType === 'draft' && historyDetailsBatch?.sellerId && historyDetailsBatch?.templateId && (
+            <Button
+              variant="contained"
+              onClick={() => {
+                openHistoryListConfirm(historyDetailsBatch);
+                setHistoryDetailsOpen(false);
+              }}
+              disabled={historyListing || historyDetailsLoading}
+            >
+              Publish to eBay
+            </Button>
+          )}
           <Button onClick={() => {
             setHistoryDetailsOpen(false);
             setHistoryDetailsBatch(null);
@@ -2202,7 +2601,7 @@ export default function DirectListPage() {
         fullWidth
         maxWidth="xs"
       >
-        <DialogTitle>List draft batch on eBay?</DialogTitle>
+        <DialogTitle>Publish draft batch on eBay?</DialogTitle>
         <DialogContent dividers>
           <Typography variant="body2" sx={{ mb: 1 }}>
             Publish <strong>{historyListTarget?.totalAsins || 0}</strong> draft ASIN(s) for{' '}
@@ -2210,7 +2609,7 @@ export default function DirectListPage() {
             <strong>{historyListTarget?.templateName || 'template'}</strong>?
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            This lists directly on eBay (not verify-only). Failed items will be retried once.
+            Uses saved draft listings, lists them on eBay, then revises this batch to Publish and stores eBay item IDs.
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -2220,7 +2619,7 @@ export default function DirectListPage() {
             onClick={() => void confirmHistoryListToEbay()}
             disabled={historyListing}
           >
-            {historyListing ? 'Listing…' : 'List on eBay'}
+            {historyListing ? 'Publishing…' : 'Publish to eBay'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -2233,7 +2632,7 @@ export default function DirectListPage() {
         pricingConfig={pricingConfig}
         previewItems={previewItems}
         hideSaveButton
-        listDirectlyLabel="List on eBay"
+        listDirectlyLabel="Publish to eBay"
         onListDirectly={handleListFromReview}
         onClose={() => {
           if (bulkProcessing) return;

@@ -14,6 +14,7 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import SearchIcon from '@mui/icons-material/Search';
 import DownloadIcon from '@mui/icons-material/Download';
 import VisibilityIcon from '@mui/icons-material/Visibility';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import api from '../../lib/api';
 
 function formatListingPrice(value) {
@@ -155,6 +156,7 @@ export default function TemplateDatabasePage() {
   // Details dialog state
   const [detailsDialogOpen, setDetailsDialogOpen] = useState(false);
   const [selectedListing, setSelectedListing] = useState(null);
+  const [deletingListingId, setDeletingListingId] = useState('');
 
   const sortedSummaryRows = useMemo(() => {
     return [...summaryRows].sort((a, b) =>
@@ -525,6 +527,44 @@ export default function TemplateDatabasePage() {
   const handleCloseDetails = () => {
     setDetailsDialogOpen(false);
     setSelectedListing(null);
+  };
+
+  const handleDeleteListing = async (listing) => {
+    if (!listing?._id) return;
+    const label = [
+      listing.customLabel || listing._asinReference || '',
+      listing.title ? String(listing.title).slice(0, 80) : '',
+    ].filter(Boolean).join(' · ') || String(listing._id);
+
+    if (!window.confirm(`Delete this listing from the database?\n\n${label}\n\nThis cannot be undone.`)) {
+      return;
+    }
+
+    const id = String(listing._id);
+    setDeletingListingId(id);
+    setError('');
+    try {
+      await api.delete(`/template-listings/${encodeURIComponent(id)}`);
+      setListings((prev) => prev.filter((row) => String(row._id) !== id));
+      setUserStoreListings((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((key) => {
+          next[key] = (next[key] || []).filter((row) => String(row._id) !== id);
+        });
+        return next;
+      });
+      setPagination((prev) => ({
+        ...prev,
+        total: Math.max(0, (prev.total || 0) - 1),
+      }));
+      if (selectedListing && String(selectedListing._id) === id) {
+        handleCloseDetails();
+      }
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message || 'Failed to delete listing');
+    } finally {
+      setDeletingListingId('');
+    }
   };
 
   const clearAllFilters = () => {
@@ -1200,15 +1240,31 @@ export default function TemplateDatabasePage() {
                                     </TableCell>
                                     <TableCell>{formatListedDate(listing.createdAt)}</TableCell>
                                     <TableCell align="right">
-                                      <IconButton
-                                        size="small"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleViewDetails(listing);
-                                        }}
-                                      >
-                                        <VisibilityIcon fontSize="small" />
-                                      </IconButton>
+                                      <Stack direction="row" spacing={0.25} justifyContent="flex-end">
+                                        <IconButton
+                                          size="small"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleViewDetails(listing);
+                                          }}
+                                          title="View Details"
+                                          color="primary"
+                                        >
+                                          <VisibilityIcon fontSize="small" />
+                                        </IconButton>
+                                        <IconButton
+                                          size="small"
+                                          color="error"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            void handleDeleteListing(listing);
+                                          }}
+                                          title="Delete listing"
+                                          disabled={deletingListingId === String(listing._id)}
+                                        >
+                                          <DeleteOutlineIcon fontSize="small" />
+                                        </IconButton>
+                                      </Stack>
                                     </TableCell>
                                   </TableRow>
                                 ))}
@@ -1404,15 +1460,28 @@ export default function TemplateDatabasePage() {
                     </Typography>
                   </Stack>
 
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<VisibilityIcon />}
-                    onClick={() => handleViewDetails(listing)}
-                    fullWidth
-                  >
-                    View Details
-                  </Button>
+                  <Stack direction="row" spacing={1}>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<VisibilityIcon />}
+                      onClick={() => handleViewDetails(listing)}
+                      fullWidth
+                    >
+                      View
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      color="error"
+                      startIcon={<DeleteOutlineIcon />}
+                      onClick={() => void handleDeleteListing(listing)}
+                      disabled={deletingListingId === String(listing._id)}
+                      fullWidth
+                    >
+                      {deletingListingId === String(listing._id) ? 'Deleting…' : 'Delete'}
+                    </Button>
+                  </Stack>
                 </Stack>
               </Paper>
             ))}
@@ -1437,7 +1506,7 @@ export default function TemplateDatabasePage() {
                   <TableCell sx={{ fontWeight: 'bold', width: 100 }}>eBay</TableCell>
                   <TableCell sx={{ fontWeight: 'bold', width: 80 }}>Qty</TableCell>
                   <TableCell sx={{ fontWeight: 'bold', width: 100 }}>Status</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 'bold', width: 100 }}>Actions</TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 'bold', width: 120 }}>Actions</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -1605,14 +1674,25 @@ export default function TemplateDatabasePage() {
                       />
                     </TableCell>
                     <TableCell align="right">
-                      <IconButton
-                        size="small"
-                        onClick={() => handleViewDetails(listing)}
-                        title="View Details"
-                        color="primary"
-                      >
-                        <VisibilityIcon sx={{ fontSize: 18 }} />
-                      </IconButton>
+                      <Stack direction="row" spacing={0.25} justifyContent="flex-end">
+                        <IconButton
+                          size="small"
+                          onClick={() => handleViewDetails(listing)}
+                          title="View Details"
+                          color="primary"
+                        >
+                          <VisibilityIcon sx={{ fontSize: 18 }} />
+                        </IconButton>
+                        <IconButton
+                          size="small"
+                          color="error"
+                          onClick={() => void handleDeleteListing(listing)}
+                          title="Delete listing"
+                          disabled={deletingListingId === String(listing._id)}
+                        >
+                          <DeleteOutlineIcon sx={{ fontSize: 18 }} />
+                        </IconButton>
+                      </Stack>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -1995,6 +2075,18 @@ export default function TemplateDatabasePage() {
         </DialogContent>
         <Divider />
         <DialogActions sx={{ px: 3, py: 2 }}>
+          {selectedListing?._id && (
+            <Button
+              color="error"
+              variant="outlined"
+              startIcon={<DeleteOutlineIcon />}
+              onClick={() => void handleDeleteListing(selectedListing)}
+              disabled={deletingListingId === String(selectedListing._id)}
+              sx={{ mr: 'auto' }}
+            >
+              {deletingListingId === String(selectedListing._id) ? 'Deleting…' : 'Delete'}
+            </Button>
+          )}
           <Button onClick={handleCloseDetails} variant="outlined">
             Close
           </Button>

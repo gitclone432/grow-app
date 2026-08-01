@@ -6,6 +6,25 @@ import ListingTemplate from '../models/ListingTemplate.js';
 import User from '../models/User.js';
 import { chunkDirectListAsins } from './directListJobRunner.js';
 import { DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE } from '../models/DirectListJob.js';
+import {
+  processDirectListBulk,
+  templateListingToDirectListPayload,
+} from './directListPrepare.js';
+import { ensureValidToken } from '../routes/ebay.js';
+
+const DRAFT_PUBLISH_CHUNK_SIZE = 25;
+const DRAFT_PUBLISH_MAX_ASINS = 200;
+
+function mapPublishRow(row = {}) {
+  return {
+    asin: String(row.asin || '').trim().toUpperCase(),
+    status: row.status === 'success' ? 'success' : 'error',
+    sku: row.sku || row.listing?.customLabel || '',
+    itemId: row.itemId != null ? String(row.itemId) : '',
+    listingUrl: row.listingUrl || '',
+    error: row.error || '',
+  };
+}
 
 function mapRowToResult(row = {}) {
   const rawStatus = String(row.status || 'error');
@@ -321,34 +340,293 @@ export async function getDerivedDirectListBatchDetail(encodedId) {
   };
 }
 
+/**
+ * Publish a draft Direct List history batch to eBay, then revise the batch to
+ * runType=publish with per-ASIN eBay item IDs / URLs saved on the job.
+ */
+export async function publishDirectListDraftBatch(batchId, { createdBy = null } = {}) {
+  const id = String(batchId || '').trim();
+  if (!id) {
+    const err = new Error('Batch id is required');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let job = null;
+  let sellerId = null;
+  let templateId = null;
+  let region = 'US';
+  let asins = [];
+  let derived = false;
+
+  const derivedParts = decodeDerivedBatchId(id);
+  if (derivedParts) {
+    if ((derivedParts.status || 'draft') !== 'draft') {
+      const err = new Error('Only draft batches can be published');
+      err.statusCode = 400;
+      throw err;
+    }
+    derived = true;
+    const detail = await getDerivedDirectListBatchDetail(id);
+    if (!detail) {
+      const err = new Error('Batch not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    sellerId = detail.sellerId;
+    templateId = detail.templateId;
+    region = detail.region && detail.region !== '—' ? detail.region : 'US';
+    asins = [...new Set(
+      (detail.asins || [])
+        .map((value) => String(value || '').trim().toUpperCase())
+        .filter(Boolean)
+    )];
+  } else {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      const err = new Error('Invalid batch id');
+      err.statusCode = 400;
+      throw err;
+    }
+    job = await DirectListJob.findById(id);
+    if (!job) {
+      const err = new Error('Batch not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    if ((job.runType || 'publish') !== 'draft') {
+      const err = new Error('Only draft batches can be published');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (['pending', 'processing'].includes(job.status)) {
+      const err = new Error('This batch is still running; wait until it finishes before publishing');
+      err.statusCode = 409;
+      throw err;
+    }
+    sellerId = String(job.sellerId);
+    templateId = String(job.templateId);
+    region = job.region || 'US';
+    asins = [...new Set(
+      (job.asins || [])
+        .map((value) => String(value || '').trim().toUpperCase())
+        .filter(Boolean)
+    )];
+  }
+
+  if (!sellerId || !templateId) {
+    const err = new Error('This batch is missing store or template and cannot be published');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!asins.length) {
+    const err = new Error('No ASINs found in this draft batch');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (asins.length > DRAFT_PUBLISH_MAX_ASINS) {
+    const err = new Error(`Maximum ${DRAFT_PUBLISH_MAX_ASINS} ASINs can be published from history at once`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const seller = await Seller.findById(sellerId);
+  if (!seller) {
+    const err = new Error('Seller not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const draftDocs = await TemplateListing.find({
+    deletedAt: null,
+    listingOrigin: 'direct_list',
+    sellerId,
+    templateId,
+    status: 'draft',
+    _asinReference: { $in: asins },
+  })
+    .select('+_asinReference')
+    .lean();
+
+  const listingsByAsin = {};
+  for (const doc of draftDocs) {
+    const asin = String(doc._asinReference || '').trim().toUpperCase();
+    if (!asin || listingsByAsin[asin]) continue;
+    listingsByAsin[asin] = templateListingToDirectListPayload(doc);
+  }
+
+  // Already-live listings for these ASINs (skip re-add; keep item id).
+  const activeDocs = await TemplateListing.find({
+    deletedAt: null,
+    listingOrigin: 'direct_list',
+    sellerId,
+    templateId,
+    status: 'active',
+    ebayItemId: { $nin: [null, ''] },
+    _asinReference: { $in: asins },
+  })
+    .select('+_asinReference customLabel ebayItemId ebayListingUrl')
+    .lean();
+
+  const alreadyLiveByAsin = {};
+  for (const doc of activeDocs) {
+    const asin = String(doc._asinReference || '').trim().toUpperCase();
+    if (!asin || alreadyLiveByAsin[asin]) continue;
+    alreadyLiveByAsin[asin] = {
+      asin,
+      status: 'success',
+      sku: doc.customLabel || '',
+      itemId: String(doc.ebayItemId),
+      listingUrl: doc.ebayListingUrl || `https://www.ebay.com/itm/${doc.ebayItemId}`,
+      error: '',
+    };
+  }
+
+  const toPublish = asins.filter((asin) => !alreadyLiveByAsin[asin]);
+  const token = toPublish.length ? await ensureValidToken(seller) : null;
+  const publishedRows = [];
+
+  for (const chunk of chunkDirectListAsins(toPublish, DRAFT_PUBLISH_CHUNK_SIZE)) {
+    if (!chunk.length) continue;
+    const bulkResult = await processDirectListBulk({
+      templateId,
+      sellerId,
+      asins: chunk,
+      region,
+      verifyOnly: false,
+      listingsByAsin,
+      token,
+      concurrency: 2,
+      createdBy,
+    });
+    publishedRows.push(...(bulkResult.results || []).map(mapPublishRow));
+  }
+
+  const byAsin = {
+    ...Object.fromEntries(Object.entries(alreadyLiveByAsin)),
+    ...Object.fromEntries(publishedRows.map((row) => [row.asin, row])),
+  };
+  const results = asins.map((asin) => byAsin[asin] || {
+    asin,
+    status: 'error',
+    sku: '',
+    itemId: '',
+    listingUrl: '',
+    error: 'No draft listing found to publish for this ASIN',
+  });
+
+  const successfulCount = results.filter((row) => row.status === 'success').length;
+  const failedCount = results.length - successfulCount;
+  const now = new Date();
+
+  let batch;
+  if (job) {
+    job.runType = 'publish';
+    job.execution = job.execution || 'sync';
+    job.status = results.length > 0 && failedCount === results.length ? 'failed' : 'done';
+    job.results = results;
+    job.successfulCount = successfulCount;
+    job.failedCount = failedCount;
+    job.lastError = failedCount
+      ? (results.find((row) => row.status === 'error')?.error || 'Some listings failed')
+      : '';
+    job.completedAt = now;
+    job.startedAt = job.startedAt || now;
+    job.currentBatchIndex = Math.max(job.currentBatchIndex || 0, 1);
+    await job.save();
+    batch = enrichJobRow(job.toObject());
+  } else {
+    const created = await recordDirectListBatchHistory({
+      sellerId,
+      templateId,
+      region,
+      runType: 'publish',
+      asins,
+      results,
+      createdBy,
+    });
+    batch = enrichJobRow(created.toObject());
+  }
+
+  return {
+    success: failedCount === 0,
+    total: results.length,
+    successful: successfulCount,
+    failed: failedCount,
+    results,
+    batch,
+    derived,
+    message: `Published ${successfulCount}/${results.length} listing(s) on eBay from draft batch.`,
+  };
+}
+
 export async function listDirectListBatchHistory({
   sellerId = null,
-  limit = 100,
+  limit = 5000,
+  includeDerived = false,
 } = {}) {
+  const requested = Number(limit);
+  const capped = Number.isFinite(requested) && requested > 0
+    ? Math.min(Math.max(Math.floor(requested), 1), 10000)
+    : 10000;
   const jobFilter = {};
   if (sellerId) jobFilter.sellerId = sellerId;
 
-  const [jobs, derived] = await Promise.all([
-    DirectListJob.find(jobFilter)
-      .sort({ createdAt: -1 })
-      .limit(Math.min(Math.max(limit, 1), 100))
-      .select('-results')
-      .populate('templateId', 'name')
-      .populate({
-        path: 'sellerId',
-        select: 'user',
-        populate: { path: 'user', select: 'username email' },
-      })
-      .populate('createdBy', 'username email')
-      .lean(),
-    listDerivedDirectListBatches({ sellerId, limit }),
-  ]);
+  const jobs = await DirectListJob.find(jobFilter)
+    .sort({ createdAt: -1 })
+    .limit(capped)
+    .select('-results')
+    .populate('templateId', 'name')
+    .populate({
+      path: 'sellerId',
+      select: 'user',
+      populate: { path: 'user', select: 'username email' },
+    })
+    .populate('createdBy', 'username email')
+    .lean();
 
   const jobRows = jobs.map(enrichJobRow);
-  // Prefer real job rows when both exist for same day/store/template; keep both otherwise.
+  if (!includeDerived) {
+    return jobRows;
+  }
+
+  // Derived listing-day groups are expensive; only fill remaining slots.
+  const remaining = Math.max(0, capped - jobRows.length);
+  if (remaining === 0) return jobRows.slice(0, capped);
+
+  const derived = await listDerivedDirectListBatches({
+    sellerId,
+    limit: Math.min(remaining, 500),
+  });
   const merged = [...jobRows, ...derived].sort(
     (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
   );
 
-  return merged.slice(0, Math.min(Math.max(limit, 1), 300));
+  return merged.slice(0, capped);
+}
+
+/** Permanently remove a Direct List job history row (not derived listing batches). */
+export async function deleteDirectListBatchHistory(id) {
+  const rawId = String(id || '').trim();
+  if (!rawId) {
+    const error = new Error('Batch id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (decodeDerivedBatchId(rawId)) {
+    const error = new Error('Derived listing batches cannot be deleted from history');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!mongoose.Types.ObjectId.isValid(rawId)) {
+    const error = new Error('Invalid batch id');
+    error.statusCode = 400;
+    throw error;
+  }
+  const deleted = await DirectListJob.findByIdAndDelete(rawId).lean();
+  if (!deleted) {
+    const error = new Error('Batch not found');
+    error.statusCode = 404;
+    throw error;
+  }
+  return { success: true, id: rawId, message: 'Batch history deleted' };
 }

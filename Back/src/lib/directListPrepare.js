@@ -89,8 +89,17 @@ function templateDescriptionNeedsAiAutofill(coreFieldDefaults = {}) {
   return /\{\{AI_FEATURE_BULLETS\}\}|\{\{AI_DESCRIPTION\}\}/i.test(desc);
 }
 
-async function resolveDescriptionAiText(amazonData, template, pricingConfig, customColumns, coreFieldDefaults, reuseOptions = {}) {
+async function resolveDescriptionAiText(
+  amazonData,
+  template,
+  pricingConfig,
+  customColumns,
+  coreFieldDefaults,
+  reuseOptions = {},
+  { skipAi = false } = {}
+) {
   if (!amazonData || !templateDescriptionNeedsAiAutofill(coreFieldDefaults)) return '';
+  if (skipAi) return '';
 
   const descriptionAiConfig = resolveDescriptionAiAutofillConfig(template);
   if (!descriptionAiConfig) return '';
@@ -230,6 +239,111 @@ function buildPersistableListingFields(listingPayload = {}, storeListerApplied =
     out[key] = merged[key];
   }
   return out;
+}
+
+function customFieldsToObject(customFields) {
+  if (!customFields) return {};
+  if (customFields instanceof Map) return Object.fromEntries(customFields.entries());
+  if (typeof customFields === 'object') return { ...customFields };
+  return {};
+}
+
+/** Convert a saved TemplateListing draft into a Direct List payload. */
+export function templateListingToDirectListPayload(doc = {}) {
+  const asin = String(doc._asinReference || '').trim().toUpperCase();
+  const {
+    _id,
+    __v,
+    sellerId,
+    templateId,
+    createdAt,
+    updatedAt,
+    deletedAt,
+    createdBy,
+    status,
+    ebayItemId,
+    ebayListingUrl,
+    ebayPublishedAt,
+    amazonSourceSnapshot,
+    amazonSourceRegion,
+    listingOrigin,
+    customFields,
+    ...rest
+  } = doc;
+
+  return {
+    ...rest,
+    customFields: customFieldsToObject(customFields),
+    _asinReference: asin || undefined,
+  };
+}
+
+/**
+ * Load draft TemplateListing rows for Direct List job publish (preserves review edits).
+ */
+export async function loadDraftListingsByAsin({
+  sellerId,
+  templateId,
+  asins = [],
+} = {}) {
+  const cleaned = [...new Set(
+    (asins || [])
+      .map((value) => String(value || '').trim().toUpperCase())
+      .filter(Boolean)
+  )];
+  if (!sellerId || !templateId || cleaned.length === 0) return {};
+
+  const docs = await TemplateListing.find({
+    deletedAt: null,
+    listingOrigin: 'direct_list',
+    sellerId,
+    templateId,
+    status: 'draft',
+    _asinReference: { $in: cleaned },
+  })
+    .select('+_asinReference')
+    .lean();
+
+  const listingsByAsin = {};
+  for (const doc of docs) {
+    const asin = String(doc._asinReference || '').trim().toUpperCase();
+    if (!asin || listingsByAsin[asin]) continue;
+    listingsByAsin[asin] = templateListingToDirectListPayload(doc);
+  }
+  return listingsByAsin;
+}
+
+/** Upsert reviewed listing payloads as drafts before queueing a publish job. */
+export async function persistReviewedDirectListDrafts({
+  templateId,
+  sellerId,
+  listingsByAsin = {},
+  region = 'US',
+  createdBy = null,
+} = {}) {
+  const entries = Object.entries(listingsByAsin || {});
+  let saved = 0;
+  for (const [asinKey, listing] of entries) {
+    if (!listing || typeof listing !== 'object') continue;
+    const asin = String(listing._asinReference || asinKey || '').trim().toUpperCase();
+    const listingPayload = {
+      ...listing,
+      _asinReference: asin || undefined,
+      customLabel: listing.customLabel || (asin ? generateSKUFromASIN(asin) : ''),
+    };
+    if (!listingPayload.customLabel) continue;
+    await persistTemplateListingRecord({
+      templateId,
+      sellerId,
+      listingPayload,
+      status: 'draft',
+      createdBy,
+      region,
+      listingOrigin: 'direct_list',
+    });
+    saved += 1;
+  }
+  return { saved };
 }
 
 /** Upsert full listing row to Listings Database (TemplateListing). */
@@ -372,8 +486,10 @@ export function buildDirectListReviewItem({
   aiDescription = '',
   error = null,
   missing = undefined,
+  fetchTimings = null,
 }) {
   const sku = listingPayload?.customLabel || generateSKUFromASIN(asin);
+  const timings = fetchTimings || amazonData?._fetchTimings || null;
   if (error || !listingPayload) {
     return {
       id: `preview-${asin}`,
@@ -388,6 +504,8 @@ export function buildDirectListReviewItem({
       errors: [error || 'Failed to prepare listing'],
       status: 'error',
       missing,
+      fetchTimings: timings,
+      fetchDurationMs: timings?.totalMs ?? null,
     };
   }
 
@@ -411,6 +529,8 @@ export function buildDirectListReviewItem({
     warnings: [],
     errors: [],
     status: 'success',
+    fetchTimings: timings,
+    fetchDurationMs: timings?.totalMs ?? null,
   };
 }
 
@@ -456,6 +576,15 @@ export async function prepareDirectListPayload({
   defaults = {},
   context = null,
 }) {
+  const prepareStarted = Date.now();
+  let aiMs = 0;
+  const runAiDescription = async (...args) => {
+    const started = Date.now();
+    const text = await resolveDescriptionAiText(...args);
+    aiMs += Date.now() - started;
+    return text;
+  };
+
   const ctx = context || await loadDirectListContext(templateId, sellerId);
   const {
     template,
@@ -479,7 +608,8 @@ export async function prepareDirectListPayload({
   let pricingCalculation = null;
 
   if (normalizedAsin) {
-    const { reuseOptions, isReuse } = await buildListingReuseContext(normalizedAsin);
+    const reuseContext = await buildListingReuseContext(normalizedAsin, { templateId });
+    const { reuseOptions, isReuse } = reuseContext;
     listingReuseOptions = reuseOptions;
     reusedFromDatabase = isReuse;
 
@@ -498,7 +628,7 @@ export async function prepareDirectListPayload({
     reusedFromDatabase = autofillReuse || isReuse;
 
     if (templateDescriptionNeedsAiAutofill(coreFieldDefaults)) {
-      aiDescription = await resolveDescriptionAiText(
+      aiDescription = await runAiDescription(
         amazonData,
         template,
         pricingConfig,
@@ -609,7 +739,7 @@ export async function prepareDirectListPayload({
 
   if (hasUnsubstitutedPlaceholders(listingPayload.description)) {
     if (!aiDescription && amazonData) {
-      aiDescription = await resolveDescriptionAiText(
+      aiDescription = await runAiDescription(
         amazonData,
         template,
         pricingConfig,
@@ -644,6 +774,19 @@ export async function prepareDirectListPayload({
     brandResult.brandApplied
   );
 
+  const scrapeMs = Number(amazonData?._fetchTimings?.scrapeMs) || 0;
+  const overlayMs = Number(amazonData?._fetchTimings?.overlayMs) || 0;
+  const totalMs = Date.now() - prepareStarted;
+  const otherMs = Math.max(0, totalMs - scrapeMs - overlayMs - aiMs);
+  const fetchTimings = {
+    scrapeMs,
+    overlayMs,
+    aiMs,
+    otherMs,
+    totalMs,
+    source: amazonData?._fetchTimings?.source || amazonData?.scrapeSource || null,
+  };
+
   return {
     listingPayload,
     amazonData,
@@ -654,6 +797,7 @@ export async function prepareDirectListPayload({
     reusedFromDatabase,
     pricingCalculation,
     aiDescriptionText: aiDescription,
+    fetchTimings,
   };
 }
 
@@ -779,7 +923,7 @@ export async function previewDirectListPayload({
     amazonSource: formatAmazonSource(amazonData),
     reusedFromDatabase: Boolean(reusedFromDatabase),
     message: reusedFromDatabase
-      ? 'Listing prepared from Listings Database (title/description rephrased only) and saved as draft.'
+      ? 'Listing prepared from Listings Database (title and description regenerated fresh) and saved as draft.'
       : 'Listing prepared for review and saved to Listings Database (draft).',
   };
 }
@@ -806,7 +950,7 @@ export async function previewDirectListBulk({
   region = 'US',
   defaults = {},
   listingOverrides = {},
-  concurrency = 2,
+  concurrency = 1,
   createdBy = null,
 }) {
   const context = await loadDirectListContext(templateId, sellerId);
@@ -820,6 +964,7 @@ export async function previewDirectListBulk({
         amazonData,
         pricingCalculation,
         aiDescriptionText,
+        fetchTimings,
       } = await prepareDirectListPayload({
         templateId,
         sellerId,
@@ -847,6 +992,7 @@ export async function previewDirectListBulk({
         pricingCalculation,
         storeListerApplied,
         aiDescription: aiDescriptionText,
+        fetchTimings,
       });
       return {
         asin,
@@ -855,6 +1001,7 @@ export async function previewDirectListBulk({
         listing: formatListingSummary(listingPayload, asin),
         storeListerApplied,
         reviewItem,
+        fetchTimings,
       };
     } catch (error) {
       const reviewItem = buildDirectListReviewItem({

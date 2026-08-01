@@ -7,7 +7,7 @@ import DirectListJob, {
 } from '../models/DirectListJob.js';
 import Seller from '../models/Seller.js';
 import { ensureValidToken } from '../routes/ebay.js';
-import { processDirectListBulk } from './directListPrepare.js';
+import { loadDraftListingsByAsin, processDirectListBulk } from './directListPrepare.js';
 
 export function chunkDirectListAsins(asins, size = DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE) {
   const chunks = [];
@@ -39,15 +39,31 @@ function normalizeDelaySeconds(value) {
   );
 }
 
+function jobUsesDrafts(job) {
+  return job.useDrafts !== false;
+}
+
+async function resolveListingsByAsin(job, asins) {
+  if (!jobUsesDrafts(job)) return {};
+  return loadDraftListingsByAsin({
+    sellerId: job.sellerId,
+    templateId: job.templateId,
+    asins,
+  });
+}
+
 async function listSingleAsin(job, token, asin) {
+  const listingsByAsin = await resolveListingsByAsin(job, [asin]);
   const bulkResult = await processDirectListBulk({
     templateId: String(job.templateId),
     sellerId: String(job.sellerId),
     asins: [asin],
     region: job.region || 'US',
     verifyOnly: false,
+    listingsByAsin,
     token,
     concurrency: 1,
+    createdBy: job.createdBy || null,
   });
   return (bulkResult.results || []).map(mapBulkRowToJobResult);
 }
@@ -119,14 +135,17 @@ async function processBatchGapJob(job, seller, token) {
   console.log(`[DirectListJob] ${job._id} batch ${job.currentBatchIndex + 1}/${batches.length} (${batchAsins.length} ASINs)`);
 
   try {
+    const listingsByAsin = await resolveListingsByAsin(job, batchAsins);
     const bulkResult = await processDirectListBulk({
       templateId: String(job.templateId),
       sellerId: String(job.sellerId),
       asins: batchAsins,
       region: job.region || 'US',
       verifyOnly: false,
+      listingsByAsin,
       token,
       concurrency: 2,
+      createdBy: job.createdBy || null,
     });
 
     const batchResults = (bulkResult.results || []).map(mapBulkRowToJobResult);

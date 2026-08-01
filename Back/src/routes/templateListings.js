@@ -33,6 +33,7 @@ import {
   processDirectListBulk,
   submitDirectListPayload,
   getDirectListStoreListerDefaults,
+  persistReviewedDirectListDrafts,
 } from '../lib/directListPrepare.js';
 import { resolveTemplateEbayMarketplace } from '../utils/ebayActionField.js';
 import DirectListJob, {
@@ -44,7 +45,7 @@ import DirectListJob, {
   DIRECT_LIST_JOB_MAX_DELAY_SECONDS,
 } from '../models/DirectListJob.js';
 import { chunkDirectListAsins } from '../lib/directListJobRunner.js';
-import { recordDirectListBatchHistory, listDirectListBatchHistory, getDerivedDirectListBatchDetail, decodeDerivedBatchId } from '../lib/directListBatchHistory.js';
+import { recordDirectListBatchHistory, listDirectListBatchHistory, getDerivedDirectListBatchDetail, decodeDerivedBatchId, publishDirectListDraftBatch, deleteDirectListBatchHistory } from '../lib/directListBatchHistory.js';
 import { enrichListingItemSpecifics, applyCustomColumnDefaults } from '../utils/ebayItemSpecificsEnrichment.js';
 import { joinItemPhotoUrls, mergeItemPhotoUrls, normalizeItemPhotoUrl } from '../utils/itemPhotoUrls.js';
 import {
@@ -1700,7 +1701,8 @@ router.post('/direct-list-bulk/preview', requireAuth, async (req, res) => {
       region = 'US',
       defaults = {},
       listingOverrides = {},
-      concurrency = 2,
+      concurrency = 1,
+      skipHistory = false,
     } = req.body;
 
     if (!templateId || !sellerId) {
@@ -1731,22 +1733,25 @@ router.post('/direct-list-bulk/preview', requireAuth, async (req, res) => {
       region,
       defaults,
       listingOverrides,
-      concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 2, 1), 3),
+      concurrency: Math.min(Math.max(Number.parseInt(concurrency, 10) || 1, 1), 20),
       createdBy: req.user?.userId,
     });
 
-    try {
-      await recordDirectListBatchHistory({
-        sellerId,
-        templateId,
-        region,
-        runType: 'draft',
-        asins: cleanedAsins,
-        results: previewResult.results || [],
-        createdBy: req.user?.userId,
-      });
-    } catch (historyErr) {
-      console.warn('[Direct List Bulk Preview] Failed to save batch history:', historyErr.message);
+    const shouldSkipHistory = skipHistory === true || skipHistory === '1' || skipHistory === 1;
+    if (!shouldSkipHistory) {
+      try {
+        await recordDirectListBatchHistory({
+          sellerId,
+          templateId,
+          region,
+          runType: 'draft',
+          asins: cleanedAsins,
+          results: previewResult.results || [],
+          createdBy: req.user?.userId,
+        });
+      } catch (historyErr) {
+        console.warn('[Direct List Bulk Preview] Failed to save batch history:', historyErr.message);
+      }
     }
 
     res.json(previewResult);
@@ -1756,6 +1761,46 @@ router.post('/direct-list-bulk/preview', requireAuth, async (req, res) => {
       error: error.message || 'Failed to prepare bulk listing preview',
       details: error.response?.data || undefined,
     });
+  }
+});
+
+// POST /api/template-listings/direct-list-bulk/preview-history — one draft history row after progressive prepare
+router.post('/direct-list-bulk/preview-history', requireAuth, async (req, res) => {
+  try {
+    const {
+      templateId,
+      sellerId,
+      asins = [],
+      results = [],
+      region = 'US',
+    } = req.body;
+
+    if (!templateId || !sellerId) {
+      return res.status(400).json({ error: 'templateId and sellerId are required' });
+    }
+
+    const cleanedAsins = Array.isArray(asins)
+      ? [...new Set(asins.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean))]
+      : parseDirectListAsins(asins);
+
+    if (cleanedAsins.length === 0) {
+      return res.status(400).json({ error: 'At least one ASIN is required' });
+    }
+
+    const job = await recordDirectListBatchHistory({
+      sellerId,
+      templateId,
+      region,
+      runType: 'draft',
+      asins: cleanedAsins,
+      results,
+      createdBy: req.user?.userId,
+    });
+
+    res.json({ success: true, jobId: job?._id });
+  } catch (error) {
+    console.error('[Direct List Bulk Preview History] Error:', error);
+    res.status(500).json({ error: error.message || 'Failed to save prepare history' });
   }
 });
 
@@ -1895,6 +1940,7 @@ router.post('/direct-list-jobs', requireAuth, async (req, res) => {
       delayMinutesBetweenBatches = DIRECT_LIST_JOB_DEFAULT_DELAY_MINUTES,
       delaySecondsBetweenListings = DIRECT_LIST_JOB_DEFAULT_DELAY_SECONDS,
       batchSize = DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE,
+      useDrafts = true,
     } = req.body;
 
     if (!templateId || !sellerId) {
@@ -1930,6 +1976,7 @@ router.post('/direct-list-jobs', requireAuth, async (req, res) => {
       DIRECT_LIST_JOB_MAX_DELAY_SECONDS
     );
     const batchCount = chunkDirectListAsins(cleanedAsins, normalizedBatchSize).length;
+    const useDraftsFlag = useDrafts !== false && useDrafts !== 'false' && useDrafts !== 0;
 
     const job = await DirectListJob.create({
       sellerId,
@@ -1940,6 +1987,7 @@ router.post('/direct-list-jobs', requireAuth, async (req, res) => {
       batchSize: normalizedBatchSize,
       delayMinutesBetweenBatches: normalizedDelayMinutes,
       delaySecondsBetweenListings: normalizedDelaySeconds,
+      useDrafts: useDraftsFlag,
       runType: 'publish',
       execution: 'queued',
       createdBy: req.user?._id || req.user?.userId || null,
@@ -1955,6 +2003,7 @@ router.post('/direct-list-jobs', requireAuth, async (req, res) => {
         batchSize: normalizedBatchSize,
         delayMinutesBetweenBatches: normalizedDelayMinutes,
         delaySecondsBetweenListings: normalizedDelaySeconds,
+        useDrafts: job.useDrafts,
         scheduledAt: job.scheduledAt,
       },
       message: runAt <= new Date()
@@ -1965,6 +2014,108 @@ router.post('/direct-list-jobs', requireAuth, async (req, res) => {
     console.error('[Direct List Job] Create error:', error);
     res.status(error.statusCode || 500).json({
       error: error.message || 'Failed to create direct list job',
+    });
+  }
+});
+
+// POST /api/template-listings/direct-list-jobs/from-review
+// Persist reviewed payloads as drafts, then queue a publish job (now or scheduled).
+router.post('/direct-list-jobs/from-review', requireAuth, async (req, res) => {
+  try {
+    const {
+      templateId,
+      sellerId,
+      asins,
+      listingsByAsin = {},
+      region = 'US',
+      scheduledAt,
+      delayMinutesBetweenBatches = DIRECT_LIST_JOB_DEFAULT_DELAY_MINUTES,
+      delaySecondsBetweenListings = DIRECT_LIST_JOB_DEFAULT_DELAY_SECONDS,
+      batchSize = DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE,
+    } = req.body;
+
+    if (!templateId || !sellerId) {
+      return res.status(400).json({ error: 'templateId and sellerId are required' });
+    }
+
+    const fromListings = Object.keys(listingsByAsin || {})
+      .map((value) => String(value || '').trim().toUpperCase())
+      .filter(Boolean);
+    const cleanedAsins = Array.isArray(asins) && asins.length
+      ? [...new Set(asins.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean))]
+      : [...new Set(fromListings)];
+
+    if (cleanedAsins.length === 0) {
+      return res.status(400).json({ error: 'At least one valid ASIN is required' });
+    }
+    if (cleanedAsins.length > DIRECT_LIST_JOB_MAX_ASINS) {
+      return res.status(400).json({ error: `Maximum ${DIRECT_LIST_JOB_MAX_ASINS} ASINs per job` });
+    }
+
+    const runAt = scheduledAt ? new Date(scheduledAt) : new Date();
+    if (Number.isNaN(runAt.getTime())) {
+      return res.status(400).json({ error: 'Invalid scheduledAt date' });
+    }
+
+    const seller = await Seller.findById(sellerId);
+    if (!seller) {
+      return res.status(404).json({ error: 'Seller not found' });
+    }
+
+    const createdBy = req.user?._id || req.user?.userId || null;
+    const persistResult = await persistReviewedDirectListDrafts({
+      templateId,
+      sellerId,
+      listingsByAsin,
+      region,
+      createdBy,
+    });
+
+    const normalizedBatchSize = Math.min(Math.max(Number.parseInt(batchSize, 10) || DIRECT_LIST_JOB_DEFAULT_BATCH_SIZE, 1), 25);
+    const normalizedDelayMinutes = Math.min(Math.max(Number.parseInt(delayMinutesBetweenBatches, 10) || DIRECT_LIST_JOB_DEFAULT_DELAY_MINUTES, 1), 60);
+    const normalizedDelaySeconds = Math.min(
+      Math.max(Number.parseInt(delaySecondsBetweenListings, 10) || DIRECT_LIST_JOB_DEFAULT_DELAY_SECONDS, DIRECT_LIST_JOB_MIN_DELAY_SECONDS),
+      DIRECT_LIST_JOB_MAX_DELAY_SECONDS
+    );
+    const batchCount = chunkDirectListAsins(cleanedAsins, normalizedBatchSize).length;
+
+    const job = await DirectListJob.create({
+      sellerId,
+      templateId,
+      region,
+      asins: cleanedAsins,
+      scheduledAt: runAt,
+      batchSize: normalizedBatchSize,
+      delayMinutesBetweenBatches: normalizedDelayMinutes,
+      delaySecondsBetweenListings: normalizedDelaySeconds,
+      useDrafts: true,
+      runType: 'publish',
+      execution: 'queued',
+      createdBy,
+    });
+
+    res.json({
+      success: true,
+      draftsSaved: persistResult.saved,
+      job: {
+        _id: job._id,
+        status: job.status,
+        totalAsins: cleanedAsins.length,
+        batchCount,
+        batchSize: normalizedBatchSize,
+        delayMinutesBetweenBatches: normalizedDelayMinutes,
+        delaySecondsBetweenListings: normalizedDelaySeconds,
+        useDrafts: true,
+        scheduledAt: job.scheduledAt,
+      },
+      message: runAt <= new Date()
+        ? `Saved ${persistResult.saved} draft(s) and queued ${cleanedAsins.length} ASIN(s) to publish now (${batchCount} batch(es)). Safe to close this page.`
+        : `Saved ${persistResult.saved} draft(s) and scheduled ${cleanedAsins.length} ASIN(s) for ${runAt.toLocaleString()}.`,
+    });
+  } catch (error) {
+    console.error('[Direct List Job] From-review error:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.message || 'Failed to queue publish from review',
     });
   }
 });
@@ -2016,12 +2167,27 @@ router.get('/direct-list-jobs', requireAuth, async (req, res) => {
 router.get('/direct-list-history', requireAuth, async (req, res) => {
   try {
     const sellerId = String(req.query.sellerId || '').trim() || null;
-    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 150, 1), 300);
-    const batches = await listDirectListBatchHistory({ sellerId, limit });
-    res.json({ batches, total: batches.length });
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 5000, 1), 10000);
+    const includeDerived = String(req.query.includeDerived || '').toLowerCase() === 'true'
+      || req.query.includeDerived === '1';
+    const batches = await listDirectListBatchHistory({ sellerId, limit, includeDerived });
+    res.json({ batches, total: batches.length, includeDerived });
   } catch (error) {
     console.error('[Direct List History] List error:', error);
     res.status(500).json({ error: error.message || 'Failed to load batch history' });
+  }
+});
+
+// DELETE /api/template-listings/direct-list-history/:id — permanently remove a job history row
+router.delete('/direct-list-history/:id', requireAuth, async (req, res) => {
+  try {
+    const outcome = await deleteDirectListBatchHistory(req.params.id);
+    res.json(outcome);
+  } catch (error) {
+    console.error('[Direct List History] Delete error:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.message || 'Failed to delete batch history',
+    });
   }
 });
 
@@ -2064,6 +2230,22 @@ router.get('/direct-list-history/:id', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('[Direct List History] Detail error:', error);
     res.status(500).json({ error: error.message || 'Failed to load batch detail' });
+  }
+});
+
+// POST /api/template-listings/direct-list-history/:id/publish — publish draft batch to eBay and revise to publish
+router.post('/direct-list-history/:id/publish', requireAuth, async (req, res) => {
+  try {
+    const outcome = await publishDirectListDraftBatch(req.params.id, {
+      createdBy: req.user?.userId,
+    });
+    res.json(outcome);
+  } catch (error) {
+    console.error('[Direct List History] Publish draft error:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.message || 'Failed to publish draft batch',
+      details: error.response?.data || undefined,
+    });
   }
 });
 

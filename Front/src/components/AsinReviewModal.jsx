@@ -137,7 +137,8 @@ function formatBulletLi(text, isLast = false) {
     cleaned = stripHtmlTagsToPlain(cleaned);
     cleaned = cleaned.replace(/\s+/g, ' ').trim();
   }
-  if (!cleaned || cleaned.length > 620) return '';
+  if (!cleaned) return '';
+  if (cleaned.length > 620) cleaned = `${cleaned.slice(0, 617)}...`;
   const words = cleaned.split(' ');
   const firstThree = words.slice(0, 3).join(' ');
   const rest = words.slice(3).join(' ');
@@ -162,8 +163,20 @@ function stripHtmlTagsToPlain(html = '') {
     .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/[ \t]+\n/g, '\n')
-    .replace(/\s+/g, ' ')
+    .replace(/\n+/g, '\n')
+    .replace(/[ \t]+/g, ' ')
     .trim();
+}
+
+function stylePlainBulletLines(lines = []) {
+  const parts = (Array.isArray(lines) ? lines : [])
+    .map((s) => String(s || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 12);
+  return parts
+    .map((line, idx, arr) => formatBulletLi(line, idx === arr.length - 1))
+    .filter(Boolean)
+    .join('');
 }
 
 /** Model sometimes echoes the whole golden eBay shell into the bullets field — reject that. */
@@ -236,9 +249,17 @@ function filterProductBullets(htmlLis = []) {
 }
 
 function bulletsFromUlBlock(ulInner) {
-  const lis = String(ulInner || '').match(/<li[\s\S]*?<\/li>/gi) || [];
-  const good = filterProductBullets(lis).filter(Boolean);
-  return good.length ? good.join('') : '';
+  const inner = String(ulInner || '');
+  const lis = inner.match(/<li[\s\S]*?<\/li>/gi) || [];
+  if (lis.length) {
+    const plains = filterProductBullets(lis)
+      .map((li) => stripHtmlTagsToPlain(li).replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    const styled = stylePlainBulletLines(plains);
+    if (styled) return styled;
+  }
+  // AI sometimes dumps plain prose / <p> into the highlights <ul>
+  return bulletsFromPlainLines(stripHtmlTagsToPlain(inner), 8);
 }
 
 /** Turn AI / scrape text into bullets for Product Highlights placeholder (never full listing HTML). */
@@ -257,27 +278,22 @@ function normalizeAiFeatureBullets(aiDescription = '') {
   }
 
   const looseLis = text.match(/<li[\s\S]*?<\/li>/gi) || [];
-  const goodLoose = filterProductBullets(looseLis).filter(Boolean);
-  if (goodLoose.length) return goodLoose.join('');
+  if (looseLis.length) {
+    const plains = filterProductBullets(looseLis)
+      .map((li) => stripHtmlTagsToPlain(li).replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    const styled = stylePlainBulletLines(plains);
+    if (styled) return styled;
+  }
 
   if (looksLikeListingShellEcho(text)) {
     return '';
   }
   if (text.length > 2000 && /<div\b|<table\b/i.test(text)) {
-    const plain = stripHtmlTagsToPlain(text);
-    return bulletsFromPlainLines(plain, 8);
+    return bulletsFromPlainLines(stripHtmlTagsToPlain(text), 8);
   }
 
-  const lines = text
-    .split(/\r?\n|[•●▪‣]/g)
-    .map((s) => s.replace(/^[\-\*\d\.\)\s]+/, '').trim())
-    .filter(Boolean)
-    .slice(0, 12);
-  if (!lines.length) return '';
-  if (lines.length === 1 && lines[0].length > 420) {
-    return bulletsFromPlainLines(lines[0], 8);
-  }
-  return lines.map((line, idx) => formatBulletLi(line, idx === lines.length - 1)).join('');
+  return bulletsFromPlainLines(stripHtmlTagsToPlain(text) || text, 8);
 }
 
 function bulletsFromPlainLines(plain, maxItems = 8) {
@@ -288,30 +304,56 @@ function bulletsFromPlainLines(plain, maxItems = 8) {
     .map((s) => s.replace(/^[\-\*\d\.\)\s]+/, '').trim())
     .filter(Boolean);
 
-  if (parts.length === 1 && parts[0].length > 240) {
-    parts = parts[0].split(/\.\s+/).map((s) => s.trim()).filter((s) => s.length > 18);
-    parts = parts.map((s) => (/\.\s*$/.test(s) ? s : `${s}.`)).slice(0, maxItems);
+  // Prose blob → one bullet per sentence so Product Highlights isn't a wall of text
+  if (parts.length === 1 && /\.\s+/.test(parts[0])) {
+    const sentences = parts[0]
+      .split(/\.\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 12);
+    if (sentences.length > 1) {
+      parts = sentences.map((s) => (/\.\s*$/.test(s) ? s : `${s}.`));
+    }
   }
-  return parts
-    .slice(0, maxItems)
-    .map((line, idx, arr) => formatBulletLi(line, idx === arr.length - 1))
-    .filter(Boolean)
-    .join('');
+  return stylePlainBulletLines(parts.slice(0, maxItems));
 }
 
 function buildFallbackFeatureBullets(rawDescription = '') {
-  const source = String(rawDescription || '').trim();
-  if (!source) return '';
+  return bulletsFromPlainLines(stripHtmlTagsToPlain(rawDescription) || rawDescription, 8);
+}
 
-  let lines = source
-    .split(/\r?\n|[•●▪‣]/g)
-    .map((s) => s.replace(/^[\-\*\d\.\)\s]+/, '').trim())
-    .filter(Boolean);
+function extractProductHighlightsUlInner(html = '') {
+  const match = String(html || '').match(
+    /Product Highlights[\s\S]{0,500}?<ul[^>]*>([\s\S]*?)<\/ul>/i
+  );
+  return match ? match[1] : null;
+}
 
-  if (lines.length === 1 && lines[0].length > 280) {
-    return bulletsFromPlainLines(lines[0], 8);
-  }
-  return lines.slice(0, 8).map((line, idx, arr) => formatBulletLi(line, idx === arr.length - 1)).join('');
+function hasStyledFeatureBullets(ulInner = '') {
+  const inner = String(ulInner || '');
+  return /<li\b/i.test(inner) && /(?:&#9658;|▶)/.test(inner);
+}
+
+/** Fix Product Highlights when AI/plain text was dumped into the <ul> without styled bullets. */
+function repairProductHighlightsInDescription(html = '', fallbackPlain = '') {
+  const composed = String(html || '');
+  if (!composed || !/Product Highlights/i.test(composed)) return composed;
+
+  const inner = extractProductHighlightsUlInner(composed);
+  if (inner == null) return composed;
+  if (hasStyledFeatureBullets(inner)) return composed;
+
+  const repaired =
+    normalizeAiFeatureBullets(inner)
+    || normalizeAiFeatureBullets(fallbackPlain)
+    || buildFallbackFeatureBullets(fallbackPlain)
+    || bulletsFromPlainLines(stripHtmlTagsToPlain(inner), 8);
+
+  if (!repaired) return composed;
+
+  return composed.replace(
+    /(Product Highlights[\s\S]{0,500}?<ul[^>]*>)([\s\S]*?)(<\/ul>)/i,
+    `$1${repaired}$3`
+  );
 }
 
 function parseAmazonPrice(value) {
@@ -355,20 +397,17 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
     normalizeAiFeatureBullets(aiDescription) ||
     buildFallbackFeatureBullets(scrapedDescription);
 
-  const sanitizedDescriptionPlaceholder = (() => {
-    if (resolvedBullets) return resolvedBullets;
-    if (!aiDescription) return '';
-    if (looksLikeListingShellEcho(aiDescription) || hasUnsubstitutedPlaceholders(aiDescription)) {
-      return buildFallbackFeatureBullets(scrapedDescription);
-    }
-    return aiDescription;
-  })();
+  // Never inject raw AI prose into the template — always styled <li> bullets.
+  const sanitizedDescriptionPlaceholder =
+    resolvedBullets
+    || buildFallbackFeatureBullets(scrapedDescription)
+    || bulletsFromPlainLines(stripHtmlTagsToPlain(aiDescription), 8);
 
   const titleClean = String(sourceData?.title || generatedListing?.title || '').trim();
   const images = resolveListingImageUrls(sourceData, generatedListing);
 
   const placeholderMap = {
-    '{{AI_FEATURE_BULLETS}}': resolvedBullets,
+    '{{AI_FEATURE_BULLETS}}': sanitizedDescriptionPlaceholder,
     '{{AI_DESCRIPTION}}': sanitizedDescriptionPlaceholder,
     '{{TITLE_CLEAN}}': titleClean,
     '{{MAIN_IMAGE}}': images[0] || '',
@@ -387,7 +426,10 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
     }
   });
 
-  return composed;
+  return repairProductHighlightsInDescription(
+    composed,
+    scrapedDescription || stripHtmlTagsToPlain(aiDescription)
+  );
 }
 
 /**
@@ -578,7 +620,11 @@ export default function AsinReviewModal({
               );
             } else {
               const aiTrim = String(item.aiDescription || '').trim();
-              nextListing.description = mergedDesc || aiTrim || '';
+              const raw = mergedDesc || aiTrim || '';
+              nextListing.description = repairProductHighlightsInDescription(
+                raw,
+                String(item.sourceData?.description || aiTrim || '')
+              );
             }
           }
           initial[item.id] = nextListing;
@@ -1152,6 +1198,45 @@ export default function AsinReviewModal({
               color={getStatusColor(currentItem?.status)}
               size="small"
             />
+            {(() => {
+              const timings = currentItem?.fetchTimings;
+              const formatMs = (ms) => {
+                if (ms == null || !Number.isFinite(Number(ms)) || Number(ms) < 0) return null;
+                const value = Number(ms);
+                if (value < 1000) return `${Math.round(value)}ms`;
+                const seconds = value / 1000;
+                if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+                const mins = Math.floor(seconds / 60);
+                const secs = Math.round(seconds % 60);
+                return `${mins}m ${secs}s`;
+              };
+              if (timings && (timings.scrapeMs != null || timings.overlayMs != null || timings.aiMs != null)) {
+                return (
+                  <>
+                    <Tooltip title={`Amazon scrape / cache (${timings.source || 'unknown'})`}>
+                      <Chip size="small" variant="outlined" color="info" label={`Scrape ${formatMs(timings.scrapeMs) || '0ms'}`} />
+                    </Tooltip>
+                    <Tooltip title="Image frame / text overlay">
+                      <Chip size="small" variant="outlined" color="secondary" label={`Overlay ${formatMs(timings.overlayMs) || '0ms'}`} />
+                    </Tooltip>
+                    <Tooltip title="AI description autofill (0 if template does not use AI)">
+                      <Chip size="small" variant="outlined" color="warning" label={`AI ${formatMs(timings.aiMs) || '0ms'}`} />
+                    </Tooltip>
+                    <Tooltip title={`Other prepare work ${formatMs(timings.otherMs) || '0ms'} · total ${formatMs(timings.totalMs) || '—'}`}>
+                      <Chip size="small" variant="outlined" label={`Total ${formatMs(timings.totalMs) || formatMs(currentItem?.fetchDurationMs) || '—'}`} />
+                    </Tooltip>
+                  </>
+                );
+              }
+              if (currentItem?.fetchDurationMs != null && Number.isFinite(Number(currentItem.fetchDurationMs))) {
+                return (
+                  <Tooltip title="Time to fetch Amazon data and generate this listing">
+                    <Chip size="small" variant="outlined" color="default" label={formatMs(currentItem.fetchDurationMs)} />
+                  </Tooltip>
+                );
+              }
+              return null;
+            })()}
             {scrapeSourceMeta && (
               <Tooltip title={scrapeSourceMeta.title}>
                 <Chip
