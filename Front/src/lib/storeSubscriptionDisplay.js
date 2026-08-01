@@ -18,7 +18,7 @@ export function formatStoreSubscriptionPrice(level, termValue, termUnit) {
   const key = String(level || '').trim().toLowerCase();
   if (months == null || !key) return '—';
 
-  if (key.includes('featured')) {
+  if (key.includes('premium') || key.includes('featured')) {
     if (months === 1) return '$74.95';
     if (months === 12) return '$59.95 / mo';
   }
@@ -29,17 +29,23 @@ export function formatStoreSubscriptionPrice(level, termValue, termUnit) {
   return '—';
 }
 
-export function formatFreeListings(level) {
+export function freeListingsAllowanceNumber(level) {
   const key = String(level || '').trim().toLowerCase();
-  if (key.includes('featured')) return '10,000 / mo';
-  if (key.includes('anchor')) return '25,000 / mo';
-  return '—';
+  if (key.includes('premium') || key.includes('featured')) return 10000;
+  if (key.includes('anchor')) return 25000;
+  return null;
+}
+
+export function formatFreeListings(level) {
+  const n = freeListingsAllowanceNumber(level);
+  if (n == null) return '—';
+  return `${n.toLocaleString()} / mo`;
 }
 
 export function priceSortValue(level, termValue, termUnit) {
   const months = termInMonths(termValue, termUnit);
   const key = String(level || '').trim().toLowerCase();
-  if (key.includes('featured')) {
+  if (key.includes('premium') || key.includes('featured')) {
     if (months === 1) return 74.95;
     if (months === 12) return 59.95;
   }
@@ -51,10 +57,45 @@ export function priceSortValue(level, termValue, termUnit) {
 }
 
 export function freeListingsSortValue(level) {
-  const key = String(level || '').trim().toLowerCase();
-  if (key.includes('featured')) return 10000;
-  if (key.includes('anchor')) return 25000;
-  return -1;
+  return freeListingsAllowanceNumber(level) ?? -1;
+}
+
+/** Listing readiness from remaining selling + free-listing headroom. */
+export function listingCapacityStatus(row) {
+  if (row.notConnected) {
+    return { id: 'disconnected', label: 'Not connected', color: 'warning', severity: 1 };
+  }
+  if (row.privilegeError || row.subscriptionError) {
+    return {
+      id: 'error',
+      label: row.needsReconnect ? 'Reconnect OAuth' : 'Error',
+      color: 'error',
+      severity: 0,
+    };
+  }
+  if (row.sellingBlocked) {
+    return { id: 'blocked', label: 'Blocked — selling limit', color: 'error', severity: 0 };
+  }
+  if (row.freeListingsExhausted) {
+    return { id: 'fee_risk', label: 'Fee risk — free listings used', color: 'warning', severity: 2 };
+  }
+  const freeRem = row.freeListingsRemainingEst;
+  const qtyRem = row.quantityLimitRemaining != null ? Number(row.quantityLimitRemaining) : null;
+  const amtRem = row.amountLimitRemaining != null ? Number(row.amountLimitRemaining) : null;
+  const freeLow = freeRem != null && freeRem <= Math.max(50, Math.round((row.freeListingsAllowance || 0) * 0.05));
+  const qtyLow = qtyRem != null && row.accountLimitQuantity
+    ? qtyRem <= Math.max(10, Math.round(Number(row.accountLimitQuantity) * 0.05))
+    : qtyRem != null && qtyRem <= 20;
+  const amtLow = amtRem != null && row.accountLimitAmount
+    ? amtRem <= Math.max(100, Number(row.accountLimitAmount) * 0.05)
+    : false;
+  if (freeLow || qtyLow || amtLow) {
+    return { id: 'low', label: 'Low remaining', color: 'warning', severity: 3 };
+  }
+  if (row.noPlan) {
+    return { id: 'no_plan', label: 'No store plan', color: 'default', severity: 2 };
+  }
+  return { id: 'ok', label: 'OK to list', color: 'success', severity: 4 };
 }
 
 export function levelSortValue(level) {

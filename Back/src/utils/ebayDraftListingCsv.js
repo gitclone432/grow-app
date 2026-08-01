@@ -89,20 +89,33 @@ export function sanitizeDraftDescription(description) {
     .trim();
 }
 
-/** Draft photo field: first URL only (official template is single-photo oriented). */
+/** @deprecated Draft CSV now exports all photos (pipe-separated); kept for callers that want a single URL. */
 export function firstPhotoUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
   return raw.split(/\s*\|\s*|\s*,\s*/)[0].trim();
 }
 
-export function listingToDraftCsvRow(listing, helpers = {}) {
+function getListingCustomField(listing, name) {
+  if (!listing?.customFields) return '';
+  if (typeof listing.customFields.get === 'function') {
+    return listing.customFields.get(name) || '';
+  }
+  return listing.customFields[name] || '';
+}
+
+export function listingToDraftCsvRow(listing, helpers = {}, customColumns = [], sanitizeCustomValue = null) {
   const joinPhotos =
     typeof helpers.joinItemPhotoUrls === 'function'
       ? helpers.joinItemPhotoUrls
       : (v) => String(v || '');
 
-  return [
+  const sanitize =
+    typeof sanitizeCustomValue === 'function'
+      ? sanitizeCustomValue
+      : (_header, value) => (value == null ? '' : String(value));
+
+  const core = [
     'Draft',
     listing.customLabel || '',
     listing.categoryId || '',
@@ -110,11 +123,20 @@ export function listingToDraftCsvRow(listing, helpers = {}) {
     listing.upc || '',
     listing.startPrice || '',
     listing.quantity ?? 1,
-    firstPhotoUrl(joinPhotos(listing.itemPhotoUrl || '')),
+    // Same as Active FE: pipe-separated URLs (up to 12)
+    joinPhotos(listing.itemPhotoUrl || ''),
     toDraftConditionId(listing.conditionId),
     sanitizeDraftDescription(listing.description),
     listing.format || 'FixedPrice',
   ];
+
+  const customValues = (Array.isArray(customColumns) ? customColumns : []).map((col) => {
+    const header = String(col?.name || '').trim();
+    if (!header) return '';
+    return sanitize(header, getListingCustomField(listing, header));
+  });
+
+  return [...core, ...customValues];
 }
 
 export function rowsToCsvString(rows, { withBom = false, eol = '\r\n' } = {}) {
@@ -134,11 +156,25 @@ export function rowsToCsvString(rows, { withBom = false, eol = '\r\n' } = {}) {
   return withBom ? `\uFEFF${body}` : body;
 }
 
-export function buildDraftListingsCsv(listings, helpers = {}, countryOrSite = 'US') {
+/**
+ * @param {object[]} listings
+ * @param {object} helpers
+ * @param {string} countryOrSite
+ * @param {{ customColumns?: Array<{ name: string }>, sanitizeCustomValue?: (header: string, value: any) => string }} [options]
+ * Draft core columns + optional C: item-specific columns from the template.
+ */
+export function buildDraftListingsCsv(listings, helpers = {}, countryOrSite = 'US', options = {}) {
+  const customColumns = Array.isArray(options.customColumns) ? options.customColumns : [];
   const actionHeader = buildDraftActionHeader(countryOrSite);
-  const headers = [actionHeader, ...DRAFT_LISTING_CORE_HEADERS.slice(1)];
+  const headers = [
+    actionHeader,
+    ...DRAFT_LISTING_CORE_HEADERS.slice(1),
+    ...customColumns.map((col) => String(col?.name || '').trim()).filter(Boolean),
+  ];
   const infoRows = buildDraftListingInfoRows(headers.length, countryOrSite);
-  const dataRows = (listings || []).map((listing) => listingToDraftCsvRow(listing, helpers));
+  const dataRows = (listings || []).map((listing) =>
+    listingToDraftCsvRow(listing, helpers, customColumns, options.sanitizeCustomValue)
+  );
   return rowsToCsvString([...infoRows, headers, ...dataRows]);
 }
 

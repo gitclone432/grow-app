@@ -4617,11 +4617,17 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
     const templateName = template.name.replace(/\s+/g, '_');
 
     if (exportStatus === 'draft') {
-      // Official eBay draft template only (no C: columns) — required for Feed Upload / Seller Hub
-      const csvContent = buildDraftListingsCsv(listings, { joinItemPhotoUrls }, 'US');
+      // eBay draft template core columns + template C: item specifics
+      const orderedUniqueCustomColumns = getOrderedUniqueCustomColumns(resolveAutofillCustomColumns(template));
+      const csvContent = buildDraftListingsCsv(listings, { joinItemPhotoUrls }, 'US', {
+        customColumns: orderedUniqueCustomColumns,
+        sanitizeCustomValue: sanitizeCustomCsvValueByHeader,
+      });
       const filename = `${templateName}_${sellerName}_draft_batch_${batchNumber}_${dateStr}.csv`;
       console.log('📁 Generated draft filename:', filename);
-      console.log('📝 Draft CSV: official eBay draft columns only (Feed Upload compatible)');
+      console.log(
+        `📝 Draft CSV: core draft columns + ${orderedUniqueCustomColumns.length} C: item-specific column(s)`
+      );
 
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -5089,9 +5095,9 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
 router.get('/download-history/:templateId', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params;
-    const { sellerId } = req.query;
+    const { sellerId, status } = req.query;
     
-    console.log('📜 Download history request - Template:', templateId, 'Seller:', sellerId);
+    console.log('📜 Download history request - Template:', templateId, 'Seller:', sellerId, 'Status:', status);
     
     // Convert string IDs to ObjectIds for aggregation
     const mongoose = await import('mongoose');
@@ -5103,22 +5109,11 @@ router.get('/download-history/:templateId', requireAuth, async (req, res) => {
     if (sellerId) {
       filter.sellerId = new mongoose.default.Types.ObjectId(sellerId);
     }
+    if (status === 'draft' || status === 'active') {
+      filter.status = status;
+    }
     
     console.log('🔍 Filter:', JSON.stringify(filter));
-    
-    // First, let's check ALL listings for this template/seller
-    const allListings = await TemplateListing.find({
-      templateId,
-      sellerId: sellerId || { $exists: true }
-    }).select('downloadBatchId downloadBatchNumber downloadedAt customLabel');
-    
-    console.log('📋 Total listings found:', allListings.length);
-    console.log('📊 All listings batch info:', allListings.map(l => ({
-      sku: l.customLabel,
-      batchId: l.downloadBatchId,
-      batchNumber: l.downloadBatchNumber,
-      downloadedAt: l.downloadedAt
-    })));
     
     // Get unique batches with their metadata
     const batches = await TemplateListing.aggregate([
@@ -5128,10 +5123,11 @@ router.get('/download-history/:templateId', requireAuth, async (req, res) => {
           _id: '$downloadBatchId',
           batchNumber: { $first: '$downloadBatchNumber' },
           downloadedAt: { $first: '$downloadedAt' },
-          listingCount: { $sum: 1 }
+          listingCount: { $sum: 1 },
+          status: { $first: '$status' },
         }
       },
-      { $sort: { batchNumber: 1 } }
+      { $sort: { batchNumber: -1 } }
     ]);
     
     console.log('📊 Aggregation result:', batches);
@@ -5141,7 +5137,8 @@ router.get('/download-history/:templateId', requireAuth, async (req, res) => {
       batchId: batch._id,
       batchNumber: batch.batchNumber,
       downloadedAt: batch.downloadedAt,
-      listingCount: batch.listingCount
+      listingCount: batch.listingCount,
+      status: batch.status || null,
     }));
     
     console.log('✅ Sending history:', history);
@@ -5188,6 +5185,27 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
     // Use the action field that was saved at download time; fall back to current template value
     const actionField = listings[0].downloadedActionField || template.customActionField || '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)';
     console.log('📝 Using Action field:', actionField);
+
+    const dateStr = new Date().toISOString().split('T')[0];
+    const sellerName = seller?.user?.username || seller?.user?.email || 'seller';
+    const templateName = template.name.replace(/\s+/g, '_');
+    const orderedUniqueCustomColumns = getOrderedUniqueCustomColumns(resolveAutofillCustomColumns(template));
+
+    const isDraftBatch =
+      listings[0]?.status === 'draft'
+      || String(listings[0]?.action || '').toLowerCase() === 'draft'
+      || (String(actionField).startsWith('Action(') && !String(actionField).startsWith('*'));
+
+    if (isDraftBatch) {
+      const csvContent = buildDraftListingsCsv(listings, { joinItemPhotoUrls }, 'US', {
+        customColumns: orderedUniqueCustomColumns,
+        sanitizeCustomValue: sanitizeCustomCsvValueByHeader,
+      });
+      const filename = `${templateName}_${sellerName}_draft_batch_${batchNumber}_redownload_${dateStr}.csv`;
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(csvContent);
+    }
     
     // Build core headers (38 columns)
     const coreHeaders = [
@@ -5232,7 +5250,6 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
     ];
     
     // Add custom column headers
-    const orderedUniqueCustomColumns = getOrderedUniqueCustomColumns(resolveAutofillCustomColumns(template));
     const customHeaders = orderedUniqueCustomColumns.map(col => col.name);
     
     const allHeaders = [...coreHeaders, ...customHeaders];
@@ -5329,9 +5346,6 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
     ).join('\n');
     
     // Send as downloadable file with template, seller, batch number and date
-    const dateStr = new Date().toISOString().split('T')[0];
-    const sellerName = seller?.user?.username || seller?.user?.email || 'seller';
-    const templateName = template.name.replace(/\s+/g, '_');
     const filename = `${templateName}_${sellerName}_batch_${batchNumber}_${dateStr}.csv`;
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

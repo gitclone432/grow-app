@@ -7,6 +7,8 @@ import {
   MenuItem,
   Paper,
   Stack,
+  Tab,
+  Tabs,
   TextField,
   Tooltip,
   Typography,
@@ -16,6 +18,58 @@ import { sortSellersByName } from '../../lib/sellersSort';
 
 const ALL_SELLERS_VALUE = '__all__';
 const BULK_CALL_DELAY_MS = 1200;
+
+function buildGetSellerListXml({ entriesPerPage = 5, pageNumber = 1 } = {}) {
+  const end = new Date();
+  const start = new Date(Date.now() - 119 * 24 * 60 * 60 * 1000); // eBay max window ~120 days
+  return `<?xml version="1.0" encoding="utf-8"?>
+<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken></eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <GranularityLevel>Fine</GranularityLevel>
+  <StartTimeFrom>${start.toISOString()}</StartTimeFrom>
+  <StartTimeTo>${end.toISOString()}</StartTimeTo>
+  <IncludeWatchCount>true</IncludeWatchCount>
+  <Pagination>
+    <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+    <PageNumber>${pageNumber}</PageNumber>
+  </Pagination>
+</GetSellerListRequest>`;
+}
+
+function buildGetMyeBaySellingXml({ entriesPerPage = 25, pageNumber = 1 } = {}) {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken></eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <DetailLevel>ReturnSummary</DetailLevel>
+  <ActiveList>
+    <Include>true</Include>
+    <IncludeNotes>false</IncludeNotes>
+    <Pagination>
+      <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+      <PageNumber>${pageNumber}</PageNumber>
+    </Pagination>
+    <Sort>StartTime</Sort>
+  </ActiveList>
+  <SellingSummary>
+    <Include>true</Include>
+  </SellingSummary>
+  <ScheduledList>
+    <Include>false</Include>
+  </ScheduledList>
+  <SoldList>
+    <Include>false</Include>
+  </SoldList>
+  <UnsoldList>
+    <Include>false</Include>
+  </UnsoldList>
+  <HideVariations>false</HideVariations>
+</GetMyeBaySellingRequest>`;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -141,6 +195,7 @@ function replaceRuntimePlaceholders(value, map) {
 }
 
 export default function EbayApiTesterPage() {
+  const [apiMode, setApiMode] = useState('rest'); // rest | trading
   const [method, setMethod] = useState('GET');
   const [path, setPath] = useState('');
   const [paramsText, setParamsText] = useState('{}');
@@ -149,6 +204,9 @@ export default function EbayApiTesterPage() {
   const [sellers, setSellers] = useState([]);
   const [orderId, setOrderId] = useState('');
   const [marketplaceId, setMarketplaceId] = useState('EBAY_US');
+  const [tradingCallName, setTradingCallName] = useState('GetSellerList');
+  const [tradingSiteId, setTradingSiteId] = useState('0');
+  const [tradingXml, setTradingXml] = useState(() => buildGetSellerListXml());
 
   const [loading, setLoading] = useState(false);
   const [bulkProgress, setBulkProgress] = useState('');
@@ -190,7 +248,62 @@ export default function EbayApiTesterPage() {
     }
   };
 
+  const runTradingRequest = async () => {
+    if (!sellerId || sellerId === ALL_SELLERS_VALUE) {
+      setError('Select one seller for Trading API calls');
+      return;
+    }
+    if (!String(tradingCallName || '').trim()) {
+      setError('Trading call name is required (e.g. GetSellerList)');
+      return;
+    }
+    if (!String(tradingXml || '').trim()) {
+      setError('Trading request XML is required');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    setNeedsReconnect(false);
+    setStatus(null);
+    setResponseHint(
+      tradingCallName === 'GetMyeBaySelling'
+        ? 'Trading API GetMyeBaySelling returns ActiveList / SellingSummary (live My eBay selling data).'
+        : 'Trading API GetSellerList returns live eBay listings (not Inventory API).'
+    );
+    setCopyStatus('');
+    setBulkProgress('');
+
+    try {
+      const { data } = await api.post('/ebay/dev/trading-call', {
+        sellerId,
+        callName: String(tradingCallName).trim(),
+        requestXml: tradingXml,
+        siteId: tradingSiteId || '0',
+      });
+      setStatus(data?.statusCode ?? 200);
+      setResponseText(JSON.stringify(data, null, 2));
+      if (!data?.ok) {
+        setError(data?.statusText || 'Trading call returned a non-success status');
+      }
+    } catch (e) {
+      const sellerNeedsReconnect = e?.response?.data?.needsReconnect === true;
+      setNeedsReconnect(sellerNeedsReconnect);
+      setStatus(e?.response?.status || 500);
+      setResponseText(JSON.stringify(e?.response?.data || { error: e.message }, null, 2));
+      setError(e?.response?.data?.error || e.message || 'Trading call failed');
+    } finally {
+      setLoading(false);
+      setBulkProgress('');
+    }
+  };
+
   const runRequest = async () => {
+    if (apiMode === 'trading') {
+      await runTradingRequest();
+      return;
+    }
+
     const parsedParamsRaw = safeJsonParse(paramsText, {});
     const parsedBodyRaw = safeJsonParse(bodyText, {});
 
@@ -231,7 +344,7 @@ export default function EbayApiTesterPage() {
         return;
       }
       if (isInternalAppPath(resolvedPath)) {
-        setError('This tester only supports raw eBay REST paths (e.g. /sell/..., /commerce/...). Internal /ebay/* routes are not available here.');
+        setError('This REST tab only supports raw eBay REST paths (e.g. /sell/..., /commerce/...). Use the Trading API tab for GetSellerList listings.');
         setLoading(false);
         return;
       }
@@ -379,21 +492,22 @@ export default function EbayApiTesterPage() {
     <Box sx={{ p: 3 }}>
       <Typography variant="h4" sx={{ mb: 1 }}>eBay API Tester</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Paste an eBay REST path or full URL, select a seller (or All sellers for GET), optionally set filters, then Run.
-        Calls eBay directly via the seller token.
+        REST tab calls Sell/Commerce APIs. Trading tab supports GetSellerList and GetMyeBaySelling
+        (ActiveList / SellingSummary).
+        (what Store Listings uses). Inventory API often returns 0 for Trading-listed stores.
       </Typography>
+
+      <Tabs
+        value={apiMode}
+        onChange={(_e, v) => setApiMode(v)}
+        sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}
+      >
+        <Tab value="rest" label="REST API" />
+        <Tab value="trading" label="Trading API (listings)" />
+      </Tabs>
 
       <Paper sx={{ p: 2, mb: 2 }}>
         <Stack spacing={2}>
-          <TextField
-            label="eBay API Path or URL"
-            value={path}
-            onChange={(e) => handlePathChange(e.target.value)}
-            size="small"
-            fullWidth
-            placeholder="/commerce/message/v1/conversation"
-            helperText="Paste path only, path with ?query=, or full https://api.ebay.com/... URL"
-          />
           <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
             <TextField
               select
@@ -404,72 +518,141 @@ export default function EbayApiTesterPage() {
               size="small"
               sx={{ minWidth: 260 }}
               helperText={
-                sellerId === ALL_SELLERS_VALUE
-                  ? `GET only — runs for all ${sellers.length} sellers sequentially`
-                  : sellerId
-                    ? `ID: ${sellerId}`
-                    : 'Required for raw eBay calls'
+                apiMode === 'trading'
+                  ? (sellerId ? `ID: ${sellerId}` : 'Required')
+                  : sellerId === ALL_SELLERS_VALUE
+                    ? `GET only — runs for all ${sellers.length} sellers sequentially`
+                    : sellerId
+                      ? `ID: ${sellerId}`
+                      : 'Required for raw eBay calls'
               }
             >
               <MenuItem value=""><em>Select seller...</em></MenuItem>
-              <MenuItem value={ALL_SELLERS_VALUE}>
-                <em>All sellers ({sellers.length})</em>
-              </MenuItem>
+              {apiMode === 'rest' ? (
+                <MenuItem value={ALL_SELLERS_VALUE}>
+                  <em>All sellers ({sellers.length})</em>
+                </MenuItem>
+              ) : null}
               {sellers.map((s) => (
                 <MenuItem key={s._id} value={s._id}>
                   {s.user?.username || s.user?.email || s._id}
                 </MenuItem>
               ))}
             </TextField>
-            <TextField
-              label="Marketplace ID"
-              value={marketplaceId}
-              onChange={(e) => setMarketplaceId(e.target.value)}
-              size="small"
-              placeholder="EBAY_US"
-              helperText="Required for Sell Account, Marketing, Inventory APIs"
-              sx={{ minWidth: 200 }}
-            />
-            <TextField
-              label="Order ID (optional)"
-              value={orderId}
-              onChange={(e) => setOrderId(e.target.value)}
-              size="small"
-              sx={{ minWidth: 220 }}
-              helperText="Fills <orderId> placeholders"
-            />
-            <TextField
-              select
-              label="Method"
-              value={method}
-              onChange={(e) => setMethod(e.target.value)}
-              size="small"
-              sx={{ width: 160 }}
-            >
-              {['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].map((m) => (
-                <MenuItem key={m} value={m}>{m}</MenuItem>
-              ))}
-            </TextField>
+
+            {apiMode === 'rest' ? (
+              <>
+                <TextField
+                  label="Marketplace ID"
+                  value={marketplaceId}
+                  onChange={(e) => setMarketplaceId(e.target.value)}
+                  size="small"
+                  placeholder="EBAY_US"
+                  helperText="Required for Sell Account, Marketing, Inventory APIs"
+                  sx={{ minWidth: 200 }}
+                />
+                <TextField
+                  label="Order ID (optional)"
+                  value={orderId}
+                  onChange={(e) => setOrderId(e.target.value)}
+                  size="small"
+                  sx={{ minWidth: 220 }}
+                  helperText="Fills <orderId> placeholders"
+                />
+                <TextField
+                  select
+                  label="Method"
+                  value={method}
+                  onChange={(e) => setMethod(e.target.value)}
+                  size="small"
+                  sx={{ width: 160 }}
+                >
+                  {['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].map((m) => (
+                    <MenuItem key={m} value={m}>{m}</MenuItem>
+                  ))}
+                </TextField>
+              </>
+            ) : (
+              <>
+                <TextField
+                  label="Call name"
+                  value={tradingCallName}
+                  onChange={(e) => setTradingCallName(e.target.value)}
+                  size="small"
+                  sx={{ minWidth: 200 }}
+                  helperText="GetSellerList or GetMyeBaySelling"
+                />
+                <TextField
+                  label="Site ID"
+                  value={tradingSiteId}
+                  onChange={(e) => setTradingSiteId(e.target.value)}
+                  size="small"
+                  sx={{ width: 120 }}
+                  helperText="0 = EBAY_US"
+                />
+                <Button
+                  variant="outlined"
+                  onClick={() => {
+                    setTradingCallName('GetSellerList');
+                    setTradingXml(buildGetSellerListXml({ entriesPerPage: 5, pageNumber: 1 }));
+                  }}
+                >
+                  Load GetSellerList sample
+                </Button>
+                <Button
+                  variant="outlined"
+                  onClick={() => {
+                    setTradingCallName('GetMyeBaySelling');
+                    setTradingXml(buildGetMyeBaySellingXml({ entriesPerPage: 25, pageNumber: 1 }));
+                  }}
+                >
+                  Load GetMyeBaySelling sample
+                </Button>
+              </>
+            )}
           </Stack>
 
-          <TextField
-            label="Params (JSON)"
-            value={paramsText}
-            onChange={(e) => setParamsText(e.target.value)}
-            multiline
-            minRows={5}
-            fullWidth
-            sx={{ '& textarea': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' } }}
-          />
-
-          {['POST', 'PATCH', 'PUT'].includes(method) && (
+          {apiMode === 'rest' ? (
+            <>
+              <TextField
+                label="eBay API Path or URL"
+                value={path}
+                onChange={(e) => handlePathChange(e.target.value)}
+                size="small"
+                fullWidth
+                placeholder="/commerce/message/v1/conversation"
+                helperText="Paste path only, path with ?query=, or full https://api.ebay.com/... URL"
+              />
+              <TextField
+                label="Params (JSON)"
+                value={paramsText}
+                onChange={(e) => setParamsText(e.target.value)}
+                multiline
+                minRows={5}
+                fullWidth
+                sx={{ '& textarea': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' } }}
+              />
+              {['POST', 'PATCH', 'PUT'].includes(method) && (
+                <TextField
+                  label="Body (JSON)"
+                  value={bodyText}
+                  onChange={(e) => setBodyText(e.target.value)}
+                  multiline
+                  minRows={5}
+                  fullWidth
+                  sx={{ '& textarea': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' } }}
+                />
+              )}
+            </>
+          ) : (
             <TextField
-              label="Body (JSON)"
-              value={bodyText}
-              onChange={(e) => setBodyText(e.target.value)}
+              label="Trading request XML"
+              value={tradingXml}
+              onChange={(e) => setTradingXml(e.target.value)}
               multiline
-              minRows={5}
+              minRows={14}
               fullWidth
+              helperText="Token is injected automatically. GetSellerList needs StartTimeFrom/To within ~120 days; GetMyeBaySelling uses ActiveList pagination."
               sx={{ '& textarea': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' } }}
             />
           )}
@@ -478,9 +661,11 @@ export default function EbayApiTesterPage() {
             <Button variant="contained" onClick={runRequest} disabled={loading}>
               {loading
                 ? (bulkProgress || 'Running...')
-                : sellerId === ALL_SELLERS_VALUE
-                  ? 'Run for all sellers'
-                  : 'Run'}
+                : apiMode === 'trading'
+                  ? 'Run Trading call'
+                  : sellerId === ALL_SELLERS_VALUE
+                    ? 'Run for all sellers'
+                    : 'Run'}
             </Button>
             {bulkProgress && loading && (
               <Typography variant="body2" color="text.secondary">

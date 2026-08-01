@@ -7,8 +7,18 @@ const ORG_WIDE_SELLER_ROLES = new Set(['superadmin', 'listingadmin']);
 /** Status values written by eBay sync and legacy rows. */
 export const ACTIVE_LISTING_STATUS_VALUES = ['Active', 'ACTIVE', 'active'];
 
+/** Ended / completed statuses from Trading API + our sync upserts. */
+export const ENDED_LISTING_STATUS_VALUES = [
+  'Ended',
+  'ENDED',
+  'ended',
+  'Completed',
+  'COMPLETED',
+  'completed',
+];
+
 /**
- * Mongo match for rows that should appear on Store Listings.
+ * Mongo match for rows that should appear on Store Listings (active).
  * eBay uses "Active"; some code paths used "ACTIVE".
  */
 export function activeListingStatusFilter() {
@@ -20,6 +30,11 @@ export function activeListingStatusFilter() {
       { listingStatus: '' },
     ],
   };
+}
+
+/** Mongo match for ended/completed store listings. */
+export function endedListingStatusFilter() {
+  return { listingStatus: { $in: ENDED_LISTING_STATUS_VALUES } };
 }
 
 /**
@@ -57,9 +72,21 @@ export function sellerIdsInMatch(sellerIds) {
 /**
  * Mongo filter for Store Listings (ActiveListing). Uses $and so search $or
  * does not overwrite listingStatus $or.
+ * @param {'active'|'ended'} [listingStatusMode='active']
  */
-export function buildStoreListingsMatch({ sellerIds = [], sellerId = '', search = '' } = {}) {
-  const clauses = [activeListingStatusFilter()];
+export function buildStoreListingsMatch({
+  sellerIds = [],
+  sellerId = '',
+  search = '',
+  startDateFrom = '',
+  startDateTo = '',
+  listingStatusMode = 'active',
+} = {}) {
+  const clauses = [
+    listingStatusMode === 'ended'
+      ? endedListingStatusFilter()
+      : activeListingStatusFilter(),
+  ];
 
   const sid = String(sellerId || '').trim();
   if (sid && mongoose.Types.ObjectId.isValid(sid)) {
@@ -75,6 +102,29 @@ export function buildStoreListingsMatch({ sellerIds = [], sellerId = '', search 
     clauses.push({
       $or: [{ title: searchRegex }, { sku: searchRegex }, { itemId: searchRegex }],
     });
+  }
+
+  // Date-only strings (YYYY-MM-DD) are interpreted as IST calendar days,
+  // matching /ebay/listings and the admin UI timezone.
+  const fromRaw = String(startDateFrom || '').trim();
+  const toRaw = String(startDateTo || '').trim();
+  const startTimeRange = {};
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fromRaw)) {
+    const from = new Date(`${fromRaw}T00:00:00+05:30`);
+    if (!Number.isNaN(from.getTime())) startTimeRange.$gte = from;
+  } else if (fromRaw) {
+    const from = new Date(fromRaw);
+    if (!Number.isNaN(from.getTime())) startTimeRange.$gte = from;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(toRaw)) {
+    const to = new Date(`${toRaw}T23:59:59.999+05:30`);
+    if (!Number.isNaN(to.getTime())) startTimeRange.$lte = to;
+  } else if (toRaw) {
+    const to = new Date(toRaw);
+    if (!Number.isNaN(to.getTime())) startTimeRange.$lte = to;
+  }
+  if (Object.keys(startTimeRange).length) {
+    clauses.push({ startTime: startTimeRange });
   }
 
   return clauses.length === 1 ? clauses[0] : { $and: clauses };

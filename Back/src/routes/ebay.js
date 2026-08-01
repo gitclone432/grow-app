@@ -87,6 +87,7 @@ import { applySellerStandardsThresholdLabels } from '../utils/sellerStandardsThr
 import {
   activeListingStatusFilter,
   buildStoreListingsMatch,
+  endedListingStatusFilter,
   getSellersForStoreListings,
   sellerIdsInMatch,
 } from '../utils/storeListingsQuery.js';
@@ -546,6 +547,16 @@ export async function withEbayPollRun(jobType, source, triggeredBy, runJob) {
 }
 
 const EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS = 120;
+/**
+ * How far back Store Listings sync walks when seller.initialSyncDate is unset.
+ * Each GetSellerList call is still ≤120 days; we issue multiple windows.
+ */
+const EBAY_LISTINGS_BACKFILL_DAYS = (() => {
+  const n = parseInt(process.env.EBAY_LISTINGS_BACKFILL_DAYS || '730', 10);
+  if (!Number.isFinite(n)) return 730;
+  return Math.min(3650, Math.max(EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS, n));
+})();
+
 /** Fulfillment getOrders: practical backfill window for first sync (days). */
 const EBAY_ORDER_INITIAL_LOOKBACK_DAYS = (() => {
   const n = parseInt(process.env.EBAY_ORDER_INITIAL_LOOKBACK_DAYS || '90', 10);
@@ -569,12 +580,55 @@ function getEffectiveInitialSyncDate(initialSyncDate) {
   return configuredStart;
 }
 
+/** Overall StartTime floor for ActiveListing sync (may span many 120d GetSellerList windows). */
+function getListingsBackfillStart(seller) {
+  const rolling = new Date();
+  rolling.setUTCDate(rolling.getUTCDate() - EBAY_LISTINGS_BACKFILL_DAYS);
+
+  if (seller?.initialSyncDate) {
+    const configured = new Date(seller.initialSyncDate);
+    if (!Number.isNaN(configured.getTime())) {
+      // Walk from the earlier of seller.initialSyncDate and the default lookback
+      // so a recent default initialSyncDate does not block multi-year listing history.
+      return configured.getTime() < rolling.getTime() ? configured : rolling;
+    }
+  }
+  return rolling;
+}
+
 function getClampedSellerListStart(startTimeFrom, startTimeTo) {
   const requestedStart = new Date(startTimeFrom);
   const maxRangeStart = new Date(startTimeTo);
   maxRangeStart.setUTCDate(maxRangeStart.getUTCDate() - EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS);
 
   return requestedStart < maxRangeStart ? maxRangeStart : requestedStart;
+}
+
+/**
+ * Split [rangeStart, rangeEnd] into GetSellerList-safe StartTime windows (< 120 days each).
+ * eBay rejects a single StartTimeFrom/To span of 120+ days; older history needs multiple calls.
+ */
+function buildSellerListStartWindows(rangeStart, rangeEnd) {
+  const start = new Date(rangeStart);
+  const end = new Date(rangeEnd);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start >= end) {
+    return [];
+  }
+
+  // eBay docs: each time range must be a value less than 120 days.
+  const maxSpanMs = (EBAY_MAX_GET_SELLER_LIST_RANGE_DAYS * 24 * 60 * 60 * 1000) - 1000;
+  const windows = [];
+  let cursor = new Date(start);
+
+  while (cursor < end) {
+    let chunkEnd = new Date(cursor.getTime() + maxSpanMs);
+    if (chunkEnd > end) chunkEnd = new Date(end);
+    if (chunkEnd <= cursor) break;
+    windows.push({ from: new Date(cursor), to: new Date(chunkEnd) });
+    cursor = new Date(chunkEnd.getTime() + 1000);
+  }
+
+  return windows;
 }
 
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
@@ -13257,13 +13311,66 @@ let syncAllStatus = {
   currentSeller: '',
   currentPage: 0,
   currentTotalPages: 0,
+  currentWindow: 0,
+  totalWindows: 0,
   results: [],
   errors: [],
   totalProcessed: 0,
   totalSkipped: 0,
   startedAt: null,
-  completedAt: null
+  completedAt: null,
+  cancelRequested: false,
+  cancelled: false,
 };
+
+/** Cooperative cancel for sync-all (in-memory + Mongo so any instance can request stop). */
+let syncAllCancelRequested = false;
+/** Bumped on start/force-stop so a killed worker's finally does not overwrite a newer job. */
+let syncAllRunGeneration = 0;
+
+/** Per-store listing sync jobs started from the Sync status table (sellerId → status). */
+const singleSellerSyncJobs = new Map();
+
+class SyncAllCancelledError extends Error {
+  constructor(message = 'Sync cancelled by user') {
+    super(message);
+    this.name = 'SyncAllCancelledError';
+  }
+}
+
+async function checkSyncAllCancelRequested() {
+  if (syncAllCancelRequested) return true;
+  try {
+    const row = await SyncAllSellersStatusCache.findById(SYNC_ALL_SELLERS_STATUS_ID).lean();
+    if (row?.payload?.cancelRequested) {
+      syncAllCancelRequested = true;
+      return true;
+    }
+  } catch {
+    // ignore read errors; rely on in-memory flag
+  }
+  return false;
+}
+
+async function requestSyncAllCancel() {
+  syncAllCancelRequested = true;
+  syncAllStatus = {
+    ...syncAllStatus,
+    cancelRequested: true,
+  };
+  try {
+    const row = await SyncAllSellersStatusCache.findById(SYNC_ALL_SELLERS_STATUS_ID).lean();
+    const base = row?.payload && typeof row.payload === 'object' ? row.payload : syncAllStatus;
+    const payload = { ...base, cancelRequested: true };
+    await SyncAllSellersStatusCache.findByIdAndUpdate(
+      SYNC_ALL_SELLERS_STATUS_ID,
+      { $set: { payload, updatedAt: new Date() } },
+      { upsert: true }
+    );
+  } catch (e) {
+    console.error('[Sync All] persist cancel failed:', e?.message || e);
+  }
+}
 
 async function persistSyncAllStatusToDb() {
   try {
@@ -13412,6 +13519,74 @@ router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
     if (!res.headersSent) {
       res.status(500).json({ error: err.message });
     }
+  }
+});
+
+/** Cooperative or forced stop for Sync All Stores. */
+router.post('/sync-all-sellers-listings/stop', requireAuth, async (req, res) => {
+  try {
+    const force = Boolean(req.body?.force);
+    const row = await SyncAllSellersStatusCache.findById(SYNC_ALL_SELLERS_STATUS_ID).lean();
+    const lock = await SyncAllSellersLock.findById(SYNC_ALL_SELLERS_LOCK_ID).lean();
+    const now = new Date();
+    const lockHeld = Boolean(lock?.leaseUntil && new Date(lock.leaseUntil) > now);
+    const running = Boolean(syncAllStatus.running || row?.payload?.running);
+
+    if (!running && !lockHeld) {
+      // Still clear local UI-facing flags if a previous cancel left them sticky.
+      syncAllCancelRequested = false;
+      syncAllStatus = {
+        ...syncAllStatus,
+        running: false,
+        cancelRequested: false,
+      };
+      await persistSyncAllStatusToDb();
+      return res.json({
+        success: true,
+        message: 'No sync is currently running.',
+        stopped: false,
+        forced: force,
+      });
+    }
+
+    await requestSyncAllCancel();
+
+    if (force || (!running && lockHeld)) {
+      syncAllRunGeneration += 1;
+      await releaseSyncAllSellersLock();
+      // Keep cancelRequested true in DB so leftover workers exit at the next page.
+      // running=false unlocks the UI immediately.
+      syncAllStatus = {
+        ...syncAllStatus,
+        running: false,
+        cancelled: true,
+        cancelRequested: true,
+        currentSeller: '',
+        currentPage: 0,
+        currentTotalPages: 0,
+        completedAt: new Date().toISOString(),
+        forceStopped: true,
+      };
+      await persistSyncAllStatusToDb();
+      return res.json({
+        success: true,
+        message: force
+          ? 'Sync force-stopped. Lock cleared — you can sync individual stores now. (A leftover worker may still finish its current eBay page in the background.)'
+          : 'Cleared a stuck sync lock.',
+        stopped: true,
+        forced: true,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Stop requested. Sync will halt after the current page finishes. Use Force stop if it stays stuck.',
+      stopped: true,
+      forced: false,
+    });
+  } catch (err) {
+    console.error('[Sync All] stop error:', err?.message || err);
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -14513,10 +14688,24 @@ router.get('/all-listings', requireAuth, async (req, res) => {
 
 // GET ALL ACTIVE LISTINGS ACROSS ALL STORES/SELLERS (ActiveListing cache from GetSellerList sync)
 router.get('/all-store-listings', requireAuth, async (req, res) => {
-  const { page = 1, limit = 50, search, sellerId, sortBy = 'startDate', sortOrder = 'desc' } = req.query;
+  const {
+    page = 1,
+    limit = 50,
+    search,
+    sellerId,
+    sortBy = 'startDate',
+    sortOrder = 'desc',
+    startDateFrom,
+    startDateTo,
+    listingStatus,
+  } = req.query;
+  const listingStatusMode = String(listingStatus || '').toLowerCase() === 'ended'
+    ? 'ended'
+    : 'active';
   const emptyPayload = (pageNum, resolvedSortField, resolvedSortOrder) => ({
     listings: [],
     sourceCollection: 'ActiveListing',
+    listingStatusMode,
     sorting: {
       sortBy: resolvedSortField,
       sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
@@ -14545,10 +14734,12 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
       soldQty: 'soldQuantity',
       views30d: 'views30d',
       startDate: 'startTime',
+      endDate: 'endTime',
       watch: 'watchCount',
       timeLeft: 'timeLeft',
     };
-    const resolvedSortField = sortFieldMap[sortBy] || 'startTime';
+    const defaultSortField = listingStatusMode === 'ended' ? 'endTime' : 'startTime';
+    const resolvedSortField = sortFieldMap[sortBy] || defaultSortField;
     const resolvedSortOrder = String(sortOrder).toLowerCase() === 'asc' ? 1 : -1;
     const sortSpec = { [resolvedSortField]: resolvedSortOrder, _id: -1 };
 
@@ -14574,6 +14765,9 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
       sellerIds: activeSellerIds,
       sellerId: sid,
       search,
+      startDateFrom,
+      startDateTo,
+      listingStatusMode,
     });
 
     const sellerNameById = new Map(
@@ -14646,6 +14840,7 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
     res.json({
       listings: enriched,
       sourceCollection: 'ActiveListing',
+      listingStatusMode,
       sorting: {
         sortBy: resolvedSortField,
         sortOrder: resolvedSortOrder === 1 ? 'asc' : 'desc',
@@ -14673,8 +14868,247 @@ router.get('/all-store-listings', requireAuth, async (req, res) => {
 });
 
 // Per-store listing counts + last sync-all result (Store Listings diagnostics).
+const EBAY_ACTIVE_COUNT_CACHE_TTL_MS = 15 * 60 * 1000;
+/** Max active items to page through when summing live eBay inventory value. */
+const EBAY_ACTIVE_VALUE_MAX_ENTRIES = 5000;
+const ebayActiveListingCountCache = new Map(); // sellerId → cached stats
+
+function moneyFromEbayNode(node) {
+  if (node == null) return null;
+  const raw = Array.isArray(node) ? node[0] : node;
+  const n = Number.parseFloat(raw?._ ?? raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function firstXmlValue(node) {
+  if (node == null) return null;
+  const raw = Array.isArray(node) ? node[0] : node;
+  if (raw == null) return null;
+  if (typeof raw === 'object' && raw._ != null) return raw._;
+  return raw;
+}
+
+/**
+ * Live eBay active listing count + inventory value via GetMyeBaySelling ActiveList.
+ * Value = Σ (CurrentPrice|BuyItNowPrice × QuantityAvailable|Quantity).
+ */
+async function fetchEbayActiveListingCount(accessToken) {
+  const buildRequest = (page, entriesPerPage, includeItemFields) => `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${accessToken}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <ActiveList>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+      <PageNumber>${page}</PageNumber>
+    </Pagination>
+  </ActiveList>
+  <SellingSummary>
+    <Include>true</Include>
+  </SellingSummary>
+  <OutputSelector>ActiveList.PaginationResult</OutputSelector>
+  <OutputSelector>Summary</OutputSelector>
+  ${includeItemFields ? `<OutputSelector>ActiveList.ItemArray.Item.ItemID</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.BuyItNowPrice</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.SellingStatus.CurrentPrice</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.Quantity</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.QuantityAvailable</OutputSelector>` : ''}
+</GetMyeBaySellingRequest>`;
+
+  const parseRoot = async (xmlRequest, logLabel) => {
+    const response = await postEbayTradingApi(xmlRequest, {
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
+      'Content-Type': 'text/xml',
+    }, { logLabel });
+    const result = await parseStringPromise(response.data);
+    const root = result?.GetMyeBaySellingResponse;
+    if (!root) throw new Error('Empty GetMyeBaySelling response');
+    if (root.Ack?.[0] === 'Failure') {
+      throw new Error(root.Errors?.[0]?.LongMessage?.[0] || 'GetMyeBaySelling failed');
+    }
+    return root;
+  };
+
+  const firstRoot = await parseRoot(buildRequest(1, 1, false), 'Active listing count');
+  const totalRaw =
+    firstRoot.ActiveList?.[0]?.PaginationResult?.[0]?.TotalNumberOfEntries?.[0]
+    ?? firstRoot.ActiveList?.PaginationResult?.TotalNumberOfEntries
+    ?? null;
+  const count = Number.parseInt(String(totalRaw ?? ''), 10);
+  if (!Number.isFinite(count)) {
+    throw new Error('Active listing total missing from eBay response');
+  }
+
+  const summary = firstRoot.Summary?.[0] || firstRoot.Summary || {};
+  const auctionValueNode = summary.TotalAuctionSellingValue?.[0] || summary.TotalAuctionSellingValue;
+  const auctionSellingValue = moneyFromEbayNode(auctionValueNode);
+  const auctionSellingCurrency =
+    (Array.isArray(auctionValueNode) ? auctionValueNode[0] : auctionValueNode)?.$?.currencyID
+    || 'USD';
+
+  let inventoryValue = null;
+  let inventoryCurrency = 'USD';
+  let inventoryValueIncomplete = false;
+
+  if (count > 0 && count <= EBAY_ACTIVE_VALUE_MAX_ENTRIES) {
+    const entriesPerPage = 200;
+    const totalPages = Math.max(1, Math.ceil(count / entriesPerPage));
+    let sum = 0;
+    let currency = 'USD';
+
+    for (let page = 1; page <= totalPages; page++) {
+      const root = await parseRoot(
+        buildRequest(page, entriesPerPage, true),
+        `Active listing value p${page}`
+      );
+      const items =
+        root.ActiveList?.[0]?.ItemArray?.[0]?.Item
+        || root.ActiveList?.ItemArray?.Item
+        || [];
+      const list = Array.isArray(items) ? items : (items ? [items] : []);
+
+      for (const item of list) {
+        const sellingStatus = item.SellingStatus?.[0] || item.SellingStatus || {};
+        const currentPriceNode = sellingStatus.CurrentPrice?.[0] || sellingStatus.CurrentPrice;
+        const buyItNowNode = item.BuyItNowPrice?.[0] || item.BuyItNowPrice;
+        const price = moneyFromEbayNode(currentPriceNode) ?? moneyFromEbayNode(buyItNowNode) ?? 0;
+        const currencyId =
+          currentPriceNode?.$?.currencyID
+          || buyItNowNode?.$?.currencyID
+          || currency;
+        if (currencyId) currency = currencyId;
+
+        const qtyRaw =
+          firstXmlValue(item.QuantityAvailable)
+          ?? firstXmlValue(item.Quantity)
+          ?? 1;
+        const qty = Number.parseInt(String(qtyRaw), 10);
+        sum += price * (Number.isFinite(qty) && qty > 0 ? qty : 1);
+      }
+    }
+
+    inventoryValue = Math.round(sum * 100) / 100;
+    inventoryCurrency = currency || 'USD';
+  } else if (count > EBAY_ACTIVE_VALUE_MAX_ENTRIES) {
+    inventoryValueIncomplete = true;
+  }
+
+  return {
+    count,
+    inventoryValue,
+    inventoryCurrency,
+    inventoryValueIncomplete,
+    auctionSellingValue: Number.isFinite(auctionSellingValue) ? auctionSellingValue : null,
+    auctionSellingCurrency: auctionSellingCurrency || 'USD',
+  };
+}
+
+async function getCachedOrFetchEbayActiveCount(seller, { force = false } = {}) {
+  const sid = String(seller._id);
+  const cached = ebayActiveListingCountCache.get(sid);
+  if (!force && cached && Date.now() < cached.expiresAt) {
+    return {
+      ebayActiveCount: cached.count,
+      ebayInventoryValue: cached.inventoryValue ?? null,
+      ebayInventoryCurrency: cached.inventoryCurrency || 'USD',
+      ebayInventoryValueIncomplete: Boolean(cached.inventoryValueIncomplete),
+      ebayAuctionSellingValue: cached.auctionSellingValue ?? null,
+      ebayAuctionSellingCurrency: cached.auctionSellingCurrency || 'USD',
+      ebayActiveCountError: cached.error || null,
+      ebayActiveCountFetchedAt: cached.fetchedAt || null,
+      ebayActiveCountCached: true,
+    };
+  }
+
+  if (!seller.ebayTokens?.refresh_token && !seller.ebayTokens?.access_token) {
+    return {
+      ebayActiveCount: null,
+      ebayInventoryValue: null,
+      ebayInventoryCurrency: null,
+      ebayInventoryValueIncomplete: false,
+      ebayAuctionSellingValue: null,
+      ebayAuctionSellingCurrency: null,
+      ebayActiveCountError: 'No OAuth',
+      ebayActiveCountFetchedAt: null,
+      ebayActiveCountCached: false,
+    };
+  }
+
+  try {
+    const token = await ensureValidToken(seller);
+    const stats = await fetchEbayActiveListingCount(token);
+    const fetchedAt = new Date().toISOString();
+    ebayActiveListingCountCache.set(sid, {
+      count: stats.count,
+      inventoryValue: stats.inventoryValue,
+      inventoryCurrency: stats.inventoryCurrency,
+      inventoryValueIncomplete: stats.inventoryValueIncomplete,
+      auctionSellingValue: stats.auctionSellingValue,
+      auctionSellingCurrency: stats.auctionSellingCurrency,
+      error: null,
+      fetchedAt,
+      expiresAt: Date.now() + EBAY_ACTIVE_COUNT_CACHE_TTL_MS,
+    });
+    return {
+      ebayActiveCount: stats.count,
+      ebayInventoryValue: stats.inventoryValue,
+      ebayInventoryCurrency: stats.inventoryCurrency,
+      ebayInventoryValueIncomplete: stats.inventoryValueIncomplete,
+      ebayAuctionSellingValue: stats.auctionSellingValue,
+      ebayAuctionSellingCurrency: stats.auctionSellingCurrency,
+      ebayActiveCountError: null,
+      ebayActiveCountFetchedAt: fetchedAt,
+      ebayActiveCountCached: false,
+    };
+  } catch (err) {
+    const fetchedAt = new Date().toISOString();
+    const error = err?.message || String(err);
+    ebayActiveListingCountCache.set(sid, {
+      count: cached?.count ?? null,
+      inventoryValue: cached?.inventoryValue ?? null,
+      inventoryCurrency: cached?.inventoryCurrency || 'USD',
+      inventoryValueIncomplete: cached?.inventoryValueIncomplete ?? false,
+      auctionSellingValue: cached?.auctionSellingValue ?? null,
+      auctionSellingCurrency: cached?.auctionSellingCurrency || 'USD',
+      error,
+      fetchedAt,
+      expiresAt: Date.now() + 60 * 1000,
+    });
+    return {
+      ebayActiveCount: cached?.count ?? null,
+      ebayInventoryValue: cached?.inventoryValue ?? null,
+      ebayInventoryCurrency: cached?.inventoryCurrency || 'USD',
+      ebayInventoryValueIncomplete: Boolean(cached?.inventoryValueIncomplete),
+      ebayAuctionSellingValue: cached?.auctionSellingValue ?? null,
+      ebayAuctionSellingCurrency: cached?.auctionSellingCurrency || 'USD',
+      ebayActiveCountError: error,
+      ebayActiveCountFetchedAt: fetchedAt,
+      ebayActiveCountCached: Boolean(cached?.count != null),
+    };
+  }
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const i = nextIndex;
+      nextIndex += 1;
+      results[i] = await mapper(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 router.get('/store-listings/store-status', requireAuth, async (req, res) => {
   try {
+    const refreshEbayCounts = String(req.query.ebayCounts || '') === '1';
     const scopedSellers = await getSellersForStoreListings(req);
     const sellerIds = scopedSellers.map((s) => s._id);
     if (sellerIds.length === 0) {
@@ -14712,21 +15146,163 @@ router.get('/store-listings/store-status', requireAuth, async (req, res) => {
     }
 
     const sellerInList = sellerIdsInMatch(sellerIds).$in;
-    const countRows = await ActiveListing.aggregate([
-      {
-        $match: {
-          ...activeListingStatusFilter(),
-          seller: { $in: sellerInList },
+    const {
+      monthStart,
+      monthEnd,
+      monthStartLabel,
+      monthEndLabel,
+    } = getEbayFreeListingMonthWindow();
+    // GTC renews once per calendar month on the StartTime day-of-month (PDT), not every 30 days.
+    const asOfForRenew = getEbayFreeListingRenewAsOf(monthStart, monthEnd);
+
+    const [countRows, endedCountRows, endedStartedThisMonthRows, renewRows] = await Promise.all([
+      ActiveListing.aggregate([
+        {
+          $match: {
+            ...activeListingStatusFilter(),
+            seller: { $in: sellerInList },
+          },
         },
-      },
-      { $group: { _id: '$seller', count: { $sum: 1 } } },
+        {
+          $group: {
+            _id: { $toString: { $ifNull: ['$seller', ''] } },
+            count: { $sum: 1 },
+            // Listed/relisted with StartTime inside the eBay free-listing month (still active)
+            newThisMonth: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ['$startTime', null] },
+                      { $gte: ['$startTime', monthStart] },
+                      { $lt: ['$startTime', monthEnd] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            inventoryValue: {
+              $sum: {
+                $multiply: [
+                  { $ifNull: ['$currentPrice', 0] },
+                  { $ifNull: ['$quantity', 1] },
+                ],
+              },
+            },
+            listingsAmount: {
+              $sum: { $ifNull: ['$currentPrice', 0] },
+            },
+          },
+        },
+      ]),
+      ActiveListing.aggregate([
+        {
+          $match: {
+            ...endedListingStatusFilter(),
+            seller: { $in: sellerInList },
+          },
+        },
+        {
+          $group: {
+            _id: { $toString: { $ifNull: ['$seller', ''] } },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      ActiveListing.aggregate([
+        {
+          $match: {
+            ...endedListingStatusFilter(),
+            seller: { $in: sellerInList },
+            startTime: { $gte: monthStart, $lt: monthEnd },
+          },
+        },
+        {
+          $group: {
+            _id: { $toString: { $ifNull: ['$seller', ''] } },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      ActiveListing.aggregate(
+        buildCalendarMonthRenewAggregateStages({
+          sellerInList,
+          monthStart,
+          asOfDay: asOfForRenew.asOfDay,
+          daysInMonth: asOfForRenew.daysInMonth,
+        })
+      ),
     ]);
-    const countBySeller = new Map(countRows.map((c) => [String(c._id), c.count]));
+    const countBySeller = new Map();
+    const inventoryValueBySeller = new Map();
+    const listingsAmountBySeller = new Map();
+    const endedCountBySeller = new Map();
+    const monthNewBySeller = new Map();
+    const monthRenewBySeller = new Map();
+    const monthEndedInsertBySeller = new Map();
+    for (const c of countRows) {
+      const key = String(c._id || '');
+      if (!key) continue;
+      countBySeller.set(key, (countBySeller.get(key) || 0) + Number(c.count || 0));
+      monthNewBySeller.set(key, (monthNewBySeller.get(key) || 0) + Number(c.newThisMonth || 0));
+      inventoryValueBySeller.set(
+        key,
+        (inventoryValueBySeller.get(key) || 0) + Number(c.inventoryValue || 0)
+      );
+      listingsAmountBySeller.set(
+        key,
+        (listingsAmountBySeller.get(key) || 0) + Number(c.listingsAmount || 0)
+      );
+    }
+    for (const c of endedCountRows) {
+      const key = String(c._id || '');
+      if (!key) continue;
+      endedCountBySeller.set(key, (endedCountBySeller.get(key) || 0) + Number(c.count || 0));
+    }
+    for (const c of endedStartedThisMonthRows) {
+      const key = String(c._id || '');
+      if (!key) continue;
+      monthEndedInsertBySeller.set(key, (monthEndedInsertBySeller.get(key) || 0) + Number(c.count || 0));
+    }
+    for (const c of renewRows) {
+      const key = String(c._id || '');
+      if (!key) continue;
+      monthRenewBySeller.set(key, (monthRenewBySeller.get(key) || 0) + Number(c.count || 0));
+    }
 
     const sellerDocs = await Seller.find({ _id: { $in: sellerIds } })
-      .select('_id user ebayTokens.refresh_token lastAllListingsPolledAt isStoreActive')
-      .populate('user', 'username email active')
-      .lean();
+      .select('_id user ebayTokens lastAllListingsPolledAt isStoreActive')
+      .populate('user', 'username email active');
+
+    const ebayCountBySeller = new Map();
+    if (refreshEbayCounts) {
+      const connected = sellerDocs.filter((s) => s.ebayTokens?.refresh_token || s.ebayTokens?.access_token);
+      const fetched = await mapWithConcurrency(connected, 3, async (sellerDoc) => {
+        const info = await getCachedOrFetchEbayActiveCount(sellerDoc, { force: true });
+        return [String(sellerDoc._id), info];
+      });
+      for (const [sid, info] of fetched) ebayCountBySeller.set(sid, info);
+    } else {
+      for (const s of sellerDocs) {
+        const sid = String(s._id);
+        const cached = ebayActiveListingCountCache.get(sid);
+        if (cached) {
+          ebayCountBySeller.set(sid, {
+            ebayActiveCount: cached.count,
+            ebayInventoryValue: cached.inventoryValue ?? null,
+            ebayInventoryCurrency: cached.inventoryCurrency || 'USD',
+            ebayInventoryValueIncomplete: Boolean(cached.inventoryValueIncomplete),
+            ebayAuctionSellingValue: cached.auctionSellingValue ?? null,
+            ebayAuctionSellingCurrency: cached.auctionSellingCurrency || 'USD',
+            ebayActiveCountError: cached.error || null,
+            ebayActiveCountFetchedAt: cached.fetchedAt || null,
+            ebayActiveCountCached: true,
+          });
+        }
+      }
+    }
 
     const stores = sellerDocs
       .map((s) => {
@@ -14734,10 +15310,41 @@ router.get('/store-listings/store-status', requireAuth, async (req, res) => {
         const sellerName = s.user?.username || s.user?.email || sid;
         const lastResult =
           resultsById.get(sid) || resultsByName.get(sellerName.toLowerCase()) || null;
+        const ebayInfo = ebayCountBySeller.get(sid) || {
+          ebayActiveCount: null,
+          ebayInventoryValue: null,
+          ebayInventoryCurrency: null,
+          ebayInventoryValueIncomplete: false,
+          ebayAuctionSellingValue: null,
+          ebayAuctionSellingCurrency: null,
+          ebayActiveCountError: null,
+          ebayActiveCountFetchedAt: null,
+          ebayActiveCountCached: false,
+        };
         return {
           sellerId: s._id,
           sellerName,
           listingCount: countBySeller.get(sid) || 0,
+          endedListingCount: endedCountBySeller.get(sid) || 0,
+          monthNewListings: monthNewBySeller.get(sid) || 0,
+          monthRenewListings: monthRenewBySeller.get(sid) || 0,
+          monthEndedInserts: monthEndedInsertBySeller.get(sid) || 0,
+          monthFreeInserts:
+            (monthNewBySeller.get(sid) || 0)
+            + (monthRenewBySeller.get(sid) || 0)
+            + (monthEndedInsertBySeller.get(sid) || 0),
+          freeListingMonthStart: monthStart,
+          freeListingMonthEnd: monthEnd,
+          inventoryValue: inventoryValueBySeller.get(sid) || 0,
+          listingsAmount: listingsAmountBySeller.get(sid) || 0,
+          ebayActiveCount: ebayInfo.ebayActiveCount,
+          ebayInventoryValue: ebayInfo.ebayInventoryValue,
+          ebayInventoryCurrency: ebayInfo.ebayInventoryCurrency,
+          ebayInventoryValueIncomplete: ebayInfo.ebayInventoryValueIncomplete,
+          ebayAuctionSellingValue: ebayInfo.ebayAuctionSellingValue,
+          ebayAuctionSellingCurrency: ebayInfo.ebayAuctionSellingCurrency,
+          ebayActiveCountError: ebayInfo.ebayActiveCountError,
+          ebayActiveCountFetchedAt: ebayInfo.ebayActiveCountFetchedAt,
           hasOAuth: Boolean(s.ebayTokens?.refresh_token),
           userActive: s.user?.active !== false,
           isStoreActive: s.isStoreActive !== false,
@@ -14749,9 +15356,56 @@ router.get('/store-listings/store-status', requireAuth, async (req, res) => {
                 error: lastResult.error || null,
               }
             : null,
+          rowSync: (() => {
+            const job = singleSellerSyncJobs.get(sid);
+            if (!job) return null;
+            return {
+              running: Boolean(job.running),
+              currentPage: job.currentPage ?? 0,
+              currentTotalPages: job.currentTotalPages ?? 0,
+              currentWindow: job.currentWindow ?? 0,
+              totalWindows: job.totalWindows ?? 0,
+              processedCount: job.processedCount ?? 0,
+              skippedCount: job.skippedCount ?? 0,
+              listingCountAfter: job.listingCountAfter ?? null,
+              error: job.error || null,
+              startedAt: job.startedAt || null,
+              completedAt: job.completedAt || null,
+            };
+          })(),
         };
       })
       .sort((a, b) => b.listingCount - a.listingCount || a.sellerName.localeCompare(b.sellerName));
+
+    const totals = stores.reduce(
+      (acc, s) => {
+        acc.listingCount += Number(s.listingCount || 0);
+        acc.endedListingCount += Number(s.endedListingCount || 0);
+        acc.monthNewListings += Number(s.monthNewListings || 0);
+        acc.monthRenewListings += Number(s.monthRenewListings || 0);
+        acc.monthEndedInserts += Number(s.monthEndedInserts || 0);
+        acc.monthFreeInserts += Number(s.monthFreeInserts || 0);
+        acc.inventoryValue += Number(s.inventoryValue || 0);
+        acc.listingsAmount += Number(s.listingsAmount || 0);
+        if (s.ebayActiveCount != null) {
+          acc.ebayActiveCount += Number(s.ebayActiveCount);
+          acc.ebayActiveCountKnown += 1;
+        }
+        return acc;
+      },
+      {
+        listingCount: 0,
+        endedListingCount: 0,
+        monthNewListings: 0,
+        monthRenewListings: 0,
+        monthEndedInserts: 0,
+        monthFreeInserts: 0,
+        inventoryValue: 0,
+        listingsAmount: 0,
+        ebayActiveCount: 0,
+        ebayActiveCountKnown: 0,
+      }
+    );
 
     res.json({
       sync: {
@@ -14761,16 +15415,124 @@ router.get('/store-listings/store-status', requireAuth, async (req, res) => {
         sellersComplete: syncPayload?.sellersComplete ?? 0,
         currentPage: syncPayload?.currentPage ?? 0,
         currentTotalPages: syncPayload?.currentTotalPages ?? 0,
+        currentWindow: syncPayload?.currentWindow ?? 0,
+        totalWindows: syncPayload?.totalWindows ?? 0,
         totalProcessed: syncPayload?.totalProcessed ?? 0,
         completedAt: syncPayload?.completedAt || null,
         startedAt: syncPayload?.startedAt || null,
         errors: Array.isArray(syncPayload?.errors) ? syncPayload.errors : [],
+        cancelRequested: Boolean(syncPayload?.cancelRequested),
+        cancelled: Boolean(syncPayload?.cancelled),
+        forceStopped: Boolean(syncPayload?.forceStopped),
       },
+      freeListingMonthStart: monthStart,
+      freeListingMonthEnd: monthEnd,
+      freeListingMonthStartLabel: monthStartLabel,
+      freeListingMonthEndLabel: monthEndLabel,
+      totals,
       stores,
     });
   } catch (err) {
     console.error('[Store Listings Status] Error:', err.message);
     res.status(500).json({ error: err.message || 'Failed to load store status' });
+  }
+});
+
+/** Start ActiveListing sync for one store (background). */
+router.post('/store-listings/sync-one', requireAuth, async (req, res) => {
+  try {
+    const sellerId = String(req.body?.sellerId || '').trim();
+    if (!sellerId || !mongoose.Types.ObjectId.isValid(sellerId)) {
+      return res.status(400).json({ success: false, error: 'Valid sellerId is required' });
+    }
+
+    if (syncAllStatus.running) {
+      return res.status(409).json({
+        success: false,
+        message: 'A Sync All Stores job is already running. Stop it or wait before syncing a single store.',
+      });
+    }
+
+    const existing = singleSellerSyncJobs.get(sellerId);
+    if (existing?.running) {
+      return res.status(409).json({
+        success: false,
+        message: 'This store is already syncing.',
+      });
+    }
+
+    const scoped = await getSellersForStoreListings(req);
+    if (!scoped.some((s) => String(s._id) === sellerId)) {
+      return res.status(403).json({ success: false, error: 'Store is not in your scope' });
+    }
+
+    const seller = await Seller.findById(sellerId).populate('user', 'username email');
+    if (!seller) {
+      return res.status(404).json({ success: false, error: 'Seller not found' });
+    }
+    if (!seller.ebayTokens?.refresh_token) {
+      return res.status(400).json({
+        success: false,
+        error: 'Store has no eBay OAuth token. Reconnect OAuth first.',
+      });
+    }
+
+    const sellerName = seller.user?.username || seller.user?.email || sellerId;
+    const job = {
+      running: true,
+      sellerId,
+      sellerName,
+      currentPage: 0,
+      currentTotalPages: 0,
+      currentWindow: 0,
+      totalWindows: 0,
+      processedCount: 0,
+      error: null,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    singleSellerSyncJobs.set(sellerId, job);
+
+    res.json({
+      success: true,
+      message: `Sync started for ${sellerName}. Progress appears in this row.`,
+      sellerId,
+      sellerName,
+    });
+
+    void (async () => {
+      try {
+        const result = await syncOneSellerActiveListings(seller, {
+          onPageProgress: ({ page, totalPages, windowIndex = 0, totalWindows = 0 }) => {
+            job.currentPage = page;
+            job.currentTotalPages = totalPages;
+            job.currentWindow = windowIndex;
+            job.totalWindows = totalWindows;
+          },
+          bumpProcessed: () => { job.processedCount += 1; },
+          shouldCancel: async () => Boolean(syncAllStatus.running),
+          logPrefix: '[Sync Store]',
+        });
+        job.processedCount = result.processedCount;
+        job.skippedCount = result.skippedCount;
+        job.error = null;
+        job.listingCountAfter = await ActiveListing.countDocuments({
+          $and: [
+            { seller: { $in: [seller._id, String(seller._id)] } },
+            activeListingStatusFilter(),
+          ],
+        });
+      } catch (err) {
+        console.error(`[Sync Store] ${sellerName}:`, err?.message || err);
+        job.error = err?.message || String(err);
+      } finally {
+        job.running = false;
+        job.completedAt = new Date().toISOString();
+      }
+    })();
+  } catch (err) {
+    console.error('[Sync Store] start error:', err?.message || err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to start store sync' });
   }
 });
 
@@ -14937,9 +15699,9 @@ async function fetchEbayRateLimits(accessToken, forceRefresh = false) {
 
     const rateLimitData = response.data?.rateLimits || [];
 
-    // Build per-context entries, each with their individual resources listed.
-    // Note: eBay uses a SHARED pool per context — all resources draw from the same bucket.
-    // The used/limit/remaining is the same for every resource in a context.
+    // Build per-context entries, each with their individual resources + call counts.
+    // Note: eBay uses a SHARED pool per context — limit/remaining are the same bucket,
+    // but each resource still reports its own `count` (calls made to that method).
     const contexts = [];
     for (const api of rateLimitData) {
       const ctx = api.apiContext || 'Other';
@@ -14952,8 +15714,25 @@ async function fetchEbayRateLimits(accessToken, forceRefresh = false) {
         ? Math.round((used / firstRate.limit) * 100)
         : 0;
 
-      // Collect all resource names
-      const resources = (api.resources || []).map(r => r.name).filter(Boolean);
+      // Per-resource call counts (prefer daily window when multiple rates exist)
+      const resources = (api.resources || [])
+        .map(r => {
+          if (!r?.name) return null;
+          const rate = (r.rates || []).find(rt => rt.timeWindow === 86400) || r.rates?.[0];
+          const count = rate?.count ?? 0;
+          const limit = rate?.limit ?? firstRate.limit ?? 0;
+          const remaining = rate?.remaining ?? firstRate.remaining ?? 0;
+          const resourceUsed = limit > 0 ? Math.max(0, limit - remaining) : count;
+          return {
+            name: r.name,
+            count,
+            used: resourceUsed,
+            limit,
+            remaining,
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => (b.count || 0) - (a.count || 0));
 
       contexts.push({
         apiContext: ctx,
@@ -14964,7 +15743,7 @@ async function fetchEbayRateLimits(accessToken, forceRefresh = false) {
         reset: firstRate.reset,
         used,
         usagePercent,
-        resources  // individual resource names that share this pool
+        resources
       });
     }
 
@@ -19398,6 +20177,280 @@ function pickBestStoreSubscription(subscriptions = []) {
   return subscriptions.find((sub) => sub.subscriptionLevel) || subscriptions[0];
 }
 
+/** Monthly free fixed-price listing allotment from eBay Store plan (US). */
+function freeListingsAllowanceForLevel(level) {
+  const key = String(level || '').trim().toLowerCase();
+  // Current US store packages (Seller Hub / RSVP): Premium 10k, Anchor 25k.
+  // Keep Featured as 10k for older subscriptionLevel strings.
+  if (key.includes('premium') || key.includes('featured')) return 10000;
+  if (key.includes('anchor')) return 25000;
+  return null;
+}
+
+/**
+ * Enrich overview row with monthly remaining headroom.
+ * Free listings (eBay has no remaining-free-insert API):
+ *   used ≈ new (StartTime in PDT month, still active)
+ *        + renew (older active whose calendar-month GTC day already fell)
+ *        + endedStartedThisMonth (StartTime in month, then ended)
+ * Early end before renew does not count (excluded: ended + startTime before month).
+ */
+function enrichStoreOverviewLimitFields(row, usage = null) {
+  const allowance = freeListingsAllowanceForLevel(row.subscriptionLevel);
+
+  let activeCount = null;
+  let endedStartedThisMonth = null;
+  let usedEst = null;
+
+  if (typeof usage === 'number' && Number.isFinite(usage)) {
+    activeCount = Math.max(0, Math.trunc(usage));
+    endedStartedThisMonth = 0;
+    usedEst = activeCount;
+  } else if (usage && typeof usage === 'object') {
+    activeCount = Number.isFinite(usage.activeCount)
+      ? Math.max(0, Math.trunc(usage.activeCount))
+      : null;
+    endedStartedThisMonth = Number.isFinite(usage.endedStartedThisMonth)
+      ? Math.max(0, Math.trunc(usage.endedStartedThisMonth))
+      : 0;
+    usedEst = Number.isFinite(usage.usedEst)
+      ? Math.max(0, Math.trunc(usage.usedEst))
+      : (activeCount != null ? activeCount + endedStartedThisMonth : null);
+  }
+
+  const remainingEst =
+    allowance != null && usedEst != null ? Math.max(0, allowance - usedEst) : null;
+
+  const qtyRem = row.quantityLimitRemaining != null && row.quantityLimitRemaining !== ''
+    ? Number(row.quantityLimitRemaining)
+    : null;
+  const amtRem = row.amountLimitRemaining != null && row.amountLimitRemaining !== ''
+    ? Number(row.amountLimitRemaining)
+    : null;
+  const qtyTotal = row.accountLimitQuantity != null && row.accountLimitQuantity !== ''
+    ? Number(row.accountLimitQuantity)
+    : null;
+  const amtTotal = row.accountLimitAmount != null && row.accountLimitAmount !== ''
+    ? Number(row.accountLimitAmount)
+    : null;
+
+  const qtyUsed =
+    qtyTotal != null && Number.isFinite(qtyRem) ? Math.max(0, qtyTotal - qtyRem) : null;
+  const amtUsed =
+    amtTotal != null && Number.isFinite(amtRem) ? Math.max(0, amtTotal - amtRem) : null;
+
+  const sellingBlocked =
+    (Number.isFinite(qtyRem) && qtyRem <= 0)
+    || (Number.isFinite(amtRem) && amtRem <= 0);
+  const freeListingsExhausted = remainingEst != null && remainingEst <= 0 && allowance > 0;
+
+  return {
+    ...row,
+    activeListingsCount: activeCount,
+    freeListingsEndedStartedThisMonth: endedStartedThisMonth,
+    freeListingsAllowance: allowance,
+    freeListingsUsedEst: usedEst,
+    freeListingsRemainingEst: remainingEst,
+    quantityUsed: Number.isFinite(qtyUsed) ? qtyUsed : null,
+    amountUsed: Number.isFinite(amtUsed) ? amtUsed : null,
+    sellingBlocked,
+    freeListingsExhausted,
+  };
+}
+
+/** US eBay free-listing allotment window (calendar month, America/Los_Angeles / PDT/PST).
+ * Example: Start Jul 1, 2026 12:00am PDT → End Aug 1, 2026 12:00am PDT (exclusive).
+ */
+function getEbayFreeListingMonthWindow(refDate = new Date()) {
+  const start = moment.tz(refDate, 'America/Los_Angeles').startOf('month');
+  const end = start.clone().add(1, 'month');
+  return {
+    monthStart: start.toDate(),
+    monthEnd: end.toDate(),
+    monthStartLabel: start.format('MMM D, YYYY [at] h:mma z'),
+    monthEndLabel: end.format('MMM D, YYYY [at] h:mma z'),
+  };
+}
+
+/** As-of day inside the free-listing month for calendar GTC renew checks. */
+function getEbayFreeListingRenewAsOf(monthStart, monthEnd, refDate = new Date()) {
+  const start = moment.tz(monthStart, 'America/Los_Angeles');
+  const end = moment.tz(monthEnd, 'America/Los_Angeles');
+  let asOf = moment.tz(refDate, 'America/Los_Angeles');
+  if (asOf.isBefore(start)) asOf = start.clone();
+  if (!asOf.isBefore(end)) asOf = end.clone().subtract(1, 'second');
+  return {
+    asOfDay: asOf.date(),
+    daysInMonth: asOf.daysInMonth(),
+    asOf: asOf.toDate(),
+  };
+}
+
+/**
+ * Older actives whose calendar-month GTC renew day already fell in this allotment month.
+ * eBay renews on the same day-of-month as StartTime (29/30/31 → last day in shorter months).
+ */
+function buildCalendarMonthRenewAggregateStages({
+  sellerInList,
+  monthStart,
+  asOfDay,
+  daysInMonth,
+}) {
+  return [
+    {
+      $match: {
+        ...activeListingStatusFilter(),
+        seller: { $in: sellerInList },
+        startTime: { $lt: monthStart, $type: 'date' },
+      },
+    },
+    {
+      $project: {
+        sellerKey: { $toString: { $ifNull: ['$seller', ''] } },
+        startDay: {
+          $dayOfMonth: { date: '$startTime', timezone: 'America/Los_Angeles' },
+        },
+      },
+    },
+    {
+      $project: {
+        sellerKey: 1,
+        renewDay: {
+          $cond: [
+            { $gt: ['$startDay', daysInMonth] },
+            daysInMonth,
+            '$startDay',
+          ],
+        },
+      },
+    },
+    {
+      $match: {
+        $expr: { $lte: ['$renewDay', asOfDay] },
+      },
+    },
+    {
+      $group: {
+        _id: '$sellerKey',
+        count: { $sum: 1 },
+      },
+    },
+  ];
+}
+
+function getEbayFreeListingMonthStart() {
+  return getEbayFreeListingMonthWindow().monthStart;
+}
+
+async function buildFreeListingUsageMaps(sellerIds) {
+  const { monthStart, monthEnd } = getEbayFreeListingMonthWindow();
+  const activeMap = new Map();
+  const newMonthMap = new Map();
+  const renewMonthMap = new Map();
+  const endedMonthMap = new Map();
+  const usedEstMap = new Map();
+  if (!sellerIds.length) {
+    return { monthStart, monthEnd, activeMap, newMonthMap, renewMonthMap, endedMonthMap, usedEstMap };
+  }
+
+  const sellerInList = sellerIdsInMatch(sellerIds).$in;
+  const asOfForRenew = getEbayFreeListingRenewAsOf(monthStart, monthEnd);
+  const nonActiveStatuses = { $nin: ['Active', 'ACTIVE', 'active'] };
+
+  const [activeGroups, newGroups, renewGroups, endedFromActiveListing, endedFromListing] = await Promise.all([
+    ActiveListing.aggregate([
+      { $match: { ...activeListingStatusFilter(), seller: { $in: sellerInList } } },
+      { $group: { _id: { $toString: { $ifNull: ['$seller', ''] } }, count: { $sum: 1 } } },
+    ]),
+    ActiveListing.aggregate([
+      {
+        $match: {
+          ...activeListingStatusFilter(),
+          seller: { $in: sellerInList },
+          startTime: { $gte: monthStart, $lt: monthEnd },
+        },
+      },
+      { $group: { _id: { $toString: { $ifNull: ['$seller', ''] } }, count: { $sum: 1 } } },
+    ]),
+    ActiveListing.aggregate(
+      buildCalendarMonthRenewAggregateStages({
+        sellerInList,
+        monthStart,
+        asOfDay: asOfForRenew.asOfDay,
+        daysInMonth: asOfForRenew.daysInMonth,
+      })
+    ),
+    ActiveListing.aggregate([
+      {
+        $match: {
+          seller: { $in: sellerInList },
+          listingStatus: nonActiveStatuses,
+          startTime: { $gte: monthStart, $lt: monthEnd },
+        },
+      },
+      { $group: { _id: { $toString: { $ifNull: ['$seller', ''] } }, itemIds: { $addToSet: '$itemId' } } },
+    ]),
+    Listing.aggregate([
+      {
+        $match: {
+          seller: { $in: sellerInList },
+          listingStatus: nonActiveStatuses,
+          startTime: { $gte: monthStart, $lt: monthEnd },
+        },
+      },
+      { $group: { _id: { $toString: { $ifNull: ['$seller', ''] } }, itemIds: { $addToSet: '$itemId' } } },
+    ]),
+  ]);
+
+  for (const g of activeGroups) {
+    activeMap.set(String(g._id), g.count);
+  }
+  for (const g of newGroups) {
+    newMonthMap.set(String(g._id), g.count);
+  }
+  for (const g of renewGroups) {
+    renewMonthMap.set(String(g._id), g.count);
+  }
+
+  const endedIdsBySeller = new Map();
+  for (const g of endedFromActiveListing) {
+    endedIdsBySeller.set(String(g._id), new Set((g.itemIds || []).map(String)));
+  }
+  for (const g of endedFromListing) {
+    const sid = String(g._id);
+    if (!endedIdsBySeller.has(sid)) endedIdsBySeller.set(sid, new Set());
+    for (const id of g.itemIds || []) endedIdsBySeller.get(sid).add(String(id));
+  }
+  for (const [sid, set] of endedIdsBySeller) {
+    endedMonthMap.set(sid, set.size);
+  }
+
+  const allSids = new Set([
+    ...activeMap.keys(),
+    ...newMonthMap.keys(),
+    ...renewMonthMap.keys(),
+    ...endedMonthMap.keys(),
+  ]);
+  for (const sid of allSids) {
+    usedEstMap.set(
+      sid,
+      (newMonthMap.get(sid) || 0)
+        + (renewMonthMap.get(sid) || 0)
+        + (endedMonthMap.get(sid) || 0)
+    );
+  }
+
+  return {
+    monthStart,
+    monthEnd,
+    activeMap,
+    newMonthMap,
+    renewMonthMap,
+    endedMonthMap,
+    usedEstMap,
+  };
+}
+
 async function fetchSellerSellingSummary(accessToken) {
   try {
     const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
@@ -19447,7 +20500,7 @@ async function fetchSellerSellingSummary(accessToken) {
 }
 
 function buildDisconnectedStoreOverviewRow(seller) {
-  return {
+  return enrichStoreOverviewLimitFields({
     sellerId: seller._id,
     sellerName: resolveStoreDisplayName(seller),
     notConnected: true,
@@ -19465,7 +20518,7 @@ function buildDisconnectedStoreOverviewRow(seller) {
     subscriptionError: null,
     needsReconnect: false,
     noPlan: false,
-  };
+  }, null);
 }
 
 async function fetchStoreOverviewForSeller(seller, { forceRefresh = false } = {}) {
@@ -19494,7 +20547,7 @@ async function fetchStoreOverviewForSeller(seller, { forceRefresh = false } = {}
       ? pickBestStoreSubscription(subResult.subscriptions)
       : null;
 
-    const row = {
+    const row = enrichStoreOverviewLimitFields({
       sellerId: seller._id,
       sellerName: resolveStoreDisplayName(seller),
       quantityLimitRemaining: sellingResult.success ? sellingResult.quantityLimitRemaining : null,
@@ -19512,13 +20565,13 @@ async function fetchStoreOverviewForSeller(seller, { forceRefresh = false } = {}
       subscriptionError: subResult.success ? null : (subResult.error || null),
       needsReconnect: Boolean(privResult.needsReconnect || subResult.needsReconnect),
       noPlan: Boolean(subResult.success && !subResult.subscriptions?.length),
-    };
+    }, null);
 
     setStoreOverviewCacheEntry(sellerId, row);
     return { row, fromCache: false };
   } catch (err) {
     console.error(`[Store Overview] Failed for seller ${seller._id}:`, err.message);
-    const row = {
+    const row = enrichStoreOverviewLimitFields({
       sellerId: seller._id,
       sellerName: resolveStoreDisplayName(seller),
       notConnected: false,
@@ -19536,7 +20589,7 @@ async function fetchStoreOverviewForSeller(seller, { forceRefresh = false } = {}
       subscriptionError: null,
       needsReconnect: false,
       noPlan: false,
-    };
+    }, null);
     setStoreOverviewCacheEntry(sellerId, row);
     return { row, fromCache: false };
   }
@@ -19566,13 +20619,53 @@ router.get('/store-overview/all', requireAuth, requirePageAccess('StoreOverview'
       else missCount += 1;
       return row;
     });
-    rows.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
+
+    // Free-listing usage: new + calendar renews already due + ended that started this month
+    let usageMaps = {
+      monthStart: getEbayFreeListingMonthStart(),
+      activeMap: new Map(),
+      endedMonthMap: new Map(),
+      usedEstMap: new Map(),
+    };
+    if (sellerIds.length) {
+      try {
+        usageMaps = await buildFreeListingUsageMaps(sellerIds);
+      } catch (aggErr) {
+        console.warn('[Store Overview] Free-listing usage aggregate failed:', aggErr.message);
+      }
+    }
+
+    const enrichedRows = rows.map((row) => {
+      const sid = String(row.sellerId);
+      const cachedEbay = ebayActiveListingCountCache.get(sid);
+      const ebayCount = cachedEbay && Date.now() < cachedEbay.expiresAt && cachedEbay.count != null
+        ? Number(cachedEbay.count)
+        : null;
+      const dbActive = usageMaps.activeMap.has(sid) ? usageMaps.activeMap.get(sid) : 0;
+      const activeCount = Number.isFinite(ebayCount) ? ebayCount : dbActive;
+      const endedStartedThisMonth = usageMaps.endedMonthMap.get(sid) || 0;
+      const usedEst = usageMaps.usedEstMap.has(sid)
+        ? usageMaps.usedEstMap.get(sid)
+        : activeCount + endedStartedThisMonth;
+      return enrichStoreOverviewLimitFields(row, {
+        activeCount,
+        endedStartedThisMonth,
+        usedEst,
+      });
+    });
+
+    enrichedRows.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
 
     return res.json({
       success: true,
       fetchedAt: new Date().toISOString(),
-      storeCount: rows.length,
-      rows,
+      storeCount: enrichedRows.length,
+      freeListingMonthStart: usageMaps.monthStart,
+      rows: enrichedRows,
+      notes: {
+        freeListingsEstimate:
+          'Free listings used ≈ new (StartTime in PDT month) + GTC renews already due this calendar month (same day-of-month as StartTime) + listings that started this month and already ended. Early end before renew is excluded. eBay does not expose free-insert remaining via API — Seller Hub is source of truth. Selling qty/$ remaining is live from eBay.',
+      },
       cache: {
         hitCount,
         missCount,
@@ -21278,9 +22371,16 @@ router.post('/dev/trading-call', requireAuth, requirePageAccess('EbayApiTester')
 
     const token = await ensureValidToken(seller);
     const hasTokenTag = /<eBayAuthToken>[\s\S]*?<\/eBayAuthToken>/i.test(xmlText);
-    const finalXml = hasTokenTag
+    let finalXml = hasTokenTag
       ? xmlText.replace(/<eBayAuthToken>[\s\S]*?<\/eBayAuthToken>/i, `<eBayAuthToken>${token}</eBayAuthToken>`)
       : xmlText;
+    if (!hasTokenTag) {
+      // Inject credentials so tester XML templates can omit the token safely.
+      finalXml = finalXml.replace(
+        /<(Get\w+Request|Add\w+Request|Revise\w+Request|End\w+Request)\b([^>]*)>/i,
+        (match) => `${match}\n  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>`
+      );
+    }
 
     const response = await axios.post('https://api.ebay.com/ws/api.dll', finalXml, {
       headers: {
@@ -23952,7 +25052,7 @@ async function fetchListingRecommendationsForSeller(seller, query = {}) {
   };
 }
 
-router.get('/marketing/listing-recommendations/all', requireAuth, requirePageAccess(['AdsAndMarketing', 'StoreListings']), async (req, res) => {
+router.get('/marketing/listing-recommendations/all', requireAuth, requirePageAccess(['AdsAndMarketing', 'StoreListings', 'ListingRecommendations']), async (req, res) => {
   try {
     const sellers = await getSellersForEbayApiPicker(req);
     const runLimited = pLimit(MARKETING_SELLER_CONCURRENCY);
@@ -24009,7 +25109,7 @@ router.get('/marketing/listing-recommendations/all', requireAuth, requirePageAcc
   }
 });
 
-router.get('/marketing/listing-recommendations', requireAuth, requirePageAccess(['AdsAndMarketing', 'StoreListings']), async (req, res) => {
+router.get('/marketing/listing-recommendations', requireAuth, requirePageAccess(['AdsAndMarketing', 'StoreListings', 'ListingRecommendations']), async (req, res) => {
   try {
     const sellerLookup = String(req.query.sellerId || '').trim();
     if (!sellerLookup) {
@@ -26950,24 +28050,39 @@ const STORE_LISTINGS_MOTORS_CATEGORIES = [
 
 /**
  * Paginate GetSellerList (StartTime window) into ActiveListing (+ Motors Listing).
- * Uses a fresh StartTimeTo on every page so listings created mid-sync are not skipped.
+ * Pass a fixed startTimeTo for historical windows. Omit it (null) for the live
+ * "up to now" window so StartTimeTo refreshes each page mid-sync.
  */
 async function paginateGetSellerListForActiveListings({
   seller,
   token,
   sellerName,
   startTimeFrom,
+  startTimeTo = null,
   onPageProgress = null,
   bumpGlobalProcessed = null,
+  shouldCancel = null,
+  logLabel = null,
 }) {
   let page = 1;
   let totalPages = 1;
   let processedCount = 0;
   let skippedCount = 0;
   const startFromIso = new Date(startTimeFrom).toISOString();
+  const fixedEnd = startTimeTo ? new Date(startTimeTo) : null;
+  if (fixedEnd && Number.isNaN(fixedEnd.getTime())) {
+    throw new Error('Invalid startTimeTo for GetSellerList window');
+  }
+  const callLabel = logLabel || `Sync ${sellerName}`;
 
   do {
-    const startTimeTo = new Date();
+    const cancelled = shouldCancel
+      ? await shouldCancel()
+      : await checkSyncAllCancelRequested();
+    if (cancelled) {
+      throw new SyncAllCancelledError();
+    }
+    const end = fixedEnd || new Date();
     if (onPageProgress) onPageProgress({ page, totalPages });
 
     const xmlRequest = `
@@ -26978,7 +28093,7 @@ async function paginateGetSellerListForActiveListings({
           <WarningLevel>High</WarningLevel>
           <DetailLevel>ItemReturnDescription</DetailLevel>
           <StartTimeFrom>${startFromIso}</StartTimeFrom>
-          <StartTimeTo>${startTimeTo.toISOString()}</StartTimeTo>
+          <StartTimeTo>${end.toISOString()}</StartTimeTo>
           <IncludeWatchCount>true</IncludeWatchCount>
           <Pagination>
             <EntriesPerPage>100</EntriesPerPage>
@@ -27007,7 +28122,7 @@ async function paginateGetSellerListForActiveListings({
       'X-EBAY-API-CALL-NAME': 'GetSellerList',
       'Content-Type': 'text/xml',
     }, {
-      logLabel: `Sync All ${sellerName} p${page}`,
+      logLabel: `${callLabel} p${page}`,
     });
 
     const result = await parseStringPromise(response.data);
@@ -27022,7 +28137,36 @@ async function paginateGetSellerListForActiveListings({
     const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
     for (const item of items) {
       const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
-      if (status !== 'Active') continue;
+      const itemId = item.ItemID?.[0];
+      if (!itemId) continue;
+
+      const startTimeRaw = item.ListingDetails?.[0]?.StartTime?.[0];
+      const endTimeRaw = item.ListingDetails?.[0]?.EndTime?.[0];
+
+      // Persist ended/completed rows too — free-listing usage needs "relist then ended" inserts.
+      if (status !== 'Active') {
+        const endedStatus = status || 'Ended';
+        await ActiveListing.findOneAndUpdate(
+          { itemId },
+          {
+            seller: seller._id,
+            title: item.Title?.[0] || '',
+            sku: item.SKU ? item.SKU[0] : '',
+            currentPrice: item.SellingStatus?.[0]?.CurrentPrice?.[0]?._
+              ? parseFloat(item.SellingStatus[0].CurrentPrice[0]._)
+              : undefined,
+            currency: item.SellingStatus?.[0]?.CurrentPrice?.[0]?.$?.currencyID,
+            quantity: item.Quantity ? parseInt(item.Quantity[0], 10) || 0 : 0,
+            listingStatus: endedStatus,
+            mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
+            categoryName: item.PrimaryCategory?.[0]?.CategoryName?.[0] || '',
+            startTime: startTimeRaw || undefined,
+            endTime: endTimeRaw || new Date(),
+          },
+          { upsert: true }
+        );
+        continue;
+      }
 
       const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
       const isMotorsItem = STORE_LISTINGS_MOTORS_CATEGORIES.some((keyword) => categoryName.includes(keyword));
@@ -27064,7 +28208,7 @@ async function paginateGetSellerListForActiveListings({
       }
 
       await ActiveListing.findOneAndUpdate(
-        { itemId: item.ItemID[0] },
+        { itemId },
         {
           seller: seller._id,
           title: item.Title[0],
@@ -27081,7 +28225,8 @@ async function paginateGetSellerListForActiveListings({
           mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
           categoryName,
           descriptionPreview: cleanHtml,
-          startTime: item.ListingDetails?.[0]?.StartTime?.[0],
+          startTime: startTimeRaw,
+          endTime: endTimeRaw || undefined,
           ...(promoted !== null ? { promoted } : {}),
           ...(adRate !== null ? { adRate } : {}),
         },
@@ -27090,7 +28235,7 @@ async function paginateGetSellerListForActiveListings({
 
       if (isMotorsItem) {
         await Listing.findOneAndUpdate(
-          { itemId: item.ItemID[0] },
+          { itemId },
           {
             seller: seller._id,
             title: item.Title[0],
@@ -27102,7 +28247,8 @@ async function paginateGetSellerListForActiveListings({
             categoryName,
             descriptionPreview: cleanHtml,
             compatibility: parsedCompatibility,
-            startTime: item.ListingDetails?.[0]?.StartTime?.[0],
+            startTime: startTimeRaw,
+            endTime: endTimeRaw || undefined,
           },
           { upsert: true }
         );
@@ -27120,9 +28266,113 @@ async function paginateGetSellerListForActiveListings({
   return { processedCount, skippedCount };
 }
 
+/**
+ * Sync ActiveListing (+ Motors Listing) for one seller:
+ * 1) recent StartTime window (fast refresh)
+ * 2) multi-window walk from listings backfill start → now (each window < 120 days)
+ */
+async function syncOneSellerActiveListings(seller, {
+  onPageProgress = null,
+  bumpProcessed = null,
+  shouldCancel = null,
+  logPrefix = '[Sync Store]',
+} = {}) {
+  const sellerName = seller.user?.username || seller.user?.email || String(seller._id);
+  if (shouldCancel && await shouldCancel()) {
+    throw new SyncAllCancelledError();
+  }
+
+  const token = await ensureValidToken(seller);
+  const pollFinishedAt = new Date();
+  const backfillStart = getListingsBackfillStart(seller);
+
+  const recentStartTimeFrom = new Date(pollFinishedAt);
+  recentStartTimeFrom.setUTCDate(recentStartTimeFrom.getUTCDate() - RECENT_LISTINGS_LOOKBACK_DAYS);
+  const recentFrom = recentStartTimeFrom < backfillStart ? backfillStart : recentStartTimeFrom;
+
+  let processedCount = 0;
+  let skippedCount = 0;
+
+  console.log(`${logPrefix} ${sellerName} — recent pass (${RECENT_LISTINGS_LOOKBACK_DAYS}d start window)...`);
+  const recentResult = await paginateGetSellerListForActiveListings({
+    seller,
+    token,
+    sellerName,
+    startTimeFrom: recentFrom,
+    startTimeTo: null,
+    onPageProgress: onPageProgress
+      ? (p) => onPageProgress({ ...p, windowIndex: 0, totalWindows: 0, pass: 'recent' })
+      : null,
+    bumpGlobalProcessed: bumpProcessed,
+    shouldCancel,
+    logLabel: `${logPrefix} ${sellerName} recent`,
+  });
+  processedCount += recentResult.processedCount;
+  skippedCount += recentResult.skippedCount;
+
+  const windows = buildSellerListStartWindows(backfillStart, pollFinishedAt);
+  console.log(
+    `${logPrefix} ${sellerName} — historical backfill: ${windows.length} window(s) `
+    + `from ${backfillStart.toISOString()} → ${pollFinishedAt.toISOString()}`
+  );
+
+  for (let i = 0; i < windows.length; i++) {
+    if (shouldCancel && await shouldCancel()) {
+      throw new SyncAllCancelledError();
+    }
+    const window = windows[i];
+    // Recent pass already covered [recentFrom → now]; only fetch older StartTime slices.
+    if (window.from >= recentFrom) {
+      console.log(
+        `${logPrefix} ${sellerName} — skip window ${i + 1}/${windows.length} `
+        + `(already covered by recent pass)`
+      );
+      continue;
+    }
+    const windowTo = window.to > recentFrom ? recentFrom : window.to;
+    const windowFrom = window.from;
+    if (windowFrom >= windowTo) continue;
+
+    console.log(
+      `${logPrefix} ${sellerName} — window ${i + 1}/${windows.length}: `
+      + `${windowFrom.toISOString()} → ${windowTo.toISOString()}`
+    );
+
+    const windowResult = await paginateGetSellerListForActiveListings({
+      seller,
+      token,
+      sellerName,
+      startTimeFrom: windowFrom,
+      startTimeTo: windowTo,
+      onPageProgress: onPageProgress
+        ? (p) => onPageProgress({
+          ...p,
+          windowIndex: i + 1,
+          totalWindows: windows.length,
+          pass: 'backfill',
+        })
+        : null,
+      bumpGlobalProcessed: bumpProcessed,
+      shouldCancel,
+      logLabel: `${logPrefix} ${sellerName} w${i + 1}/${windows.length}`,
+    });
+    processedCount += windowResult.processedCount;
+    skippedCount += windowResult.skippedCount;
+  }
+
+  seller.lastListingPolledAt = pollFinishedAt;
+  seller.lastAllListingsPolledAt = new Date();
+  await seller.save();
+  console.log(`${logPrefix} ${sellerName} — Done: ${processedCount} processed, ${skippedCount} skipped`);
+  return { sellerName, processedCount, skippedCount, windows: windows.length };
+}
+
 // Core logic for "Poll All Sellers".
 // Called by: POST /sync-all-sellers-listings (background) and the 1:00 AM IST cron job.
 async function executeSyncAllSellersWork() {
+  syncAllCancelRequested = false;
+  syncAllRunGeneration += 1;
+  const runGeneration = syncAllRunGeneration;
   const allSellers = await Seller.find({
     isStoreActive: { $ne: false },
     'ebayTokens.refresh_token': { $exists: true, $nin: [null, ''] },
@@ -27137,12 +28387,16 @@ async function executeSyncAllSellersWork() {
       currentSeller: '',
       currentPage: 0,
       currentTotalPages: 0,
+      currentWindow: 0,
+      totalWindows: 0,
       results: [],
       errors: [],
       totalProcessed: 0,
       totalSkipped: 0,
       startedAt: null,
       completedAt: new Date().toISOString(),
+      cancelRequested: false,
+      cancelled: false,
     };
     await persistSyncAllStatusToDb();
     return;
@@ -27154,85 +28408,70 @@ async function executeSyncAllSellersWork() {
     currentSeller: '',
     currentPage: 0,
     currentTotalPages: 0,
+    currentWindow: 0,
+    totalWindows: 0,
     results: [],
     errors: [],
     totalProcessed: 0,
     totalSkipped: 0,
     startedAt: new Date().toISOString(),
-    completedAt: null
+    completedAt: null,
+    cancelRequested: false,
+    cancelled: false,
   };
   console.log(`[Sync All] Started for ${allSellers.length} seller(s).`);
   await persistSyncAllStatusToDb();
   try {
     for (const seller of allSellers) {
+      if (await checkSyncAllCancelRequested()) {
+        syncAllStatus.cancelled = true;
+        console.log('[Sync All] Cancelled before next seller.');
+        break;
+      }
       await renewSyncAllSellersLock();
       const sellerName = seller.user?.username || seller.user?.email || seller._id;
       syncAllStatus.currentSeller = sellerName;
       syncAllStatus.currentPage = 0;
       syncAllStatus.currentTotalPages = 0;
+      syncAllStatus.currentWindow = 0;
+      syncAllStatus.totalWindows = 0;
       console.log(`[Sync All] Starting sync for seller: ${sellerName}`);
       try {
-        const token = await ensureValidToken(seller);
-        const pollFinishedAt = new Date();
-        const fullStartTimeFrom = getClampedSellerListStart(
-          getEffectiveInitialSyncDate(seller.initialSyncDate),
-          pollFinishedAt
-        );
-        const recentStartTimeFrom = new Date(pollFinishedAt);
-        recentStartTimeFrom.setUTCDate(recentStartTimeFrom.getUTCDate() - RECENT_LISTINGS_LOOKBACK_DAYS);
-        const recentFrom = recentStartTimeFrom > fullStartTimeFrom
-          ? recentStartTimeFrom
-          : fullStartTimeFrom;
-
-        const onPageProgress = ({ page, totalPages }) => {
+        const onPageProgress = ({ page, totalPages, windowIndex = 0, totalWindows = 0 }) => {
           syncAllStatus.currentPage = page;
           syncAllStatus.currentTotalPages = totalPages;
+          syncAllStatus.currentWindow = windowIndex;
+          syncAllStatus.totalWindows = totalWindows;
           if (page === 1 || page % 3 === 0 || page >= totalPages) {
             void persistSyncAllStatusToDb();
           }
         };
-        const bumpGlobalProcessed = () => {
-          syncAllStatus.totalProcessed++;
-        };
-
-        console.log(`[Sync All] ${sellerName} — recent pass (${RECENT_LISTINGS_LOOKBACK_DAYS}d start window)...`);
-        let processedCount = 0;
-        let skippedCount = 0;
-        const recentResult = await paginateGetSellerListForActiveListings({
-          seller,
-          token,
-          sellerName,
-          startTimeFrom: recentFrom,
+        const result = await syncOneSellerActiveListings(seller, {
           onPageProgress,
-          bumpGlobalProcessed,
+          bumpProcessed: () => { syncAllStatus.totalProcessed++; },
+          shouldCancel: checkSyncAllCancelRequested,
+          logPrefix: '[Sync All]',
         });
-        processedCount += recentResult.processedCount;
-        skippedCount += recentResult.skippedCount;
-
-        console.log(`[Sync All] ${sellerName} — full pass (120d start window)...`);
-        const fullResult = await paginateGetSellerListForActiveListings({
-          seller,
-          token,
-          sellerName,
-          startTimeFrom: fullStartTimeFrom,
-          onPageProgress,
-          bumpGlobalProcessed,
-        });
-        processedCount += fullResult.processedCount;
-        skippedCount += fullResult.skippedCount;
-
-        seller.lastListingPolledAt = pollFinishedAt;
-        seller.lastAllListingsPolledAt = new Date();
-        await seller.save();
-        console.log(`[Sync All] ${sellerName} — Done: ${processedCount} processed, ${skippedCount} skipped`);
         syncAllStatus.results.push({
           sellerId: String(seller._id),
-          sellerName,
-          processedCount,
-          skippedCount,
+          sellerName: result.sellerName,
+          processedCount: result.processedCount,
+          skippedCount: result.skippedCount,
         });
-        syncAllStatus.totalSkipped += skippedCount;
+        syncAllStatus.totalSkipped += result.skippedCount;
       } catch (sellerErr) {
+        if (sellerErr?.name === 'SyncAllCancelledError') {
+          syncAllStatus.cancelled = true;
+          syncAllStatus.results.push({
+            sellerId: String(seller._id),
+            sellerName,
+            processedCount: 0,
+            skippedCount: 0,
+            error: 'Cancelled',
+          });
+          console.log(`[Sync All] Cancelled while syncing ${sellerName}`);
+          break;
+        }
         console.error(`[Sync All] Error for seller ${sellerName}:`, sellerErr.message);
         syncAllStatus.errors.push(`${sellerName}: ${sellerErr.message}`);
         syncAllStatus.results.push({
@@ -27246,16 +28485,30 @@ async function executeSyncAllSellersWork() {
       syncAllStatus.sellersComplete++;
       await persistSyncAllStatusToDb();
     }
-    console.log(`[Sync All] Done: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.totalSkipped} skipped, ${syncAllStatus.errors.length} errors`);
+    if (syncAllStatus.cancelled) {
+      console.log(`[Sync All] Stopped early: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.sellersComplete}/${syncAllStatus.sellersTotal} sellers`);
+    } else {
+      console.log(`[Sync All] Done: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.totalSkipped} skipped, ${syncAllStatus.errors.length} errors`);
+    }
   } catch (fatal) {
     console.error('[Sync All] Fatal error:', fatal?.message || fatal);
-    syncAllStatus.errors.push(`Fatal: ${fatal?.message || String(fatal)}`);
+    if (runGeneration === syncAllRunGeneration) {
+      syncAllStatus.errors.push(`Fatal: ${fatal?.message || String(fatal)}`);
+    }
   } finally {
+    if (runGeneration !== syncAllRunGeneration) {
+      console.log('[Sync All] Skipping finally persist — job was force-stopped or superseded.');
+      return;
+    }
     syncAllStatus.running = false;
+    syncAllStatus.cancelRequested = false;
     syncAllStatus.currentSeller = '';
     syncAllStatus.currentPage = 0;
     syncAllStatus.currentTotalPages = 0;
+    syncAllStatus.currentWindow = 0;
+    syncAllStatus.totalWindows = 0;
     syncAllStatus.completedAt = new Date().toISOString();
+    syncAllCancelRequested = false;
     await persistSyncAllStatusToDb();
   }
 }

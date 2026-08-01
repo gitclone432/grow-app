@@ -470,13 +470,13 @@ export default function TemplateListingsLabPage({ embedded = false }) {
     
     try {
       const { data } = await api.get(`/template-listings/download-history/${templateId}`, {
-        params: { sellerId }
+        params: { sellerId, status: listingStatusFilter }
       });
-      setDownloadHistory(data);
+      setDownloadHistory(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Failed to fetch download history:', err);
     }
-  }, [templateId, sellerId]);
+  }, [templateId, sellerId, listingStatusFilter]);
 
   useEffect(() => {
     if (templateId && sellerId) {
@@ -484,6 +484,40 @@ export default function TemplateListingsLabPage({ embedded = false }) {
       fetchDownloadHistory();
     }
   }, [templateId, sellerId, fetchListings, fetchDownloadHistory]);
+
+  // Reset undownloaded batch when status/store/template changes
+  useEffect(() => {
+    setBatchFilter('active');
+    setPagination((prev) => ({ ...prev, page: 1 }));
+  }, [listingStatusFilter, templateId, sellerId]);
+
+  const handleViewBatch = async (batchId) => {
+    if (!batchId || !templateId) return;
+    setHistoryDialog(false);
+    setBatchFilter(batchId);
+    setPagination((prev) => ({ ...prev, page: 1 }));
+    setSelectedListings(new Set());
+    setError('');
+    try {
+      setLoading(true);
+      let url = `/template-listings?templateId=${templateId}&page=1&limit=${pagination.limit}`;
+      if (sellerId) url += `&sellerId=${sellerId}`;
+      url += `&status=${encodeURIComponent(listingStatusFilter)}`;
+      url += `&excludeDirectList=1`;
+      url += `&batchId=${encodeURIComponent(batchId)}`;
+      const { data } = await api.get(url);
+      setListings(data.listings || []);
+      setPagination(data.pagination || { page: 1, limit: pagination.limit, total: 0, pages: 0 });
+      if (!(data.listings || []).length) {
+        setError('No listings found in this batch for the current status. Try the other Status (Draft/Active) or Re-Download.');
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to load batch listings');
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleAddListing = () => {
     setEditingListing(null);
@@ -1120,13 +1154,17 @@ export default function TemplateListingsLabPage({ embedded = false }) {
   };
 
   const handleExportCSV = async () => {
-    if (batchFilter !== 'active') {
-      // For historical batches, download directly without confirmation
-      await performCSVDownload();
+    // Historical batch selected — re-download that batch (export-csv only has undownloaded/active rows)
+    if (batchFilter && batchFilter !== 'active' && batchFilter !== 'all') {
+      await handleReDownloadBatch(batchFilter);
+      return;
+    }
+    if (batchFilter === 'all') {
+      setError('Select Active batch or a specific Batch # to download CSV.');
       return;
     }
     
-    // For active batch, show confirmation
+    // For active (undownloaded) batch, show confirmation
     setConfirmDownloadDialog(true);
   };
   
@@ -1134,6 +1172,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
     try {
       setLoading(true);
       setConfirmDownloadDialog(false);
+      setError('');
       
       let url = `/template-listings/export-csv/${templateId}`;
       const params = new URLSearchParams();
@@ -1144,6 +1183,19 @@ export default function TemplateListingsLabPage({ embedded = false }) {
       const response = await api.get(url, {
         responseType: 'blob'
       });
+
+      // API errors often come back as JSON with blob responseType
+      const contentType = String(response.headers['content-type'] || '');
+      if (contentType.includes('application/json')) {
+        const text = await response.data.text();
+        let message = 'Failed to export CSV';
+        try {
+          message = JSON.parse(text)?.error || message;
+        } catch {
+          /* ignore */
+        }
+        throw new Error(message);
+      }
       
       // Extract filename from Content-Disposition header
       const contentDisposition = response.headers['content-disposition'];
@@ -1182,7 +1234,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
       await fetchListings();
       await fetchDownloadHistory();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to export CSV');
+      setError(err.response?.data?.error || err.message || 'Failed to export CSV');
       console.error(err);
     } finally {
       setLoading(false);
@@ -1219,7 +1271,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
           filename,
           sellerId,
           templateId,
-          listingCount: 0,
+          listingCount: pagination.total || listings.length || 0,
           listingStatus: listingStatusFilter,
           source: 'download',
         });
@@ -1236,7 +1288,18 @@ export default function TemplateListingsLabPage({ embedded = false }) {
       setSuccess('Batch re-downloaded successfully!');
       setHistoryDialog(false);
     } catch (err) {
-      setError('Failed to re-download batch');
+      const contentType = String(err.response?.headers?.['content-type'] || '');
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const parsed = JSON.parse(text);
+          setError(parsed.error || 'Failed to re-download batch');
+        } catch {
+          setError('Failed to re-download batch');
+        }
+      } else {
+        setError(err.response?.data?.error || err.message || 'Failed to re-download batch');
+      }
       console.error(err);
     } finally {
       setLoading(false);
@@ -1453,12 +1516,20 @@ export default function TemplateListingsLabPage({ embedded = false }) {
         {!isDraftMode && (
           <ActionFieldEditor templateId={templateId} sellerId={sellerId} />
         )}
-        <Button size="small" variant="outlined" startIcon={<DownloadIcon />} onClick={handleExportCSV} disabled={loading || listings.length === 0}>
-          {isDraftMode ? 'Download Draft CSV' : 'Download CSV'}
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<DownloadIcon />}
+          onClick={handleExportCSV}
+          disabled={loading || listings.length === 0 || batchFilter === 'all'}
+        >
+          {batchFilter !== 'active' && batchFilter !== 'all'
+            ? (isDraftMode ? 'Re-Download Draft CSV' : 'Re-Download CSV')
+            : (isDraftMode ? 'Download Draft CSV' : 'Download CSV')}
         </Button>
         {isDraftMode && (
           <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
-            Upload drafts via{' '}
+            Draft CSV includes core draft columns + C: item specifics. Upload via{' '}
             <Link href="https://www.ebay.com/sh/reports/uploads" target="_blank" rel="noopener noreferrer" underline="hover">
               Seller Hub Uploads
             </Link>
@@ -2487,7 +2558,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
                           <Button
                             size="small"
                             variant="outlined"
-                            onClick={() => setBatchFilter(batch.batchId)}
+                            onClick={() => handleViewBatch(batch.batchId)}
                           >
                             View
                           </Button>

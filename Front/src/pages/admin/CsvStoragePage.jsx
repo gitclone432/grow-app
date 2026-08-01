@@ -49,7 +49,9 @@ export default function CsvStoragePage() {
 
     // Filters
     const [sellers, setSellers] = useState([]);
+    const [users, setUsers] = useState([]);
     const [selectedSeller, setSelectedSeller] = useState('');
+    const [selectedUser, setSelectedUser] = useState('');
     const [keyword, setKeyword] = useState('');
     const [dateFrom, setDateFrom] = useState(null);
     const [dateTo, setDateTo] = useState(null);
@@ -89,12 +91,19 @@ export default function CsvStoragePage() {
     useEffect(() => {
         const fetchInitial = async () => {
             try {
-                const [sellersRes, categoriesRes] = await Promise.all([
+                const [sellersRes, categoriesRes, usersRes] = await Promise.all([
                     api.get('/sellers/all'),
                     api.get('/asin-list-categories'),
+                    api.get('/users'),
                 ]);
                 setSellers(sellersRes.data);
                 setCategories(categoriesRes.data);
+                const userList = Array.isArray(usersRes.data) ? usersRes.data : [];
+                setUsers(
+                    userList
+                        .filter((u) => u.role !== 'seller')
+                        .sort((a, b) => String(a.username || '').localeCompare(String(b.username || '')))
+                );
             } catch {
                 setError('Failed to load initial data.');
             }
@@ -139,6 +148,7 @@ export default function CsvStoragePage() {
                 offset: (pg - 1) * rowsPerPage,
             };
             if (selectedSeller) params.sellerId = selectedSeller;
+            if (selectedUser) params.userId = selectedUser;
             if (keyword.trim()) params.keyword = keyword.trim();
             if (dateFrom) params.dateFrom = dateFrom.toISOString();
             if (dateTo) params.dateTo = dateTo.toISOString();
@@ -154,7 +164,7 @@ export default function CsvStoragePage() {
         } finally {
             setLoading(false);
         }
-    }, [page, selectedSeller, keyword, dateFrom, dateTo, selectedCategory, selectedRange, selectedProduct]);
+    }, [page, selectedSeller, selectedUser, keyword, dateFrom, dateTo, selectedCategory, selectedRange, selectedProduct]);
 
     // Fetch on page change or filter deps
     useEffect(() => {
@@ -170,6 +180,7 @@ export default function CsvStoragePage() {
 
     const handleClearFilters = () => {
         setSelectedSeller('');
+        setSelectedUser('');
         setKeyword('');
         setDateFrom(null);
         setDateTo(null);
@@ -382,6 +393,21 @@ export default function CsvStoragePage() {
                                     ))}
                                 </Select>
                             </FormControl>
+                            <FormControl size="small" sx={{ minWidth: 160 }}>
+                                <InputLabel>User</InputLabel>
+                                <Select
+                                    value={selectedUser}
+                                    label="User"
+                                    onChange={(e) => setSelectedUser(e.target.value)}
+                                >
+                                    <MenuItem value=""><em>All</em></MenuItem>
+                                    {users.map((u) => (
+                                        <MenuItem key={u._id} value={u._id}>
+                                            {u.username || u.email || u._id}
+                                        </MenuItem>
+                                    ))}
+                                </Select>
+                            </FormControl>
 
                             <Box sx={{ ml: 'auto' }}>
                                 <Stack direction="row" spacing={1}>
@@ -439,10 +465,11 @@ export default function CsvStoragePage() {
                                     disabled={records.length === 0}
                                 />
                             </TableCell>
-                            <TableCell sx={{ width: 200, maxWidth: 200 }}>Name</TableCell>
+                            <TableCell sx={{ width: 200, maxWidth: 200 }}>Template name</TableCell>
                             <TableCell sx={{ width: 130, whiteSpace: 'nowrap' }}>Source</TableCell>
                             <TableCell sx={{ width: 110, whiteSpace: 'nowrap' }}>Template</TableCell>
                             <TableCell sx={{ width: 120, whiteSpace: 'nowrap' }}>Store</TableCell>
+                            <TableCell sx={{ width: 120, whiteSpace: 'nowrap' }}>User</TableCell>
                             <TableCell>Date</TableCell>
                             <TableCell align="center">Listings</TableCell>
                             <TableCell>Category › Range › Product</TableCell>
@@ -454,13 +481,13 @@ export default function CsvStoragePage() {
                     <TableBody>
                         {loading ? (
                             <TableRow>
-                                <TableCell colSpan={11} align="center" sx={{ py: 4 }}>
+                                <TableCell colSpan={12} align="center" sx={{ py: 4 }}>
                                     <CircularProgress size={28} />
                                 </TableCell>
                             </TableRow>
                         ) : records.length === 0 ? (
                             <TableRow>
-                                <TableCell colSpan={11} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                                <TableCell colSpan={12} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                                     No CSV records found.
                                 </TableCell>
                             </TableRow>
@@ -511,6 +538,9 @@ export default function CsvStoragePage() {
                                         </TableCell>
                                         <TableCell>
                                             {record.seller?.storeName || record.seller?.user?.username || '—'}
+                                        </TableCell>
+                                        <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                                            {record.createdBy?.username || '—'}
                                         </TableCell>
                                         <TableCell sx={{ whiteSpace: 'nowrap' }}>
                                             {record.createdAt
