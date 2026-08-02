@@ -20,6 +20,7 @@ import {
   Link,
   LinearProgress,
   MenuItem,
+  Autocomplete,
   Paper,
   Radio,
   RadioGroup,
@@ -67,6 +68,11 @@ function countItemPhotoUrls(value) {
     .map((url) => url.trim())
     .filter(Boolean)
     .length;
+}
+
+function sellerOptionLabel(seller) {
+  if (!seller) return '';
+  return String(seller.storeName || seller.user?.username || seller.user?.email || seller._id || '').trim();
 }
 
 function parseBulkAsins(text) {
@@ -1477,6 +1483,28 @@ export default function DirectListPage() {
     [templates, selectedTemplate]
   );
 
+  const sellerOptionsSorted = useMemo(() => {
+    return [...sellers].sort((a, b) =>
+      sellerOptionLabel(a).localeCompare(sellerOptionLabel(b), undefined, { sensitivity: 'base' })
+    );
+  }, [sellers]);
+
+  const templateOptionsSorted = useMemo(() => {
+    return [...templates].sort((a, b) =>
+      String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
+    );
+  }, [templates]);
+
+  const selectedSellerOption = useMemo(
+    () => sellerOptionsSorted.find((s) => String(s._id) === String(selectedSeller)) || null,
+    [sellerOptionsSorted, selectedSeller]
+  );
+
+  const selectedTemplateOption = useMemo(
+    () => templateOptionsSorted.find((t) => String(t._id) === String(selectedTemplate)) || null,
+    [templateOptionsSorted, selectedTemplate]
+  );
+
   return (
     <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1100 }}>
       <Typography variant="h5" gutterBottom sx={{ fontWeight: 600 }}>
@@ -1498,30 +1526,50 @@ export default function DirectListPage() {
               </>
             ) : (
               <>
-                <FormControl fullWidth size="small" disabled={!sellers.length}>
-                  <InputLabel>Seller</InputLabel>
-                  <Select value={selectedSeller} label="Seller" onChange={(e) => setSelectedSeller(e.target.value)}>
-                    {sellers.map((seller) => (
-                      <MenuItem key={seller._id} value={seller._id}>
-                        {seller.storeName || seller.user?.username || seller._id}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                <FormControl fullWidth size="small" disabled={loadingTemplates || !templates.length}>
-                  <InputLabel>Template{loadingTemplates ? ' (loading…)' : ''}</InputLabel>
-                  <Select
-                    value={selectedTemplate}
-                    label={`Template${loadingTemplates ? ' (loading…)' : ''}`}
-                    onChange={(e) => setSelectedTemplate(e.target.value)}
-                  >
-                    {templates.map((template) => (
-                      <MenuItem key={template._id} value={template._id}>
-                        {template.name}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
+                <Autocomplete
+                  fullWidth
+                  size="small"
+                  options={sellerOptionsSorted}
+                  value={selectedSellerOption}
+                  onChange={(_, next) => setSelectedSeller(next?._id ? String(next._id) : '')}
+                  getOptionLabel={(option) => sellerOptionLabel(option)}
+                  isOptionEqualToValue={(option, value) => String(option?._id) === String(value?._id)}
+                  disabled={!sellers.length}
+                  filterOptions={(options, state) => {
+                    const q = String(state.inputValue || '').trim().toLowerCase();
+                    if (!q) return options;
+                    return options.filter((option) =>
+                      sellerOptionLabel(option).toLowerCase().includes(q)
+                    );
+                  }}
+                  renderInput={(params) => (
+                    <TextField {...params} label="Seller" placeholder="Type to search seller…" />
+                  )}
+                />
+                <Autocomplete
+                  fullWidth
+                  size="small"
+                  options={templateOptionsSorted}
+                  value={selectedTemplateOption}
+                  onChange={(_, next) => setSelectedTemplate(next?._id ? String(next._id) : '')}
+                  getOptionLabel={(option) => String(option?.name || '')}
+                  isOptionEqualToValue={(option, value) => String(option?._id) === String(value?._id)}
+                  disabled={loadingTemplates || !templates.length}
+                  filterOptions={(options, state) => {
+                    const q = String(state.inputValue || '').trim().toLowerCase();
+                    if (!q) return options;
+                    return options.filter((option) =>
+                      String(option?.name || '').toLowerCase().includes(q)
+                    );
+                  }}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label={loadingTemplates ? 'Template (loading…)' : 'Template'}
+                      placeholder="Type to search template…"
+                    />
+                  )}
+                />
                 <FormControl size="small" sx={{ minWidth: 120 }}>
                   <InputLabel>Amazon region</InputLabel>
                   <Select value={region} label="Amazon region" onChange={(e) => setRegion(e.target.value)}>

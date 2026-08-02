@@ -72,7 +72,8 @@ function buildCreatedAtDateFilter(startDate, endDate) {
 
 /** Cast query ids for aggregation $match (find() casts; aggregate does not). */
 function toObjectId(id) {
-  if (id == null || id === '' || id === 'all') return null;
+  if (id == null || id === '' || id === 'all' || id === 'unassigned' || id === 'null') return null;
+  if (id instanceof mongoose.Types.ObjectId) return id;
   const value = String(id);
   if (!mongoose.Types.ObjectId.isValid(value)) return null;
   return new mongoose.Types.ObjectId(value);
@@ -600,13 +601,38 @@ router.get('/database-view', requireAuth, async (req, res) => {
     if (sellerId === 'unassigned' || sellerId === 'null') {
       query.sellerId = null;
     } else if (sellerId) {
-      query.sellerId = sellerId;
+      const sellerOid = toObjectId(sellerId);
+      if (!sellerOid) {
+        return res.json({
+          listings: [],
+          pagination: { page: 1, limit: 50, total: 0, pages: 0 },
+        });
+      }
+      query.sellerId = sellerOid;
     }
-    if (templateId) query.templateId = templateId;
+    if (templateId) {
+      const templateOid = toObjectId(templateId);
+      if (!templateOid) {
+        return res.json({
+          listings: [],
+          pagination: { page: 1, limit: 50, total: 0, pages: 0 },
+        });
+      }
+      query.templateId = templateOid;
+    }
     if (status) query.status = status;
 
     const creatorId = createdBy || userId;
-    if (creatorId && creatorId !== 'all') query.createdBy = creatorId;
+    if (creatorId && creatorId !== 'all') {
+      const creatorOid = toObjectId(creatorId);
+      if (!creatorOid) {
+        return res.json({
+          listings: [],
+          pagination: { page: 1, limit: 50, total: 0, pages: 0 },
+        });
+      }
+      query.createdBy = creatorOid;
+    }
 
     const createdAtRange = buildCreatedAtDateFilter(startDate, endDate);
     if (createdAtRange) query.createdAt = createdAtRange;

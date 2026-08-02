@@ -111,7 +111,11 @@ export default function FieldConfigList({ configs, customColumns, onChange, amaz
                     <Chip 
                       label={config.source === 'ai' ? 'AI Generated' : 'Direct Mapping'} 
                       size="small"
-                      color={config.source === 'ai' ? 'primary' : 'default'}
+                      color={
+                        config.source === 'ai'
+                          ? (String(config.promptTemplate || '').trim() ? 'primary' : 'error')
+                          : 'default'
+                      }
                     />
                     {!config.enabled && (
                       <Chip label="Disabled" size="small" color="error" variant="outlined" />
