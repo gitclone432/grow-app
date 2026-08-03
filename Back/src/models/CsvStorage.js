@@ -24,7 +24,7 @@ const csvStorageSchema = new mongoose.Schema({
     },
     templateId: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'TemplateListing',
+        ref: 'ListingTemplate',
         default: null
     },
     listingCount: {

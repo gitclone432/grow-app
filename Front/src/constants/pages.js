@@ -43,6 +43,7 @@ export const SUBMENUS = {
 export const PAGE_REGISTRY = [
   // ====== STORE LISTINGS ======
   { id: 'StoreListings', name: 'Store Listings', path: '/store-listings', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'ListingRecommendations', name: 'Listing Recommendations', path: '/listing-recommendations', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'SendOfferEligible', name: 'Send Offer Eligible', path: '/send-offer-eligible', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
 
   // ====== ORDER FULFILMENT ======
@@ -133,7 +134,7 @@ export const PAGE_REGISTRY = [
   { id: 'AffiliateOrders', name: 'Affiliate Orders', path: '/affiliate-orders', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
 
   // ====== EBAY PARAMETERS ======
-  { id: 'StoreOverview', name: 'Store Overview', path: '/store-overview', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'StoreOverview', name: 'Store Limits', path: '/store-overview', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayApiUsage', name: 'eBay API Usage', path: '/ebay-api-usage', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayAnalyticsHub', name: 'Analytics Hub', path: '/analytics-hub', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EbayFeedback', name: 'Feedback', path: '/feedback', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },

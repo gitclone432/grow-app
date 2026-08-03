@@ -126,6 +126,7 @@ import {
   ActiveListingTiersPage,
   DiscountsPage,
   StoreListingsPage,
+  ListingRecommendationsPage,
   SendOfferEligiblePage,
   FeedUploadStatsPage,
   SellerUploadLimitsPage,
@@ -287,6 +288,7 @@ const flyoutMenuSx = {
 // Component map for routing
 const COMPONENT_MAP = {
   'StoreListings': StoreListingsPage,
+  'ListingRecommendations': ListingRecommendationsPage,
   'SendOfferEligible': SendOfferEligiblePage,
   'OrdersDashboard': OrdersDepartmentDashboardPage,
   'OrderAnalytics': OrderAnalyticsPage,

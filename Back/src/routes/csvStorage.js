@@ -1,11 +1,134 @@
 import express from 'express';
 import multer from 'multer';
+import mongoose from 'mongoose';
 import { requireAuth } from '../middleware/auth.js';
 import CsvStorage from '../models/CsvStorage.js';
 import FeedUpload from '../models/FeedUpload.js';
+import ListingTemplate from '../models/ListingTemplate.js';
+import TemplateListing from '../models/TemplateListing.js';
+import { getEffectiveTemplate } from '../utils/templateMerger.js';
+import { buildDraftListingsCsv } from '../utils/ebayDraftListingCsv.js';
+import { joinItemPhotoUrls } from '../utils/itemPhotoUrls.js';
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
+
+function getOrderedUniqueCustomColumns(customColumns = []) {
+    const seen = new Set();
+    return (Array.isArray(customColumns) ? customColumns : [])
+        .slice()
+        .sort((a, b) => (a?.order ?? 0) - (b?.order ?? 0))
+        .filter((col) => {
+            const name = String(col?.name || '').trim();
+            if (!name) return false;
+            const normalized = name.toLowerCase();
+            if (seen.has(normalized)) return false;
+            seen.add(normalized);
+            return true;
+        });
+}
+
+function sanitizeCustomCsvValueByHeader(header, value) {
+    const headerName = String(header || '').trim().toLowerCase();
+    const raw = value == null ? '' : String(value);
+    if (headerName === 'c:feature' && raw.length > 65) return raw.slice(0, 65);
+    return raw;
+}
+
+/**
+ * Rebuild draft CSV from TemplateListing rows (C: item specifics + all photos).
+ * Old CSV Storage blobs were saved before those fields were included.
+ */
+async function regenerateDraftCsvBuffer(record) {
+    if (record.listingStatus !== 'draft' || !record.templateId || !record.seller) {
+        return null;
+    }
+
+    const sellerId = record.seller._id || record.seller;
+    const nameBlob = `${record.name || ''} ${record.fileName || ''}`;
+    const batchMatch = nameBlob.match(/draft_batch_(\d+)/i);
+
+    const filter = {
+        templateId: record.templateId,
+        sellerId,
+        status: 'draft',
+        downloadBatchId: { $ne: null },
+    };
+    if (batchMatch) {
+        filter.downloadBatchNumber = parseInt(batchMatch[1], 10);
+    }
+
+    let listings = await TemplateListing.find(filter).sort({ createdAt: -1 });
+
+    // Filename without batch #: pick the downloaded draft batch matching listingCount
+    if (!listings.length && !batchMatch && record.listingCount) {
+        const batches = await TemplateListing.aggregate([
+            {
+                $match: {
+                    templateId: new mongoose.Types.ObjectId(String(record.templateId)),
+                    sellerId: new mongoose.Types.ObjectId(String(sellerId)),
+                    status: 'draft',
+                    downloadBatchId: { $ne: null },
+                },
+            },
+            {
+                $group: {
+                    _id: '$downloadBatchId',
+                    downloadBatchNumber: { $first: '$downloadBatchNumber' },
+                    count: { $sum: 1 },
+                    downloadedAt: { $first: '$downloadedAt' },
+                },
+            },
+            { $match: { count: Number(record.listingCount) } },
+            { $sort: { downloadedAt: -1 } },
+            { $limit: 1 },
+        ]);
+        if (batches[0]?._id) {
+            listings = await TemplateListing.find({
+                templateId: record.templateId,
+                sellerId,
+                status: 'draft',
+                downloadBatchId: batches[0]._id,
+            }).sort({ createdAt: -1 });
+        }
+    }
+
+    if (!listings.length) return null;
+
+    const template = await getEffectiveTemplate(record.templateId, sellerId);
+    if (!template) return null;
+
+    const customColumns = getOrderedUniqueCustomColumns(template.customColumns || []);
+    const csvContent = buildDraftListingsCsv(listings, { joinItemPhotoUrls }, record.country || 'US', {
+        customColumns,
+        sanitizeCustomValue: sanitizeCustomCsvValueByHeader,
+    });
+    return Buffer.from(csvContent, 'utf8');
+}
+
+/** Fill missing createdBy from linked ListingTemplate creator (legacy rows). */
+async function enrichCreatedByFromTemplates(records) {
+    const missing = records.filter((r) => !r.createdBy && r.templateId);
+    if (!missing.length) return records;
+
+    const templateIds = [...new Set(missing.map((r) => String(r.templateId)))];
+    const templates = await ListingTemplate.find({ _id: { $in: templateIds } })
+        .select('createdBy')
+        .populate('createdBy', 'username')
+        .lean();
+    const byTemplateId = new Map(
+        templates.map((t) => [String(t._id), t.createdBy || null])
+    );
+
+    return records.map((r) => {
+        if (r.createdBy || !r.templateId) return r;
+        const fallback = byTemplateId.get(String(r.templateId));
+        if (!fallback) return r;
+        const plain = typeof r.toObject === 'function' ? r.toObject() : { ...r };
+        plain.createdBy = fallback;
+        return plain;
+    });
+}
 
 // ============================================
 // GET /csv-storage — Paginated list with filters
@@ -14,6 +137,7 @@ router.get('/', requireAuth, async (req, res) => {
     try {
         const {
             sellerId,
+            userId,
             keyword,
             dateFrom,
             dateTo,
@@ -27,6 +151,9 @@ router.get('/', requireAuth, async (req, res) => {
         const filter = {};
 
         if (sellerId) filter.seller = sellerId;
+        if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+            filter.createdBy = new mongoose.Types.ObjectId(userId);
+        }
         if (categoryId) filter.categoryId = categoryId;
         if (rangeId) filter.rangeId = rangeId;
         if (productId) filter.productId = productId;
@@ -51,6 +178,7 @@ router.get('/', requireAuth, async (req, res) => {
         const records = await CsvStorage.find(filter)
             .select('-csvData') // Exclude binary data from list response
             .populate({ path: 'seller', select: 'storeName user', populate: { path: 'user', select: 'username' } })
+            .populate('createdBy', 'username')
             .populate('feedUploadId', 'status uploadSummary taskId')
             .populate('scheduledSellerId', 'storeName')
             .sort({ createdAt: -1 })
@@ -58,8 +186,9 @@ router.get('/', requireAuth, async (req, res) => {
             .limit(limitNum);
 
         const total = await CsvStorage.countDocuments(filter);
+        const enriched = await enrichCreatedByFromTemplates(records);
 
-        res.json({ records, total });
+        res.json({ records: enriched, total });
     } catch (err) {
         console.error('[CSV Storage] GET Error:', err.message);
         res.status(500).json({ error: 'Failed to fetch CSV records', details: err.message });
@@ -119,7 +248,7 @@ router.post('/', requireAuth, upload.single('csvFile'), async (req, res) => {
             source: source || null,
             listingStatus: normalizedListingStatus,
             country: normalizedCountry,
-            createdBy: req.user?._id || null
+            createdBy: req.user?.userId || req.user?._id || null
         });
 
         res.json({ _id: record._id, name: record.name, fileName: record.fileName });
@@ -171,9 +300,32 @@ router.get('/:id/download', requireAuth, async (req, res) => {
             return res.status(404).json({ error: 'CSV record not found' });
         }
 
+        let payload = record.csvData;
+        let filename = record.fileName;
+
+        // Draft blobs saved before C:/multi-image fix — rebuild from listings when possible
+        try {
+            const regenerated = await regenerateDraftCsvBuffer(record);
+            if (regenerated && regenerated.length > 0) {
+                payload = regenerated;
+                await CsvStorage.updateOne(
+                    { _id: record._id },
+                    { $set: { csvData: regenerated, mimeType: 'text/csv' } }
+                );
+                console.log(
+                    `[CSV Storage] Regenerated draft CSV ${record._id} (${regenerated.length} bytes)`
+                );
+            }
+        } catch (regenErr) {
+            console.warn(
+                `[CSV Storage] Draft regenerate failed for ${record._id}, serving stored blob:`,
+                regenErr.message
+            );
+        }
+
         res.setHeader('Content-Type', record.mimeType || 'text/csv');
-        res.setHeader('Content-Disposition', `attachment; filename="${record.fileName}"`);
-        res.send(record.csvData);
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(payload);
     } catch (err) {
         console.error('[CSV Storage] Download Error:', err.message);
         res.status(500).json({ error: 'Failed to download CSV', details: err.message });

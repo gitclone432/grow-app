@@ -189,7 +189,7 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
   } = options;
   const overlayOpts = { skip: skipOverlay, templateOverlay };
 
-  const withOverlayedImages = async (data) => {
+  const withOverlayedImages = async (data, baseTimings = {}) => {
     if (!data || typeof data !== 'object') return data;
     const resolvedTextOverlay =
       textOverlay && textOverlay.enabled
@@ -198,11 +198,23 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
             text: resolveTextOverlayContent(data, textOverlay),
           }
         : null;
+    const overlayStart = Date.now();
     const images = await applyOverlayToScrapedImages(data.images || [], {
       ...overlayOpts,
       textOverlay: resolvedTextOverlay,
     });
-    return { ...data, images };
+    const overlayMs = Date.now() - overlayStart;
+    const timings = {
+      scrapeMs: Number(baseTimings.scrapeMs) || 0,
+      overlayMs,
+      source: baseTimings.source || data.scrapeSource || 'unknown',
+      totalFetchMs: (Number(baseTimings.scrapeMs) || 0) + overlayMs,
+    };
+    return {
+      ...data,
+      images,
+      _fetchTimings: timings,
+    };
   };
   
   try {
@@ -216,7 +228,10 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
         console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${region}, ${cacheTime}ms)`);
         // Cache hits made no fetch — do not re-report availabilityRetry
         // Overlay is applied after cache so each template can use its own frame.
-        return withOverlayedImages({ ...cached, availabilityRetry: null, scrapeSource: 'cache' });
+        return withOverlayedImages(
+          { ...cached, availabilityRetry: null, scrapeSource: 'cache' },
+          { scrapeMs: cacheTime, source: 'cache' }
+        );
       }
 
       // Reuse Amazon scrape saved on any Listings Database row for this ASIN
@@ -225,11 +240,14 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
         setCachedAsinData(asin, { ...fromListingsDb, availabilityRetry: null }, region);
         const dbTime = Date.now() - startTime;
         console.log(`[fetchAmazonData] 📚 Listings Database reused for ${asin} (${region}, ${dbTime}ms)`);
-        return withOverlayedImages({
-          ...fromListingsDb,
-          availabilityRetry: null,
-          scrapeSource: 'listings_db',
-        });
+        return withOverlayedImages(
+          {
+            ...fromListingsDb,
+            availabilityRetry: null,
+            scrapeSource: 'listings_db',
+          },
+          { scrapeMs: dbTime, source: 'listings_db' }
+        );
       }
     } else {
       console.log(`[fetchAmazonData] 🔄 Force refresh enabled for ${asin} (${region})`);
@@ -238,10 +256,12 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
     // Single provider call for ALL data. Provider is env-switchable so a bad
     // rollout can be reverted by flipping AMAZON_PRODUCT_PROVIDER — no code change.
     // Both clients return the identical object shape for core fields.
+    const scrapeStart = Date.now();
     const provider = (process.env.AMAZON_PRODUCT_PROVIDER || 'scraperapi').toLowerCase();
     const scrapedData = provider === 'scrapingdog'
       ? await scrapeAmazonProductWithScrapingdog(asin, region)
       : await scrapeAmazonProductWithScraperAPI(asin, region);
+    const scrapeMs = Date.now() - scrapeStart;
     
     const responseTime = Date.now() - startTime;
     
@@ -361,7 +381,7 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
       console.log(`[fetchAmazonData] ⚠️ Skipping cache for ${asin} (no stock/delivery info) — will retry on next request`);
     }
     
-    return withOverlayedImages(result);
+    return withOverlayedImages(result, { scrapeMs, source: 'live_scrape' });
   } catch (error) {
     const responseTime = Date.now() - startTime;
     
@@ -416,7 +436,7 @@ export async function applyFieldConfigs(
     Object.assign(coreFields, reuseFromPriorListing.coreFields || {});
     Object.assign(customFields, reuseFromPriorListing.customFields || {});
     console.log(
-      `[ASIN: ${amazonData.asin}] ♻️ Reusing Listings Database row — OpenAI rephrase only for: ${aiFieldsOnly.join(', ')}`
+      `[ASIN: ${amazonData.asin}] ♻️ Reusing Listings Database row — regenerating fresh: ${aiFieldsOnly.join(', ')}`
     );
   }
 
@@ -728,7 +748,7 @@ export async function applyFieldConfigs(
           || config.ebayField === 'review'
           || usesReviewInPrompt
           || customColumnWantsReviewExtract
-            ? 2000
+            ? (config.ebayField === 'description' ? 900 : 2000)
             : 150;
         console.log(`    🎯 Token limit: ${maxTokens}`);
         

@@ -49,11 +49,11 @@ export const CRON_JOB_DEFINITIONS = [
   },
   {
     jobKey: 'pollAllSellers',
-    label: 'Poll all sellers',
-    description: 'Sync all sellers listings from eBay.',
+    label: 'Poll all sellers (store listings)',
+    description: 'Nightly Sync All Stores from eBay GetSellerList. Disabled — use Sync status → Sync All Stores or Sync listings per store.',
     cronExpr: '0 1 * * *',
     timezone: 'Asia/Kolkata',
-    enabled: true,
+    enabled: false,
   },
   {
     jobKey: 'pollNewOrders',
@@ -157,6 +157,20 @@ export async function ensureCronConfigDefaults() {
       { upsert: true }
     );
   }
+
+  // Store listings sync is manual-only (Sync All / Sync listings). Keep cron off even if
+  // an older DB row still has enabled: true from a previous default.
+  await CronJobConfig.updateOne(
+    { jobKey: 'pollAllSellers' },
+    {
+      $set: {
+        enabled: false,
+        label: 'Poll all sellers (store listings)',
+        description:
+          'Nightly Sync All Stores from eBay GetSellerList. Disabled — use Sync status → Sync All Stores or Sync listings per store.',
+      },
+    }
+  );
 }
 
 async function runDailyTimerAutoStop() {

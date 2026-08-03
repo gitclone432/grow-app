@@ -6,6 +6,7 @@ import {
   Chip,
   CircularProgress,
   InputAdornment,
+  LinearProgress,
   Paper,
   Stack,
   Table,
@@ -16,20 +17,19 @@ import {
   TableRow,
   TableSortLabel,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SearchIcon from '@mui/icons-material/Search';
 import api from '../../lib/api';
 import {
-  formatFreeListings,
   formatStoreSubscriptionPrice,
   formatTerm,
-  freeListingsSortValue,
+  freeListingsAllowanceNumber,
   levelChipColor,
   levelSortValue,
-  mergedStatusLabel,
-  mergedStatusSortValue,
+  listingCapacityStatus,
   monthlyStorePriceAmount,
   priceSortValue,
   termInMonths,
@@ -37,14 +37,13 @@ import {
 
 const SORT_COLUMNS = {
   sellerName: { label: 'Store', align: 'left' },
-  quantityLimitRemaining: { label: 'Qty limit', align: 'right' },
-  amountLimitRemaining: { label: 'Amt limit', align: 'right' },
-  totalLimit: { label: 'Total Limit', align: 'right' },
-  subscriptionLevel: { label: 'Store level', align: 'left' },
+  freeListingsRemainingEst: { label: 'Free listings left', align: 'right' },
+  quantityLimitRemaining: { label: 'Qty left', align: 'right' },
+  amountLimitRemaining: { label: '$ left', align: 'right' },
+  capacity: { label: 'Can list?', align: 'center' },
+  subscriptionLevel: { label: 'Plan', align: 'left' },
   term: { label: 'Term', align: 'left' },
   price: { label: 'Price', align: 'right' },
-  freeListings: { label: 'Free listings', align: 'right' },
-  status: { label: 'Status', align: 'center' },
 };
 
 function formatCurrency(amount, currency) {
@@ -57,39 +56,66 @@ function formatCurrency(amount, currency) {
   }).format(num);
 }
 
-function formatCurrencyCompact(amount, currency) {
-  if (amount === undefined || amount === null || amount === '') return '—';
-  const num = parseFloat(amount);
-  if (Number.isNaN(num)) return '—';
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: currency || 'USD',
-    notation: 'compact',
-    maximumFractionDigits: 1,
-  }).format(num);
-}
-
 function formatNumber(num) {
   if (num === undefined || num === null || num === '') return '—';
-  const n = parseInt(num, 10);
+  const n = Number(num);
   if (Number.isNaN(n)) return '—';
-  return n.toLocaleString();
+  return Math.trunc(n).toLocaleString();
 }
 
-function formatNumberCompact(num) {
-  if (num === undefined || num === null || num === '') return '—';
-  const n = parseInt(num, 10);
-  if (Number.isNaN(n)) return '—';
-  return new Intl.NumberFormat('en-US', {
-    notation: 'compact',
-    maximumFractionDigits: 1,
-  }).format(n);
+function remainingPercent(remaining, total) {
+  const rem = Number(remaining);
+  const tot = Number(total);
+  if (!Number.isFinite(rem) || !Number.isFinite(tot) || tot <= 0) return null;
+  return Math.max(0, Math.min(100, Math.round((rem / tot) * 100)));
 }
 
-function sortableLimitValue(row, field, errorField = 'privilegeError') {
-  if (row.notConnected || row[errorField]) return null;
-  const val = Number(row[field]);
-  return Number.isFinite(val) ? val : null;
+function barColor(pct) {
+  if (pct == null) return 'inherit';
+  if (pct <= 0) return 'error';
+  if (pct <= 10) return 'warning';
+  return 'success';
+}
+
+function RemainingCell({ remaining, used, total, formatValue = formatNumber, hint }) {
+  const pct = remainingPercent(remaining, total);
+  const remLabel = formatValue(remaining);
+  const sub =
+    used != null && total != null
+      ? `${formatValue(used)} used / ${formatValue(total)}`
+      : total != null
+        ? `of ${formatValue(total)}`
+        : null;
+
+  return (
+    <Tooltip title={hint || ''} disableHoverListener={!hint}>
+      <Box sx={{ minWidth: 110, ml: 'auto' }}>
+        <Typography
+          variant="body2"
+          fontWeight={700}
+          sx={{
+            fontVariantNumeric: 'tabular-nums',
+            color: pct != null && pct <= 0 ? 'error.main' : pct != null && pct <= 10 ? 'warning.main' : 'text.primary',
+          }}
+        >
+          {remLabel}
+        </Typography>
+        {sub && (
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ fontSize: '0.65rem', lineHeight: 1.2 }}>
+            {sub}
+          </Typography>
+        )}
+        {pct != null && (
+          <LinearProgress
+            variant="determinate"
+            value={pct}
+            color={barColor(pct)}
+            sx={{ mt: 0.5, height: 4, borderRadius: 1 }}
+          />
+        )}
+      </Box>
+    </Tooltip>
+  );
 }
 
 function compareNullableNumeric(a, b, dir) {
@@ -99,15 +125,6 @@ function compareNullableNumeric(a, b, dir) {
   if (aMissing) return 1;
   if (bMissing) return -1;
   return dir * (a - b);
-}
-
-function formatTotalLimit(row) {
-  const qty = formatNumberCompact(row.accountLimitQuantity);
-  const amt = formatCurrencyCompact(row.accountLimitAmount, row.accountLimitCurrency);
-  if (qty === '—' && amt === '—') return '—';
-  if (qty === '—') return `— / ${amt}`;
-  if (amt === '—') return `${qty} / —`;
-  return `${qty} / ${amt}`;
 }
 
 function compareRows(a, b, sortBy, sortOrder) {
@@ -127,29 +144,38 @@ function compareRows(a, b, sortBy, sortOrder) {
         { sensitivity: 'base' }
       );
       break;
+    case 'freeListingsRemainingEst': {
+      const valA = a.freeListingsRemainingEst != null ? Number(a.freeListingsRemainingEst) : null;
+      const valB = b.freeListingsRemainingEst != null ? Number(b.freeListingsRemainingEst) : null;
+      cmp = compareNullableNumeric(valA, valB, dir);
+      break;
+    }
     case 'quantityLimitRemaining': {
-      const valA = a.notConnected || a.privilegeError ? -1 : Number(a.quantityLimitRemaining) || -1;
-      const valB = b.notConnected || b.privilegeError ? -1 : Number(b.quantityLimitRemaining) || -1;
-      cmp = valA - valB;
+      const valA = a.notConnected || a.privilegeError ? null : Number(a.quantityLimitRemaining);
+      const valB = b.notConnected || b.privilegeError ? null : Number(b.quantityLimitRemaining);
+      cmp = compareNullableNumeric(
+        Number.isFinite(valA) ? valA : null,
+        Number.isFinite(valB) ? valB : null,
+        dir
+      );
       break;
     }
     case 'amountLimitRemaining': {
-      const valA = a.notConnected || a.privilegeError ? -1 : Number(a.amountLimitRemaining) || -1;
-      const valB = b.notConnected || b.privilegeError ? -1 : Number(b.amountLimitRemaining) || -1;
-      cmp = valA - valB;
+      const valA = a.notConnected || a.privilegeError ? null : Number(a.amountLimitRemaining);
+      const valB = b.notConnected || b.privilegeError ? null : Number(b.amountLimitRemaining);
+      cmp = compareNullableNumeric(
+        Number.isFinite(valA) ? valA : null,
+        Number.isFinite(valB) ? valB : null,
+        dir
+      );
       break;
     }
-    case 'totalLimit': {
-      const qtyA = sortableLimitValue(a, 'accountLimitQuantity', 'accountPrivilegeError');
-      const qtyB = sortableLimitValue(b, 'accountLimitQuantity', 'accountPrivilegeError');
-      const amtA = sortableLimitValue(a, 'accountLimitAmount', 'accountPrivilegeError');
-      const amtB = sortableLimitValue(b, 'accountLimitAmount', 'accountPrivilegeError');
-      cmp = compareNullableNumeric(qtyA, qtyB, dir);
-      if (cmp === 0 && qtyA !== null) {
-        cmp = compareNullableNumeric(amtA, amtB, dir);
+    case 'capacity':
+      cmp = listingCapacityStatus(a).severity - listingCapacityStatus(b).severity;
+      if (cmp === 0) {
+        cmp = listingCapacityStatus(a).label.localeCompare(listingCapacityStatus(b).label);
       }
       break;
-    }
     case 'subscriptionLevel':
       cmp = levelSortValue(a.subscriptionLevel) - levelSortValue(b.subscriptionLevel);
       if (cmp === 0) {
@@ -170,21 +196,14 @@ function compareRows(a, b, sortBy, sortOrder) {
       cmp = priceSortValue(a.subscriptionLevel, a.termValue, a.termUnit)
         - priceSortValue(b.subscriptionLevel, b.termValue, b.termUnit);
       break;
-    case 'freeListings':
-      cmp = freeListingsSortValue(a.subscriptionLevel) - freeListingsSortValue(b.subscriptionLevel);
-      break;
-    case 'status':
-      cmp = mergedStatusSortValue(a) - mergedStatusSortValue(b);
-      if (cmp === 0) {
-        cmp = mergedStatusLabel(a).localeCompare(mergedStatusLabel(b), undefined, { sensitivity: 'base' });
-      }
-      break;
     default:
       cmp = 0;
   }
 
   if (cmp === 0 && sortBy !== 'sellerName') return tieBreak();
-  if (sortBy === 'totalLimit') return cmp;
+  if (sortBy === 'freeListingsRemainingEst' || sortBy === 'quantityLimitRemaining' || sortBy === 'amountLimitRemaining') {
+    return cmp;
+  }
   return dir * cmp;
 }
 
@@ -208,8 +227,9 @@ export default function StoreOverviewPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
-  const [sortBy, setSortBy] = useState('sellerName');
+  const [sortBy, setSortBy] = useState('capacity');
   const [sortOrder, setSortOrder] = useState('asc');
+  const [notes, setNotes] = useState('');
 
   const fetchData = useCallback(async (forceRefresh = false) => {
     setLoading(true);
@@ -226,6 +246,7 @@ export default function StoreOverviewPage() {
       }
 
       setRows(Array.isArray(data.rows) ? data.rows : []);
+      setNotes(data.notes?.freeListingsEstimate || '');
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load store overview');
       setRows([]);
@@ -245,7 +266,7 @@ export default function StoreOverviewPage() {
       const haystack = [
         row.sellerName,
         row.subscriptionLevel,
-        mergedStatusLabel(row),
+        listingCapacityStatus(row).label,
       ].filter(Boolean).join(' ').toLowerCase();
       return haystack.includes(q);
     });
@@ -263,15 +284,22 @@ export default function StoreOverviewPage() {
       return;
     }
     setSortBy(column);
-    setSortOrder('asc');
+    setSortOrder(column === 'capacity' ? 'asc' : 'asc');
   };
 
   const summary = useMemo(() => {
-    const withPlan = rows.filter((r) => r.subscriptionLevel && !r.notConnected).length;
-    const noPlan = rows.filter((r) => r.noPlan && !r.notConnected).length;
-    const notConnected = rows.filter((r) => r.notConnected).length;
-    const errors = rows.filter((r) => r.privilegeError || r.subscriptionError).length;
-    return { withPlan, noPlan, notConnected, errors };
+    let blocked = 0;
+    let feeRisk = 0;
+    let low = 0;
+    let ok = 0;
+    for (const row of rows) {
+      const id = listingCapacityStatus(row).id;
+      if (id === 'blocked') blocked += 1;
+      else if (id === 'fee_risk') feeRisk += 1;
+      else if (id === 'low') low += 1;
+      else if (id === 'ok') ok += 1;
+    }
+    return { blocked, feeRisk, low, ok };
   }, [rows]);
 
   const billingKpi = useMemo(() => {
@@ -311,17 +339,19 @@ export default function StoreOverviewPage() {
         >
           <Box sx={{ minWidth: 0 }}>
             <Typography variant="h4" fontWeight={800} sx={{ lineHeight: 1.2 }}>
-              Store Overview
+              Store Limits Tracker
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 720 }}>
+              Monthly remaining headroom per store. Selling qty/$ exhaust = cannot list.
+              Free listing exhaust = can still list, but insertion fees apply (avoid).
             </Typography>
             {!loading && rows.length > 0 && (
               <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap sx={{ mt: 0.75 }}>
                 <Chip label={`${rows.length} stores`} size="small" variant="outlined" />
-                <Chip label={`${summary.withPlan} with plan`} size="small" color="success" variant="outlined" />
-                {summary.noPlan > 0 && <Chip label={`${summary.noPlan} no plan`} size="small" variant="outlined" />}
-                {summary.notConnected > 0 && (
-                  <Chip label={`${summary.notConnected} not connected`} size="small" color="warning" />
-                )}
-                {summary.errors > 0 && <Chip label={`${summary.errors} errors`} size="small" color="error" />}
+                {summary.blocked > 0 && <Chip label={`${summary.blocked} blocked`} size="small" color="error" />}
+                {summary.feeRisk > 0 && <Chip label={`${summary.feeRisk} fee risk`} size="small" color="warning" />}
+                {summary.low > 0 && <Chip label={`${summary.low} low`} size="small" color="warning" variant="outlined" />}
+                <Chip label={`${summary.ok} OK`} size="small" color="success" variant="outlined" />
               </Stack>
             )}
           </Box>
@@ -357,7 +387,7 @@ export default function StoreOverviewPage() {
             )}
             <TextField
               size="small"
-              placeholder="Search store or level…"
+              placeholder="Search store or plan…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               InputProps={{
@@ -383,7 +413,19 @@ export default function StoreOverviewPage() {
         </Stack>
       </Paper>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {error && <Alert severity="error" sx={{ mb: 1.5 }}>{error}</Alert>}
+
+      <Alert severity="info" sx={{ mb: 1.5, py: 0.5, '& .MuiAlert-message': { py: 0.25 } }}>
+        <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>
+          {notes || (
+            <>
+              Free listings used ≈ active (monthly auto-renew) + listings that started this month and already
+              ended (relist-then-end). Early end before renew is not counted. Sync Store Listings so ended
+              inserts are stored. Qty/$ left is live from eBay.
+            </>
+          )}
+        </Typography>
+      </Alert>
 
       <Paper sx={{ overflow: 'hidden' }}>
         <TableContainer>
@@ -391,12 +433,8 @@ export default function StoreOverviewPage() {
             size="small"
             stickyHeader
             sx={{
-              '& .MuiTableCell-root': {
-                py: 0.9,
-              },
-              '& .MuiTableCell-head': {
-                py: 1,
-              },
+              '& .MuiTableCell-root': { py: 0.9 },
+              '& .MuiTableCell-head': { py: 1 },
             }}
           >
             <TableHead>
@@ -415,66 +453,94 @@ export default function StoreOverviewPage() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={9} align="center" sx={{ py: 4 }}>
+                  <TableCell colSpan={8} align="center" sx={{ py: 4 }}>
                     <CircularProgress size={32} />
                     <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                      Loading selling limits and store subscriptions…
+                      Loading monthly limits…
                     </Typography>
                   </TableCell>
                 </TableRow>
               ) : sortedRows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={9} align="center" sx={{ py: 4 }}>
+                  <TableCell colSpan={8} align="center" sx={{ py: 4 }}>
                     <Typography color="text.secondary">No stores found</Typography>
                   </TableCell>
                 </TableRow>
               ) : (
-                sortedRows.map((row) => (
-                  <TableRow key={row.sellerId} hover>
-                    <TableCell>
-                      <Typography variant="body2" fontWeight={600}>{row.sellerName}</Typography>
-                    </TableCell>
-                    <TableCell align="right">{formatNumber(row.quantityLimitRemaining)}</TableCell>
-                    <TableCell align="right">
-                      {formatCurrency(row.amountLimitRemaining, row.amountLimitCurrency)}
-                    </TableCell>
-                    <TableCell align="right">
-                      {formatTotalLimit(row)}
-                    </TableCell>
-                    <TableCell>
-                      {row.subscriptionLevel ? (
-                        <Chip
-                          size="small"
-                          label={row.subscriptionLevel}
-                          color={levelChipColor(row.subscriptionLevel)}
+                sortedRows.map((row) => {
+                  const capacity = listingCapacityStatus(row);
+                  const freeAllowance = row.freeListingsAllowance ?? freeListingsAllowanceNumber(row.subscriptionLevel);
+                  return (
+                    <TableRow key={row.sellerId} hover>
+                      <TableCell>
+                        <Typography variant="body2" fontWeight={600}>{row.sellerName}</Typography>
+                      </TableCell>
+                      <TableCell align="right">
+                        <RemainingCell
+                          remaining={row.freeListingsRemainingEst}
+                          used={row.freeListingsUsedEst}
+                          total={freeAllowance}
+                          hint={
+                            [
+                              'Estimate (eBay has no free-insert remaining API).',
+                              `Used = ${formatNumber(row.activeListingsCount)} active (renewals)`,
+                              `+ ${formatNumber(row.freeListingsEndedStartedThisMonth || 0)} started this month then ended (relist/new).`,
+                              'Early end before renew is excluded. Sync Store Listings to refresh ended inserts.',
+                            ].join(' ')
+                          }
                         />
-                      ) : '—'}
-                    </TableCell>
-                    <TableCell>{formatTerm(row.termValue, row.termUnit)}</TableCell>
-                    <TableCell align="right">
-                      <Typography variant="body2" fontWeight={600}>
-                        {formatStoreSubscriptionPrice(row.subscriptionLevel, row.termValue, row.termUnit)}
-                      </Typography>
-                    </TableCell>
-                    <TableCell align="right">{formatFreeListings(row.subscriptionLevel)}</TableCell>
-                    <TableCell align="center">
-                      {row.notConnected ? (
-                        <Chip size="small" label="Not connected" color="warning" />
-                      ) : row.privilegeError || row.subscriptionError ? (
-                        <Chip
-                          size="small"
-                          label={row.needsReconnect ? 'Reconnect OAuth' : 'Error'}
-                          color="error"
-                          title={row.privilegeError || row.subscriptionError}
+                        {(row.freeListingsEndedStartedThisMonth > 0 || row.activeListingsCount != null) && (
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            display="block"
+                            sx={{ fontSize: '0.62rem', lineHeight: 1.2, mt: 0.25 }}
+                          >
+                            {formatNumber(row.activeListingsCount)} active
+                            {row.freeListingsEndedStartedThisMonth > 0
+                              ? ` + ${formatNumber(row.freeListingsEndedStartedThisMonth)} ended`
+                              : ''}
+                          </Typography>
+                        )}
+                      </TableCell>
+                      <TableCell align="right">
+                        <RemainingCell
+                          remaining={row.notConnected || row.privilegeError ? null : row.quantityLimitRemaining}
+                          used={row.quantityUsed}
+                          total={row.accountLimitQuantity}
+                          hint="Hard stop: when qty left hits 0 you cannot list for the month."
                         />
-                      ) : row.noPlan ? (
-                        <Chip size="small" label="No store plan" variant="outlined" />
-                      ) : (
-                        <Chip size="small" label="Active" color="success" />
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))
+                      </TableCell>
+                      <TableCell align="right">
+                        <RemainingCell
+                          remaining={row.notConnected || row.privilegeError ? null : row.amountLimitRemaining}
+                          used={row.amountUsed}
+                          total={row.accountLimitAmount}
+                          formatValue={(v) => formatCurrency(v, row.amountLimitCurrency || row.accountLimitCurrency)}
+                          hint="Hard stop: when $ left hits 0 you cannot list for the month."
+                        />
+                      </TableCell>
+                      <TableCell align="center">
+                        <Chip size="small" label={capacity.label} color={capacity.color} />
+                      </TableCell>
+                      <TableCell>
+                        {row.subscriptionLevel ? (
+                          <Chip
+                            size="small"
+                            label={row.subscriptionLevel}
+                            color={levelChipColor(row.subscriptionLevel)}
+                          />
+                        ) : '—'}
+                      </TableCell>
+                      <TableCell>{formatTerm(row.termValue, row.termUnit)}</TableCell>
+                      <TableCell align="right">
+                        <Typography variant="body2" fontWeight={600}>
+                          {formatStoreSubscriptionPrice(row.subscriptionLevel, row.termValue, row.termUnit)}
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
               )}
             </TableBody>
           </Table>

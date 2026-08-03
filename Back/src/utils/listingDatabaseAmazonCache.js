@@ -212,20 +212,38 @@ export function extractReusableListingFields(priorListing) {
   return { coreFields, customFields };
 }
 
-/** When ASIN already exists in Listings Database, reuse listing fields and only rephrase title/description. */
-export async function buildListingReuseContext(asin) {
+/** When ASIN already exists in Listings Database, reuse listing fields (category, photos, etc.).
+ * Title and description are never reused from DB — always regenerated fresh (eBay can reject duplicates). */
+export async function buildListingReuseContext(asin, { templateId: _templateId = null } = {}) {
   const priorListing = await getPriorListingForAsinReuse(asin);
   const reusable = extractReusableListingFields(priorListing);
   if (!reusable) {
-    return { reuseOptions: {}, priorListing: null, isReuse: false };
+    return {
+      reuseOptions: {},
+      priorListing: null,
+      isReuse: false,
+      skipDescriptionAi: false,
+    };
   }
+
+  const {
+    title: _omitPriorTitle,
+    description: _omitPriorDescription,
+    ...reusableCoreWithoutTitleOrDescription
+  } = reusable.coreFields || {};
+
   return {
     reuseOptions: {
-      reuseFromPriorListing: reusable,
+      reuseFromPriorListing: {
+        ...reusable,
+        coreFields: reusableCoreWithoutTitleOrDescription,
+      },
+      // Always regenerate title + description via AI (never copy from prior listing).
       aiFieldsOnly: ['title', 'description'],
     },
     priorListing,
     isReuse: true,
+    skipDescriptionAi: false,
   };
 }
 

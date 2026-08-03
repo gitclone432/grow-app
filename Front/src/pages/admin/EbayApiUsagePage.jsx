@@ -63,11 +63,14 @@ export default function EbayApiUsagePage() {
         }
     };
 
+    const resourceName = (r) => (typeof r === 'string' ? r : r?.name || '');
+
     const filtered = rateLimits
         .map(ctx => {
-            const matchCtx = ctx.apiContext.toLowerCase().includes(search.toLowerCase());
+            const q = search.toLowerCase();
+            const matchCtx = ctx.apiContext.toLowerCase().includes(q);
             const matchedResources = (ctx.resources || []).filter(r =>
-                r.toLowerCase().includes(search.toLowerCase())
+                resourceName(r).toLowerCase().includes(q)
             );
             if (!search || matchCtx || matchedResources.length > 0) {
                 return {
@@ -287,6 +290,10 @@ export default function EbayApiUsagePage() {
                                     bgcolor: 'action.hover',
                                     borderBottom: '1px solid',
                                     borderColor: 'divider',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: 1.5,
                                 }}
                             >
                                 <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.75rem' }}>
@@ -303,6 +310,13 @@ export default function EbayApiUsagePage() {
                                         {ctx.usagePercent}%
                                     </Box>
                                 </Typography>
+                                <Typography
+                                    variant="caption"
+                                    color="text.secondary"
+                                    sx={{ flexShrink: 0, fontSize: '0.7rem', fontWeight: 600 }}
+                                >
+                                    Calls
+                                </Typography>
                             </Box>
 
                             <Box
@@ -316,31 +330,57 @@ export default function EbayApiUsagePage() {
                                     overflow: 'auto',
                                 }}
                             >
-                                {(ctx.resources || []).map((resourceName, j) => (
-                                    <Box
-                                        component="li"
-                                        key={`${resourceName}-${j}`}
-                                        sx={{
-                                            px: 1.5,
-                                            py: 0.5,
-                                            borderBottom: '1px solid',
-                                            borderColor: 'divider',
-                                            '&:last-child': { borderBottom: 0 },
-                                            '&:hover': { bgcolor: 'action.hover' },
-                                        }}
-                                    >
-                                        <Typography
-                                            variant="body2"
+                                {(ctx.resources || []).map((resource, j) => {
+                                    const name = resourceName(resource);
+                                    const count = typeof resource === 'object' ? (resource.count ?? 0) : null;
+                                    return (
+                                        <Box
+                                            component="li"
+                                            key={`${name}-${j}`}
                                             sx={{
-                                                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-                                                fontSize: '0.75rem',
-                                                lineHeight: 1.4,
+                                                px: 1.5,
+                                                py: 0.5,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'space-between',
+                                                gap: 1.5,
+                                                borderBottom: '1px solid',
+                                                borderColor: 'divider',
+                                                '&:last-child': { borderBottom: 0 },
+                                                '&:hover': { bgcolor: 'action.hover' },
                                             }}
                                         >
-                                            {resourceName}
-                                        </Typography>
-                                    </Box>
-                                ))}
+                                            <Typography
+                                                variant="body2"
+                                                sx={{
+                                                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                                                    fontSize: '0.75rem',
+                                                    lineHeight: 1.4,
+                                                    minWidth: 0,
+                                                    overflow: 'hidden',
+                                                    textOverflow: 'ellipsis',
+                                                    whiteSpace: 'nowrap',
+                                                }}
+                                            >
+                                                {name}
+                                            </Typography>
+                                            {count !== null && (
+                                                <Typography
+                                                    variant="caption"
+                                                    sx={{
+                                                        flexShrink: 0,
+                                                        fontVariantNumeric: 'tabular-nums',
+                                                        fontWeight: count > 0 ? 700 : 400,
+                                                        color: count > 0 ? 'text.primary' : 'text.secondary',
+                                                        fontSize: '0.75rem',
+                                                    }}
+                                                >
+                                                    {count.toLocaleString()}
+                                                </Typography>
+                                            )}
+                                        </Box>
+                                    );
+                                })}
                             </Box>
                         </AccordionDetails>
                     </Accordion>

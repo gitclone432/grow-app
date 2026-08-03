@@ -33,6 +33,8 @@ const directListJobSchema = new mongoose.Schema({
     enum: ['sync', 'queued'],
     default: 'queued',
   },
+  /** When true, job runner loads TemplateListing drafts for ASINs (review edits). */
+  useDrafts: { type: Boolean, default: true },
   batchSize: { type: Number, default: 25 },
   delayMinutesBetweenBatches: { type: Number, default: 2 },
   delaySecondsBetweenListings: { type: Number, default: 5 },
