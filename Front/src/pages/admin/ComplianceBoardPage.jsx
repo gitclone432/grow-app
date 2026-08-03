@@ -53,6 +53,7 @@ const COLUMN_STATUS = {
   OUT_OF_STOCK: 'out_of_stock',
   CANCELLATION: 'cancellation',
   ADDRESS_ISSUE: 'address_issue',
+  LATE_DELIVERY: 'late_delivery',
   NOT_FULFILLED: 'not_fulfilled',
   FULFILLED: 'fulfilled',
   BUYER_CONFIRMATION: 'buyer_confirmation',
@@ -111,6 +112,7 @@ const ORDER_FULFILLMENT_ISSUE_OPTIONS = [
   { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', color: '#f97316' },
   { id: COLUMN_STATUS.CANCELLATION, label: 'Cancellation', color: '#3b82f6' },
   { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', color: '#a855f7' },
+  { id: COLUMN_STATUS.LATE_DELIVERY, label: 'Late Delivery', color: '#dc2626' },
 ];
 
 const ORDER_FULFILLMENT_PROGRESS_OPTIONS = [
@@ -227,6 +229,7 @@ const FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS = {
   [COLUMN_STATUS.OUT_OF_STOCK]: 'fulfillment_out_of_stock_overdue',
   [COLUMN_STATUS.CANCELLATION]: 'fulfillment_cancellation_overdue',
   [COLUMN_STATUS.ADDRESS_ISSUE]: 'fulfillment_address_issue_overdue',
+  [COLUMN_STATUS.LATE_DELIVERY]: 'fulfillment_late_delivery_overdue',
 };
 const FULFILLMENT_ISSUE_STATUS_BY_ALERT_ID = Object.entries(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS)
   .reduce((acc, [status, alertId]) => ({ ...acc, [alertId]: status }), {});
@@ -234,6 +237,7 @@ const FULFILLMENT_ISSUE_STATUS_BY_ALERT_ID = Object.entries(FULFILLMENT_ISSUE_OV
 const ISSUE_HUB_OPTIONS = [
   { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', type: 'order', color: BRAND_ORANGE },
   { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', type: 'order', color: '#a855f7' },
+  { id: COLUMN_STATUS.LATE_DELIVERY, label: 'Late Delivery', type: 'order', color: '#dc2626' },
   { id: MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT, label: 'Issue with Product', type: 'message', color: '#ea580c' },
   { id: MESSAGE_CATEGORIES.INQUIRY, label: 'Inquiry', type: 'message', color: BRAND_GREEN },
 ];
@@ -346,6 +350,7 @@ function ComplianceBoardPage() {
     [COLUMN_STATUS.OUT_OF_STOCK]: [],
     [COLUMN_STATUS.CANCELLATION]: [],
     [COLUMN_STATUS.ADDRESS_ISSUE]: [],
+    [COLUMN_STATUS.LATE_DELIVERY]: [],
     [COLUMN_STATUS.NOT_FULFILLED]: [],
     [COLUMN_STATUS.FULFILLED]: [],
     [COLUMN_STATUS.BUYER_CONFIRMATION]: [],
@@ -426,6 +431,7 @@ function ComplianceBoardPage() {
   const [orderCommunicationWorkCategory, setOrderCommunicationWorkCategory] = useState(MESSAGE_CATEGORIES.ON_HOLD);
   const [fulfillmentIssueCategory, setFulfillmentIssueCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
   const [fulfillmentProgressCategory, setFulfillmentProgressCategory] = useState(COLUMN_STATUS.NOT_FULFILLED);
+  const [showOnlyUnreadMessages, setShowOnlyUnreadMessages] = useState(false);
   const [returnCaseOpenedCategory, setReturnCaseOpenedCategory] = useState(COLUMN_STATUS.CASE_OPENED);
   const [returnCaseNotOpenedCategory, setReturnCaseNotOpenedCategory] = useState(COLUMN_STATUS.CASE_NOT_OPENED);
   const [returnFlowCategory, setReturnFlowCategory] = useState(COLUMN_STATUS.PROVIDE_RETURN_LABEL);
@@ -773,6 +779,7 @@ function ComplianceBoardPage() {
         [COLUMN_STATUS.OUT_OF_STOCK]: [],
         [COLUMN_STATUS.CANCELLATION]: [],
         [COLUMN_STATUS.ADDRESS_ISSUE]: [],
+        [COLUMN_STATUS.LATE_DELIVERY]: [],
         [COLUMN_STATUS.NOT_FULFILLED]: [],
         [COLUMN_STATUS.FULFILLED]: [],
         [COLUMN_STATUS.BUYER_CONFIRMATION]: [],
@@ -832,22 +839,90 @@ function ComplianceBoardPage() {
 
       // Merge INR cases from Issues & Resolutions into INR board's Case Opened column
       if (selectedCategory === 'inr') {
-        grouped[COLUMN_STATUS.INR_CASE_OPENED] = (inrCasesResult ? [...inrCasesResult] : []).filter(matchesBoardOrderFilters);
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => (
-          order.complianceBoardSource === 'order_communication' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED &&
-          getOrderBoardCategories(order).includes('inr')
-        ));
+        // Case Opened = All INR cases from Issues & Resolutions
+        // Don't filter by matchesBoardOrderFilters since INR cases come from different source
+        let inrCasesForBoard = inrCasesResult ? [...inrCasesResult] : [];
+        
+        // Apply only basic filters: search order ID and buyer name
+        if (searchOrderId.trim()) {
+          inrCasesForBoard = inrCasesForBoard.filter(c => {
+            const orderId = String(c.orderId || c.caseOrderId || '');
+            return orderId.toLowerCase().includes(searchOrderId.trim().toLowerCase());
+          });
+        }
+        
+        if (searchBuyerName.trim()) {
+          inrCasesForBoard = inrCasesForBoard.filter(c => {
+            const buyerName = String(c.buyer?.buyerRegistrationAddress?.fullName || c.buyerName || c.buyer?.username || '');
+            return buyerName.toLowerCase().includes(searchBuyerName.trim().toLowerCase());
+          });
+        }
+        
+        grouped[COLUMN_STATUS.INR_CASE_OPENED] = inrCasesForBoard;
+        
+        // Case Not Opened = Order Communication items assigned to INR category
+        // Filter for orders with INR category (check both array and old single-value format)
+        const caseNotOpenedOrders = boardOrders.filter((order) => {
+          const hasINRCategory = getOrderBoardCategories(order).includes('inr');
+          const isFromOrderComm = order.complianceBoardSource === 'order_communication';
+          const isCaseNotOpened = order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED;
+          
+          // Include if it has INR category AND either:
+          // 1. Has order_communication source + case_not_opened status
+          // 2. OR just has INR category (for backward compatibility with orders that might not have source set yet)
+          const match = hasINRCategory && (isFromOrderComm || isCaseNotOpened);
+          if (hasINRCategory) {
+            console.log(`[INR Board] Order ${order._id || order.orderId}:`, {
+              hasINRCategory,
+              isFromOrderComm,
+              isCaseNotOpened,
+              complianceBoardStatus: order.complianceBoardStatus,
+              complianceBoardSource: order.complianceBoardSource,
+              categories: getOrderBoardCategories(order),
+              match
+            });
+          }
+          return match;
+        });
+        
+        console.log(`[INR Board] boardOrders total: ${boardOrders.length}, filtered for INR: ${caseNotOpenedOrders.length}`);
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = caseNotOpenedOrders;
       }
 
       // Merge cancelled orders from Issues & Resolutions into Cancellation board's Cancellation Request column
       if (selectedCategory === 'cancellation') {
-        grouped[COLUMN_STATUS.CANCELLATION_REQUEST] = (cancelledOrdersResult ? [...cancelledOrdersResult] : []).filter(matchesBoardOrderFilters);
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => (
-          order.complianceBoardSource === 'order_communication' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED &&
-          getOrderBoardCategories(order).includes('cancellation')
-        ));
+        // Case Opened = All cancelled orders from Issues & Resolutions cancellation search
+        // Don't filter by matchesBoardOrderFilters since cancelled orders come from different source
+        let cancelledOrdersForBoard = cancelledOrdersResult ? [...cancelledOrdersResult] : [];
+        
+        // Apply only basic filters: search order ID and buyer name
+        if (searchOrderId.trim()) {
+          cancelledOrdersForBoard = cancelledOrdersForBoard.filter(o => {
+            const orderId = String(o.orderId || o.legacyOrderId || '');
+            return orderId.toLowerCase().includes(searchOrderId.trim().toLowerCase());
+          });
+        }
+        
+        if (searchBuyerName.trim()) {
+          cancelledOrdersForBoard = cancelledOrdersForBoard.filter(o => {
+            const buyerName = String(o.buyer?.buyerRegistrationAddress?.fullName || o.buyerName || o.buyer?.username || '');
+            return buyerName.toLowerCase().includes(searchBuyerName.trim().toLowerCase());
+          });
+        }
+        
+        grouped[COLUMN_STATUS.CANCELLATION_REQUEST] = cancelledOrdersForBoard;
+        
+        // Case Not Opened = Order Communication items assigned to cancellation category
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => {
+          const hasCancellationCategory = getOrderBoardCategories(order).includes('cancellation');
+          const isFromOrderComm = order.complianceBoardSource === 'order_communication';
+          const isCaseNotOpened = order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED;
+          
+          // Include if it has cancellation category AND either:
+          // 1. Has order_communication source + case_not_opened status
+          // 2. OR just has cancellation category (for backward compatibility)
+          return hasCancellationCategory && (isFromOrderComm || isCaseNotOpened);
+        });
       }
 
       if (selectedCategory === 'return_refund') {
@@ -1140,6 +1215,75 @@ function ComplianceBoardPage() {
       setLoading(false);
     }
   };
+
+  // Load dropdown preferences from localStorage on mount
+  useEffect(() => {
+    try {
+      const savedPrefs = localStorage.getItem('complianceBoardDropdownPreferences');
+      if (savedPrefs) {
+        const prefs = JSON.parse(savedPrefs);
+        if (prefs.issueHubSourceCategory) setIssueHubSourceCategory(prefs.issueHubSourceCategory);
+        if (prefs.issueHubWorkspaceCategory) setIssueHubWorkspaceCategory(prefs.issueHubWorkspaceCategory);
+        if (prefs.orderCommunicationWorkCategory) setOrderCommunicationWorkCategory(prefs.orderCommunicationWorkCategory);
+        if (prefs.fulfillmentIssueCategory) setFulfillmentIssueCategory(prefs.fulfillmentIssueCategory);
+        if (prefs.fulfillmentProgressCategory) setFulfillmentProgressCategory(prefs.fulfillmentProgressCategory);
+        if (prefs.returnCaseOpenedCategory) setReturnCaseOpenedCategory(prefs.returnCaseOpenedCategory);
+        if (prefs.returnCaseNotOpenedCategory) setReturnCaseNotOpenedCategory(prefs.returnCaseNotOpenedCategory);
+        if (prefs.returnFlowCategory) setReturnFlowCategory(prefs.returnFlowCategory);
+        if (prefs.returnResolutionCategory) setReturnResolutionCategory(prefs.returnResolutionCategory);
+        if (prefs.cancellationDecisionCategory) setCancellationDecisionCategory(prefs.cancellationDecisionCategory);
+        if (prefs.inrPrimaryCategory) setInrPrimaryCategory(prefs.inrPrimaryCategory);
+        if (prefs.inrSecondaryCategory) setInrSecondaryCategory(prefs.inrSecondaryCategory);
+        if (prefs.inrActionCategory) setInrActionCategory(prefs.inrActionCategory);
+        if (prefs.inrRefundCategory) setInrRefundCategory(prefs.inrRefundCategory);
+        if (prefs.hasOwnProperty('showOnlyUnreadMessages')) setShowOnlyUnreadMessages(prefs.showOnlyUnreadMessages);
+      }
+    } catch (err) {
+      console.error('Failed to load dropdown preferences:', err);
+    }
+  }, []);
+
+  // Save dropdown preferences to localStorage whenever they change
+  useEffect(() => {
+    try {
+      const prefs = {
+        issueHubSourceCategory,
+        issueHubWorkspaceCategory,
+        orderCommunicationWorkCategory,
+        fulfillmentIssueCategory,
+        fulfillmentProgressCategory,
+        returnCaseOpenedCategory,
+        returnCaseNotOpenedCategory,
+        returnFlowCategory,
+        returnResolutionCategory,
+        cancellationDecisionCategory,
+        inrPrimaryCategory,
+        inrSecondaryCategory,
+        inrActionCategory,
+        inrRefundCategory,
+        showOnlyUnreadMessages,
+      };
+      localStorage.setItem('complianceBoardDropdownPreferences', JSON.stringify(prefs));
+    } catch (err) {
+      console.error('Failed to save dropdown preferences:', err);
+    }
+  }, [
+    issueHubSourceCategory,
+    issueHubWorkspaceCategory,
+    orderCommunicationWorkCategory,
+    fulfillmentIssueCategory,
+    fulfillmentProgressCategory,
+    returnCaseOpenedCategory,
+    returnCaseNotOpenedCategory,
+    returnFlowCategory,
+    returnResolutionCategory,
+    cancellationDecisionCategory,
+    inrPrimaryCategory,
+    inrSecondaryCategory,
+    inrActionCategory,
+    inrRefundCategory,
+    showOnlyUnreadMessages,
+  ]);
 
   useEffect(() => {
     const init = async () => {
@@ -1700,17 +1844,20 @@ function ComplianceBoardPage() {
     const overdueOutOfStockOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.OUT_OF_STOCK);
     const overdueCancellationOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.CANCELLATION);
     const overdueAddressIssueOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.ADDRESS_ISSUE);
+    const overdueLateLateDeliveryOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.LATE_DELIVERY);
     return [
       { id: COLUMN_STATUS.TODO, label: 'To Do', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.TODO), type: 'stat' },
       { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.OUT_OF_STOCK), type: 'stat' },
       { id: COLUMN_STATUS.CANCELLATION, label: 'Cancellation', color: BRAND_BLUE, count: getStatusCount(COLUMN_STATUS.CANCELLATION), type: 'stat' },
       { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', color: '#a855f7', count: getStatusCount(COLUMN_STATUS.ADDRESS_ISSUE), type: 'stat' },
+      { id: COLUMN_STATUS.LATE_DELIVERY, label: 'Late Delivery', color: '#dc2626', count: getStatusCount(COLUMN_STATUS.LATE_DELIVERY), type: 'stat' },
       { id: COLUMN_STATUS.NOT_FULFILLED, label: 'Not Fulfilled', color: BRAND_YELLOW_DARK, count: getStatusCount(COLUMN_STATUS.NOT_FULFILLED), type: 'stat' },
       { id: COLUMN_STATUS.FULFILLED, label: 'Fulfilled', color: BRAND_GREEN, count: getStatusCount(COLUMN_STATUS.FULFILLED), type: 'stat' },
       { id: COLUMN_STATUS.BUYER_CONFIRMATION, label: 'Buyer Confirmation', color: '#0f766e', count: getStatusCount(COLUMN_STATUS.BUYER_CONFIRMATION), type: 'stat' },
       { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.OUT_OF_STOCK], label: 'Out of Stock 48h+', color: '#dc2626', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.OUT_OF_STOCK], overdueOutOfStockOrders.length), type: 'alert' },
       { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.CANCELLATION], label: 'Cancellation 48h+', color: '#b91c1c', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.CANCELLATION], overdueCancellationOrders.length), type: 'alert' },
       { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.ADDRESS_ISSUE], label: 'Address Issue 48h+', color: '#7f1d1d', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.ADDRESS_ISSUE], overdueAddressIssueOrders.length), type: 'alert' },
+      { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.LATE_DELIVERY], label: 'Late Delivery 48h+', color: '#7c2d12', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.LATE_DELIVERY], overdueLateLateDeliveryOrders.length), type: 'alert' },
       { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#991b1b', count: overdueMessages.length, type: 'alert' },
     ];
   };
@@ -1730,10 +1877,19 @@ function ComplianceBoardPage() {
   };
 
   const getColumnCount = (status) => {
-    if (selectedCategory === 'return_refund' && status === COLUMN_STATUS.CASE_OPENED) {
-      return boardSourceCounts.caseOpenedReturnRequests ?? orders[status]?.length ?? 0;
+    let statusOrders = orders[status] || [];
+    if (showOnlyUnreadMessages) {
+      statusOrders = statusOrders.filter(order => getUnreadMessageCountForOrder(order) > 0);
     }
-    return orders[status]?.length || 0;
+    
+    if (selectedCategory === 'return_refund' && status === COLUMN_STATUS.CASE_OPENED) {
+      const baseCount = boardSourceCounts.caseOpenedReturnRequests ?? orders[status]?.length ?? 0;
+      if (showOnlyUnreadMessages) {
+        return statusOrders.length;
+      }
+      return baseCount;
+    }
+    return statusOrders.length;
   };
 
   const addPendingOrderMove = (order, destColumn) => {
@@ -1955,6 +2111,9 @@ function ComplianceBoardPage() {
       });
 
       setSnackbar({ open: true, message: `Applied ${moves.length} message(s) to ${category}` });
+      
+      // Refresh orders to show updates in other boards (especially when assigning to INR/Cancellation/Return)
+      await fetchOrders();
     } catch (err) {
       console.error('Failed to apply message column:', err);
       setSnackbar({
@@ -2086,6 +2245,21 @@ function ComplianceBoardPage() {
           caseStatus: movedItem.caseStatus || 'Case Not Opened',
           pickedUpBy: movedItem.pickedUpBy || null
         });
+
+        // Also clear the order's compliance board category and status
+        if (movedItem.orderId) {
+          try {
+            await api.patch(`/orders/${encodeURIComponent(movedItem.orderId)}/compliance-status`, {
+              complianceBoardStatus: 'todo',
+              complianceBoardCategory: null,
+              complianceBoardSource: null,
+              clearCategory: true // Flag to backend to remove from categories array
+            });
+          } catch (err) {
+            console.warn('ConversationMeta cleared, but order category clear failed:', err);
+          }
+        }
+
         setSnackbar({
           open: true,
           message: 'Message moved back to All Messages',
@@ -2191,6 +2365,8 @@ function ComplianceBoardPage() {
         return 'Cancellation';
       case COLUMN_STATUS.ADDRESS_ISSUE:
         return 'Address Issue';
+      case COLUMN_STATUS.LATE_DELIVERY:
+        return 'Late Delivery';
       case COLUMN_STATUS.NOT_FULFILLED:
         return 'Not Fulfilled';
       case COLUMN_STATUS.FULFILLED:
@@ -2212,6 +2388,8 @@ function ComplianceBoardPage() {
         return BRAND_BLUE;
       case COLUMN_STATUS.ADDRESS_ISSUE:
         return '#a855f7'; // purple
+      case COLUMN_STATUS.LATE_DELIVERY:
+        return '#dc2626'; // red
       case COLUMN_STATUS.NOT_FULFILLED:
         return BRAND_YELLOW_DARK;
       case COLUMN_STATUS.FULFILLED:
@@ -2635,7 +2813,11 @@ function ComplianceBoardPage() {
 
   // Render message droppable column
   const renderMessageColumn = (categoryId, title, color, height = 600, headerControl = null) => {
-    const items = messages[categoryId] || [];
+    let items = messages[categoryId] || [];
+    // Filter unread messages if toggle is enabled
+    if (showOnlyUnreadMessages) {
+      items = items.filter(item => (item.unreadCount || 0) > 0);
+    }
     const count = items.length;
     const visibleCount = getVisibleMessageCount(categoryId);
     const remainingCount = Math.max(0, count - visibleCount);
@@ -2947,6 +3129,37 @@ function ComplianceBoardPage() {
                 >
                   {order.orderId || order.legacyOrderId || '-'}
                 </Typography>
+                {selectedCategory === 'cancellation' && order.caseInfo?.state && (
+                  <Chip
+                    label={order.caseInfo.state}
+                    size="small"
+                    sx={{ 
+                      bgcolor: (() => {
+                        const state = order.caseInfo.state;
+                        if (state === 'CLOSED' || state === 'RESOLVED') return '#dcfce7';
+                        if (state === 'APPROVAL_PENDING' || state === 'PENDING') return '#fef3c7';
+                        if (state === 'OPEN' || state === 'IN_PROGRESS') return '#fee2e2';
+                        if (state === 'WAITING_BUYER_RESPONSE') return '#e0e7ff';
+                        if (state === 'WAITING_SELLER_RESPONSE') return '#ffedd5';
+                        if (state === 'ON_HOLD') return '#fef3c7';
+                        return '#f3f4f6';
+                      })(),
+                      color: (() => {
+                        const state = order.caseInfo.state;
+                        if (state === 'CLOSED' || state === 'RESOLVED') return '#166534';
+                        if (state === 'APPROVAL_PENDING' || state === 'PENDING') return '#92400e';
+                        if (state === 'OPEN' || state === 'IN_PROGRESS') return '#991b1b';
+                        if (state === 'WAITING_BUYER_RESPONSE') return '#3730a3';
+                        if (state === 'WAITING_SELLER_RESPONSE') return '#9a3412';
+                        if (state === 'ON_HOLD') return '#92400e';
+                        return '#374151';
+                      })(),
+                      fontSize: '0.75rem', 
+                      height: 24, 
+                      fontWeight: 800 
+                    }}
+                  />
+                )}
               </Stack>
               <Stack direction="row" spacing={0.5}>
                 <Tooltip title="Copy Order ID">
@@ -3078,8 +3291,14 @@ function ComplianceBoardPage() {
 
   // Helper function to render a droppable column
   const renderDroppableColumn = (status, title, color, height = '100%', minHeight = 500, headerControl = null, droppableId = status) => {
+    // Filter orders by unread status if the filter is enabled
+    let statusOrders = orders[status] || [];
+    if (showOnlyUnreadMessages) {
+      statusOrders = statusOrders.filter(order => getUnreadMessageCountForOrder(order) > 0);
+    }
+
     const visibleCount = getVisibleOrderCount(status);
-    const remainingCount = Math.max(0, (orders[status]?.length || 0) - visibleCount);
+    const remainingCount = Math.max(0, statusOrders.length - visibleCount);
 
     return (
     <Droppable droppableId={droppableId} type="order">
@@ -3146,7 +3365,7 @@ function ComplianceBoardPage() {
             </Stack>
           </Stack>
           <Stack spacing={1} sx={{ overflowY: 'auto', flex: 1 }}>
-            {orders[status]?.slice(0, visibleCount).map((order, index) => (
+            {statusOrders.slice(0, visibleCount).map((order, index) => (
               <Draggable key={order._id} draggableId={order._id} index={index}>
                 {(provided, snapshot) => renderOrderCard(order, provided, snapshot, false, status)}
               </Draggable>
@@ -3989,6 +4208,21 @@ function ComplianceBoardPage() {
             />
           </Box>
 
+          <Box sx={FILTER_ACTION_SX}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={showOnlyUnreadMessages}
+                  onChange={(e) => setShowOnlyUnreadMessages(e.target.checked)}
+                  color="primary"
+                  size="small"
+                />
+              }
+              label="Unread Only"
+              sx={FILTER_SWITCH_SX}
+            />
+          </Box>
+
           <Stack direction="row" spacing={1} sx={{ width: { xs: '100%', sm: 'auto' } }}>
             <Button
               variant="contained"
@@ -4003,10 +4237,13 @@ function ComplianceBoardPage() {
             >
               Apply Filters
             </Button>
-            {(dateFilter.mode !== 'none' || draftDateFilter.mode !== 'none' || selectedSeller || searchOrderId.trim() || draftSearchOrderId.trim() || searchBuyerName.trim() || draftSearchBuyerName.trim() || !excludeClient || !draftExcludeClient || !excludeLowValue || !draftExcludeLowValue) && (
+            {(dateFilter.mode !== 'none' || draftDateFilter.mode !== 'none' || selectedSeller || searchOrderId.trim() || draftSearchOrderId.trim() || searchBuyerName.trim() || draftSearchBuyerName.trim() || !excludeClient || !draftExcludeClient || !excludeLowValue || !draftExcludeLowValue || showOnlyUnreadMessages) && (
               <Button
                 variant="outlined"
-                onClick={handleClearDateFilters}
+                onClick={() => {
+                  handleClearDateFilters();
+                  setShowOnlyUnreadMessages(false);
+                }}
                 sx={{ ...FILTER_ACTION_SX, color: BRAND_YELLOW_DARK, borderColor: BRAND_YELLOW_DARK }}
               >
                 Clear Filters

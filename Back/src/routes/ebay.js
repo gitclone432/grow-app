@@ -170,6 +170,62 @@ async function enrichCaseLikeRowsWithConversationMeta(rows = []) {
     };
   });
 }
+
+async function enrichCancelledOrdersWithCaseState(rows = []) {
+  if (!rows.length) return rows;
+
+  const orderIds = [...new Set(
+    rows
+      .map((row) => row?.orderId || row?.legacyOrderId)
+      .filter(Boolean)
+      .map(String)
+  )];
+
+  if (orderIds.length === 0) return rows;
+
+  try {
+    const cancellations = await Cancellation.find(
+      {
+        $or: [
+          { orderId: { $in: orderIds } },
+          { legacyOrderId: { $in: orderIds } }
+        ]
+      },
+      { orderId: 1, legacyOrderId: 1, cancelId: 1, cancelState: 1, cancelStatus: 1, cancelReason: 1, cancelRequestDate: 1 }
+    )
+      .sort({ cancelRequestDate: -1 })
+      .lean();
+
+    const cancellationByOrderId = new Map();
+    cancellations.forEach((cancel) => {
+      const key = String(cancel.orderId || cancel.legacyOrderId || '');
+      if (key && !cancellationByOrderId.has(key)) {
+        cancellationByOrderId.set(key, cancel);
+      }
+    });
+
+    return rows.map((row) => {
+      const cancel = cancellationByOrderId.get(String(row?.orderId || '')) ||
+        cancellationByOrderId.get(String(row?.legacyOrderId || ''));
+
+      if (!cancel) return row;
+
+      return {
+        ...row,
+        caseInfo: {
+          cancelId: cancel.cancelId,
+          cancelState: cancel.cancelState,
+          state: cancel.cancelStatus,
+          cancelReason: cancel.cancelReason,
+        },
+      };
+    });
+  } catch (err) {
+    console.error('[enrichCancelledOrdersWithCaseState] Error fetching cancellation data:', err);
+    return rows; // Return rows as-is if there's an error
+  }
+}
+
 const activeAutoCompatBatchRuns = new Set();
 const PAYONEER_FEED_CACHE_ID = 'singleton';
 /** Shown in UI; page loads always read Mongo — no auto eBay call on open. */
@@ -3032,6 +3088,9 @@ router.get('/cancelled-orders', async (req, res) => {
       query.purchaseMarketplaceId = marketplace;
     }
 
+    // Minimum date for compliance boards: July 19, 2026
+    const COMPLIANCE_BOARD_MIN_DATE = new Date('2026-07-19T00:00:00Z');
+
     // Add date filter if provided (using PST timezone logic like other endpoints)
     if (startDate || endDate) {
       query.dateSold = {};
@@ -3041,6 +3100,9 @@ router.get('/cancelled-orders', async (req, res) => {
         const start = new Date(startDate);
         start.setUTCHours(PST_OFFSET_HOURS, 0, 0, 0);
         query.dateSold.$gte = start;
+      } else {
+        // No startDate provided, use minimum date for compliance boards
+        query.dateSold.$gte = COMPLIANCE_BOARD_MIN_DATE;
       }
 
       if (endDate) {
@@ -3049,6 +3111,9 @@ router.get('/cancelled-orders', async (req, res) => {
         end.setUTCHours(PST_OFFSET_HOURS - 1, 59, 59, 999);
         query.dateSold.$lte = end;
       }
+    } else {
+      // No date filters provided, apply minimum date for compliance boards
+      query.dateSold = { $gte: COMPLIANCE_BOARD_MIN_DATE };
     }
 
     const pageNum = parseInt(page);
@@ -3084,9 +3149,13 @@ router.get('/cancelled-orders', async (req, res) => {
       .skip(skip)
       .limit(limitNum);
 
-    const enrichedCancelledOrders = await enrichCaseLikeRowsWithConversationMeta(
+    // Enrich with conversation metadata
+    let enrichedCancelledOrders = await enrichCaseLikeRowsWithConversationMeta(
       cancelledOrders.map((order) => order.toObject())
     );
+
+    // Enrich with case state from Cancellation collection
+    enrichedCancelledOrders = await enrichCancelledOrdersWithCaseState(enrichedCancelledOrders);
 
     console.log(`[Cancelled Orders] Found ${enrichedCancelledOrders.length} cancellation orders (page ${pageNum}/${totalPages})`);
 
@@ -10620,10 +10689,39 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
 
 // Get stored INR cases from database
 router.get('/stored-inr-cases', async (req, res) => {
-  const { sellerId, status, caseType, limit = 200 } = req.query;
+  const { sellerId, status, caseType, limit = 200, dateFrom, dateTo } = req.query;
 
   try {
-    let query = {};
+    // Minimum date for compliance boards: July 19, 2026
+    const COMPLIANCE_BOARD_MIN_DATE = new Date('2026-07-19T00:00:00Z');
+
+    // Build date filter
+    let dateQuery = { $gte: COMPLIANCE_BOARD_MIN_DATE };
+    
+    if (dateFrom) {
+      const fromDate = new Date(dateFrom);
+      if (!isNaN(fromDate.getTime())) {
+        dateQuery.$gte = new Date(Math.max(fromDate.getTime(), COMPLIANCE_BOARD_MIN_DATE.getTime()));
+      }
+    }
+    
+    if (dateTo) {
+      const toDate = new Date(dateTo);
+      if (!isNaN(toDate.getTime())) {
+        // Set to end of day in UTC
+        toDate.setUTCHours(23, 59, 59, 999);
+        dateQuery.$lte = toDate;
+      }
+    } else {
+      // If no explicit end date, default to today's end
+      const today = new Date();
+      today.setUTCHours(23, 59, 59, 999);
+      dateQuery.$lte = today;
+    }
+
+    let query = {
+      creationDate: dateQuery
+    };
     if (sellerId) query.seller = sellerId;
     if (status) query.status = status;
     if (caseType) query.caseType = caseType;
