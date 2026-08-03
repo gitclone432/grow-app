@@ -1919,6 +1919,10 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       return res.status(400).json({ error: 'Category is required' });
     }
 
+    // Minimum date for compliance boards (cancellation, INR, return_refund): July 19, 2026
+    const COMPLIANCE_BOARD_MIN_DATE = new Date('2026-07-19T00:00:00Z');
+    const categoriesWithMinDate = ['cancellation', 'inr', 'return_refund'];
+
     // Build date filter using timezone-aware PT logic (same as All Orders page)
     const dateFilter = {};
     if (startDate || endDate) {
@@ -1926,11 +1930,17 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       if (startDate) {
         const { start } = getPTDayBoundsUTC(startDate);
         dateFilter.dateSold.$gte = start;
+      } else if (categoriesWithMinDate.includes(category)) {
+        // No startDate provided but category requires minimum date
+        dateFilter.dateSold.$gte = COMPLIANCE_BOARD_MIN_DATE;
       }
       if (endDate) {
         const { end } = getPTDayBoundsUTC(endDate);
         dateFilter.dateSold.$lte = end;
       }
+    } else if (categoriesWithMinDate.includes(category)) {
+      // No date filters provided but category requires minimum date
+      dateFilter.dateSold = { $gte: COMPLIANCE_BOARD_MIN_DATE };
     }
 
     const orderIdRegex = searchOrderId?.trim() ? new RegExp(searchOrderId.trim(), 'i') : null;
@@ -1956,10 +1966,17 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 500));
       const skip = (pageNum - 1) * limitNum;
 
-      const returnQuery = {};
-      const conversationQuery = { category: { $in: ['Return', 'Refund', 'Replace'] } };
+      // Minimum date for compliance boards: July 19, 2026
+      const COMPLIANCE_BOARD_MIN_DATE = new Date('2026-07-19T00:00:00Z');
+
+      const returnQuery = {
+        creationDate: { $gte: COMPLIANCE_BOARD_MIN_DATE }
+      };
+      const conversationQuery = {
+        category: { $in: ['Return', 'Refund', 'Replace'] },
+        updatedAt: { $gte: COMPLIANCE_BOARD_MIN_DATE }
+      };
       if (startDate || endDate) {
-        returnQuery.creationDate = {};
         if (startDate) returnQuery.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
         if (endDate) returnQuery.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
       }
@@ -2204,7 +2221,8 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
 
     // Build the query
     // For Order Fulfillment & Order Communication: show ALL orders (assigned or unassigned)
-    // For other categories: show unassigned + orders with that specific category
+    // For INR, Cancellation, Return/Refund: show ONLY orders with that specific category (no unassigned)
+    // This prevents unassigned orders from filling up the results and pushing categorized orders beyond pagination limit
     let query;
     
     if (category === 'order_fulfillment' || category === 'order_communication') {
@@ -2222,6 +2240,19 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         ],
         ...dateFilter
       };
+    } else if (category === 'inr' || category === 'cancellation' || category === 'return_refund') {
+      // INR, Cancellation, Return/Refund: ONLY show orders with that specific category
+      // Don't include unassigned orders - they should stay in Order Communication
+      query = {
+        $or: [
+          // Has this category (new format)
+          { complianceBoardCategories: category },
+          // Has this category (old format)
+          { complianceBoardCategory: category }
+        ],
+        ...dateFilter
+      };
+      console.log(`[/compliance-board] Category: ${category}, Query (specific category only):`, JSON.stringify(query, null, 2));
     } else {
       // Other categories: show unassigned + that specific category
       query = {
@@ -2237,6 +2268,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         ],
         ...dateFilter
       };
+      console.log(`[/compliance-board] Category: ${category}, Query:`, JSON.stringify(query, null, 2));
     }
 
     // Exclude cancelled orders if requested (same logic as All Orders)
@@ -2380,37 +2412,57 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       .limit(limitNum)
       .lean();
 
-    // Update orders without any category (both new and old formats) to add the current category
-    const orderIdsToUpdate = orders
-      .filter(o => {
-        // New format: empty array or doesn't exist
-        if (!o.complianceBoardCategories || o.complianceBoardCategories.length === 0) {
-          return true;
-        }
-        // Old format: null or doesn't exist
-        if (!o.complianceBoardCategory) {
-          return true;
-        }
-        return false;
-      })
-      .map(o => o._id);
+    console.log(`[/compliance-board] Category: ${category}, Found ${orders.length} orders from query`);
+    
+    // Log details about first few orders with their categories
+    if (orders.length > 0) {
+      console.log(`[/compliance-board] Sample orders:`, orders.slice(0, 3).map(o => ({
+        orderId: o.orderId,
+        complianceBoardStatus: o.complianceBoardStatus,
+        complianceBoardCategories: o.complianceBoardCategories,
+        complianceBoardSource: o.complianceBoardSource,
+        complianceBoardCategory: o.complianceBoardCategory
+      })));
+    }
 
-    if (orderIdsToUpdate.length > 0) {
-      await Order.updateMany(
-        { _id: { $in: orderIdsToUpdate } },
-        { $push: { complianceBoardCategories: category } }
-      );
+    // Update orders without any category (both new and old formats) to add the current category
+    // Only auto-assign for Order Fulfillment and Order Communication boards
+    // INR, Cancellation, Return boards don't auto-assign - orders must be explicitly moved there
+    const shouldAutoAssign = (category === 'order_fulfillment' || category === 'order_communication');
+    
+    if (shouldAutoAssign) {
+      const orderIdsToUpdate = orders
+        .filter(o => {
+          // New format: empty array or doesn't exist
+          if (!o.complianceBoardCategories || o.complianceBoardCategories.length === 0) {
+            return true;
+          }
+          // Old format: null or doesn't exist
+          if (!o.complianceBoardCategory) {
+            return true;
+          }
+          return false;
+        })
+        .map(o => o._id);
+
+      if (orderIdsToUpdate.length > 0) {
+        await Order.updateMany(
+          { _id: { $in: orderIdsToUpdate } },
+          { $push: { complianceBoardCategories: category } }
+        );
+      }
     }
 
     // Return orders with updated categories (convert old format to new for consistency)
     const updatedOrders = await enrichOrdersWithConversationMeta(orders.map(o => {
       let categories = [];
       if (o.complianceBoardCategories && Array.isArray(o.complianceBoardCategories) && o.complianceBoardCategories.length > 0) {
-        categories = o.complianceBoardCategories;
+        // Deduplicate categories array (remove duplicates that may have accumulated)
+        categories = [...new Set(o.complianceBoardCategories)];
       } else if (o.complianceBoardCategory) {
         categories = [o.complianceBoardCategory];
-      } else {
-        categories = [category]; // Newly assigned
+      } else if (shouldAutoAssign) {
+        categories = [category]; // Newly assigned (only for Order Fulfillment/Communication)
       }
       return {
         ...o,
@@ -2781,14 +2833,14 @@ router.get('/compliance-monitoring/overview', requireAuth, requirePageAccess('Co
 router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('ComplianceBoard'), async (req, res) => {
   try {
     const { orderId } = req.params;
-    const { complianceBoardStatus, complianceBoardCategory, complianceBoardSource } = req.body;
+    const { complianceBoardStatus, complianceBoardCategory, complianceBoardSource, clearCategory } = req.body;
 
     if (!complianceBoardStatus) {
       return res.status(400).json({ error: 'complianceBoardStatus is required' });
     }
 
     const validStatuses = [
-      'todo', 'out_of_stock', 'cancellation', 'address_issue', 'not_fulfilled', 'fulfilled', 'buyer_confirmation',
+      'todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation',
       // Return/Refund statuses
       'case_opened', 'case_not_opened', 'provide_return_label', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement',
       // Cancellation statuses
@@ -2803,17 +2855,28 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
 
     // Build update query - always update status, add category to array if provided
     const updateOps = { $set: { complianceBoardStatus } };
-    if (complianceBoardCategory) {
-      // Add to new array format and unset old format
-      updateOps.$addToSet = { complianceBoardCategories: complianceBoardCategory };
+    
+    if (clearCategory) {
+      // Remove all categories and source - moving back to All Messages
+      updateOps.$set.complianceBoardCategories = [];
+      updateOps.$set.complianceBoardSource = null;
       updateOps.$unset = { complianceBoardCategory: '' };
-    }
-
-    if (complianceBoardSource !== undefined) {
-      if (complianceBoardSource && complianceBoardSource !== 'order_communication') {
-        return res.status(400).json({ error: 'Invalid complianceBoardSource' });
+      console.log(`[PATCH compliance-status] OrderId: ${orderId}, CLEARING category, updateOps:`, JSON.stringify(updateOps, null, 2));
+    } else if (complianceBoardCategory) {
+      // Use $addToSet to avoid duplicate categories in array
+      updateOps.$addToSet = { complianceBoardCategories: complianceBoardCategory };
+      
+      // Set the source - required for filtering on other boards
+      if (complianceBoardSource) {
+        if (complianceBoardSource !== 'order_communication') {
+          return res.status(400).json({ error: 'Invalid complianceBoardSource' });
+        }
+        updateOps.$set.complianceBoardSource = complianceBoardSource;
       }
-      updateOps.$set.complianceBoardSource = complianceBoardSource || null;
+      
+      // Unset old single-value format
+      updateOps.$unset = { complianceBoardCategory: '' };
+      console.log(`[PATCH compliance-status] OrderId: ${orderId}, ADDING category: ${complianceBoardCategory}, source: ${complianceBoardSource}, updateOps:`, JSON.stringify(updateOps, null, 2));
     }
 
     const orderFulfillmentTimedFields = {
@@ -2856,6 +2919,14 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       updateOps,
       { new: true, select: 'orderId complianceBoardStatus complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt' }
     );
+
+    if (order) {
+      console.log(`[PATCH compliance-status] Updated order ${order.orderId}:`, {
+        status: order.complianceBoardStatus,
+        categories: order.complianceBoardCategories,
+        source: order.complianceBoardSource
+      });
+    }
 
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
