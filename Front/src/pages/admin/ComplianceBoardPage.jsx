@@ -478,7 +478,10 @@ function ComplianceBoardPage() {
     if (searchOrderId.trim()) params.searchOrderId = searchOrderId.trim();
     if (searchBuyerName.trim()) params.searchBuyerName = searchBuyerName.trim();
     params.excludeClient = excludeClient;
-    params.excludeLowValue = excludeLowValue;
+    // Don't apply excludeLowValue for compliance boards (INR, Cancellation, Return) - these are customer support issues that need attention regardless of value
+    // Also disable when searching for specific orders - user wants to see the searched order regardless of value
+    const isComplianceBoard = ['inr', 'cancellation', 'return_refund'].includes(selectedCategory);
+    params.excludeLowValue = (isComplianceBoard || searchOrderId.trim() || searchBuyerName.trim()) ? false : excludeLowValue;
     return params;
   };
 
@@ -556,6 +559,7 @@ function ComplianceBoardPage() {
       // Transform INR cases to board format with proper field mapping for card display
       return cases.map(caseItem => ({
         ...caseItem,
+        orderObjectId: caseItem._id, // Store original _id for API calls if case has one
         _id: toDraggableId('inr', caseItem, caseItem.caseId),
         originalOrderId: caseItem.orderId,
         caseOrderId: caseItem.orderId,
@@ -565,7 +569,13 @@ function ComplianceBoardPage() {
           username: caseItem.buyerUsername,
           buyerRegistrationAddress: { fullName: caseItem.buyerName }
         },
-        status: COLUMN_STATUS.INR_CASE_OPENED,
+        // Use persisted complianceBoardStatus if set, otherwise default to INR_CASE_OPENED
+        complianceBoardStatus: caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED,
+        complianceBoardCategories: Array.isArray(caseItem.complianceBoardCategories)
+          ? caseItem.complianceBoardCategories
+          : (caseItem.complianceBoardCategory ? [caseItem.complianceBoardCategory] : ['inr']),
+        complianceBoardCategory: caseItem.complianceBoardCategory || 'inr',
+        status: caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED,
         sourceType: 'inr-case' // Mark as INR case for display
       }));
     } catch (err) {
@@ -598,8 +608,15 @@ function ComplianceBoardPage() {
       // Transform cancelled orders to board format
       return cancelledOrders.map(order => ({
         ...order,
+        orderObjectId: order._id, // Store original MongoDB _id for API calls
         _id: toDraggableId('cancelled', order, order.orderId),
-        status: COLUMN_STATUS.CANCELLATION_REQUEST,
+        // Use persisted complianceBoardStatus if set, otherwise default to CANCELLATION_REQUEST
+        complianceBoardStatus: order.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST,
+        complianceBoardCategories: Array.isArray(order.complianceBoardCategories) 
+          ? order.complianceBoardCategories 
+          : (order.complianceBoardCategory ? [order.complianceBoardCategory] : ['cancellation']),
+        complianceBoardCategory: order.complianceBoardCategory || 'cancellation',
+        status: order.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST,
         sourceType: 'cancelled-order' // Mark as cancelled order for display
       }));
     } catch (err) {
@@ -613,7 +630,6 @@ function ComplianceBoardPage() {
       category: 'order_fulfillment',
       page: 1,
       limit: 500,
-      excludeCancelled: true,
       ...buildDateParams(),
       ...buildBoardFilterParams(),
     };
@@ -753,7 +769,6 @@ function ComplianceBoardPage() {
         // Mixed boards need a broader fetch because one response is later split
         // into multiple columns and small pages can hide "Case Not Opened".
         limit: ['return_refund', 'inr', 'cancellation'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT,
-        excludeCancelled: true,
         ...buildBoardFilterParams()
       };
       
@@ -768,7 +783,9 @@ function ComplianceBoardPage() {
         selectedCategory === 'inr'
           ? fetchINRCasesForBoard()
           : Promise.resolve(null),
-        selectedCategory === 'cancellation'
+        // Fetch cancelled orders for both 'cancellation' and 'order_fulfillment' boards
+        // This allows users to search for cancelled orders in Order Fulfillment board
+        ['cancellation', 'order_fulfillment'].includes(selectedCategory)
           ? fetchCancelledOrdersForBoard()
           : Promise.resolve(null)
       ]);
@@ -839,8 +856,7 @@ function ComplianceBoardPage() {
 
       // Merge INR cases from Issues & Resolutions into INR board's Case Opened column
       if (selectedCategory === 'inr') {
-        // Case Opened = All INR cases from Issues & Resolutions
-        // Don't filter by matchesBoardOrderFilters since INR cases come from different source
+        // INR cases should be grouped by their complianceBoardStatus
         let inrCasesForBoard = inrCasesResult ? [...inrCasesResult] : [];
         
         // Apply only basic filters: search order ID and buyer name
@@ -858,41 +874,55 @@ function ComplianceBoardPage() {
           });
         }
         
-        grouped[COLUMN_STATUS.INR_CASE_OPENED] = inrCasesForBoard;
-        
-        // Case Not Opened = Order Communication items assigned to INR category
-        // Filter for orders with INR category (check both array and old single-value format)
-        const caseNotOpenedOrders = boardOrders.filter((order) => {
-          const hasINRCategory = getOrderBoardCategories(order).includes('inr');
-          const isFromOrderComm = order.complianceBoardSource === 'order_communication';
-          const isCaseNotOpened = order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED;
+        // Deduplicate inrCasesForBoard by orderId
+        // Keep the one with inr_case_opened status if multiple exist for same orderId, otherwise keep first
+        const inrByOrderId = new Map();
+        inrCasesForBoard.forEach((caseItem) => {
+          const orderId = String(caseItem.orderId || caseItem.caseOrderId || '').toLowerCase();
+          if (!orderId) return;
           
-          // Include if it has INR category AND either:
-          // 1. Has order_communication source + case_not_opened status
-          // 2. OR just has INR category (for backward compatibility with orders that might not have source set yet)
-          const match = hasINRCategory && (isFromOrderComm || isCaseNotOpened);
-          if (hasINRCategory) {
-            console.log(`[INR Board] Order ${order._id || order.orderId}:`, {
-              hasINRCategory,
-              isFromOrderComm,
-              isCaseNotOpened,
-              complianceBoardStatus: order.complianceBoardStatus,
-              complianceBoardSource: order.complianceBoardSource,
-              categories: getOrderBoardCategories(order),
-              match
-            });
+          const status = caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
+          const existing = inrByOrderId.get(orderId);
+          
+          // Keep this case if:
+          // - No existing entry, OR
+          // - This one has inr_case_opened status and existing doesn't
+          if (!existing || 
+              (status === COLUMN_STATUS.INR_CASE_OPENED && existing.status !== COLUMN_STATUS.INR_CASE_OPENED)) {
+            inrByOrderId.set(orderId, { caseItem, status });
           }
-          return match;
         });
         
-        console.log(`[INR Board] boardOrders total: ${boardOrders.length}, filtered for INR: ${caseNotOpenedOrders.length}`);
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = caseNotOpenedOrders;
+        // Extract deduplicated cases and build Set of orderIds for filtering
+        const dedupInrCases = Array.from(inrByOrderId.values()).map(item => item.caseItem);
+        const inrOrderIds = new Set(inrByOrderId.keys());
+        
+        // Remove duplicate Order Communication entries if same orderId exists in INR cases
+        Object.keys(grouped).forEach((status) => {
+          grouped[status] = grouped[status].filter((order) => {
+            const orderId = String(order.orderId || order.caseOrderId || '').toLowerCase();
+            return !inrOrderIds.has(orderId);
+          });
+        });
+        
+        // Group deduplicated INR cases by their complianceBoardStatus
+        dedupInrCases.forEach((caseItem) => {
+          const status = caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
+          if (grouped[status]) {
+            grouped[status].push(caseItem);
+          }
+        });
+        
+        // Case Not Opened = Orders with status 'case_not_opened'
+        // Backend already filters to only return orders with 'inr' category, so we just need to check status
+        // These are typically from Order Communication messages assigned to INR
+        // Note: Orders are already grouped by status above, so this just uses that existing grouped data
+        // grouped[COLUMN_STATUS.CASE_NOT_OPENED] is already populated by the status-based grouping above
       }
 
-      // Merge cancelled orders from Issues & Resolutions into Cancellation board's Cancellation Request column
+      // Merge cancelled orders from Issues & Resolutions into Cancellation board's columns
       if (selectedCategory === 'cancellation') {
-        // Case Opened = All cancelled orders from Issues & Resolutions cancellation search
-        // Don't filter by matchesBoardOrderFilters since cancelled orders come from different source
+        // Cancelled orders should be grouped by their complianceBoardStatus (respects persisted status after updates)
         let cancelledOrdersForBoard = cancelledOrdersResult ? [...cancelledOrdersResult] : [];
         
         // Apply only basic filters: search order ID and buyer name
@@ -910,33 +940,123 @@ function ComplianceBoardPage() {
           });
         }
         
-        grouped[COLUMN_STATUS.CANCELLATION_REQUEST] = cancelledOrdersForBoard;
-        
-        // Case Not Opened = Order Communication items assigned to cancellation category
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => {
-          const hasCancellationCategory = getOrderBoardCategories(order).includes('cancellation');
-          const isFromOrderComm = order.complianceBoardSource === 'order_communication';
-          const isCaseNotOpened = order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED;
+        // Deduplicate cancelledOrdersForBoard by orderId
+        // Keep the one with case_opened status if multiple exist for same orderId, otherwise keep first
+        const cancelledByOrderId = new Map();
+        cancelledOrdersForBoard.forEach((order) => {
+          const orderId = String(order.orderId || order.legacyOrderId || '').toLowerCase();
+          if (!orderId) return;
           
-          // Include if it has cancellation category AND either:
-          // 1. Has order_communication source + case_not_opened status
-          // 2. OR just has cancellation category (for backward compatibility)
-          return hasCancellationCategory && (isFromOrderComm || isCaseNotOpened);
+          const status = order.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
+          const existing = cancelledByOrderId.get(orderId);
+          
+          // Keep this order if:
+          // - No existing entry, OR
+          // - This one has case_opened status and existing doesn't
+          if (!existing || 
+              (status === COLUMN_STATUS.CASE_OPENED && existing.status !== COLUMN_STATUS.CASE_OPENED)) {
+            cancelledByOrderId.set(orderId, { order, status });
+          }
         });
+        
+        // Extract deduplicated orders and build Set of orderIds for filtering
+        const dedupCancelledOrders = Array.from(cancelledByOrderId.values()).map(item => item.order);
+        const cancelledOrderIds = new Set(cancelledByOrderId.keys());
+        
+        // Remove duplicate Order Communication entries if same orderId exists in cancelled orders
+        Object.keys(grouped).forEach((status) => {
+          grouped[status] = grouped[status].filter((order) => {
+            const orderId = String(order.orderId || order.legacyOrderId || '').toLowerCase();
+            return !cancelledOrderIds.has(orderId);
+          });
+        });
+        
+        // Group deduplicated cancelled orders by their complianceBoardStatus
+        dedupCancelledOrders.forEach((order) => {
+          const status = order.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
+          if (grouped[status]) {
+            grouped[status].push(order);
+          }
+        });
+        
+        // Case Not Opened = Orders with status 'case_not_opened'
+        // Backend already filters to only return orders with 'cancellation' category, so we just need to check status
+        // These are typically from Order Communication messages assigned to Cancellation
+        // Note: Orders are already grouped by status above, so this just uses that existing grouped data
+        // grouped[COLUMN_STATUS.CASE_NOT_OPENED] is already populated by the status-based grouping above
+      }
+
+      // Merge cancelled orders into Order Fulfillment board as well
+      // This allows users to see and search for cancelled orders in the Order Fulfillment view
+      if (selectedCategory === 'order_fulfillment') {
+        let cancelledOrdersForBoard = cancelledOrdersResult ? [...cancelledOrdersResult] : [];
+        
+        // Apply only basic filters: search order ID and buyer name
+        if (searchOrderId.trim()) {
+          cancelledOrdersForBoard = cancelledOrdersForBoard.filter(o => {
+            const orderId = String(o.orderId || o.legacyOrderId || '');
+            return orderId.toLowerCase().includes(searchOrderId.trim().toLowerCase());
+          });
+        }
+        
+        if (searchBuyerName.trim()) {
+          cancelledOrdersForBoard = cancelledOrdersForBoard.filter(o => {
+            const buyerName = String(o.buyer?.buyerRegistrationAddress?.fullName || o.buyerName || o.buyer?.username || '');
+            return buyerName.toLowerCase().includes(searchBuyerName.trim().toLowerCase());
+          });
+        }
+        
+        // Merge cancelled orders into the groupedTodo
+        // Cancelled orders go into "To Do" column (they need action)
+        if (cancelledOrdersForBoard.length > 0) {
+          if (!grouped[COLUMN_STATUS.TODO]) {
+            grouped[COLUMN_STATUS.TODO] = [];
+          }
+          grouped[COLUMN_STATUS.TODO].push(...cancelledOrdersForBoard);
+        }
       }
 
       if (selectedCategory === 'return_refund') {
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => (
-          (order.complianceBoardSource === 'order_communication' || isReturnConversationOrder(order)) &&
-          (
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED ||
-            isReturnConversationOrder(order)
-          ) &&
-          (
-            getOrderBoardCategories(order).includes('return_refund') ||
-            isReturnConversationOrder(order)
-          )
-        ));
+        // Case Opened: Only Return Request items (from Return Search / Issues & Resolutions)
+        grouped[COLUMN_STATUS.CASE_OPENED] = boardOrders.filter((order) => 
+          order.returnBoardSource === 'return_request'
+        );
+        
+        // Case Not Opened: Only Conversation items (from Order Communication assigned to Return/Refund/Replace)
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => 
+          order.returnBoardSource === 'conversation' &&
+          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED
+        );
+        
+        // Other return statuses (Follow Up, Provide Return Label, etc.) from Order Communication
+        grouped[COLUMN_STATUS.RETURN_FOLLOW_UP] = boardOrders.filter((order) =>
+          order.returnBoardSource === 'conversation' &&
+          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.RETURN_FOLLOW_UP
+        );
+        grouped[COLUMN_STATUS.PROVIDE_RETURN_LABEL] = boardOrders.filter((order) =>
+          order.returnBoardSource === 'conversation' &&
+          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PROVIDE_RETURN_LABEL
+        );
+        grouped[COLUMN_STATUS.BUYER_DROP_OFF] = boardOrders.filter((order) =>
+          order.returnBoardSource === 'conversation' &&
+          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.BUYER_DROP_OFF
+        );
+        grouped[COLUMN_STATUS.ITEM_DELIVERED] = boardOrders.filter((order) =>
+          order.returnBoardSource === 'conversation' &&
+          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.ITEM_DELIVERED
+        );
+        grouped[COLUMN_STATUS.PARTIAL_REFUND] = boardOrders.filter((order) =>
+          order.returnBoardSource === 'conversation' &&
+          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PARTIAL_REFUND
+        );
+        grouped[COLUMN_STATUS.FULL_REFUND] = boardOrders.filter((order) =>
+          order.returnBoardSource === 'conversation' &&
+          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.FULL_REFUND
+        );
+        grouped[COLUMN_STATUS.REPLACEMENT] = boardOrders.filter((order) =>
+          order.returnBoardSource === 'conversation' &&
+          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.REPLACEMENT
+        );
       }
       
       setOrders(grouped);
@@ -1601,7 +1721,6 @@ function ComplianceBoardPage() {
         category: selectedCategory,
         page: 1,
         limit: 500,
-        excludeCancelled: true,
         ...buildDateParams(),
         ...buildBoardFilterParams(),
       };
@@ -1996,9 +2115,16 @@ function ComplianceBoardPage() {
     setApplyingColumns((prev) => ({ ...prev, [`order:${status}`]: true }));
     try {
       await Promise.all(moves.map((order) => {
-        const targetId = String(order._id || '').startsWith('return:')
-          ? order.orderId
-          : (order.orderObjectId || order._id);
+        const idStr = String(order._id || '');
+        // Handle different order source types
+        let targetId;
+        if (idStr.startsWith('return:') || idStr.startsWith('cancelled:') || idStr.startsWith('inr:')) {
+          // For special sources, use orderObjectId (original MongoDB _id) or fall back to orderId
+          targetId = order.orderObjectId || order.orderId || order._id;
+        } else {
+          // For regular orders, use orderObjectId if available, else _id
+          targetId = order.orderObjectId || order._id;
+        }
 
         return api.patch(`/orders/${encodeURIComponent(targetId)}/compliance-status`, {
           complianceBoardStatus: status,
@@ -2104,6 +2230,112 @@ function ComplianceBoardPage() {
         }
       }));
 
+      // Update messages state locally to move them to the applied category
+      setMessages((prev) => {
+        const updated = { ...prev };
+        
+        // Remove from ALL_MESSAGES if they were there
+        if (updated[MESSAGE_CATEGORIES.ALL_MESSAGES]) {
+          updated[MESSAGE_CATEGORIES.ALL_MESSAGES] = updated[MESSAGE_CATEGORIES.ALL_MESSAGES].filter(
+            msg => !moves.some(m => getMessageKey(m) === getMessageKey(msg))
+          );
+        }
+        
+        // Add to the target category
+        if (!updated[categoryId]) {
+          updated[categoryId] = [];
+        }
+        moves.forEach(msg => {
+          if (!updated[categoryId].some(m => getMessageKey(m) === getMessageKey(msg))) {
+            updated[categoryId].push({
+              ...msg,
+              category: category,
+              conversationCategory: category
+            });
+          }
+        });
+        
+        return updated;
+      });
+
+      // If orders were assigned, update the orders state locally
+      if (orderAssignment) {
+        const orderIdsToUpdate = moves.map(m => m.orderId).filter(Boolean);
+        if (orderIdsToUpdate.length > 0) {
+          setOrders((prev) => {
+            const updated = { ...prev };
+            
+            // Find and update orders in all columns
+            Object.keys(updated).forEach(columnKey => {
+              updated[columnKey] = updated[columnKey].map(order => {
+                if (orderIdsToUpdate.includes(order.orderId)) {
+                  const categories = getOrderBoardCategories(order);
+                  const newCategory = orderAssignment.complianceBoardCategory;
+                  
+                  // Add the new category if not already present
+                  if (!categories.includes(newCategory)) {
+                    return {
+                      ...order,
+                      complianceBoardCategories: [...categories, newCategory],
+                      complianceBoardStatus: orderAssignment.complianceBoardStatus,
+                      complianceBoardSource: orderAssignment.complianceBoardSource || order.complianceBoardSource
+                    };
+                  }
+                }
+                return order;
+              });
+            });
+            
+            // If we're on INR, Cancellation, or Return board, re-group orders to move them to correct columns
+            if (selectedCategory === 'inr' && orderAssignment.complianceBoardCategory === 'inr') {
+              // Move orders to Case Not Opened column
+              const movedOrders = [];
+              Object.keys(updated).forEach(columnKey => {
+                updated[columnKey] = updated[columnKey].filter(order => {
+                  if (orderIdsToUpdate.includes(order.orderId)) {
+                    movedOrders.push({
+                      ...order,
+                      complianceBoardCategories: [...getOrderBoardCategories(order), 'inr'].filter((v, i, a) => a.indexOf(v) === i),
+                      complianceBoardStatus: COLUMN_STATUS.CASE_NOT_OPENED,
+                      complianceBoardSource: 'order_communication'
+                    });
+                    return false;
+                  }
+                  return true;
+                });
+              });
+              updated[COLUMN_STATUS.CASE_NOT_OPENED] = [
+                ...(updated[COLUMN_STATUS.CASE_NOT_OPENED] || []),
+                ...movedOrders
+              ];
+            } else if (selectedCategory === 'cancellation' && orderAssignment.complianceBoardCategory === 'cancellation') {
+              // Move orders to Case Not Opened column
+              const movedOrders = [];
+              Object.keys(updated).forEach(columnKey => {
+                updated[columnKey] = updated[columnKey].filter(order => {
+                  if (orderIdsToUpdate.includes(order.orderId)) {
+                    movedOrders.push({
+                      ...order,
+                      complianceBoardCategories: [...getOrderBoardCategories(order), 'cancellation'].filter((v, i, a) => a.indexOf(v) === i),
+                      complianceBoardStatus: COLUMN_STATUS.CASE_NOT_OPENED,
+                      complianceBoardSource: 'order_communication'
+                    });
+                    return false;
+                  }
+                  return true;
+                });
+              });
+              updated[COLUMN_STATUS.CASE_NOT_OPENED] = [
+                ...(updated[COLUMN_STATUS.CASE_NOT_OPENED] || []),
+                ...movedOrders
+              ];
+            }
+            
+            return updated;
+          });
+        }
+      }
+
       setPendingMessageMoves((prev) => {
         const next = { ...prev };
         delete next[categoryId];
@@ -2111,9 +2343,6 @@ function ComplianceBoardPage() {
       });
 
       setSnackbar({ open: true, message: `Applied ${moves.length} message(s) to ${category}` });
-      
-      // Refresh orders to show updates in other boards (especially when assigning to INR/Cancellation/Return)
-      await fetchOrders();
     } catch (err) {
       console.error('Failed to apply message column:', err);
       setSnackbar({
