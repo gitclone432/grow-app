@@ -95,6 +95,7 @@ export default function CancellationSearchPage({
     { id: 'marketplace', label: 'Marketplace' },
     { id: 'requestDate', label: 'Request Date' },
     { id: 'sellerDue', label: 'Seller Response Due' },
+    { id: 'worksheetStatus', label: 'Worksheet Status' },
     { id: 'action', label: 'Action' },
   ];
   const [visibleColumns, setVisibleColumns] = useState(ALL_COLUMNS.map((c) => c.id));
@@ -255,6 +256,30 @@ export default function CancellationSearchPage({
     if (s.includes('APPROV') || s.includes('CONFIRM')) return 'success';
     if (s.includes('PENDING') || s.includes('WAIT') || s.includes('OPEN') || s.includes('REQUESTED')) return 'warning';
     return 'primary';
+  };
+
+  const handleWorksheetStatusChange = async (orderId, newStatus) => {
+    try {
+      await api.patch(`/ebay/orders/${orderId}/worksheet-status`, { worksheetStatus: newStatus });
+      // Update local state
+      setRows(prevRows =>
+        prevRows.map(row =>
+          row.orderId === orderId ? { ...row, worksheetStatus: newStatus } : row
+        )
+      );
+      setSnackbar({
+        open: true,
+        severity: 'success',
+        message: `Worksheet status updated to ${newStatus}`
+      });
+    } catch (err) {
+      console.error('Failed to update worksheet status:', err);
+      setSnackbar({
+        open: true,
+        severity: 'error',
+        message: 'Failed to update worksheet status: ' + (err.response?.data?.error || err.message)
+      });
+    }
   };
 
   const canSellerRespond = (row) => {
@@ -552,6 +577,7 @@ export default function CancellationSearchPage({
                   </TableCell>
                 )}
                 {visibleColumns.includes('sellerDue') && <TableCell sx={headerSx}>Seller Response Due</TableCell>}
+                {visibleColumns.includes('worksheetStatus') && <TableCell sx={headerSx}>Worksheet Status</TableCell>}
                 {visibleColumns.includes('action') && <TableCell sx={headerSx} align="center">Action</TableCell>}
               </TableRow>
             </TableHead>
@@ -659,6 +685,21 @@ export default function CancellationSearchPage({
                     )}
                     {visibleColumns.includes('sellerDue') && (
                       <TableCell>{formatDate(row.sellerResponseDueDate)}</TableCell>
+                    )}
+                    {visibleColumns.includes('worksheetStatus') && (
+                      <TableCell>
+                        <FormControl size="small" fullWidth>
+                          <Select
+                            value={row.worksheetStatus || 'open'}
+                            onChange={(e) => handleWorksheetStatusChange(row.orderId, e.target.value)}
+                            sx={{ fontSize: '0.75rem' }}
+                          >
+                            <MenuItem value="open">Open</MenuItem>
+                            <MenuItem value="attended">Attended</MenuItem>
+                            <MenuItem value="resolved">Resolved</MenuItem>
+                          </Select>
+                        </FormControl>
+                      </TableCell>
                     )}
                     {visibleColumns.includes('action') && (
                       <TableCell align="center">
