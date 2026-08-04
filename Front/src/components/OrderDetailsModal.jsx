@@ -407,6 +407,8 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
   const [remarkTemplates, setRemarkTemplates] = useState([]);
   const [pendingRemarkUpdate, setPendingRemarkUpdate] = useState(null);
   const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
+  // Track which fields have been modified (dirty fields) for batch saving on remark update
+  const [dirtyFields, setDirtyFields] = useState(new Set());
 
   useEffect(() => {
     if (!order) return;
@@ -421,6 +423,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
     });
     setSaveError('');
     setSavedField('');
+    setDirtyFields(new Set()); // Reset dirty fields when order changes
   }, [order]);
 
   useEffect(() => {
@@ -465,6 +468,73 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
       return normalized.toLowerCase() === 'select' ? '' : normalized;
     }
     return value || '';
+  };
+
+  // Batch save all dirty fields when remark is updated
+  const batchSaveAllFields = async (remarkValue) => {
+    if (!editable) return false;
+
+    if (!orderMongoId) {
+      setSaveError('Order id missing. Cannot save.');
+      return false;
+    }
+
+    // Build payload with all fields that have changed
+    const payload = {};
+    let hasChanges = false;
+
+    // Check each field and include in payload only if it has changed
+    const fieldOrder = ['amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId', 'remark', 'fulfillmentNotes'];
+    
+    fieldOrder.forEach((field) => {
+      const currentValue = field === 'arrivingDate' ? formatDateInputValue(order[field]) : (order[field] ?? '');
+      const newValue = field === 'remark' ? remarkValue : values[field];
+      
+      if (String(newValue ?? '') !== String(currentValue ?? '')) {
+        payload[field] = normalizeValue(field, newValue);
+        hasChanges = true;
+      }
+    });
+
+    if (!hasChanges && remarkValue === (order.remark || '')) {
+      // No changes to save
+      return true;
+    }
+
+    // Ensure remark is always included
+    if (!payload.remark) {
+      payload.remark = normalizeValue('remark', remarkValue);
+    }
+
+    setSavingField('batch');
+    setSaveError('');
+    setSavedField('');
+    
+    try {
+      const { data } = await api.patch(`/ebay/orders/${orderMongoId}/manual-fields`, payload);
+      if (data?.order) {
+        onOrderUpdate(data.order);
+      } else {
+        const updatedOrder = { ...order, ...payload };
+        onOrderUpdate(updatedOrder);
+      }
+      
+      // Update local values to match what was saved
+      setValues((prev) => ({
+        ...prev,
+        ...payload
+      }));
+      
+      // Clear dirty fields after successful save
+      setDirtyFields(new Set());
+      setSavedField('batch');
+      return true;
+    } catch (err) {
+      setSaveError(err.response?.data?.error || err.message || 'Failed to update fields');
+      return false;
+    } finally {
+      setSavingField('');
+    }
   };
 
   const saveField = async (field, nextValue, extraFields = {}) => {
@@ -525,12 +595,14 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
       setPendingRemarkUpdate({ remarkValue, order });
       return;
     }
-    saveField('remark', remarkValue, { remarkMessageSent: false });
+    // Trigger batch save of all fields when remark is updated
+    batchSaveAllFields(remarkValue);
   };
 
   const handleSkipRemarkMessage = async () => {
     if (!pendingRemarkUpdate) return;
-    const saved = await saveField('remark', pendingRemarkUpdate.remarkValue, { remarkMessageSent: false });
+    // Trigger batch save with the remark value
+    const saved = await batchSaveAllFields(pendingRemarkUpdate.remarkValue);
     if (saved) setPendingRemarkUpdate(null);
   };
 
@@ -538,7 +610,8 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
     if (!pendingRemarkUpdate) return;
     setSendingRemarkMessage(true);
     try {
-      const saved = await saveField('remark', pendingRemarkUpdate.remarkValue, { remarkMessageSent: true });
+      // Trigger batch save with the remark value
+      const saved = await batchSaveAllFields(pendingRemarkUpdate.remarkValue);
       if (!saved) return;
       await sendAutoMessageForRemark(pendingRemarkUpdate.remarkValue);
       setPendingRemarkUpdate(null);
@@ -551,6 +624,8 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
 
   const handleLocalChange = (field, value) => {
     setValues((prev) => ({ ...prev, [field]: value }));
+    // Mark field as dirty (changed from original value)
+    setDirtyFields((prev) => new Set([...prev, field]));
   };
 
   const fieldSx = {
@@ -564,13 +639,12 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
       label={label}
       value={values[field]}
       onChange={(event) => handleLocalChange(field, event.target.value)}
-      onBlur={() => saveField(field, values[field])}
       onKeyDown={(event) => {
         if (event.key === 'Enter' && !props.multiline) event.currentTarget.blur();
       }}
       size="small"
       fullWidth
-      disabled={!editable || savingField === field}
+      disabled={!editable || savingField !== ''}
       {...props}
       sx={{ ...fieldSx, ...(props.sx || {}) }}
     />
@@ -610,11 +684,10 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
             onChange={(event) => {
               const nextValue = event.target.value;
               handleLocalChange('amazonAccount', nextValue);
-              saveField('amazonAccount', nextValue);
             }}
             size="small"
             fullWidth
-            disabled={!editable || savingField === 'amazonAccount'}
+            disabled={!editable || savingField !== ''}
             sx={fieldSx}
           >
             <MenuItem value="">- Select -</MenuItem>
@@ -644,7 +717,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
             }}
             size="small"
             fullWidth
-            disabled={!editable || savingField === 'remark'}
+            disabled={!editable || savingField !== ''}
             sx={fieldSx}
           >
             <MenuItem value="">- Select -</MenuItem>
@@ -667,14 +740,29 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
         </Box>
         <Stack direction="row" alignItems="center" spacing={1} sx={{ minHeight: 28, mt: 0.75 }}>
           {savingField && <CircularProgress size={14} />}
-          {savingField && (
+          {savingField === 'batch' && (
+            <Typography variant="caption" color="text.secondary">
+              Saving all fields...
+            </Typography>
+          )}
+          {savingField && savingField !== 'batch' && (
             <Typography variant="caption" color="text.secondary">
               Saving...
             </Typography>
           )}
-          {!savingField && savedField && (
+          {!savingField && savedField === 'batch' && (
+            <Typography variant="caption" color="success.main">
+              ✓ All fields saved
+            </Typography>
+          )}
+          {!savingField && savedField && savedField !== 'batch' && (
             <Typography variant="caption" color="success.main">
               Updated
+            </Typography>
+          )}
+          {!savingField && dirtyFields.size > 0 && savedField !== 'batch' && (
+            <Typography variant="caption" color="warning.main">
+              {dirtyFields.size} field{dirtyFields.size !== 1 ? 's' : ''} pending save - update Remark to save all
             </Typography>
           )}
           {saveError && (
