@@ -59,6 +59,7 @@ export default function ChatModal({
   const [notes, setNotes] = useState(initialNotes);
   const [status, setStatus] = useState(initialStatus);
   const [pickedUpBy, setPickedUpBy] = useState(initialPickedUpBy || '');
+  const [categoryLocal, setCategoryLocal] = useState(category);
   const [chatAgents, setChatAgents] = useState([]);
   const [savingResolution, setSavingResolution] = useState(false);
   const [templateAnchorEl, setTemplateAnchorEl] = useState(null);
@@ -76,6 +77,7 @@ export default function ChatModal({
   const [resolvedConversationId, setResolvedConversationId] = useState('');
   const [resolvedOrderId, setResolvedOrderId] = useState('');
   const [emptyThreadHint, setEmptyThreadHint] = useState('');
+  const [changeLog, setChangeLog] = useState([]);
 
   const propBuyerName = String(buyerName || '').trim();
   const propBuyerId = String(buyerUsername || '').trim();
@@ -227,15 +229,18 @@ export default function ChatModal({
       setNotes(initialNotes);
       setStatus(initialStatus);
       setPickedUpBy(initialPickedUpBy || '');
+      setCategoryLocal(category);
       setAttachments([]);
       setNewMessage('');
       setResolvedBuyerName('');
       setResolvedConversationId(conversationIdProp || '');
       setResolvedOrderId(orderId || '');
       setEmptyThreadHint('');
+      setChangeLog([]);
       loadMessages();
+      loadMetadata();
     }
-  }, [open, orderId, buyerUsername, itemId, sellerId, buyerName, conversationIdProp]);
+  }, [open, orderId, buyerUsername, itemId, sellerId, buyerName, conversationIdProp, category]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -259,6 +264,33 @@ export default function ChatModal({
       setChatAgents(data || []);
     } catch (e) {
       console.error('Failed to load chat agents', e);
+    }
+  }
+
+  async function loadMetadata() {
+    try {
+      const sellerIdStr = String(
+        (sellerId && typeof sellerId === 'object' ? sellerId._id : sellerId) || ''
+      ).trim();
+
+      if (!sellerIdStr) return;
+
+      const params = {
+        sellerId: sellerIdStr
+      };
+      if (orderId) params.orderId = orderId;
+      if (buyerUsername) params.buyerUsername = buyerUsername;
+      if (itemId) params.itemId = itemId;
+
+      const { data } = await api.get('/ebay/conversation-meta/single', { params });
+      if (data?.changeLog && Array.isArray(data.changeLog)) {
+        setChangeLog(data.changeLog);
+      } else {
+        setChangeLog([]);
+      }
+    } catch (e) {
+      console.error('Failed to load metadata:', e);
+      setChangeLog([]);
     }
   }
 
@@ -515,7 +547,15 @@ export default function ChatModal({
     }
   }
 
+  const CATEGORY_OPTIONS = ['On Hold', 'INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Issue with Delivery', 'Inquiry'];
+
   function mapMetaCategory() {
+    // Use categoryLocal state which is updated from the About dropdown
+    const selected = String(categoryLocal || '').trim();
+    if (CATEGORY_OPTIONS.includes(selected)) {
+      return selected;
+    }
+    // Fallback to original category if categoryLocal is not set
     const raw = String(category || '').toLowerCase();
     if (raw.includes('inr') || raw.includes('item not received')) return 'INR';
     if (raw.includes('return')) return 'Return';
@@ -998,17 +1038,21 @@ export default function ChatModal({
           </Box>
 
           <Box sx={{ p: 2, flex: 1, overflowY: 'auto' }}>
-            <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
-              <Box sx={{ flex: '1 1 140px' }}>
-                <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                  About
-                </Typography>
-                <Chip
-                  label={String(category || title || '—')}
-                  size="small"
-                  sx={{ mt: 0.75, display: 'flex', width: 'fit-content', bgcolor: alpha('#1565c0', 0.1), color: '#1565c0', fontWeight: 700 }}
-                />
-              </Box>
+            <Stack direction="row" spacing={1.5} useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
+              <FormControl size="small" sx={{ flex: '1 1 150px', minWidth: 140 }}>
+                <InputLabel>About</InputLabel>
+                <Select
+                  value={categoryLocal}
+                  label="About"
+                  onChange={(e) => setCategoryLocal(e.target.value)}
+                  sx={{ bgcolor: '#fff', borderRadius: 1.5 }}
+                >
+                  <MenuItem value=""><em>Select category...</em></MenuItem>
+                  {CATEGORY_OPTIONS.map((opt) => (
+                    <MenuItem key={opt} value={opt}>{opt}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
               <Box sx={{ flex: '1 1 140px' }}>
                 <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 0.4 }}>
                   Case
@@ -1065,6 +1109,62 @@ export default function ChatModal({
                 <MenuItem value="Resolved">Resolved</MenuItem>
               </Select>
             </FormControl>
+
+            {changeLog.length > 0 && (
+              <Box sx={{ mt: 2.5, pt: 2, borderTop: `1px solid ${alpha(BRAND_DARK, 0.1)}` }}>
+                <Typography variant="caption" sx={{ fontWeight: 800, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 0.4, display: 'block', mb: 1 }}>
+                  Change History
+                </Typography>
+                <Stack spacing={1.25} sx={{ maxHeight: 200, overflowY: 'auto' }}>
+                  {changeLog
+                    .slice()
+                    .reverse()
+                    .map((entry, idx) => (
+                      <Paper
+                        key={idx}
+                        elevation={0}
+                        sx={{
+                          p: 1.25,
+                          bgcolor: alpha(BRAND_DARK, 0.03),
+                          border: `1px solid ${alpha(BRAND_DARK, 0.08)}`,
+                          borderRadius: 1.5
+                        }}
+                      >
+                        <Stack spacing={0.5}>
+                          <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
+                            <Typography variant="caption" sx={{ fontWeight: 700, color: BRAND_DARK }}>
+                              {entry.field}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>
+                              {entry.changedAt
+                                ? new Date(entry.changedAt).toLocaleString('en-US', {
+                                    timeZone: 'America/Los_Angeles',
+                                    month: 'short',
+                                    day: 'numeric',
+                                    hour: '2-digit',
+                                    minute: '2-digit'
+                                  }) + ' PT'
+                                : 'Unknown time'}
+                            </Typography>
+                          </Stack>
+                          <Stack direction="row" alignItems="center" spacing={1} sx={{ fontSize: '0.75rem' }}>
+                            <Typography variant="caption" sx={{ color: 'error.main', fontWeight: 600 }}>
+                              {entry.oldValue || '(empty)'}
+                            </Typography>
+                            <Typography variant="caption" sx={{ color: 'text.secondary' }}>→</Typography>
+                            <Typography variant="caption" sx={{ color: 'success.main', fontWeight: 600 }}>
+                              {entry.newValue || '(empty)'}
+                            </Typography>
+                          </Stack>
+                          <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
+                            by <strong>{entry.changedBy}</strong>
+                          </Typography>
+                        </Stack>
+                      </Paper>
+                    ))}
+                </Stack>
+              </Box>
+            )}
           </Box>
 
           <Box sx={{ p: 2, borderTop: `1px solid ${alpha(BRAND_DARK, 0.1)}`, bgcolor: '#fff', display: 'flex', justifyContent: 'flex-end' }}>
