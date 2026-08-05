@@ -36,6 +36,12 @@ const CancellationSchema = new mongoose.Schema(
     itemId: String,
     itemTitle: String,
 
+    worksheetStatus: {
+      type: String,
+      enum: ['open', 'attended', 'resolved'],
+      default: 'open'
+    }, // Manual status for worksheet tracking
+
     rawData: Object,
     logs: { type: String, default: '' }
   },

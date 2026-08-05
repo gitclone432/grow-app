@@ -19544,6 +19544,7 @@ router.patch('/orders/:orderId/worksheet-status', requireAuth, async (req, res) 
       return res.status(400).json({ error: 'Invalid worksheet status' });
     }
 
+    // Update Order document
     const order = await Order.findOneAndUpdate(
       { orderId },
       { worksheetStatus },
@@ -19554,7 +19555,13 @@ router.patch('/orders/:orderId/worksheet-status', requireAuth, async (req, res) 
       return res.status(404).json({ error: 'Order not found' });
     }
 
-    res.json({ success: true, order });
+    // Also update Cancellation document if it exists (for CancellationSearchPage persistence)
+    await Cancellation.updateMany(
+      { $or: [{ orderId }, { legacyOrderId: orderId }] },
+      { worksheetStatus }
+    );
+
+    res.json({ success: true, order, worksheetStatus });
   } catch (err) {
     console.error('Error updating order worksheet status:', err);
     res.status(500).json({ error: err.message });
