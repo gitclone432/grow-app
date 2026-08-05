@@ -1919,9 +1919,11 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       return res.status(400).json({ error: 'Category is required' });
     }
 
-    // Minimum date for compliance boards: July 19, 2026
-    // Applied to all compliance boards to maintain data consistency
-    const COMPLIANCE_BOARD_MIN_DATE = new Date('2026-07-19T00:00:00Z');
+    // Minimum date for compliance boards
+    // order_fulfillment: August 1, 2026 | others: July 19, 2026
+    const COMPLIANCE_BOARD_MIN_DATE = category === 'order_fulfillment' 
+      ? new Date('2026-08-01T00:00:00Z') 
+      : new Date('2026-07-19T00:00:00Z');
     const categoriesWithMinDate = ['order_fulfillment', 'order_communication', 'issue_hub', 'cancellation', 'inr', 'return_refund'];
 
     // Build date filter using timezone-aware PT logic (same as All Orders page)
@@ -2411,13 +2413,48 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 500));
     const skip = (pageNum - 1) * limitNum;
 
-    const orders = await Order.find(detailQuery)
+    let orders = await Order.find(detailQuery)
       .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
       .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
       .sort({ dateSold: -1 })
       .skip(skip)
       .limit(limitNum)
       .lean();
+
+    // Deduplicate orders by orderId - keep the one with the latest updatedAt
+    // This prevents duplicate orders from appearing in multiple columns
+    const deduped = {};
+    let duplicateCount = 0;
+    orders.forEach(order => {
+      const key = order.orderId;
+      if (!deduped[key]) {
+        deduped[key] = order;
+      } else {
+        duplicateCount++;
+        // Keep the one with latest updatedAt
+        const existing = deduped[key];
+        const existingTime = new Date(existing.updatedAt || existing.dateSold || 0).getTime();
+        const newTime = new Date(order.updatedAt || order.dateSold || 0).getTime();
+        if (newTime > existingTime) {
+          console.warn(`[DEDUPE] Found duplicate for orderId ${key}: replacing old (_id: ${existing._id}, status: ${existing.complianceBoardStatus}) with new (_id: ${order._id}, status: ${order.complianceBoardStatus})`);
+          deduped[key] = order;
+        } else {
+          console.warn(`[DEDUPE] Found duplicate for orderId ${key}: keeping old (_id: ${existing._id}, status: ${existing.complianceBoardStatus}), discarding new (_id: ${order._id}, status: ${order.complianceBoardStatus})`);
+        }
+      }
+    });
+    if (duplicateCount > 0) {
+      console.warn(`[DEDUPE] Found ${duplicateCount} duplicate orders, deduped to ${Object.keys(deduped).length} unique orders`);
+    }
+    orders = Object.values(deduped);
+
+    // Log order statuses for debugging
+    if (searchOrderId && orders.length > 0) {
+      console.log(`[BOARD-FETCH] Fetched ${orders.length} orders for search "${searchOrderId}":`);
+      orders.forEach(order => {
+        console.log(`  - orderId: ${order.orderId}, _id: ${order._id}, status: ${order.complianceBoardStatus || 'todo'}, updatedAt: ${order.updatedAt}`);
+      });
+    }
 
     // Update orders without any category (both new and old formats) to add the current category
     // Only auto-assign for Order Fulfillment and Order Communication boards
@@ -2447,8 +2484,17 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       }
     }
 
+    // Log the API call
+    const BOARD_DEBUG = req.query.category === 'order_fulfillment' && (req.query.startDate === '2026-08-02');
+    if (BOARD_DEBUG) {
+      console.log(`[BOARD-ENDPOINT] Called with startDate: ${req.query.startDate}, endDate: ${req.query.endDate}`);
+    }
+
     // Return orders with updated categories (convert old format to new for consistency)
-    const updatedOrders = await enrichOrdersWithConversationMeta(orders.map(o => {
+    // Create a map of original _ids before enrichment
+    const orderIdMap = new Map(orders.map(o => [String(o._id), o._id]));
+    
+    const updatedOrders = (await enrichOrdersWithConversationMeta(orders.map(o => {
       let categories = [];
       if (o.complianceBoardCategories && Array.isArray(o.complianceBoardCategories) && o.complianceBoardCategories.length > 0) {
         // Deduplicate categories array (remove duplicates that may have accumulated)
@@ -2460,10 +2506,28 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       }
       return {
         ...o,
+        orderObjectId: o._id,  // Include original MongoDB _id for frontend drag-drop updates
         complianceBoardCategories: categories,
         complianceBoardStatus: o.complianceBoardStatus || 'todo'
       };
+    }))).map(o => ({
+      ...o,
+      // Ensure orderObjectId is always present (in case enrichment stripped it)
+      orderObjectId: o.orderObjectId || o._id || (o.orderId ? orderIdMap.get(o.orderId) : undefined)
     }));
+
+    // Log for debugging
+    if (BOARD_DEBUG) {
+      const ordersByStatus = {};
+      updatedOrders.forEach(o => {
+        const status = o.complianceBoardStatus || 'todo';
+        ordersByStatus[status] = (ordersByStatus[status] || 0) + 1;
+      });
+      console.log(`[BOARD-ENDPOINT-DEBUG] Returned ${updatedOrders.length} orders with status distribution:`, ordersByStatus);
+      updatedOrders.slice(0, 5).forEach(o => {
+        console.log(`  - orderId: ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`);
+      });
+    }
 
     res.json({
       orders: updatedOrders,
@@ -2906,6 +2970,8 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       ? { _id: orderId }
       : { orderId };
 
+    console.log(`[COMPLIANCE-STATUS] Updating order with query:`, JSON.stringify(orderQuery), `Status:`, complianceBoardStatus, `Category:`, complianceBoardCategory);
+
     const order = await Order.findOneAndUpdate(
       orderQuery,
       updateOps,
@@ -2913,8 +2979,11 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
     );
 
     if (!order) {
+      console.warn(`[COMPLIANCE-STATUS] Order not found with query:`, JSON.stringify(orderQuery));
       return res.status(404).json({ error: 'Order not found' });
     }
+
+    console.log(`[COMPLIANCE-STATUS] Successfully updated order ${order.orderId} to status ${order.complianceBoardStatus}`);
 
     // Log the activity - fetch user details first
     try {
@@ -3504,6 +3573,309 @@ router.get('/legacy-item-orders', requireAuth, requirePageAccess('LegacyItemAnal
   } catch (error) {
     console.error('Error fetching legacy item orders:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch legacy item orders' });
+  }
+});
+
+// Get stats for order fulfillment statuses - count by complianceBoardStatus field (same as board)
+router.get('/stats', requireAuth, requirePageAccess('ComplianceBoard'), async (req, res) => {
+  try {
+    const {
+      category = 'order_fulfillment',
+      startDate,
+      endDate,
+      sellerId = '',
+      excludeClient = 'false',
+      excludeLowValue = 'false'
+    } = req.query;
+
+    // Minimum date for compliance boards
+    // order_fulfillment: August 1, 2026 | others: July 19, 2026
+    const COMPLIANCE_BOARD_MIN_DATE = category === 'order_fulfillment'
+      ? new Date('2026-08-01T00:00:00Z')
+      : new Date('2026-07-19T00:00:00Z');
+
+    const dateFilter = {};
+    if (startDate || endDate) {
+      dateFilter.dateSold = {};
+      if (startDate) {
+        const { start } = getPTDayBoundsUTC(startDate);
+        dateFilter.dateSold.$gte = start;
+      } else {
+        dateFilter.dateSold.$gte = COMPLIANCE_BOARD_MIN_DATE;
+      }
+      if (endDate) {
+        const { end } = getPTDayBoundsUTC(endDate);
+        dateFilter.dateSold.$lte = end;
+      }
+    } else {
+      dateFilter.dateSold = { $gte: COMPLIANCE_BOARD_MIN_DATE };
+    }
+
+    const sellerObjectId = sellerId && mongoose.Types.ObjectId.isValid(sellerId)
+      ? new mongoose.Types.ObjectId(sellerId)
+      : null;
+    const excludeClientEnabled = excludeClient === 'true' || excludeClient === true;
+    const excludeLowValueEnabled = excludeLowValue === 'true' || excludeLowValue === true;
+    const excludedSellerIds = excludeClientEnabled ? await getExcludedClientSellerIds() : [];
+
+    const baseQuery = { ...dateFilter };
+    
+    // CRITICAL: Use the same category filtering logic as the board endpoint
+    // For order_fulfillment and order_communication, include unassigned + assigned orders
+    const categoryFilters = [];
+    if (category === 'order_fulfillment' || category === 'order_communication') {
+      categoryFilters.push(
+        { complianceBoardCategories: [] },
+        { complianceBoardCategory: null },
+        { complianceBoardCategories: { $elemMatch: {} } },
+        { complianceBoardCategory: { $ne: null, $exists: true } }
+      );
+    } else if (category === 'inr' || category === 'cancellation' || category === 'return_refund') {
+      categoryFilters.push(
+        { complianceBoardCategories: category },
+        { complianceBoardCategory: category }
+      );
+    } else {
+      categoryFilters.push(
+        { complianceBoardCategories: [] },
+        { complianceBoardCategory: null },
+        { complianceBoardCategories: category },
+        { complianceBoardCategory: category }
+      );
+    }
+    baseQuery.$or = categoryFilters;
+    
+    if (sellerObjectId) {
+      baseQuery.seller = sellerObjectId;
+    } else if (excludedSellerIds.length > 0) {
+      baseQuery.seller = { $nin: excludedSellerIds };
+    }
+
+    // Add low value filter if enabled
+    if (excludeLowValueEnabled) {
+      baseQuery.$and = baseQuery.$and || [];
+      baseQuery.$and.push({
+        $or: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } }
+        ]
+      });
+    }
+
+    // Use aggregation to count and deduplicate by orderId at the same time
+    // This prevents duplicate orders from being counted multiple times
+    const statusCounts = await Order.aggregate([
+      { $match: baseQuery },
+      // Sort by updatedAt desc to prefer the most recent version of each order
+      { $sort: { orderId: 1, updatedAt: -1 } },
+      // Group by orderId to get only the most recent version
+      {
+        $group: {
+          _id: { orderId: '$orderId', status: { $ifNull: ['$complianceBoardStatus', 'todo'] } },
+          _firstId: { $first: '$_id' },
+          updatedAt: { $first: '$updatedAt' }
+        }
+      },
+      // Now group by status to count unique orders per status
+      {
+        $group: {
+          _id: '$_id.status',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const counts = statusCounts.reduce((acc, row) => {
+      acc[row._id] = row.count;
+      return acc;
+    }, {});
+
+    // Debug logging
+    if (startDate === '2026-08-02') {
+      console.log(`[STATS-ENDPOINT-DEBUG] For date 2026-08-02, counted:`, counts);
+    }
+
+    res.json({
+      todo: counts.todo || 0,
+      outOfStock: counts.out_of_stock || 0,
+      cancellation: counts.cancellation || 0,
+      addressIssue: counts.address_issue || 0,
+      lateDelivery: counts.late_delivery || 0,
+      notFulfilled: counts.not_fulfilled || 0,
+      fulfilled: counts.fulfilled || 0,
+      buyerConfirmation: counts.buyer_confirmation || 0
+    });
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch stats' });
+  }
+});
+
+// Get detailed orders for a specific status - filter by complianceBoardStatus (same as board)
+router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), async (req, res) => {
+  try {
+    const {
+      status,
+      category = 'order_fulfillment',
+      startDate,
+      endDate,
+      sellerId = '',
+      excludeClient = 'false',
+      excludeLowValue = 'false'
+    } = req.query;
+
+    // Minimum date for compliance boards
+    // order_fulfillment: August 1, 2026 | others: July 19, 2026
+    const COMPLIANCE_BOARD_MIN_DATE = category === 'order_fulfillment'
+      ? new Date('2026-08-01T00:00:00Z')
+      : new Date('2026-07-19T00:00:00Z');
+
+    const dateFilter = {};
+    if (startDate || endDate) {
+      dateFilter.dateSold = {};
+      if (startDate) {
+        const { start } = getPTDayBoundsUTC(startDate);
+        dateFilter.dateSold.$gte = start;
+      } else {
+        dateFilter.dateSold.$gte = COMPLIANCE_BOARD_MIN_DATE;
+      }
+      if (endDate) {
+        const { end } = getPTDayBoundsUTC(endDate);
+        dateFilter.dateSold.$lte = end;
+      }
+    } else {
+      dateFilter.dateSold = { $gte: COMPLIANCE_BOARD_MIN_DATE };
+    }
+
+    const sellerObjectId = sellerId && mongoose.Types.ObjectId.isValid(sellerId)
+      ? new mongoose.Types.ObjectId(sellerId)
+      : null;
+    const excludeClientEnabled = excludeClient === 'true' || excludeClient === true;
+    const excludeLowValueEnabled = excludeLowValue === 'true' || excludeLowValue === true;
+    const excludedSellerIds = excludeClientEnabled ? await getExcludedClientSellerIds() : [];
+
+    // Build query with proper $and/$or logic
+    let query = { ...dateFilter };
+    
+    // CRITICAL: Use the same category filtering logic as the board endpoint
+    // For order_fulfillment and order_communication, include unassigned + assigned orders
+    const categoryFilters = [];
+    if (category === 'order_fulfillment' || category === 'order_communication') {
+      categoryFilters.push(
+        { complianceBoardCategories: [] },
+        { complianceBoardCategory: null },
+        { complianceBoardCategories: { $elemMatch: {} } },
+        { complianceBoardCategory: { $ne: null, $exists: true } }
+      );
+    } else if (category === 'inr' || category === 'cancellation' || category === 'return_refund') {
+      categoryFilters.push(
+        { complianceBoardCategories: category },
+        { complianceBoardCategory: category }
+      );
+    } else {
+      categoryFilters.push(
+        { complianceBoardCategories: [] },
+        { complianceBoardCategory: null },
+        { complianceBoardCategories: category },
+        { complianceBoardCategory: category }
+      );
+    }
+    query.$and = query.$and || [];
+    query.$and.push({ $or: categoryFilters });
+    
+    // Match by complianceBoardStatus (handle 'todo' as missing/null status)
+    const statusCriteria = [];
+    if (status === 'todo') {
+      statusCriteria.push(
+        { complianceBoardStatus: { $exists: false } },
+        { complianceBoardStatus: null },
+        { complianceBoardStatus: 'todo' }
+      );
+    } else {
+      statusCriteria.push({ complianceBoardStatus: status });
+    }
+    
+    query.$and.push({ $or: statusCriteria });
+
+    if (sellerObjectId) {
+      query.$and.push({ seller: sellerObjectId });
+    } else if (excludedSellerIds.length > 0) {
+      query.$and.push({ seller: { $nin: excludedSellerIds } });
+    }
+
+    // Add low value filter if enabled
+    if (excludeLowValueEnabled) {
+      query.$and.push({
+        $or: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } }
+        ]
+      });
+    }
+
+    // DEBUG: Log the query before executing
+    console.log(`[STATS-DETAILS] Query for status="${status}", category="${category}":`);
+    console.log(`  - COMPLIANCE_BOARD_MIN_DATE: ${COMPLIANCE_BOARD_MIN_DATE.toISOString()}`);
+    console.log(`  - dateFilter: ${JSON.stringify(dateFilter)}`);
+    console.log(`  - query.$and length: ${query.$and?.length || 0}`);
+    if (query.dateSold) {
+      console.log(`  - dateSold filter: ${JSON.stringify(query.dateSold)}`);
+    }
+
+    // Fetch orders for this status, deduplicating by orderId
+    let orders = await Order.find(query)
+      .select('orderId dateSold buyer itemNumber lineItems productName subtotalUSD subtotal')
+      .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
+      .sort({ dateSold: -1, updatedAt: -1 })
+      .lean();
+
+    // Deduplicate by orderId - keep the most recently updated version
+    const deduped = {};
+    let dupCount = 0;
+    orders.forEach(order => {
+      if (!deduped[order.orderId]) {
+        deduped[order.orderId] = order;
+      } else {
+        dupCount++;
+        // In this case, since we're already sorted by updatedAt desc, the first one we see is the newest
+        // So we don't need to replace it
+      }
+    });
+    if (dupCount > 0) {
+      console.warn(`[STATS-DETAILS] Found ${dupCount} duplicate orders for status ${status}, deduped to ${Object.keys(deduped).length} unique`);
+    }
+    
+    const uniqueOrders = Object.values(deduped).slice(0, 100);
+
+    // DEBUG: Log sample of returned orders and their dates
+    console.log(`[STATS-DETAILS] Returned ${uniqueOrders.length} unique orders for status="${status}":`);
+    uniqueOrders.slice(0, 3).forEach(o => {
+      const dateSoldISO = new Date(o.dateSold).toISOString();
+      console.log(`  - orderId: ${o.orderId}, dateSold: ${dateSoldISO}`);
+    });
+
+    const enriched = uniqueOrders.map((order) => ({
+      orderId: order.orderId,
+      orderObjectId: order._id,
+      itemTitle: order.productName || (order.lineItems?.[0]?.title || 'Item'),
+      buyerName: order.buyer?.buyerRegistrationAddress?.fullName || order.buyer?.username || 'Unknown',
+      sellerName: order.seller?.user?.username || 'Unknown',
+      price: order.subtotalUSD || 0,
+      creationDate: order.dateSold,
+      status: status
+    }));
+
+    // DEBUG: Log what was returned
+    console.log(`[STATS-DETAILS] Returned ${enriched.length} orders for status="${status}"`);
+    if (enriched.length > 0) {
+      console.log(`  - First order: orderId=${enriched[0].orderId}, date=${new Date(enriched[0].creationDate).toISOString()}`);
+      console.log(`  - Last order: orderId=${enriched[enriched.length-1].orderId}, date=${new Date(enriched[enriched.length-1].creationDate).toISOString()}`);
+    }
+
+    res.json({ items: enriched });
+  } catch (error) {
+    console.error('Error fetching stats details:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch stats details' });
   }
 });
 

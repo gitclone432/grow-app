@@ -448,6 +448,23 @@ function ComplianceBoardPage() {
   const [chatAgents, setChatAgents] = useState([]);
   const [savingPickedUpByKey, setSavingPickedUpByKey] = useState('');
 
+  // Stats section states
+  const [showStats, setShowStats] = useState(true);
+  const [statsDateFilter, setStatsDateFilter] = useState(createEmptyDateFilter());
+  const [draftStatsDateFilter, setDraftStatsDateFilter] = useState(createEmptyDateFilter());
+  const [statsCounts, setStatsCounts] = useState({
+    todo: 0,
+    outOfStock: 0,
+    cancellation: 0,
+    addressIssue: 0,
+    lateDelivery: 0,
+    notFulfilled: 0,
+    fulfilled: 0,
+    buyerConfirmation: 0
+  });
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsDetailsModal, setStatsDetailsModal] = useState({ open: false, statType: null, items: [] });
+
   const buildDateParams = () => {
     const params = {};
     if (dateFilter.mode === 'single' && dateFilter.single) {
@@ -484,6 +501,88 @@ function ComplianceBoardPage() {
     params.excludeLowValue = (isComplianceBoard || searchOrderId.trim() || searchBuyerName.trim()) ? false : excludeLowValue;
     return params;
   };
+
+  // Fetch stats based on date filter
+  const fetchStats = useCallback(async () => {
+    setStatsLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.append('category', selectedCategory);
+      
+      if (statsDateFilter.mode === 'single' && statsDateFilter.single) {
+        params.append('startDate', statsDateFilter.single);
+        params.append('endDate', statsDateFilter.single);
+      } else if (statsDateFilter.mode === 'range') {
+        if (statsDateFilter.from) params.append('startDate', statsDateFilter.from);
+        if (statsDateFilter.to) params.append('endDate', statsDateFilter.to);
+      }
+      
+      if (selectedSeller) params.append('sellerId', selectedSeller);
+      if (excludeClient) params.append('excludeClient', 'true');
+      if (excludeLowValue) params.append('excludeLowValue', 'true');
+      
+      console.log(`[STATS-FETCH] Calling /orders/stats with params:`, params.toString());
+      
+      const { data } = await api.get(`/orders/stats?${params.toString()}`);
+      
+      console.log(`[STATS-FETCH] Response:`, data);
+      
+      setStatsCounts({
+        todo: data.todo || 0,
+        outOfStock: data.outOfStock || 0,
+        cancellation: data.cancellation || 0,
+        addressIssue: data.addressIssue || 0,
+        lateDelivery: data.lateDelivery || 0,
+        notFulfilled: data.notFulfilled || 0,
+        fulfilled: data.fulfilled || 0,
+        buyerConfirmation: data.buyerConfirmation || 0
+      });
+    } catch (err) {
+      console.error('Error fetching stats:', err);
+    } finally {
+      setStatsLoading(false);
+    }
+  }, [statsDateFilter, selectedSeller, excludeClient, excludeLowValue, selectedCategory]);
+
+  // Fetch stats details for modal
+  const fetchStatsDetails = useCallback(async (statType) => {
+    console.log('[STATS-DETAILS-BADGE] Badge clicked with statType:', statType);
+    setStatsDetailsModal(prev => ({ ...prev, open: true, statType, items: [] }));
+    
+    try {
+      const params = new URLSearchParams();
+      params.append('status', statType);
+      params.append('category', selectedCategory);
+      
+      if (statsDateFilter.mode === 'single' && statsDateFilter.single) {
+        params.append('startDate', statsDateFilter.single);
+        params.append('endDate', statsDateFilter.single);
+      } else if (statsDateFilter.mode === 'range') {
+        if (statsDateFilter.from) params.append('startDate', statsDateFilter.from);
+        if (statsDateFilter.to) params.append('endDate', statsDateFilter.to);
+      }
+      
+      if (selectedSeller) params.append('sellerId', selectedSeller);
+      if (excludeClient) params.append('excludeClient', 'true');
+      if (excludeLowValue) params.append('excludeLowValue', 'true');
+      
+      const url = `/orders/stats-details?${params.toString()}`;
+      console.log('[STATS-DETAILS-BADGE] Fetching from:', url);
+      const { data } = await api.get(url);
+      console.log('[STATS-DETAILS-BADGE] Received data:', data);
+      
+      setStatsDetailsModal(prev => ({ ...prev, items: data.items || [] }));
+    } catch (err) {
+      console.error('[STATS-DETAILS-BADGE] Error fetching stats details:', err);
+      setStatsDetailsModal(prev => ({ ...prev, items: [] }));
+    }
+  }, [statsDateFilter, selectedSeller, excludeClient, excludeLowValue, selectedCategory]);
+
+  // Fetch stats when date filter changes
+  useEffect(() => {
+    console.log(`[STATS-EFFECT] Calling fetchStats, statsDateFilter:`, statsDateFilter);
+    fetchStats();
+  }, [fetchStats]);
 
   const matchesMessageFilters = (message) => {
     if (selectedSeller) {
@@ -592,11 +691,11 @@ function ComplianceBoardPage() {
       };
       
       if (dateFilter.mode === 'single' && dateFilter.single) {
-        params.dateFrom = dateFilter.single;
-        params.dateTo = dateFilter.single;
+        params.startDate = dateFilter.single;
+        params.endDate = dateFilter.single;
       } else if (dateFilter.mode === 'range') {
-        if (dateFilter.from) params.dateFrom = dateFilter.from;
-        if (dateFilter.to) params.dateTo = dateFilter.to;
+        if (dateFilter.from) params.startDate = dateFilter.from;
+        if (dateFilter.to) params.endDate = dateFilter.to;
       }
 
       const response = await api.get('/ebay/cancelled-orders', {
@@ -775,6 +874,8 @@ function ComplianceBoardPage() {
       // Only add dates based on filter mode
       Object.assign(params, buildDateParams());
       
+      console.log(`[BOARD-API-CALL] Calling /orders/compliance-board with params:`, JSON.stringify(params));
+      
       const [response, inrCasesResult, cancelledOrdersResult] = await Promise.all([
         api.get('/orders/compliance-board', {
           params,
@@ -789,6 +890,18 @@ function ComplianceBoardPage() {
           ? fetchCancelledOrdersForBoard()
           : Promise.resolve(null)
       ]);
+
+      // Log search results from both main and cancelled orders calls
+      if (searchOrderId.trim()) {
+        console.log(`[BOARD-API] Main compliance-board API returned ${ensureArray(response.data?.orders).length} orders`);
+        const mainMatches = ensureArray(response.data?.orders).filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
+        mainMatches.forEach(o => console.log(`  - Main API: orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
+        
+        const cancelledOrders = ensureArray(cancelledOrdersResult);
+        console.log(`[BOARD-API] fetchCancelledOrdersForBoard returned ${cancelledOrders.length} orders`);
+        const cancelledMatches = cancelledOrders.filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
+        cancelledMatches.forEach(o => console.log(`  - Cancelled API: orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
+      }
       
       // Group orders by their board status
       const grouped = {
@@ -829,6 +942,17 @@ function ComplianceBoardPage() {
         _id: toDraggableId('order', order, `${selectedCategory}-${index}`),
       }));
 
+      // Log orders if searching for specific order ID
+      if (searchOrderId.trim()) {
+        const searchedOrders = boardOrders.filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
+        if (searchedOrders.length > 0) {
+          console.log(`[BOARD-GROUP] Searching for "${searchOrderId}": found ${searchedOrders.length} order(s) from API:`);
+          searchedOrders.forEach(order => {
+            console.log(`  - orderId: ${order.orderId}, status: ${order.complianceBoardStatus || 'todo'}, _id: ${order._id}, orderObjectId: ${order.orderObjectId}`);
+          });
+        }
+      }
+
       boardOrders.forEach((order) => {
         const rawStatus = order.complianceBoardStatus || COLUMN_STATUS.TODO;
         const status = rawStatus === 'inr_case_closed'
@@ -836,6 +960,11 @@ function ComplianceBoardPage() {
           : rawStatus;
         if (grouped[status]) {
           grouped[status].push(order);
+        }
+        
+        // Log if adding searched order
+        if (searchOrderId.trim() && order.orderId?.toString().includes(searchOrderId.trim())) {
+          console.log(`[BOARD-GROUP] Adding orderId ${order.orderId} to column "${status}"`);
         }
       });
 
@@ -1005,14 +1134,39 @@ function ComplianceBoardPage() {
             return buyerName.toLowerCase().includes(searchBuyerName.trim().toLowerCase());
           });
         }
+
+        // Log cancelled orders being merged
+        if (searchOrderId.trim()) {
+          console.log(`[BOARD-GROUP] Merging ${cancelledOrdersForBoard.length} cancelled order(s) for order_fulfillment:`);
+          cancelledOrdersForBoard.forEach(o => {
+            console.log(`  - Cancelled orderId: ${o.orderId}, status: ${o.complianceBoardStatus}, will add to: ${COLUMN_STATUS.TODO}`);
+          });
+        }
+        
+        // FIXED: Only add cancelled orders to TODO if they don't already exist in the main board orders
+        // This prevents the same order from appearing in multiple columns
+        const mainOrderIds = new Set();
+        Object.values(grouped).forEach(columnOrders => {
+          columnOrders.forEach(order => {
+            mainOrderIds.add(String(order.orderId).toLowerCase());
+          });
+        });
+        
+        const dedupedCancelledOrders = cancelledOrdersForBoard.filter(o => 
+          !mainOrderIds.has(String(o.orderId).toLowerCase())
+        );
         
         // Merge cancelled orders into the groupedTodo
         // Cancelled orders go into "To Do" column (they need action)
-        if (cancelledOrdersForBoard.length > 0) {
+        if (dedupedCancelledOrders.length > 0) {
           if (!grouped[COLUMN_STATUS.TODO]) {
             grouped[COLUMN_STATUS.TODO] = [];
           }
-          grouped[COLUMN_STATUS.TODO].push(...cancelledOrdersForBoard);
+          grouped[COLUMN_STATUS.TODO].push(...dedupedCancelledOrders);
+          
+          if (searchOrderId.trim()) {
+            console.log(`[BOARD-GROUP] After dedup, adding ${dedupedCancelledOrders.length} cancelled orders to TODO`);
+          }
         }
       }
 
@@ -1058,6 +1212,14 @@ function ComplianceBoardPage() {
           (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.REPLACEMENT
         );
       }
+      
+      // Log column counts
+      console.log(`[BOARD-FINAL] Column counts after grouping:`);
+      Object.keys(grouped).forEach(status => {
+        if (grouped[status].length > 0) {
+          console.log(`  - ${status}: ${grouped[status].length} orders`);
+        }
+      });
       
       setOrders(grouped);
       setPendingOrderMoves({});
@@ -1432,7 +1594,9 @@ function ComplianceBoardPage() {
   };
 
   const handleApplyFilters = () => {
+    console.log(`[APPLY-FILTERS] Applying filters, draftDateFilter:`, draftDateFilter);
     setDateFilter(draftDateFilter);
+    setStatsDateFilter(draftDateFilter); // Sync stats filter with board filter
     setSearchOrderId(draftSearchOrderId);
     setSearchBuyerName(draftSearchBuyerName);
     setExcludeClient(draftExcludeClient);
@@ -1443,6 +1607,7 @@ function ComplianceBoardPage() {
   const handleClearDateFilters = () => {
     const emptyDateFilter = createEmptyDateFilter();
     setDateFilter(emptyDateFilter);
+    setStatsDateFilter(emptyDateFilter); // Sync stats filter with board filter
     setDraftDateFilter(emptyDateFilter);
     setSelectedSeller('');
     setSearchOrderId('');
@@ -2110,11 +2275,16 @@ function ComplianceBoardPage() {
 
   const applyOrderColumn = async (status) => {
     const moves = Object.values(pendingOrderMoves[status] || {});
-    if (moves.length === 0) return;
+    console.log(`[APPLY-ORDER] Starting applyOrderColumn for status: ${status}, moves count:`, moves.length);
+    if (moves.length === 0) {
+      console.log(`[APPLY-ORDER] No pending moves for status ${status}, returning`);
+      return;
+    }
 
     setApplyingColumns((prev) => ({ ...prev, [`order:${status}`]: true }));
     try {
-      await Promise.all(moves.map((order) => {
+      console.log(`[APPLY-ORDER] Processing ${moves.length} order move(s):`);
+      await Promise.all(moves.map((order, idx) => {
         const idStr = String(order._id || '');
         // Handle different order source types
         let targetId;
@@ -2125,11 +2295,31 @@ function ComplianceBoardPage() {
           // For regular orders, use orderObjectId if available, else _id
           targetId = order.orderObjectId || order._id;
         }
+        
+        console.log(`[APPLY-ORDER] Order ${idx + 1}:`, {
+          orderId: order.orderId,
+          _id: order._id,
+          orderObjectId: order.orderObjectId,
+          targetId: targetId,
+          fromStatus: order.complianceBoardStatus,
+          toStatus: status
+        });
 
-        return api.patch(`/orders/${encodeURIComponent(targetId)}/compliance-status`, {
+        const patchData = {
           complianceBoardStatus: status,
           complianceBoardCategory: selectedCategory,
-        });
+        };
+        console.log(`[APPLY-ORDER] Sending PATCH to /orders/${encodeURIComponent(targetId)}/compliance-status with:`, patchData);
+        
+        return api.patch(`/orders/${encodeURIComponent(targetId)}/compliance-status`, patchData)
+          .then(res => {
+            console.log(`[APPLY-ORDER] PATCH succeeded for order ${order.orderId}:`, res.data);
+            return res;
+          })
+          .catch(err => {
+            console.error(`[APPLY-ORDER] PATCH failed for order ${order.orderId}:`, err.response?.status, err.response?.data || err.message);
+            throw err;
+          });
       }));
 
       setOrders((prev) => {
@@ -2189,14 +2379,21 @@ function ComplianceBoardPage() {
         delete next[status];
         return next;
       });
+      console.log(`[APPLY-ORDER] Successfully applied ${moves.length} order(s) to ${status}`);
       setSnackbar({ open: true, message: `Applied ${moves.length} order(s) to ${getColumnTitle(status)}` });
     } catch (err) {
-      console.error('Failed to apply order column:', err);
+      console.error('[APPLY-ORDER] Failed to apply order column:', err);
+      console.error('[APPLY-ORDER] Error details:', {
+        status: err.response?.status,
+        data: err.response?.data,
+        message: err.message
+      });
       setSnackbar({
         open: true,
         message: `Failed: ${err.response?.data?.error || err.message}`,
       });
     } finally {
+      console.log(`[APPLY-ORDER] Finally block for status ${status}`);
       setApplyingColumns((prev) => ({ ...prev, [`order:${status}`]: false }));
     }
   };
@@ -3567,7 +3764,13 @@ function ComplianceBoardPage() {
                 size="small"
                 variant={getPendingCount(pendingOrderMoves, status) > 0 ? 'contained' : 'outlined'}
                 disabled={getPendingCount(pendingOrderMoves, status) === 0 || applyingColumns[`order:${status}`]}
-                onClick={() => applyOrderColumn(status)}
+                onClick={() => {
+                  console.log(`[APPLY-BTN] Apply button clicked for status: ${status}`, {
+                    pendingCount: getPendingCount(pendingOrderMoves, status),
+                    pendingOrderMoves: pendingOrderMoves[status] || {}
+                  });
+                  applyOrderColumn(status);
+                }}
                 sx={{
                   minWidth: 72,
                   height: 26,
@@ -3974,6 +4177,8 @@ function ComplianceBoardPage() {
         }}
         fullWidth
         maxWidth="md"
+        BackdropProps={{ style: { pointerEvents: 'none' } }}
+        disableEnforceFocus
         PaperProps={{
           sx: {
             height: 'min(85vh, 900px)',
@@ -4488,6 +4693,301 @@ function ComplianceBoardPage() {
         )}
       </Paper>
 
+      {/* Collapsible Stats Section - Only visible in Order Fulfillment board */}
+      {selectedCategory === 'order_fulfillment' && (
+      <Paper sx={{ p: 2, mb: 3, borderRadius: 2, bgcolor: '#f8fafc' }}>
+        <Stack 
+          direction="row" 
+          justifyContent="space-between" 
+          alignItems="center" 
+          sx={{ cursor: 'pointer', mb: showStats ? 2 : 0 }}
+          onClick={() => setShowStats(!showStats)}
+        >
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <Typography variant="h6" fontWeight={700} color={BRAND_DARK}>
+              Stats
+            </Typography>
+            <Chip label={showStats ? 'Expanded' : 'Collapsed'} size="small" variant="outlined" />
+          </Stack>
+          <IconButton size="small" onClick={() => setShowStats(!showStats)}>
+            <Typography sx={{ transform: showStats ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>
+              ▼
+            </Typography>
+          </IconButton>
+        </Stack>
+
+        {showStats && (
+          <>
+            {/* Stats Date Filter */}
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="flex-end" sx={{ mb: 2 }}>
+              <FormControl sx={FILTER_CONTROL_SX}>
+                <InputLabel>Date Mode</InputLabel>
+                <Select
+                  value={draftStatsDateFilter.mode}
+                  label="Date Mode"
+                  onChange={(e) => setDraftStatsDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+                >
+                  <MenuItem value="none">None</MenuItem>
+                  <MenuItem value="single">Single Day</MenuItem>
+                  <MenuItem value="range">Date Range</MenuItem>
+                </Select>
+              </FormControl>
+
+              {draftStatsDateFilter.mode === 'single' && (
+                <TextField
+                  size="small"
+                  label="Date"
+                  type="date"
+                  value={draftStatsDateFilter.single}
+                  onChange={(e) => setDraftStatsDateFilter(prev => ({ ...prev, single: e.target.value }))}
+                  InputLabelProps={{ shrink: true }}
+                  sx={FILTER_CONTROL_SX}
+                />
+              )}
+
+              {draftStatsDateFilter.mode === 'range' && (
+                <>
+                  <TextField
+                    size="small"
+                    label="From"
+                    type="date"
+                    value={draftStatsDateFilter.from}
+                    onChange={(e) => setDraftStatsDateFilter(prev => ({ ...prev, from: e.target.value }))}
+                    InputLabelProps={{ shrink: true }}
+                    sx={FILTER_CONTROL_SX}
+                  />
+                  <TextField
+                    size="small"
+                    label="To"
+                    type="date"
+                    value={draftStatsDateFilter.to}
+                    onChange={(e) => setDraftStatsDateFilter(prev => ({ ...prev, to: e.target.value }))}
+                    InputLabelProps={{ shrink: true }}
+                    sx={FILTER_CONTROL_SX}
+                  />
+                </>
+              )}
+
+              <Button
+                variant="contained"
+                onClick={() => setStatsDateFilter(draftStatsDateFilter)}
+                sx={{
+                  ...FILTER_ACTION_SX,
+                  bgcolor: BRAND_YELLOW_DARK,
+                  color: BRAND_DARK,
+                  fontWeight: 700,
+                  '&:hover': { bgcolor: BRAND_YELLOW }
+                }}
+              >
+                Apply
+              </Button>
+            </Stack>
+
+            {/* Stats Cards Grid */}
+            {statsLoading ? (
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
+                <CircularProgress size={30} />
+              </Box>
+            ) : (
+              <Box 
+                onClick={(e) => console.log('[STATS-BOX-CLICK] Parent box clicked!', e.target)}
+                sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(4, 1fr)' }, gap: 1.5 }}>
+                {/* To Do Card */}
+                <Card
+                  onMouseDown={(e) => {
+                    console.log('[BADGE-MOUSEDOWN] Card mousedown!', e);
+                    fetchStatsDetails(COLUMN_STATUS.TODO);
+                  }}
+                  onClick={(e) => {
+                    console.log('[BADGE-CLICK] Card clicked!', e);
+                    e.preventDefault();
+                    e.stopPropagation();
+                    fetchStatsDetails(COLUMN_STATUS.TODO);
+                  }}
+                  sx={{
+                    cursor: 'pointer',
+                    border: `2px solid ${BRAND_RED}`,
+                    transition: 'all 0.2s ease',
+                    '&:hover': { boxShadow: 3, transform: 'translateY(-2px)' }
+                  }}
+                >
+                  <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+                    <Stack spacing={0.5}>
+                      <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                        To Do
+                      </Typography>
+                      <Typography variant="h6" fontWeight={700} color={BRAND_RED}>
+                        {statsCounts.todo}
+                      </Typography>
+                    </Stack>
+                  </CardContent>
+                </Card>
+
+                {/* Out of Stock Card */}
+                <Card
+                  onClick={(e) => {
+                    console.log('[BADGE-CLICK] Out of Stock clicked!', e);
+                    e.preventDefault();
+                    e.stopPropagation();
+                    fetchStatsDetails(COLUMN_STATUS.OUT_OF_STOCK);
+                  }}
+                  sx={{
+                    cursor: 'pointer',
+                    border: `2px solid ${BRAND_ORANGE}`,
+                    transition: 'all 0.2s ease',
+                    '&:hover': { boxShadow: 3, transform: 'translateY(-2px)' }
+                  }}
+                >
+                  <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+                    <Stack spacing={0.5}>
+                      <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                        Out of Stock
+                      </Typography>
+                      <Typography variant="h6" fontWeight={700} color={BRAND_ORANGE}>
+                        {statsCounts.outOfStock}
+                      </Typography>
+                    </Stack>
+                  </CardContent>
+                </Card>
+
+                {/* Cancellation Card */}
+                <Card
+                  onClick={() => fetchStatsDetails(COLUMN_STATUS.CANCELLATION)}
+                  sx={{
+                    cursor: 'pointer',
+                    border: `2px solid ${BRAND_BLUE}`,
+                    transition: 'all 0.2s ease',
+                    '&:hover': { boxShadow: 3, transform: 'translateY(-2px)' }
+                  }}
+                >
+                  <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+                    <Stack spacing={0.5}>
+                      <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                        Cancellation
+                      </Typography>
+                      <Typography variant="h6" fontWeight={700} color={BRAND_BLUE}>
+                        {statsCounts.cancellation}
+                      </Typography>
+                    </Stack>
+                  </CardContent>
+                </Card>
+
+                {/* Address Issue Card */}
+                <Card
+                  onClick={() => fetchStatsDetails(COLUMN_STATUS.ADDRESS_ISSUE)}
+                  sx={{
+                    cursor: 'pointer',
+                    border: `2px solid #a855f7`,
+                    transition: 'all 0.2s ease',
+                    '&:hover': { boxShadow: 3, transform: 'translateY(-2px)' }
+                  }}
+                >
+                  <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+                    <Stack spacing={0.5}>
+                      <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                        Address Issue
+                      </Typography>
+                      <Typography variant="h6" fontWeight={700} color="#a855f7">
+                        {statsCounts.addressIssue}
+                      </Typography>
+                    </Stack>
+                  </CardContent>
+                </Card>
+
+                {/* Late Delivery Card */}
+                <Card
+                  onClick={() => fetchStatsDetails(COLUMN_STATUS.LATE_DELIVERY)}
+                  sx={{
+                    cursor: 'pointer',
+                    border: `2px solid #dc2626`,
+                    transition: 'all 0.2s ease',
+                    '&:hover': { boxShadow: 3, transform: 'translateY(-2px)' }
+                  }}
+                >
+                  <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+                    <Stack spacing={0.5}>
+                      <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                        Late Delivery
+                      </Typography>
+                      <Typography variant="h6" fontWeight={700} color="#dc2626">
+                        {statsCounts.lateDelivery}
+                      </Typography>
+                    </Stack>
+                  </CardContent>
+                </Card>
+
+                {/* Not Fulfilled Card */}
+                <Card
+                  onClick={() => fetchStatsDetails(COLUMN_STATUS.NOT_FULFILLED)}
+                  sx={{
+                    cursor: 'pointer',
+                    border: `2px solid ${BRAND_YELLOW_DARK}`,
+                    transition: 'all 0.2s ease',
+                    '&:hover': { boxShadow: 3, transform: 'translateY(-2px)' }
+                  }}
+                >
+                  <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+                    <Stack spacing={0.5}>
+                      <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                        Not Fulfilled
+                      </Typography>
+                      <Typography variant="h6" fontWeight={700} color={BRAND_YELLOW_DARK}>
+                        {statsCounts.notFulfilled}
+                      </Typography>
+                    </Stack>
+                  </CardContent>
+                </Card>
+
+                {/* Fulfilled Card */}
+                <Card
+                  onClick={() => fetchStatsDetails(COLUMN_STATUS.FULFILLED)}
+                  sx={{
+                    cursor: 'pointer',
+                    border: `2px solid ${BRAND_GREEN}`,
+                    transition: 'all 0.2s ease',
+                    '&:hover': { boxShadow: 3, transform: 'translateY(-2px)' }
+                  }}
+                >
+                  <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+                    <Stack spacing={0.5}>
+                      <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                        Fulfilled
+                      </Typography>
+                      <Typography variant="h6" fontWeight={700} color={BRAND_GREEN}>
+                        {statsCounts.fulfilled}
+                      </Typography>
+                    </Stack>
+                  </CardContent>
+                </Card>
+
+                {/* Buyer Confirmation Card */}
+                <Card
+                  onClick={() => fetchStatsDetails(COLUMN_STATUS.BUYER_CONFIRMATION)}
+                  sx={{
+                    cursor: 'pointer',
+                    border: `2px solid #0f766e`,
+                    transition: 'all 0.2s ease',
+                    '&:hover': { boxShadow: 3, transform: 'translateY(-2px)' }
+                  }}
+                >
+                  <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+                    <Stack spacing={0.5}>
+                      <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                        Buyer Confirmation
+                      </Typography>
+                      <Typography variant="h6" fontWeight={700} color="#0f766e">
+                        {statsCounts.buyerConfirmation}
+                      </Typography>
+                    </Stack>
+                  </CardContent>
+                </Card>
+              </Box>
+            )}
+          </>
+        )}
+      </Paper>
+      )}
+
       {/* Board */}
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
@@ -4634,6 +5134,8 @@ function ComplianceBoardPage() {
         onClose={handleCloseActivityLogs}
         maxWidth="md"
         fullWidth
+        BackdropProps={{ style: { pointerEvents: 'none' } }}
+        disableEnforceFocus
         PaperProps={{
           sx: {
             backgroundImage: 'none',
@@ -4803,6 +5305,97 @@ function ComplianceBoardPage() {
         </DialogContent>
         <DialogActions sx={{ pt: 2 }}>
           <Button onClick={handleCloseActivityLogs}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Stats Details Modal */}
+      <Dialog 
+        open={statsDetailsModal.open} 
+        onClose={() => setStatsDetailsModal({ ...statsDetailsModal, open: false })}
+        maxWidth="sm"
+        fullWidth
+        BackdropProps={{ style: { pointerEvents: 'none' } }}
+        disableEnforceFocus
+      >
+        <DialogTitle sx={{ fontWeight: 700, fontSize: '1rem', pb: 0.5, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Box>
+            {statsDetailsModal.statType === COLUMN_STATUS.TODO && 'To Do Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.OUT_OF_STOCK && 'Out of Stock Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.CANCELLATION && 'Cancellation Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.ADDRESS_ISSUE && 'Address Issue Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.LATE_DELIVERY && 'Late Delivery Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.NOT_FULFILLED && 'Not Fulfilled Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.FULFILLED && 'Fulfilled Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.BUYER_CONFIRMATION && 'Buyer Confirmation Details'}
+          </Box>
+          <IconButton 
+            size="small" 
+            onClick={() => setStatsDetailsModal({ ...statsDetailsModal, open: false })}
+          >
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </DialogTitle>
+        {statsDetailsModal.items.length > 0 && (
+          <Box sx={{ px: 3, pb: 1, pt: 0 }}>
+            <Typography variant="caption" color="text.secondary">
+              {statsDetailsModal.items.length} {statsDetailsModal.items.length === 1 ? 'order' : 'orders'} in this category
+            </Typography>
+          </Box>
+        )}
+        <DialogContent sx={{ maxHeight: '600px', overflow: 'auto', pt: 1 }}>
+          {statsDetailsModal.items.length === 0 ? (
+            <Typography color="text.secondary" textAlign="center" sx={{ py: 3 }}>
+              No items found
+            </Typography>
+          ) : (
+            <Stack spacing={1}>
+              {statsDetailsModal.items.map((item, idx) => (
+                <Box key={idx} sx={{ pb: 1.5, borderBottom: idx < statsDetailsModal.items.length - 1 ? '1px solid #e2e8f0' : 'none' }}>
+                  <Stack spacing={0.5}>
+                    <Typography variant="body2" fontWeight={700} color="text.primary">
+                      {item.orderId}
+                    </Typography>
+                    {item.itemTitle && (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                        {item.itemTitle}
+                      </Typography>
+                    )}
+                    <Stack direction="row" spacing={2} sx={{ mt: 0.5 }}>
+                      {item.buyerName && (
+                        <Typography variant="caption" color="text.secondary">
+                          {item.buyerName}
+                        </Typography>
+                      )}
+                      {item.creationDate && (
+                        <Typography variant="caption" color="text.secondary">
+                          {format(new Date(item.creationDate), 'MMM dd, yyyy')}
+                        </Typography>
+                      )}
+                    </Stack>
+                    {item.sellerName && (
+                      <Typography variant="caption" color="text.secondary">
+                        Seller: {item.sellerName}
+                      </Typography>
+                    )}
+                    {item.price && (
+                      <Typography variant="caption" fontWeight={600} color="success.main">
+                        ${parseFloat(item.price).toFixed(2)}
+                      </Typography>
+                    )}
+                  </Stack>
+                </Box>
+              ))}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ justifyContent: 'flex-end', px: 3, py: 2 }}>
+          <Button 
+            onClick={() => setStatsDetailsModal({ ...statsDetailsModal, open: false })}
+            variant="text"
+            color="primary"
+          >
+            Close
+          </Button>
         </DialogActions>
       </Dialog>
 

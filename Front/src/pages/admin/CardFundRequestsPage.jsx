@@ -250,6 +250,12 @@ export default function CardFundRequestsPage() {
         <Stack direction="row" spacing={1}>
           <Button
             variant="outlined"
+            onClick={() => navigate('/admin/credit-cards')}
+          >
+            Manage Cards
+          </Button>
+          <Button
+            variant="outlined"
             startIcon={<RefreshIcon />}
             onClick={fetchRequests}
           >
