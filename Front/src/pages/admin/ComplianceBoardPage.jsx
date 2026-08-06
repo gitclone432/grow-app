@@ -3255,6 +3255,31 @@ function ComplianceBoardPage() {
     setSelectedOrderDetailsCanEditFulfillment(Boolean(options.canEditFulfillment));
   };
 
+  const handleOrderUpdatedInModal = (updatedOrder) => {
+    // Update the order in the orders state
+    // This ensures the card is immediately re-rendered with the new fulfillment data
+    setOrders((prevOrders) => {
+      const updated = { ...prevOrders };
+      
+      // Find and update the order in all columns
+      Object.keys(updated).forEach((columnId) => {
+        updated[columnId] = updated[columnId].map((order) => {
+          if (order._id === updatedOrder._id || order.orderId === updatedOrder.orderId) {
+            return {
+              ...order,
+              ...updatedOrder,
+              // Preserve important fields that shouldn't be overwritten
+              _id: order._id || updatedOrder._id
+            };
+          }
+          return order;
+        });
+      });
+      
+      return updated;
+    });
+  };
+
   const handleCopy = (text) => {
     if (text && navigator?.clipboard?.writeText) {
       navigator.clipboard.writeText(text);
@@ -5580,6 +5605,7 @@ function ComplianceBoardPage() {
         }}
         orderId={selectedOrderDetailsId}
         fulfillmentFieldsEditable={selectedOrderDetailsCanEditFulfillment}
+        onOrderUpdated={handleOrderUpdatedInModal}
       />
 
       {/* Activity Logs Dialog */}

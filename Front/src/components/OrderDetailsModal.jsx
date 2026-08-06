@@ -839,7 +839,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
   );
 }
 
-export default function OrderDetailsModal({ open, onClose, orderId, fulfillmentFieldsEditable = false }) {
+export default function OrderDetailsModal({ open, onClose, orderId, fulfillmentFieldsEditable = false, onOrderUpdated = null }) {
   const [order, setOrder] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -1006,7 +1006,10 @@ export default function OrderDetailsModal({ open, onClose, orderId, fulfillmentF
               <ShippingAddressSection order={order} onCopy={handleCopy} />
               <EditableFulfillmentFields
                 order={order}
-                onOrderUpdate={setOrder}
+                onOrderUpdate={(updatedOrder) => {
+                  setOrder(updatedOrder);
+                  if (onOrderUpdated) onOrderUpdated(updatedOrder);
+                }}
                 editable={fulfillmentFieldsEditable}
               />
             </Box>
