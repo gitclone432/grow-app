@@ -3140,6 +3140,7 @@ router.get('/cancelled-orders', async (req, res) => {
     const totalPages = Math.ceil(totalCount / limitNum);
 
     const cancelledOrders = await Order.find(query)
+      .select('orderId dateSold buyer subtotal subtotalUSD complianceBoardStatus complianceBoardCategory complianceBoardCategories cancelState seller itemNumber lineItems productName trackingNumber manualTrackingNumber remark')
       .populate({
         path: 'seller',
         populate: {
