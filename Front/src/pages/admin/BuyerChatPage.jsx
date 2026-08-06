@@ -1773,6 +1773,7 @@ export default function BuyerChatPage() {
                   <FormControl size="small" sx={{ minWidth: 110, '& .MuiInputBase-root': { height: 32 } }}>
                     <InputLabel sx={{ fontSize: '0.75rem' }}>Status</InputLabel>
                     <Select value={metaCaseStatus} label="Status" onChange={(e) => setMetaCaseStatus(e.target.value)} sx={{ fontSize: '0.75rem' }}>
+                      <MenuItem value="">Select</MenuItem>
                       <MenuItem value="Case Not Opened">Case Not Opened</MenuItem>
                       <MenuItem value="Open">Open</MenuItem>
                       <MenuItem value="In Progress">In Progress</MenuItem>

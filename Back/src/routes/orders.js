@@ -2000,7 +2000,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           ],
           ...dateFilter
         })
-          .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+          .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
           .sort({ dateSold: -1 })
           .lean()
@@ -2019,7 +2019,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           { 'lineItems.legacyItemId': { $in: sourceOrderIds } },
         ]
       })
-        .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+        .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
         .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
         .lean();
 
@@ -2414,7 +2414,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     const skip = (pageNum - 1) * limitNum;
 
     let orders = await Order.find(detailQuery)
-      .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber')
+      .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
       .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
       .sort({ dateSold: -1 })
       .skip(skip)

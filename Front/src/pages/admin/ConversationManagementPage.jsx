@@ -873,6 +873,7 @@ function ResolutionDialog({ open, onClose, metaItem, onSave, chatAgents = [] }) 
                   onChange={(e) => setStatus(e.target.value)}
                   sx={{ bgcolor: '#fff', borderRadius: 1.5 }}
                 >
+                  <MenuItem value="">Select</MenuItem>
                   <MenuItem value="Open">Open</MenuItem>
                   <MenuItem value="In Progress">In Progress</MenuItem>
                   <MenuItem value="Resolved">Resolved</MenuItem>

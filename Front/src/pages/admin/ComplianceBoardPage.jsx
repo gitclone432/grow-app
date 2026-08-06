@@ -34,6 +34,7 @@ import CommentIcon from '@mui/icons-material/Comment';
 import ChatIcon from '@mui/icons-material/Chat';
 import HistoryIcon from '@mui/icons-material/History';
 import CloseIcon from '@mui/icons-material/Close';
+import InfoIcon from '@mui/icons-material/Info';
 import { format } from 'date-fns';
 import api from '../../lib/api';
 import ChatModal from '../../components/ChatModal';
@@ -318,6 +319,39 @@ const cleanMessagePreviewText = (body = '') => {
     .filter((token) => text.toLowerCase().includes(token)).length;
 
   return cssSignalCount >= 3 ? '' : text;
+};
+
+// Helper function to check if all 6 fulfillment fields are complete
+const isOrderFulfillmentComplete = (order) => {
+  const hasAllFields = 
+    order?.amazonAccount &&
+    order?.amazonAccount !== '' &&
+    order?.arrivingDate &&
+    order?.arrivingDate !== '' &&
+    order?.beforeTax !== null &&
+    order?.beforeTax !== '' &&
+    order?.beforeTax !== undefined &&
+    order?.beforeTax !== 0 &&
+    order?.estimatedTax !== null &&
+    order?.estimatedTax !== '' &&
+    order?.estimatedTax !== undefined &&
+    order?.azOrderId &&
+    order?.azOrderId !== '' &&
+    order?.remark &&
+    order?.remark !== '';
+  
+  return hasAllFields;
+};
+
+const getMissingFulfillmentFields = (order) => {
+  const missing = [];
+  if (!order?.amazonAccount || order.amazonAccount === '') missing.push('Amazon Account');
+  if (!order?.arrivingDate || order.arrivingDate === '') missing.push('Arriving Date');
+  if (order?.beforeTax === null || order?.beforeTax === '' || order?.beforeTax === undefined) missing.push('Before Tax');
+  if (order?.estimatedTax === null || order?.estimatedTax === '' || order?.estimatedTax === undefined) missing.push('Estimated Tax');
+  if (!order?.azOrderId || order.azOrderId === '') missing.push('Az Order ID');
+  if (!order?.remark || order.remark === '') missing.push('Remark');
+  return missing;
 };
 
 const createEmptyDateFilter = () => ({
@@ -1120,6 +1154,18 @@ function ComplianceBoardPage() {
       if (selectedCategory === 'order_fulfillment') {
         let cancelledOrdersForBoard = cancelledOrdersResult ? [...cancelledOrdersResult] : [];
         
+        // Log what we received from backend
+        if (cancelledOrdersForBoard.length > 0) {
+          console.log(`[BOARD-MERGE] Received ${cancelledOrdersForBoard.length} cancelled orders from API`);
+          console.log(`[BOARD-MERGE] Sample order:`, {
+            orderId: cancelledOrdersForBoard[0].orderId,
+            cancelState: cancelledOrdersForBoard[0].cancelState,
+            complianceBoardStatus: cancelledOrdersForBoard[0].complianceBoardStatus,
+            sourceType: cancelledOrdersForBoard[0].sourceType,
+            keys: Object.keys(cancelledOrdersForBoard[0]).slice(0, 20)
+          });
+        }
+        
         // Apply only basic filters: search order ID and buyer name
         if (searchOrderId.trim()) {
           cancelledOrdersForBoard = cancelledOrdersForBoard.filter(o => {
@@ -1136,10 +1182,10 @@ function ComplianceBoardPage() {
         }
 
         // Log cancelled orders being merged
-        if (searchOrderId.trim()) {
+        if (cancelledOrdersForBoard.length > 0) {
           console.log(`[BOARD-GROUP] Merging ${cancelledOrdersForBoard.length} cancelled order(s) for order_fulfillment:`);
-          cancelledOrdersForBoard.forEach(o => {
-            console.log(`  - Cancelled orderId: ${o.orderId}, status: ${o.complianceBoardStatus}, will add to: ${COLUMN_STATUS.TODO}`);
+          cancelledOrdersForBoard.slice(0, 3).forEach(o => {
+            console.log(`  - Cancelled orderId: ${o.orderId}, cancelState: ${o.cancelState}, status: ${o.complianceBoardStatus}`);
           });
         }
         
@@ -2245,6 +2291,11 @@ function ComplianceBoardPage() {
     let statusOrders = orders[status] || [];
     if (showOnlyUnreadMessages) {
       statusOrders = statusOrders.filter(order => getUnreadMessageCountForOrder(order) > 0);
+    }
+    
+    // Filter out CANCELED orders from order_fulfillment board
+    if (selectedCategory === 'order_fulfillment') {
+      statusOrders = statusOrders.filter(order => order.cancelState !== 'CANCELED');
     }
     
     if (selectedCategory === 'return_refund' && status === COLUMN_STATUS.CASE_OPENED) {
@@ -3821,7 +3872,7 @@ function ComplianceBoardPage() {
   };
 
   // Render order card (compact version for mini tiles, full version for main columns)
-  const renderOrderCard = (order, provided, snapshot, isCompact = false, columnStatus = '') => {
+  const renderOrderCard = (order, provided, snapshot, isCompact = false, columnStatus = '', isDragDisabled = false) => {
     const showOrderCommunicationBadge = (
       (selectedCategory === 'cancellation' || selectedCategory === 'inr') &&
       order.complianceBoardSource === 'order_communication'
@@ -3830,20 +3881,35 @@ function ComplianceBoardPage() {
     const unreadMessageCount = getUnreadMessageCountForOrder(order);
     const pickedUpByLabel = getPickedUpByLabel(order);
 
+    // Debug log for cancelled orders
+    if (columnStatus === COLUMN_STATUS.TODO && order.sourceType === 'cancelled-order') {
+      console.log(`[CARD-DEBUG] Cancelled order ${order.orderId}:`, {
+        cancelState: order.cancelState,
+        sourceType: order.sourceType,
+        complianceBoardStatus: order.complianceBoardStatus
+      });
+    }
+
+    const missingFields = selectedCategory === 'order_fulfillment' ? getMissingFulfillmentFields(order) : [];
+
     return (
       <Card
         ref={provided.innerRef}
         {...provided.draggableProps}
         {...provided.dragHandleProps}
         sx={{
-          cursor: 'grab',
+          cursor: isDragDisabled ? 'not-allowed' : 'grab',
           bgcolor: snapshot.isDragging ? '#fef3c7' : '#fff',
           border: snapshot.isDragging ? `2px solid ${BRAND_YELLOW_DARK}` : '1px solid #e2e8f0',
           borderRadius: 1.5,
           transition: 'all 0.2s ease',
-          '&:hover': { boxShadow: 3, transform: 'translateY(-2px)' },
+          '&:hover': { 
+            boxShadow: isDragDisabled ? 'none' : 3, 
+            transform: isDragDisabled ? 'none' : 'translateY(-2px)'
+          },
           flexShrink: 0,
           minHeight: 'fit-content',
+          position: 'relative'
         }}
       >
         <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
@@ -3852,34 +3918,41 @@ function ComplianceBoardPage() {
             <Stack direction="row" alignItems="center" justifyContent="space-between">
               <Stack direction="row" alignItems="center" spacing={1}>
                 <ShoppingCartIcon sx={{ fontSize: 18, color: BRAND_YELLOW_DARK }} />
-                <Typography
-                  component="button"
-                  type="button"
-                  variant="body2"
-                  fontWeight={700}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleOpenOrderDetails(order.orderId || order.legacyOrderId, {
-                      canEditFulfillment: selectedCategory === 'order_fulfillment' && columnStatus === COLUMN_STATUS.TODO
-                    });
-                  }}
-                  sx={{
-                    color: BRAND_DARK,
-                    fontSize: '0.95rem',
-                    p: 0,
-                    border: 0,
-                    bgcolor: 'transparent',
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                    '&:hover': { textDecoration: 'underline' },
-                    '&:focus-visible': {
-                      outline: `2px solid ${BRAND_BLUE}`,
-                      outlineOffset: 2,
-                    }
-                  }}
-                >
-                  {order.orderId || order.legacyOrderId || '-'}
-                </Typography>
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <Typography
+                    component="button"
+                    type="button"
+                    variant="body2"
+                    fontWeight={700}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleOpenOrderDetails(order.orderId || order.legacyOrderId, {
+                        canEditFulfillment: selectedCategory === 'order_fulfillment' && columnStatus === COLUMN_STATUS.TODO
+                      });
+                    }}
+                    sx={{
+                      color: BRAND_DARK,
+                      fontSize: '0.95rem',
+                      p: 0,
+                      border: 0,
+                      bgcolor: 'transparent',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      '&:hover': { textDecoration: 'underline' },
+                      '&:focus-visible': {
+                        outline: `2px solid ${BRAND_BLUE}`,
+                        outlineOffset: 2,
+                      }
+                    }}
+                  >
+                    {order.orderId || order.legacyOrderId || '-'}
+                  </Typography>
+                  {isDragDisabled && (
+                    <Tooltip title={`Missing: ${missingFields.join(', ')}`} arrow>
+                      <InfoIcon sx={{ fontSize: 18, color: '#dc2626', cursor: 'help', flexShrink: 0 }} />
+                    </Tooltip>
+                  )}
+                </Stack>
                 {selectedCategory === 'cancellation' && order.caseInfo?.state && (
                   <Chip
                     label={order.caseInfo.state}
@@ -3975,6 +4048,36 @@ function ComplianceBoardPage() {
                       sx={{ bgcolor: '#dc2626', color: '#fff', fontSize: '0.75rem', height: 24, fontWeight: 800 }}
                     />
                   )}
+                  {/* Cancellation Status Badge */}
+                  {order.cancelState && (
+                    <Chip
+                      label={String(order.cancelState).toUpperCase()}
+                      size="small"
+                      sx={{
+                        bgcolor: (() => {
+                          const state = String(order.cancelState || '').toUpperCase();
+                          if (state === 'CANCEL_CLOSED_WITH_REFUND') return '#dcfce7';
+                          if (state === 'CANCEL_PENDING') return '#fef3c7';
+                          if (state === 'CANCEL_REQUESTED') return '#fed7aa';
+                          if (state === 'CANCEL_REJECTED') return '#fee2e2';
+                          if (state === 'IN_PROGRESS') return '#fed7aa';
+                          return '#f3f4f6';
+                        })(),
+                        color: (() => {
+                          const state = String(order.cancelState || '').toUpperCase();
+                          if (state === 'CANCEL_CLOSED_WITH_REFUND') return '#166534';
+                          if (state === 'CANCEL_PENDING') return '#92400e';
+                          if (state === 'CANCEL_REQUESTED') return '#b45309';
+                          if (state === 'CANCEL_REJECTED') return '#991b1b';
+                          if (state === 'IN_PROGRESS') return '#b45309';
+                          return '#374151';
+                        })(),
+                        fontSize: '0.75rem',
+                        height: 24,
+                        fontWeight: 800
+                      }}
+                    />
+                  )}
                   {pickedUpByLabel && (
                     <Chip
                       icon={<PersonIcon sx={{ color: '#1e40af !important', fontSize: 14 }} />}
@@ -4046,6 +4149,11 @@ function ComplianceBoardPage() {
     let statusOrders = orders[status] || [];
     if (showOnlyUnreadMessages) {
       statusOrders = statusOrders.filter(order => getUnreadMessageCountForOrder(order) > 0);
+    }
+
+    // Filter out CANCELED orders from order_fulfillment board
+    if (selectedCategory === 'order_fulfillment') {
+      statusOrders = statusOrders.filter(order => order.cancelState !== 'CANCELED');
     }
 
     const visibleCount = getVisibleOrderCount(status);
@@ -4122,11 +4230,32 @@ function ComplianceBoardPage() {
             </Stack>
           </Stack>
           <Stack spacing={1} sx={{ overflowY: 'auto', flex: 1 }}>
-            {statusOrders.slice(0, visibleCount).map((order, index) => (
-              <Draggable key={order._id} draggableId={order._id} index={index}>
-                {(provided, snapshot) => renderOrderCard(order, provided, snapshot, false, status)}
-              </Draggable>
-            ))}
+            {statusOrders.slice(0, visibleCount).map((order, index) => {
+              const isOrderFulfillmentCategory = selectedCategory === 'order_fulfillment';
+              const isComplete = isOrderFulfillmentComplete(order);
+              const canDrag = !isOrderFulfillmentCategory || isComplete;
+              const missingFields = isOrderFulfillmentCategory ? getMissingFulfillmentFields(order) : [];
+              
+              return (
+                <Draggable 
+                  key={order._id} 
+                  draggableId={order._id} 
+                  index={index}
+                  isDragDisabled={!canDrag}
+                >
+                  {(provided, snapshot) => {
+                    // Handle drag attempt on incomplete order
+                    if (!canDrag && snapshot.isDragging) {
+                      setSnackbar({
+                        open: true,
+                        message: `❌ Cannot move: Missing fields - ${missingFields.join(', ')}`
+                      });
+                    }
+                    return renderOrderCard(order, provided, snapshot, false, status, !canDrag);
+                  }}
+                </Draggable>
+              );
+            })}
             {remainingCount > 0 && (
               <Button
                 size="small"
