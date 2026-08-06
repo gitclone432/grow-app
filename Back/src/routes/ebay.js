@@ -16069,10 +16069,6 @@ function buildMetaChangeEntries(existing, updates, changedBy) {
 router.post('/conversation-meta', requireAuth, async (req, res) => {
   const { sellerId, buyerUsername, orderId, itemId, category, caseStatus, status, pickedUpBy } = req.body;
 
-  if (!caseStatus) {
-    return res.status(400).json({ error: 'Case Status is required' });
-  }
-
   try {
     let query = { seller: sellerId };
 
@@ -16107,8 +16103,8 @@ router.post('/conversation-meta', requireAuth, async (req, res) => {
       itemId: resolvedItemId,
       category,
       caseStatus,
-      // Use provided status if given; otherwise default to 'Open'
-      status: status || 'Open',
+      // Allow empty status to be saved as null (user can clear status by selecting "Select")
+      status: status || null,
       resolvedAt: null,
       resolvedBy: null
     };
