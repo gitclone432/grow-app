@@ -133,6 +133,8 @@ export default function ReturnPostOrderPage({
     { id: 'marketplaceId', label: 'marketplaceId' },
     { id: 'transactionDate', label: 'transactionDate' },
     { id: 'created', label: 'creationDate' },
+    { id: 'responseDue', label: 'Response Due (PST)' },
+    { id: 'worksheetStatus', label: 'Worksheet Status' },
     { id: 'action', label: 'Action' },
   ];
   const [visibleColumns, setVisibleColumns] = useState(ALL_COLUMNS.map((c) => c.id));
@@ -315,6 +317,46 @@ export default function ReturnPostOrderPage({
     if (s.includes('REQUEST')) return 'warning';
     if (s.includes('SHIP') || s.includes('LABEL')) return 'info';
     return 'primary';
+  };
+
+  // Check if response due date is within next 24 hours
+  const isResponseUrgent24hrs = (responseDate) => {
+    if (!responseDate) return false;
+    const dueDate = new Date(responseDate);
+    const now = new Date();
+    const diff = dueDate.getTime() - now.getTime();
+    return diff > 0 && diff < 24 * 60 * 60 * 1000;
+  };
+
+  // Check if response due date is within next 2 days
+  const isResponseUrgent = (responseDate) => {
+    if (!responseDate) return false;
+    const dueDate = new Date(responseDate);
+    const now = new Date();
+    return dueDate.getTime() - now.getTime() > 0 && dueDate.getTime() - now.getTime() < 2 * 24 * 60 * 60 * 1000;
+  };
+
+  // Check if response due date has already passed
+  const isResponseOverdue = (responseDate) => {
+    if (!responseDate) return false;
+    return new Date(responseDate) < new Date();
+  };
+
+  // Handle worksheet status change
+  const handleWorksheetStatusChange = async (returnId, newStatus) => {
+    try {
+      await api.patch(`/ebay/returns/${returnId}/worksheet-status`, { worksheetStatus: newStatus });
+      // Update local state
+      setRows(prevRows =>
+        prevRows.map(row =>
+          row.returnId === returnId ? { ...row, worksheetStatus: newStatus } : row
+        )
+      );
+      setSnackbar({ open: true, message: 'Worksheet status updated', severity: 'success' });
+    } catch (err) {
+      console.error('Failed to update worksheet status:', err);
+      setSnackbar({ open: true, message: 'Failed to update worksheet status', severity: 'error' });
+    }
   };
 
   const getSellerActionTypes = (row) => {
@@ -893,6 +935,8 @@ export default function ReturnPostOrderPage({
                 {visibleColumns.includes('marketplaceId') && <TableCell sx={headerSx}>marketplaceId</TableCell>}
                 {visibleColumns.includes('transactionDate') && <TableCell sx={headerSx}>transactionDate</TableCell>}
                 {visibleColumns.includes('created') && <TableCell sx={headerSx}>creationDate</TableCell>}
+                {visibleColumns.includes('responseDue') && <TableCell sx={headerSx}>Response Due (PST)</TableCell>}
+                {visibleColumns.includes('worksheetStatus') && <TableCell sx={headerSx}>Worksheet Status</TableCell>}
                 {visibleColumns.includes('action') && <TableCell sx={headerSx} align="center">Action</TableCell>}
               </TableRow>
             </TableHead>
@@ -1033,6 +1077,51 @@ export default function ReturnPostOrderPage({
                     )}
                     {visibleColumns.includes('created') && (
                       <TableCell>{formatDate(row.creationDate)}</TableCell>
+                    )}
+                    {visibleColumns.includes('responseDue') && (
+                      <TableCell>
+                        <Stack direction="row" alignItems="center" spacing={0.5}>
+                          <Typography
+                            variant="body2"
+                            fontSize="0.75rem"
+                            color={row.returnStatus !== 'CLOSED' && isResponseOverdue(row.responseDate) ? 'error' : 'inherit'}
+                            fontWeight={row.returnStatus !== 'CLOSED' && (isResponseOverdue(row.responseDate) || isResponseUrgent(row.responseDate)) ? 'bold' : 'normal'}
+                          >
+                            {formatDate(row.responseDate)}
+                          </Typography>
+                          {row.returnStatus !== 'CLOSED' && isResponseOverdue(row.responseDate) && (
+                            <Chip
+                              label="OVERDUE"
+                              size="small"
+                              color="error"
+                              sx={{ fontSize: '0.6rem', height: 16 }}
+                            />
+                          )}
+                          {row.returnStatus !== 'CLOSED' && !isResponseOverdue(row.responseDate) && isResponseUrgent(row.responseDate) && (
+                            <Chip
+                              label="URGENT"
+                              size="small"
+                              color="warning"
+                              sx={{ fontSize: '0.6rem', height: 16 }}
+                            />
+                          )}
+                        </Stack>
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('worksheetStatus') && (
+                      <TableCell>
+                        <FormControl size="small" fullWidth>
+                          <Select
+                            value={row.worksheetStatus || 'open'}
+                            onChange={(e) => handleWorksheetStatusChange(row.returnId, e.target.value)}
+                            sx={{ fontSize: '0.75rem' }}
+                          >
+                            <MenuItem value="open">Open</MenuItem>
+                            <MenuItem value="attended">Attended</MenuItem>
+                            <MenuItem value="resolved">Resolved</MenuItem>
+                          </Select>
+                        </FormControl>
+                      </TableCell>
                     )}
                     {visibleColumns.includes('action') && (
                       <TableCell align="center">

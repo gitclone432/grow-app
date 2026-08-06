@@ -581,6 +581,7 @@ export default function AwaitingShipmentPage() {
   const [excludeClient, setExcludeClient] = useState(true);
   const [amazonAccounts, setAmazonAccounts] = useState([]);
   const [selectedAmazonAccount, setSelectedAmazonAccount] = useState('');
+  const [selectedRemark, setSelectedRemark] = useState(''); // Filter by remark
   // Grow default column: Ship By; UI default: newest first
   const [sortBy, setSortBy] = useState('shipBy');
   const [sortDir, setSortDir] = useState('desc');
@@ -664,7 +665,7 @@ export default function AwaitingShipmentPage() {
   useEffect(() => {
     fetchAwaitingOrders();
     // eslint-disable-next-line
-  }, [page, debouncedOrderId, debouncedBuyerName, selectedSeller, searchMarketplace, shipByDate, shipByDateTz, dateSold, arrivalDateFrom, arrivalDateTo, excludeClient, selectedAmazonAccount, sortBy, sortDir]);
+  }, [page, debouncedOrderId, debouncedBuyerName, selectedSeller, searchMarketplace, shipByDate, shipByDateTz, dateSold, arrivalDateFrom, arrivalDateTo, excludeClient, selectedAmazonAccount, selectedRemark, sortBy, sortDir]);
 
   // Handlers
   const handleSellerChange = (e) => {
@@ -729,6 +730,7 @@ export default function AwaitingShipmentPage() {
     setArrivalDateTo('');
     setExcludeClient(true);
     setSelectedAmazonAccount('');
+    setSelectedRemark('');
     setSortBy('shipBy');
     setSortDir('desc');
     setPage(1);
@@ -757,6 +759,7 @@ export default function AwaitingShipmentPage() {
     if (arrivalDateTo) params.arrivalDateTo = arrivalDateTo;
     params.excludeClient = excludeClient;
     if (selectedAmazonAccount) params.amazonAccount = selectedAmazonAccount;
+    if (selectedRemark) params.remark = selectedRemark;
 
     // SMART CHECK: If params haven't changed since last fetch, STOP.
     const paramsString = JSON.stringify(params);
@@ -1598,6 +1601,28 @@ export default function AwaitingShipmentPage() {
                   {amazonAccounts.map((acc) => (
                     <MenuItem key={acc._id} value={acc.name}>{acc.name}</MenuItem>
                   ))}
+                </Select>
+              </FormControl>
+
+              {/* 10. REMARK FILTER */}
+              <FormControl size="small" sx={{ minWidth: 180 }}>
+                <InputLabel id="remark-select-label">Remark</InputLabel>
+                <Select
+                  labelId="remark-select-label"
+                  value={selectedRemark}
+                  label="Remark"
+                  onChange={(e) => {
+                    setSelectedRemark(e.target.value);
+                    setPage(1);
+                  }}
+                >
+                  <MenuItem value=""><em>All Remarks</em></MenuItem>
+                  <MenuItem value="Delivered">Delivered</MenuItem>
+                  <MenuItem value="Shipped">Shipped</MenuItem>
+                  <MenuItem value="Not yet shipped">Not yet shipped</MenuItem>
+                  <MenuItem value="Processing">Processing</MenuItem>
+                  <MenuItem value="Delayed">Delayed</MenuItem>
+                  <MenuItem value="__NO_REMARK__">No Remark</MenuItem>
                 </Select>
               </FormControl>
 

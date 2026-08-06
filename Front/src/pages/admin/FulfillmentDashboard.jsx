@@ -439,9 +439,14 @@ const MobileOrderCard = memo(function MobileOrderCard({ order, index, onCopy, on
             />
             {order.cancelState && order.cancelState !== 'NONE_REQUESTED' && (
               <Chip
-                label={order.cancelState === 'CANCELED' ? 'Canceled' : 'Cancel Req'}
+                label={
+                  order.cancelState === 'CANCEL_REQUESTED' ? 'Cancel Requested' :
+                  order.cancelState === 'CANCEL_REJECTED' ? 'Cancel Rejected' :
+                  order.cancelState
+                }
                 size="small"
-                color={order.cancelState === 'CANCELED' ? 'error' : 'warning'}
+                color={order.cancelState === 'CANCEL_REJECTED' ? 'error' : 'warning'}
+                variant="outlined"
                 sx={{ fontSize: '0.65rem', height: 20 }}
               />
             )}
