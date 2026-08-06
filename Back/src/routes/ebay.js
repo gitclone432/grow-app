@@ -3071,11 +3071,13 @@ router.get('/cancelled-orders', async (req, res) => {
   try {
     const { startDate, endDate, sellerId, marketplace, page = 1, limit = 50, sortBy, sortDir } = req.query;
 
-    console.log(`[Cancelled Orders] Fetching all cancellation orders`);
+    console.log(`[Cancelled Orders] Fetching cancellation orders with CANCEL_REQUESTED and CANCEL_REJECTED status`);
 
     // Build query for cancellation states
+    // Only show orders with CANCEL_REQUESTED and CANCEL_REJECTED status
+    // Exclude CANCEL_CLOSED_WITH_REFUND and other resolved statuses
     const query = {
-      cancelState: { $in: ['CANCEL_REQUESTED', 'IN_PROGRESS', 'CANCELED', 'CANCELLED'] }
+      cancelState: { $in: ['CANCEL_REQUESTED', 'CANCEL_REJECTED'] }
     };
 
     // Add filters
@@ -3209,7 +3211,7 @@ const STORED_ORDER_LIST_OMIT = '-paymentSummary -fulfillmentStartInstructions -e
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, sortBy, sortDir, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, sortBy, sortDir, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient, remark } = req.query;
 
   try {
     let query = {};
@@ -3275,6 +3277,20 @@ router.get('/stored-orders', async (req, res) => {
     // Amazon Account Filter
     if (amazonAccount && amazonAccount !== '') {
       query.amazonAccount = amazonAccount;
+    }
+
+    // Remark Filter
+    if (remark && remark !== '') {
+      if (remark === '__NO_REMARK__') {
+        // Filter for orders with no remark (empty, null, or doesn't exist)
+        query.$or = [
+          { remark: { $exists: false } },
+          { remark: null },
+          { remark: '' }
+        ];
+      } else {
+        query.remark = remark;
+      }
     }
 
     // Apply search filters

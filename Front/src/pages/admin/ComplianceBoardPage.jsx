@@ -1575,6 +1575,87 @@ function ComplianceBoardPage() {
     init();
   }, [fetchOrders]);
 
+  // Auto-refill empty/under-filled columns from next pages
+  useEffect(() => {
+    const autoRefillColumns = async () => {
+      try {
+        // Define column limits based on category
+        const COLUMN_LIMITS = {
+          [COLUMN_STATUS.TODO]: 50,
+          [COLUMN_STATUS.OUT_OF_STOCK]: 50,
+          [COLUMN_STATUS.CANCELLATION]: 50,
+          [COLUMN_STATUS.ADDRESS_ISSUE]: 50,
+          [COLUMN_STATUS.LATE_DELIVERY]: 50,
+          [COLUMN_STATUS.NOT_FULFILLED]: 50,
+          [COLUMN_STATUS.FULFILLED]: 100,
+          [COLUMN_STATUS.BUYER_CONFIRMATION]: 50,
+          // Return/Refund columns
+          [COLUMN_STATUS.CASE_OPENED]: 500,
+          [COLUMN_STATUS.CASE_NOT_OPENED]: 500,
+          [COLUMN_STATUS.RETURN_FOLLOW_UP]: 500,
+          [COLUMN_STATUS.PROVIDE_RETURN_LABEL]: 500,
+          [COLUMN_STATUS.BUYER_DROP_OFF]: 500,
+          [COLUMN_STATUS.ITEM_DELIVERED]: 500,
+          [COLUMN_STATUS.PARTIAL_REFUND]: 500,
+          [COLUMN_STATUS.FULL_REFUND]: 500,
+          [COLUMN_STATUS.REPLACEMENT]: 500,
+          // Cancellation columns
+          [COLUMN_STATUS.CANCELLATION_REQUEST]: 500,
+          [COLUMN_STATUS.ACCEPTED]: 500,
+          [COLUMN_STATUS.DECLINED]: 500,
+          // INR columns
+          [COLUMN_STATUS.INR_CASE_OPENED]: 500,
+          [COLUMN_STATUS.INR_FOLLOW_UP]: 500,
+          [COLUMN_STATUS.INR_TRACKING_ID_UPLOAD]: 500,
+          [COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN]: 500,
+          [COLUMN_STATUS.INR_FULLY_REFUNDED]: 500,
+          [COLUMN_STATUS.INR_PARTIAL_REFUND]: 500,
+          [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]: 500,
+        };
+        
+        // Check which columns need refilling
+        const columnsNeedingRefill = [];
+        
+        Object.entries(orders).forEach(([status, items]) => {
+          const columnLimit = COLUMN_LIMITS[status] || 50;
+          const currentCount = items.length;
+          const statsCount = statusCounts[status] ?? currentCount;
+          
+          // If column has less than its limit and stats say there are more orders out there
+          if (currentCount < columnLimit && currentCount < statsCount) {
+            const needed = Math.min(columnLimit - currentCount, statsCount - currentCount);
+            if (needed > 0) {
+              columnsNeedingRefill.push({
+                status,
+                currentCount,
+                statsCount,
+                columnLimit,
+                needed
+              });
+            }
+          }
+        });
+        
+        if (columnsNeedingRefill.length > 0) {
+          console.log(`[AUTO-REFILL-COLUMNS] Found ${columnsNeedingRefill.length} columns needing refill:`, 
+            columnsNeedingRefill.map(c => `${c.status}(${c.currentCount}/${c.needed})`).join(', ')
+          );
+          
+          if (currentPage <= pagination.totalPages && pagination.totalPages > 1) {
+            await refillColumnsFromNextPages(columnsNeedingRefill);
+          }
+        }
+      } catch (err) {
+        console.warn('[AUTO-REFILL-COLUMNS] Error during auto-refill:', err);
+      }
+    };
+
+    // Only auto-refill if not currently loading
+    if (!loading && statusCounts && Object.keys(statusCounts).length > 0) {
+      autoRefillColumns();
+    }
+  }, [orders, currentPage, pagination, selectedCategory, loading, statusCounts]);
+
   const fetchSellers = async () => {
     try {
       const { data } = await api.get('/sellers/all');
@@ -2273,6 +2354,213 @@ function ComplianceBoardPage() {
     return null;
   };
 
+  // Smart per-column refill from next pages respecting stats counts
+  const refillColumnsFromNextPages = async (columnsNeedingRefill) => {
+    try {
+      const expectedPageSize = ['return_refund', 'inr', 'cancellation'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT;
+      
+      // Track how many we need for each status
+      const statusQuotas = {};
+      columnsNeedingRefill.forEach(col => {
+        statusQuotas[col.status] = col.needed;
+      });
+      
+      console.log(`[REFILL-COLUMNS] Starting smart column refill. Quotas:`, statusQuotas);
+      
+      // Fetch ALL remaining pages in parallel
+      const pagesToFetch = [];
+      for (let pageNum = currentPage + 1; pageNum <= pagination.totalPages; pageNum++) {
+        pagesToFetch.push(pageNum);
+      }
+      
+      if (pagesToFetch.length === 0) {
+        console.log(`[REFILL-COLUMNS] No more pages to fetch`);
+        return;
+      }
+      
+      console.log(`[REFILL-COLUMNS] Fetching ${pagesToFetch.length} pages in parallel to fill: ${columnsNeedingRefill.map(c => c.status).join(', ')}`);
+      
+      // Fetch all pages in parallel
+      const fetchPromises = pagesToFetch.map(pageNum =>
+        (async () => {
+          try {
+            const params = {
+              category: selectedCategory,
+              page: pageNum,
+              limit: expectedPageSize,
+              ...buildBoardFilterParams()
+            };
+            Object.assign(params, buildDateParams());
+            
+            const response = await api.get('/orders/compliance-board', {
+              params,
+              timeout: BOARD_REQUEST_TIMEOUT_MS,
+            });
+            
+            return { pageNum, orders: response.data?.orders || [] };
+          } catch (err) {
+            console.warn(`[REFILL-COLUMNS] Failed to fetch page ${pageNum}:`, err);
+            return { pageNum, orders: [] };
+          }
+        })()
+      );
+      
+      const fetchResults = await Promise.all(fetchPromises);
+      
+      // Collect orders per status respecting quotas
+      const accumulatedOrders = {};
+      columnsNeedingRefill.forEach(col => {
+        accumulatedOrders[col.status] = [];
+      });
+      
+      // Process all fetched pages
+      fetchResults.forEach(({ pageNum, orders: pageOrders }) => {
+        console.log(`[REFILL-COLUMNS] Page ${pageNum} returned ${pageOrders.length} orders`);
+        
+        pageOrders.forEach((order, index) => {
+          const rawStatus = order.complianceBoardStatus || COLUMN_STATUS.TODO;
+          const status = rawStatus === 'inr_case_closed' ? COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED : rawStatus;
+          
+          // Only collect if this status needs refilling AND we haven't hit the quota
+          if (accumulatedOrders[status] && statusQuotas[status] > 0) {
+            accumulatedOrders[status].push({
+              ...order,
+              _id: toDraggableId('order', order, `${selectedCategory}-page${pageNum}-${index}`),
+            });
+            statusQuotas[status]--;
+          }
+        });
+      });
+      
+      // Calculate total orders collected
+      const totalToMerge = Object.values(accumulatedOrders).reduce((sum, arr) => sum + arr.length, 0);
+      
+      if (totalToMerge > 0) {
+        console.log(`[REFILL-COLUMNS] Merging ${totalToMerge} orders into columns:`, 
+          Object.fromEntries(Object.entries(accumulatedOrders).map(([status, arr]) => [status, arr.length]))
+        );
+        
+        setOrders((prevOrders) => {
+          const merged = { ...prevOrders };
+          Object.entries(accumulatedOrders).forEach(([status, newOrders]) => {
+            if (newOrders.length > 0) {
+              merged[status] = [...(merged[status] || []), ...newOrders];
+              console.log(`[REFILL-COLUMNS] Column ${status}: ${(merged[status] || []).length - newOrders.length} → ${merged[status].length} orders`);
+            }
+          });
+          return merged;
+        });
+        
+        console.log(`[REFILL-COLUMNS] Successfully merged ${totalToMerge} orders into columns`);
+      } else {
+        console.log(`[REFILL-COLUMNS] No matching orders found to merge`);
+      }
+    } catch (err) {
+      console.warn('[REFILL-COLUMNS] Failed to refill columns from next pages:', err);
+    }
+  };
+
+  // Refetch from next pages if current page is under-filled after orders are moved
+  const refillCurrentPageFromNextPages = async () => {
+    try {
+      const expectedPageSize = ['return_refund', 'inr', 'cancellation'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT;
+      const currentOrderCount = Object.values(orders).reduce((sum, col) => sum + col.length, 0);
+      
+      console.log(`[REFILL-PAGE] Starting refill: page ${currentPage} has ${currentOrderCount}/${expectedPageSize} orders, totalPages: ${pagination.totalPages}`);
+      
+      if (currentOrderCount >= expectedPageSize) {
+        console.log(`[REFILL-PAGE] Page is already full, no refill needed`);
+        return;
+      }
+      
+      if (currentPage >= pagination.totalPages) {
+        console.log(`[REFILL-PAGE] Already on last page, no refill needed`);
+        return;
+      }
+      
+      // Fetch ALL remaining pages in parallel, then merge into current page
+      const pagesToFetch = [];
+      for (let pageNum = currentPage + 1; pageNum <= pagination.totalPages; pageNum++) {
+        pagesToFetch.push(pageNum);
+      }
+      
+      console.log(`[REFILL-PAGE] Fetching ${pagesToFetch.length} pages in parallel: ${pagesToFetch.join(', ')}`);
+      
+      // Fetch all pages in parallel
+      const fetchPromises = pagesToFetch.map(pageNum =>
+        (async () => {
+          try {
+            const params = {
+              category: selectedCategory,
+              page: pageNum,
+              limit: expectedPageSize,
+              ...buildBoardFilterParams()
+            };
+            Object.assign(params, buildDateParams());
+            
+            const response = await api.get('/orders/compliance-board', {
+              params,
+              timeout: BOARD_REQUEST_TIMEOUT_MS,
+            });
+            
+            return { pageNum, orders: response.data?.orders || [] };
+          } catch (err) {
+            console.warn(`[REFILL-PAGE] Failed to fetch page ${pageNum}:`, err);
+            return { pageNum, orders: [] };
+          }
+        })()
+      );
+      
+      const fetchResults = await Promise.all(fetchPromises);
+      
+      // Accumulate all orders from all fetched pages
+      const allAccumulatedOrders = {};
+      Object.keys(orders).forEach(key => {
+        allAccumulatedOrders[key] = [];
+      });
+      
+      let totalAccumulated = 0;
+      fetchResults.forEach(({ pageNum, orders: pageOrders }) => {
+        console.log(`[REFILL-PAGE] Page ${pageNum} returned ${pageOrders.length} orders`);
+        
+        pageOrders.forEach((order, index) => {
+          const rawStatus = order.complianceBoardStatus || COLUMN_STATUS.TODO;
+          const status = rawStatus === 'inr_case_closed' ? COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED : rawStatus;
+          if (allAccumulatedOrders[status]) {
+            allAccumulatedOrders[status].push({
+              ...order,
+              _id: toDraggableId('order', order, `${selectedCategory}-page${pageNum}-${index}`),
+            });
+            totalAccumulated++;
+          }
+        });
+      });
+      
+      // Merge all accumulated orders at once
+      if (totalAccumulated > 0) {
+        console.log(`[REFILL-PAGE] Merging ${totalAccumulated} orders from pages ${currentPage + 1} to ${pagination.totalPages}`);
+        
+        setOrders((prevOrders) => {
+          const merged = { ...prevOrders };
+          Object.keys(allAccumulatedOrders).forEach((status) => {
+            merged[status] = [...(merged[status] || []), ...allAccumulatedOrders[status]];
+          });
+          console.log(`[REFILL-PAGE] Merged orders - new column counts:`, Object.fromEntries(
+            Object.entries(merged).map(([status, items]) => [status, items.length])
+          ));
+          return merged;
+        });
+        
+        console.log(`[REFILL-PAGE] Successfully merged ${totalAccumulated} orders into page ${currentPage}`);
+      } else {
+        console.log(`[REFILL-PAGE] No orders found to merge`);
+      }
+    } catch (err) {
+      console.warn('[REFILL-PAGE] Failed to refill current page from next pages:', err);
+      // Non-critical error, don't break the flow
+    }
+  };
+
   const applyOrderColumn = async (status) => {
     const moves = Object.values(pendingOrderMoves[status] || {});
     console.log(`[APPLY-ORDER] Starting applyOrderColumn for status: ${status}, moves count:`, moves.length);
@@ -2381,6 +2669,43 @@ function ComplianceBoardPage() {
       });
       console.log(`[APPLY-ORDER] Successfully applied ${moves.length} order(s) to ${status}`);
       setSnackbar({ open: true, message: `Applied ${moves.length} order(s) to ${getColumnTitle(status)}` });
+      
+      // Smart refill: check which columns need filling after this apply
+      const COLUMN_LIMITS = {
+        [COLUMN_STATUS.TODO]: 50,
+        [COLUMN_STATUS.OUT_OF_STOCK]: 50,
+        [COLUMN_STATUS.CANCELLATION]: 50,
+        [COLUMN_STATUS.ADDRESS_ISSUE]: 50,
+        [COLUMN_STATUS.LATE_DELIVERY]: 50,
+        [COLUMN_STATUS.NOT_FULFILLED]: 50,
+        [COLUMN_STATUS.FULFILLED]: 100,
+        [COLUMN_STATUS.BUYER_CONFIRMATION]: 50,
+      };
+      
+      const columnsNeedingRefill = [];
+      Object.entries(orders).forEach(([colStatus, items]) => {
+        const columnLimit = COLUMN_LIMITS[colStatus] || 50;
+        const currentCount = items.length;
+        const statsCount = statusCounts[colStatus] ?? currentCount;
+        
+        if (currentCount < columnLimit && currentCount < statsCount) {
+          const needed = Math.min(columnLimit - currentCount, statsCount - currentCount);
+          if (needed > 0) {
+            columnsNeedingRefill.push({
+              status: colStatus,
+              currentCount,
+              statsCount,
+              columnLimit,
+              needed
+            });
+          }
+        }
+      });
+      
+      if (columnsNeedingRefill.length > 0 && currentPage <= pagination.totalPages && pagination.totalPages > 1) {
+        console.log(`[APPLY-ORDER] After apply, refilling columns:`, columnsNeedingRefill.map(c => `${c.status}(need ${c.needed})`).join(', '));
+        await refillColumnsFromNextPages(columnsNeedingRefill);
+      }
     } catch (err) {
       console.error('[APPLY-ORDER] Failed to apply order column:', err);
       console.error('[APPLY-ORDER] Error details:', {
