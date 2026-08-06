@@ -629,8 +629,9 @@ export default function BuyerChatPage() {
       const { data } = await api.get('/ebay/conversation-meta/single', { params });
       // If data exists, fill state. If not, reset to empty/default.
       if (data && data._id) {
-        setMetaCategory(data.category);
-        setMetaCaseStatus(data.status || data.caseStatus || '');
+        setMetaCategory(data.category || '');
+        // Handle null status by converting to empty string for Select component
+        setMetaCaseStatus(data.status ? String(data.status) : (data.caseStatus || ''));
         setMetaPickedUpBy(data.pickedUpBy || '');
         setMetaChangeLog(data.changeLog || []);
       } else {
@@ -653,11 +654,6 @@ export default function BuyerChatPage() {
   }
 
   async function handleSaveMeta() {
-    if (!metaCaseStatus) {
-      alert("Please select a 'Status' field.");
-      return;
-    }
-
     setSavingMeta(true);
     try {
       const { data } = await api.post('/ebay/conversation-meta', {
@@ -671,6 +667,8 @@ export default function BuyerChatPage() {
         pickedUpBy: metaPickedUpBy || null
       });
       if (data?.meta?.changeLog) setMetaChangeLog(data.meta.changeLog);
+      // Refresh the meta data to show what was just saved
+      await fetchMeta(selectedThread);
     } catch (e) {
       alert("Failed to save tags: " + e.message);
     } finally {
@@ -1771,8 +1769,16 @@ export default function BuyerChatPage() {
                   </FormControl>
 
                   <FormControl size="small" sx={{ minWidth: 110, '& .MuiInputBase-root': { height: 32 } }}>
-                    <InputLabel sx={{ fontSize: '0.75rem' }}>Status</InputLabel>
-                    <Select value={metaCaseStatus} label="Status" onChange={(e) => setMetaCaseStatus(e.target.value)} sx={{ fontSize: '0.75rem' }}>
+                    <InputLabel shrink sx={{ fontSize: '0.75rem' }}>Status</InputLabel>
+                    <Select 
+                      value={metaCaseStatus} 
+                      label="Status" 
+                      displayEmpty
+                      notched
+                      onChange={(e) => setMetaCaseStatus(e.target.value)} 
+                      sx={{ fontSize: '0.75rem' }}
+                      renderValue={(selected) => selected || <em style={{ color: '#999' }}>Select</em>}
+                    >
                       <MenuItem value="">Select</MenuItem>
                       <MenuItem value="Case Not Opened">Case Not Opened</MenuItem>
                       <MenuItem value="Open">Open</MenuItem>
