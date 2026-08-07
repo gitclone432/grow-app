@@ -2969,6 +2969,22 @@ function ComplianceBoardPage() {
       }
     }
 
+    // Check if trying to move incomplete order to Fulfilled box in order_fulfillment category
+    if (selectedCategory === 'order_fulfillment' && destColumn === COLUMN_STATUS.FULFILLED) {
+      const sourceItems = orders[sourceColumn];
+      const movedOrder = sourceItems[source.index];
+      const isComplete = isOrderFulfillmentComplete(movedOrder);
+      
+      if (!isComplete) {
+        const missingFields = getMissingFulfillmentFields(movedOrder);
+        setSnackbar({
+          open: true,
+          message: `❌ Cannot move to Fulfilled: Missing fields - ${missingFields.join(', ')}`
+        });
+        return;
+      }
+    }
+
     // Create new state for orders
     const newOrders = { ...orders };
     const sourceItems = Array.from(newOrders[sourceColumn]);
@@ -4258,7 +4274,7 @@ function ComplianceBoardPage() {
             {statusOrders.slice(0, visibleCount).map((order, index) => {
               const isOrderFulfillmentCategory = selectedCategory === 'order_fulfillment';
               const isComplete = isOrderFulfillmentComplete(order);
-              const canDrag = !isOrderFulfillmentCategory || isComplete;
+              const canDrag = true;
               const missingFields = isOrderFulfillmentCategory ? getMissingFulfillmentFields(order) : [];
               
               return (
