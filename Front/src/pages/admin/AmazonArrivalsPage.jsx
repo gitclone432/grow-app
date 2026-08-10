@@ -41,6 +41,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import InfoIcon from '@mui/icons-material/Info';
 import api from '../../lib/api';
 import ChatModal from '../../components/ChatModal';
+import OrderDetailsModal from '../../components/OrderDetailsModal';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
 import SectionCard from '../../components/SectionCard.jsx';
 import { tableContainerSx, tableHeaderCellSx, tableBodyRowSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
@@ -254,6 +255,7 @@ export default function AmazonArrivalsPage() {
   const [editingArrivalDate, setEditingArrivalDate] = useState({}); // { [orderId]: 'YYYY-MM-DD' }
   const [savingArrivalDateId, setSavingArrivalDateId] = useState(null);
   const [selectedOrderForMessage, setSelectedOrderForMessage] = useState(null);
+  const [selectedOrderForDetails, setSelectedOrderForDetails] = useState(null);
   const [remarkConfirmOpen, setRemarkConfirmOpen] = useState(false);
   const [pendingRemarkUpdate, setPendingRemarkUpdate] = useState(null); // { orderId, remarkValue, order }
   const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
@@ -927,7 +929,12 @@ export default function AmazonArrivalsPage() {
                       </TableCell>
                       <TableCell>
                         <Stack direction="row" spacing={0.5} alignItems="center">
-                          <Typography variant="body2" fontWeight="medium" sx={{ color: 'primary.main' }}>
+                          <Typography 
+                            variant="body2" 
+                            fontWeight="medium" 
+                            sx={{ color: 'primary.main', cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}
+                            onClick={() => setSelectedOrderForDetails(order.orderId || order.legacyOrderId)}
+                          >
                             {order.orderId || order.legacyOrderId || '-'}
                           </Typography>
                           <IconButton
@@ -1132,6 +1139,14 @@ export default function AmazonArrivalsPage() {
             {snack.message}
           </Alert>
         </Snackbar>
+
+        {selectedOrderForDetails && (
+          <OrderDetailsModal
+            open={Boolean(selectedOrderForDetails)}
+            onClose={() => setSelectedOrderForDetails(null)}
+            orderId={selectedOrderForDetails}
+          />
+        )}
 
       {selectedOrderForMessage && (
         <ChatModal
