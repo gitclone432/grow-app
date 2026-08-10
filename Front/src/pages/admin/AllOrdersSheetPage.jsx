@@ -52,6 +52,129 @@ import { tableHeaderCellSx, tableBodyRowSx, tableContainerSx, yellowOutlinedButt
 import { BRAND_DARK, BRAND_YELLOW } from '../../constants/brandTheme.js';
 import { alpha } from '@mui/material/styles';
 import { sortSellersByName } from '../../lib/sellersSort';
+import { getTodayPtDateString } from '../../lib/pacificDate.js';
+import { getOrderEarnings as getDisplayOrderEarnings } from '../../utils/partialRefundEarnings';
+
+const EBAY_PER_ORDER_TID = 0.24;
+
+/** NET / P.Balance from the same live earnings shown in the Earnings column. */
+function getDisplayOrderNet(order) {
+  const fromApi = parseFloat(order?.net);
+  if (Number.isFinite(fromApi)) return fromApi;
+
+  const earnings = parseFloat(getDisplayOrderEarnings(order)) || 0;
+  const tds = parseFloat(order?.tds) || 0;
+  const tid = order?.tid != null && order?.tid !== ''
+    ? (parseFloat(order.tid) || 0)
+    : EBAY_PER_ORDER_TID;
+  return parseFloat((earnings - tds - tid).toFixed(2));
+}
+
+function getDisplayPBalanceInr(order) {
+  const fromApi = parseFloat(order?.pBalanceINR);
+  if (Number.isFinite(fromApi)) return fromApi;
+
+  const net = getDisplayOrderNet(order);
+  const rate = parseFloat(order?.ebayExchangeRate ?? order?.exchangeRate);
+  const resolvedRate = Number.isFinite(rate) && rate > 0 ? rate : 82;
+  return parseFloat((net * resolvedRate).toFixed(2));
+}
+
+function getDisplayOrderProfit(order) {
+  const fromApi = parseFloat(order?.profit);
+  if (Number.isFinite(fromApi)) return fromApi;
+
+  const pBalance = getDisplayPBalanceInr(order);
+  const aTotalInr = parseFloat(order?.amazonTotalINR) || 0;
+  const totalCC = parseFloat(order?.totalCC) || 0;
+  return parseFloat((pBalance - aTotalInr - totalCC).toFixed(2));
+}
+
+const createEmptyDateFilter = () => ({ mode: 'none', single: '', from: '', to: '' });
+
+const DATE_PRESET_MODES = new Set([
+  'last90',
+  'today',
+  'yesterday',
+  'thisMonth',
+  'lastMonth',
+  'thisYear',
+  'lastYear',
+]);
+
+/** Shift a YYYY-MM-DD calendar date by N days (timezone-agnostic calendar math). */
+const shiftYmd = (ymd, days) => {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+};
+
+/** Preset ranges use Pacific (America/Los_Angeles) calendar days — same as Fulfilment / Seller Analytics. */
+const getPresetDateRange = (mode) => {
+  const todayPt = getTodayPtDateString();
+  const [y, m] = todayPt.split('-').map(Number);
+
+  switch (mode) {
+    case 'today':
+      return { from: todayPt, to: todayPt };
+    case 'yesterday': {
+      const yesterday = shiftYmd(todayPt, -1);
+      return { from: yesterday, to: yesterday };
+    }
+    case 'last90':
+      return { from: shiftYmd(todayPt, -89), to: todayPt };
+    case 'thisMonth':
+      return {
+        from: `${y}-${String(m).padStart(2, '0')}-01`,
+        to: todayPt,
+      };
+    case 'lastMonth': {
+      const lastDayPrev = new Date(Date.UTC(y, m - 1, 0));
+      const from = `${lastDayPrev.getUTCFullYear()}-${String(lastDayPrev.getUTCMonth() + 1).padStart(2, '0')}-01`;
+      const to = `${lastDayPrev.getUTCFullYear()}-${String(lastDayPrev.getUTCMonth() + 1).padStart(2, '0')}-${String(lastDayPrev.getUTCDate()).padStart(2, '0')}`;
+      return { from, to };
+    }
+    case 'thisYear':
+      return { from: `${y}-01-01`, to: todayPt };
+    case 'lastYear':
+      return { from: `${y - 1}-01-01`, to: `${y - 1}-12-31` };
+    default:
+      return null;
+  }
+};
+
+const normalizeDateFilter = (value) => {
+  const base = value && typeof value === 'object'
+    ? { ...createEmptyDateFilter(), ...value }
+    : createEmptyDateFilter();
+
+  if (DATE_PRESET_MODES.has(base.mode)) {
+    const range = getPresetDateRange(base.mode);
+    if (range) {
+      return { ...base, single: '', from: range.from, to: range.to };
+    }
+  }
+
+  return base;
+};
+
+const applyDateModeChange = (mode, setFilter) => {
+  if (mode === 'none') {
+    setFilter(createEmptyDateFilter());
+    return;
+  }
+  const preset = getPresetDateRange(mode);
+  if (preset) {
+    setFilter({ mode, single: '', from: preset.from, to: preset.to });
+    return;
+  }
+  setFilter((prev) => ({
+    ...prev,
+    mode,
+    ...(mode === 'single' ? { from: '', to: '' } : { single: '' }),
+  }));
+};
+
 /** Toolbar section toggles — highlighted when open or filters from that section are active */
 const filterSectionToggleSx = (active) => ({
   fontSize: '0.75rem',
@@ -103,11 +226,6 @@ const EXCHANGE_RATE_DEFAULTS = {
   AMAZON_CA: 87
 };
 
-/**
- * Dual-row sticky header.
- * MUI stickyHeader defaults every th to top:0 — row 2 must override that or
- * Subtotal…Total_CC slides up under the section band when scrolling.
- */
 const stickyHeaderTableSx = {
   borderCollapse: 'separate',
   borderSpacing: 0,
@@ -326,6 +444,9 @@ export default function AllOrdersSheetPage() {
   const [filtersExpanded, setFiltersExpanded] = useState(() => getInitialState('filtersExpanded', false));
   const [excludeLowValue, setExcludeLowValue] = useState(() => getInitialState('excludeLowValue', true));
   const [excludeNoAmazonAccount, setExcludeNoAmazonAccount] = useState(() => getInitialState('excludeNoAmazonAccount', false));
+  const [excludeRefunded, setExcludeRefunded] = useState(() => getInitialState('excludeRefunded', true));
+  const [excludeCancelled, setExcludeCancelled] = useState(() => getInitialState('excludeCancelled', true));
+  const [exclusionBreakdown, setExclusionBreakdown] = useState(null);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(() => getInitialState('currentPage', 1));
@@ -339,15 +460,10 @@ export default function AllOrdersSheetPage() {
   const [accountProfitError, setAccountProfitError] = useState('');
   const [showAccountRanking, setShowAccountRanking] = useState(false);
   const [rankingMarketplace, setRankingMarketplace] = useState('');
-  const [rankingDateFilter, setRankingDateFilter] = useState({ mode: 'none', single: '', from: '', to: '' });
+  const [rankingDateFilter, setRankingDateFilter] = useState(() => createEmptyDateFilter());
 
-  // Date filter
-  const [dateFilter, setDateFilter] = useState(() => getInitialState('dateFilter', {
-    mode: 'none',
-    single: '',
-    from: '',
-    to: ''
-  }));
+  // Date filter — same modes/presets as Fulfilment / Seller Analytics
+  const [dateFilter, setDateFilter] = useState(() => normalizeDateFilter(getInitialState('dateFilter', createEmptyDateFilter())));
 
   // Profit filter
   const [profitFilter, setProfitFilter] = useState(() => getInitialState('profitFilter', {
@@ -399,6 +515,8 @@ export default function AllOrdersSheetPage() {
       subtotalFilter,
       excludeLowValue,
       excludeNoAmazonAccount,
+      excludeRefunded,
+      excludeCancelled,
       showProfitCards,
       showSubtotalCards,
       showExchangeRate
@@ -408,7 +526,7 @@ export default function AllOrdersSheetPage() {
     } catch (e) {
       console.error('Error saving to sessionStorage:', e);
     }
-  }, [selectedSeller, searchOrderId, searchBuyerName, searchItemNumber, searchProductName, searchMarketplace, filtersExpanded, currentPage, dateFilter, profitFilter, subtotalFilter, excludeLowValue, excludeNoAmazonAccount, showProfitCards, showSubtotalCards, showExchangeRate]);
+  }, [selectedSeller, searchOrderId, searchBuyerName, searchItemNumber, searchProductName, searchMarketplace, filtersExpanded, currentPage, dateFilter, profitFilter, subtotalFilter, excludeLowValue, excludeNoAmazonAccount, excludeRefunded, excludeCancelled, showProfitCards, showSubtotalCards, showExchangeRate]);
 
   // Keep Subtotal…Total_CC stuck just under the eBay/Amazon/CC band (not at top:0).
   useLayoutEffect(() => {
@@ -464,7 +582,7 @@ export default function AllOrdersSheetPage() {
     setSearchBuyerName('');
     setSearchItemNumber('');
     setSearchProductName('');
-    setDateFilter({ mode: 'none', single: '', from: '', to: '' });
+    setDateFilter(createEmptyDateFilter());
     setProfitFilter({ mode: 'none', single: '', from: '', to: '' });
     setSubtotalFilter({ mode: 'none', single: '', from: '', to: '' });
   }
@@ -472,7 +590,7 @@ export default function AllOrdersSheetPage() {
   async function fetchSellers() {
     setError('');
     try {
-      const { data } = await api.get('/sellers/all');
+      const { data } = await api.get('/sellers/all-unfiltered');
       setSellers(sortSellersByName(data || []));
     } catch (e) {
       setError('Failed to load sellers');
@@ -537,20 +655,20 @@ export default function AllOrdersSheetPage() {
     try {
       let ordersToExport = orders;
       
-      // If custom date range is selected, fetch all orders in that range
+      // Fetch all orders in the selected range (respects current page filters + exclusions)
       if (useCustomRange && csvStartDate && csvEndDate) {
-        const exportParams = {
-          startDate: csvStartDate,
-          endDate: csvEndDate,
-          excludeCancelled: true,
-        };
-
-        if (selectedSeller) exportParams.sellerId = selectedSeller;
-        if (searchMarketplace) exportParams.searchMarketplace = searchMarketplace;
+        const exportParams = buildAllOrdersUsdParams({
+          includePagination: false,
+          overrides: {
+            dateFilter: { mode: 'range', from: csvStartDate, to: csvEndDate, single: '' },
+          },
+        });
+        exportParams.includeCounts = 'false';
 
         ordersToExport = await fetchAllPages('/ebay/all-orders-usd', exportParams, {
           itemsKey: 'orders',
-          pagesKey: 'totalPages',
+          limit: 10000,
+          timeout: 180000,
         });
         
         if (ordersToExport.length === 0) {
@@ -616,18 +734,13 @@ export default function AllOrdersSheetPage() {
         const salesTax = showZero ? 0 : (parseFloat(order.salesTax) || 0);
         const transactionFees = showZero ? 0 : (parseFloat(order.transactionFees) || 0);
         const adFeeGeneral = showZero ? 0 : (parseFloat(order.adFeeGeneral) || 0);
-        const discount = showZero ? 0 : (parseFloat(order.discount) || 0);
+        const discount = showZero ? 0 : Math.abs(parseFloat(order.discount) || 0);
         const shipping = showZero ? 0 : (parseFloat(order.shipping) || 0);
         const orderTotal = showZero ? 0 : (order.orderTotal ?? ((parseFloat(order.pricingSummary?.total?.value) || 0) + (parseFloat(order.salesTax) || 0)));
         
-        // Use DB fields for financial calculations
-        const earnings = parseFloat(order.orderEarnings) || 0;
-        const tds = parseFloat(order.tds) || 0;
-        const tid = parseFloat(order.tid) || 0;
-        const net = parseFloat(order.net) || 0;
-
-        const exchangeRate = order.ebayExchangeRate || 85;
-        const pBalanceINR = parseFloat(order.pBalanceINR) || 0;
+        // Use live earnings (same as Earnings column) so NET = earnings − TDS − T.ID
+        const net = getDisplayOrderNet(order);
+        const pBalanceINR = getDisplayPBalanceInr(order);
 
         // Use DB fields for Amazon financial calculations
         const beforeTax = isCancelled ? 0 : (parseFloat(order.beforeTax) || 0);
@@ -638,7 +751,8 @@ export default function AllOrdersSheetPage() {
         const marketplaceFee = parseFloat(order.marketplaceFee) || 0;
         const igst = parseFloat(order.igst) || 0;
         const totalCC = parseFloat(order.totalCC) || 0;
-        const profit = pBalanceINR - aTotalInr - totalCC;
+        const profit = getDisplayOrderProfit(order);
+        const exchangeRate = order.ebayExchangeRate ?? order.exchangeRate ?? 82;
 
         return [
           order.seller?.user?.username || '-',
@@ -654,12 +768,12 @@ export default function AllOrdersSheetPage() {
           discount.toFixed(2),
           transactionFees.toFixed(2),
           adFeeGeneral.toFixed(2),
-          earnings.toFixed(2),
+          (parseFloat(getDisplayOrderEarnings(order)) || 0).toFixed(2),
           orderTotal.toFixed(2),
-          tds.toFixed(2),
-          tid.toFixed(2),
+          (parseFloat(order.tds) || 0).toFixed(2),
+          (order.tid != null && order.tid !== '' ? (parseFloat(order.tid) || 0) : EBAY_PER_ORDER_TID).toFixed(2),
           net.toFixed(2),
-          exchangeRate.toFixed(5),
+          Number(exchangeRate).toFixed(5),
           pBalanceINR.toFixed(2),
           beforeTax.toFixed(2),
           estimatedTax.toFixed(2),
@@ -690,9 +804,11 @@ export default function AllOrdersSheetPage() {
       const url = URL.createObjectURL(blob);
       
       link.setAttribute('href', url);
-      const fileName = csvFileName.trim() 
-        ? `${csvFileName.trim()}.csv` 
-        : `all_orders_sheet_${new Date().toISOString().split('T')[0]}.csv`;
+      const fileName = csvFileName.trim()
+        ? `${csvFileName.trim()}.csv`
+        : useCustomRange && csvStartDate && csvEndDate
+          ? `all_orders_${csvStartDate}_to_${csvEndDate}.csv`
+          : `all_orders_sheet_${new Date().toISOString().split('T')[0]}.csv`;
       link.setAttribute('download', fileName);
       link.style.visibility = 'hidden';
       
@@ -701,6 +817,7 @@ export default function AllOrdersSheetPage() {
       document.body.removeChild(link);
       
       if (useCustomRange) {
+        alert(`Exported ${ordersToExport.length} order${ordersToExport.length !== 1 ? 's' : ''} to CSV.`);
         setShowExportModal(false);
         setCsvStartDate('');
         setCsvEndDate('');
@@ -708,7 +825,7 @@ export default function AllOrdersSheetPage() {
       }
     } catch (error) {
       console.error('CSV export error:', error);
-      alert('Failed to export CSV');
+      alert(`Failed to export CSV: ${error?.response?.data?.error || error.message || 'Unknown error'}`);
     } finally {
       setExportingCSV(false);
     }
@@ -719,7 +836,8 @@ export default function AllOrdersSheetPage() {
     const activeMarketplace = overrides.searchMarketplace !== undefined ? overrides.searchMarketplace : searchMarketplace;
     const isSingleDate = activeDateFilter.mode === 'single' && activeDateFilter.single;
     const params = {
-      excludeCancelled: true,
+      excludeCancelled: excludeCancelled ? 'true' : 'false',
+      excludeRefunded: excludeRefunded ? 'true' : 'false',
     };
 
     if (includePagination) {
@@ -739,9 +857,12 @@ export default function AllOrdersSheetPage() {
     if (activeDateFilter.mode === 'single' && activeDateFilter.single) {
       params.startDate = activeDateFilter.single;
       params.endDate = activeDateFilter.single;
-    } else if (activeDateFilter.mode === 'range') {
-      if (activeDateFilter.from) params.startDate = activeDateFilter.from;
-      if (activeDateFilter.to) params.endDate = activeDateFilter.to;
+    } else if (activeDateFilter.mode === 'range' || DATE_PRESET_MODES.has(activeDateFilter.mode)) {
+      const resolved = DATE_PRESET_MODES.has(activeDateFilter.mode)
+        ? (getPresetDateRange(activeDateFilter.mode) || activeDateFilter)
+        : activeDateFilter;
+      if (resolved.from) params.startDate = resolved.from;
+      if (resolved.to) params.endDate = resolved.to;
     }
 
     if (profitFilter.mode === 'single' && profitFilter.single !== '') {
@@ -801,6 +922,7 @@ export default function AllOrdersSheetPage() {
         setTotalPages(data.pagination.totalPages);
         setTotalOrders(data.pagination.totalOrders);
         setRawCount(data.pagination.rawCount ?? null);
+        setExclusionBreakdown(data.pagination.exclusionBreakdown || null);
       }
 
       if (data?.counts) {
@@ -819,6 +941,7 @@ export default function AllOrdersSheetPage() {
       setOrders([]);
       setCounts({ uniqueCategories: 0, uniqueRanges: 0, uniqueProducts: 0, categoryData: [], rangeData: [], productData: [] });
       setRawCount(null);
+      setExclusionBreakdown(null);
       setFilteredTotals(null);
       setAccountProfitRows([]);
       const status = e.response?.status;
@@ -886,6 +1009,14 @@ export default function AllOrdersSheetPage() {
     const num = parseFloat(value);
     if (isNaN(num)) return '-';
     return `$${num.toFixed(2)}`;
+  };
+
+  /** eBay discounts are often negative; show as positive — same as Fulfilment. */
+  const formatDiscount = (value) => {
+    if (value == null || value === '') return '-';
+    const num = parseFloat(value);
+    if (isNaN(num)) return '-';
+    return `$${Math.abs(num).toFixed(2)}`;
   };
 
   const formatInr = (value) => {
@@ -1063,14 +1194,15 @@ export default function AllOrdersSheetPage() {
     // Using high precision to match backend calculation
     const ebayEarnings = tryPrice + newDiscount - newTransactionFees - newAdFeeGeneral;
     
-    // TDS and TID calculations (round to match backend)
-    const newTDS = Math.round(newOrderTotal * 0.01 * 100) / 100;
+    // TDS: 0.1% of (try) subtotal — Poll TDS replaces with eBay Finances on saved orders
+    const newTDS = Math.round((tryPrice || parseFloat(order.subtotal) || 0) * 0.001 * 100) / 100;
     const newTID = 0.24;
     const newNet = Math.round((ebayEarnings - newTDS - newTID) * 100) / 100;
     
-    // Convert to INR
-    const ebayExchangeRate = parseFloat(order.ebayExchangeRate) || 85;
-    const newPBalanceINR = Math.round(newNet * ebayExchangeRate * 100) / 100;
+    // Convert to INR — prefer stored/API rate, else backend default (82 for EBAY)
+    const ebayExchangeRate = parseFloat(order.ebayExchangeRate ?? order.exchangeRate);
+    const resolvedRate = Number.isFinite(ebayExchangeRate) && ebayExchangeRate > 0 ? ebayExchangeRate : 82;
+    const newPBalanceINR = Math.round(newNet * resolvedRate * 100) / 100;
     
     // Get Amazon and CC costs
     const amazonTotalINR = parseFloat(order.amazonTotalINR) || 0;
@@ -1177,6 +1309,9 @@ export default function AllOrdersSheetPage() {
             {csvStartDate && csvEndDate && (
               <Alert severity="info">
                 Will export all orders from {new Date(csvStartDate).toLocaleDateString()} to {new Date(csvEndDate).toLocaleDateString()}
+                {selectedSeller || searchMarketplace || excludeRefunded || excludeCancelled || excludeLowValue || excludeNoAmazonAccount
+                  ? ' (using your current seller, marketplace, and exclusion filters).'
+                  : '.'}
               </Alert>
             )}
           </Stack>
@@ -1294,17 +1429,24 @@ export default function AllOrdersSheetPage() {
             </Select>
           </FormControl>
 
-          <FormControl size="small" sx={{ minWidth: 130 }}>
+          <FormControl size="small" sx={{ minWidth: 150 }}>
             <InputLabel id="date-mode-label">Date Mode</InputLabel>
             <Select
               labelId="date-mode-label"
               value={dateFilter.mode}
               label="Date Mode"
-              onChange={(e) => setDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+              onChange={(e) => applyDateModeChange(e.target.value, setDateFilter)}
             >
               <MenuItem value="none">None</MenuItem>
               <MenuItem value="single">Single Day</MenuItem>
               <MenuItem value="range">Date Range</MenuItem>
+              <MenuItem value="today">Today</MenuItem>
+              <MenuItem value="yesterday">Yesterday</MenuItem>
+              <MenuItem value="thisMonth">This Month</MenuItem>
+              <MenuItem value="lastMonth">Last Month</MenuItem>
+              <MenuItem value="last90">Last 90 Days</MenuItem>
+              <MenuItem value="thisYear">This Year</MenuItem>
+              <MenuItem value="lastYear">Last Year</MenuItem>
             </Select>
           </FormControl>
 
@@ -1343,6 +1485,30 @@ export default function AllOrdersSheetPage() {
             </>
           )}
 
+          <FormControlLabel
+            control={
+              <Switch
+                checked={excludeRefunded}
+                onChange={(e) => setExcludeRefunded(e.target.checked)}
+                size="small"
+                color="error"
+              />
+            }
+            label={<Typography variant="caption">Hide Refunded</Typography>}
+            sx={{ mr: 0.5 }}
+          />
+          <FormControlLabel
+            control={
+              <Switch
+                checked={excludeCancelled}
+                onChange={(e) => setExcludeCancelled(e.target.checked)}
+                size="small"
+                color="secondary"
+              />
+            }
+            label={<Typography variant="caption">Hide Cancelled</Typography>}
+            sx={{ mr: 0.5 }}
+          />
           <FormControlLabel
             control={
               <Switch
@@ -1796,7 +1962,34 @@ export default function AllOrdersSheetPage() {
                 )}
               </Typography>
               {rawCount !== null && (
-                <Tooltip title="Total orders in this date/seller/marketplace scope before any exclusion filters (matches Fulfillment Dashboard count)" arrow>
+                <Tooltip
+                  title={(() => {
+                    const parts = [
+                      'Raw = same date/seller/marketplace scope as Fulfilment (before hide toggles).',
+                    ];
+                    if (exclusionBreakdown) {
+                      const lines = [];
+                      if (excludeRefunded && exclusionBreakdown.refunded > 0) {
+                        lines.push(`Refunded/partial: ${exclusionBreakdown.refunded}`);
+                      }
+                      if (excludeCancelled && exclusionBreakdown.cancelled > 0) {
+                        lines.push(`Cancelled: ${exclusionBreakdown.cancelled}`);
+                      }
+                      if (excludeLowValue && exclusionBreakdown.lowValue > 0) {
+                        lines.push(`Subtotal <$3: ${exclusionBreakdown.lowValue}`);
+                      }
+                      if (excludeNoAmazonAccount && exclusionBreakdown.noAmazonAccount > 0) {
+                        lines.push(`No Amazon account: ${exclusionBreakdown.noAmazonAccount}`);
+                      }
+                      if (lines.length) {
+                        parts.push(`In this scope: ${lines.join(' · ')} (categories can overlap).`);
+                      }
+                      parts.push('Turn off Hide Refunded / Hide Cancelled / Hide <$3 to include them.');
+                    }
+                    return parts.join(' ');
+                  })()}
+                  arrow
+                >
                   <Typography
                     variant="caption"
                     sx={{
@@ -1809,7 +2002,19 @@ export default function AllOrdersSheetPage() {
                     Raw total: {rawCount}
                     {rawCount !== totalOrders && (
                       <Typography component="span" sx={{ ml: 0.5, color: 'warning.main', fontWeight: 'bold', fontStyle: 'normal' }}>
-                        (−{rawCount - totalOrders} excluded)
+                        (−{rawCount - totalOrders} excluded
+                        {exclusionBreakdown && (excludeRefunded || excludeCancelled || excludeLowValue || excludeNoAmazonAccount) && (
+                          <>
+                            {': '}
+                            {[
+                              excludeRefunded && exclusionBreakdown.refunded > 0 && `${exclusionBreakdown.refunded} refunded`,
+                              excludeCancelled && exclusionBreakdown.cancelled > 0 && `${exclusionBreakdown.cancelled} cancelled`,
+                              excludeLowValue && exclusionBreakdown.lowValue > 0 && `${exclusionBreakdown.lowValue} <$3`,
+                              excludeNoAmazonAccount && exclusionBreakdown.noAmazonAccount > 0 && `${exclusionBreakdown.noAmazonAccount} no Amazon`,
+                            ].filter(Boolean).join(', ')}
+                          </>
+                        )}
+                        )
                       </Typography>
                     )}
                   </Typography>
@@ -1822,6 +2027,8 @@ export default function AllOrdersSheetPage() {
                   dateFilter.mode !== 'none' && 'Date',
                   profitFilter.mode !== 'none' && 'Profit',
                   subtotalFilter.mode !== 'none' && 'Subtotal',
+                  excludeRefunded && 'Hiding refunded',
+                  excludeCancelled && 'Hiding cancelled',
                   excludeLowValue && 'Hiding <$3',
                   excludeNoAmazonAccount && 'Hiding no Amazon account',
                   searchOrderId && 'Order ID',
@@ -2012,16 +2219,23 @@ export default function AllOrdersSheetPage() {
                 <MenuItem value="EBAY_GB">eBay UK</MenuItem>
               </Select>
             </FormControl>
-            <FormControl size="small" sx={{ width: 145 }}>
+            <FormControl size="small" sx={{ width: 150 }}>
               <InputLabel>Date Mode</InputLabel>
               <Select
                 value={rankingDateFilter.mode}
                 label="Date Mode"
-                onChange={(e) => setRankingDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+                onChange={(e) => applyDateModeChange(e.target.value, setRankingDateFilter)}
               >
                 <MenuItem value="none">None</MenuItem>
                 <MenuItem value="single">Single Day</MenuItem>
                 <MenuItem value="range">Date Range</MenuItem>
+                <MenuItem value="today">Today</MenuItem>
+                <MenuItem value="yesterday">Yesterday</MenuItem>
+                <MenuItem value="thisMonth">This Month</MenuItem>
+                <MenuItem value="lastMonth">Last Month</MenuItem>
+                <MenuItem value="last90">Last 90 Days</MenuItem>
+                <MenuItem value="thisYear">This Year</MenuItem>
+                <MenuItem value="lastYear">Last Year</MenuItem>
               </Select>
             </FormControl>
             {rankingDateFilter.mode === 'single' && (
@@ -2162,7 +2376,7 @@ export default function AllOrdersSheetPage() {
 
       {/* Orders Table */}
       {orders.length === 0 ? (
-        <Alert severity="info">No orders found{(selectedSeller || searchMarketplace || dateFilter.mode !== 'none' || profitFilter.mode !== 'none' || subtotalFilter.mode !== 'none' || excludeLowValue || excludeNoAmazonAccount || searchOrderId || searchBuyerName) ? ' with current filters' : ''}</Alert>
+        <Alert severity="info">No orders found{(selectedSeller || searchMarketplace || dateFilter.mode !== 'none' || profitFilter.mode !== 'none' || subtotalFilter.mode !== 'none' || excludeRefunded || excludeCancelled || excludeLowValue || excludeNoAmazonAccount || searchOrderId || searchBuyerName) ? ' with current filters' : ''}</Alert>
       ) : (
         <TableContainer
           component={Paper}
@@ -2239,7 +2453,7 @@ export default function AllOrdersSheetPage() {
                   </Tooltip>
                 </TableCell>
                 <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
-                  <Tooltip title="Earnings = Subtotal + Discount - Sales Tax - Transaction Fees - Ad Fee - Shipping" arrow placement="top">
+                  <Tooltip title="Earnings = Subtotal − Discount − Transaction Fees − Ad Fee − Shipping" arrow placement="top">
                     <Box component="span">Earnings</Box>
                   </Tooltip>
                 </TableCell>
@@ -2249,7 +2463,7 @@ export default function AllOrdersSheetPage() {
                   </Tooltip>
                 </TableCell>
                 <TableCell sx={{ ...tableHeaderCellSx, cursor: 'help' }} align="right">
-                  <Tooltip title="TDS from eBay Finances (TAX_DEDUCTION_AT_SOURCE), else 1% of order total" arrow placement="top">
+                  <Tooltip title="TDS from eBay Finances (TAX_DEDUCTION_AT_SOURCE), else 0.1% of subtotal" arrow placement="top">
                     <Box component="span">TDS</Box>
                   </Tooltip>
                 </TableCell>
@@ -2395,15 +2609,23 @@ export default function AllOrdersSheetPage() {
                         <TableCell align="right">{showZero ? '$0.00' : formatCurrency(order.subtotal)}</TableCell>
                         <TableCell align="right">{showZero ? '$0.00' : formatCurrency(order.shipping)}</TableCell>
                         <TableCell align="right">{showZero ? '$0.00' : formatCurrency(order.salesTax)}</TableCell>
-                        <TableCell align="right">{showZero ? '$0.00' : formatCurrency(order.discount)}</TableCell>
+                        <TableCell align="right">{showZero ? '$0.00' : formatDiscount(order.discount)}</TableCell>
                         <TableCell align="right">{showZero ? '$0.00' : formatCurrency(order.transactionFees)}</TableCell>
                         <TableCell align="right">{showZero ? '$0.00' : formatCurrency(order.adFeeGeneral)}</TableCell>
                       </>
                     );
                   })()}
                   {/* Earnings (from DB), TDS, T.ID, NET, Exchange Rate, P.Balance */}
-                  <TableCell align="right">
-                    {formatCurrency(order.orderEarnings)}
+                  <TableCell
+                    align="right"
+                    sx={{
+                      color: (getDisplayOrderEarnings(order) ?? 0) < 0
+                        ? 'error.main'
+                        : 'success.main',
+                      fontWeight: 'bold',
+                    }}
+                  >
+                    {formatCurrency(getDisplayOrderEarnings(order))}
                   </TableCell>
                   <TableCell align="right">
                     {(() => {
@@ -2455,16 +2677,16 @@ export default function AllOrdersSheetPage() {
                       }}
                       title={order.tdsSource === 'finances'
                         ? 'From eBay Finances (TAX_DEDUCTION_AT_SOURCE) — same as All Orders (Fulfilment)'
-                        : '1% estimate — click Poll TDS to load Finances value'}
+                        : '0.1% of subtotal — click Poll TDS to load Finances value'}
                     >
                       {formatCurrency(order.tds)}
                     </Typography>
                   </TableCell>
                   <TableCell align="right">
-                    {formatCurrency(order.tid)}
+                    {formatCurrency(order.tid != null ? order.tid : EBAY_PER_ORDER_TID)}
                   </TableCell>
                   <TableCell align="right">
-                    {formatCurrency(order.net)}
+                    {formatCurrency(getDisplayOrderNet(order))}
                   </TableCell>
                   <TableCell align="right">
                     {(() => {
@@ -2474,8 +2696,8 @@ export default function AllOrdersSheetPage() {
                                          order.cancelStatus?.cancelState === 'CANCELLED';
                       if (isCancelled) return '-';
                       
-                      // Show manually set eBay exchange rate from DB
-                      const rate = order.ebayExchangeRate || 85;
+                      // Show eBay exchange rate from enriched API row
+                      const rate = order.ebayExchangeRate ?? order.exchangeRate ?? '—';
                       
                       return (
                         <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
@@ -2493,9 +2715,7 @@ export default function AllOrdersSheetPage() {
                       
                       if (isCancelled) return '₹0.00';
                       
-                      // Use pBalanceINR from DB
-                      const pBalance = order.pBalanceINR;
-                      if (pBalance == null) return '-';
+                      const pBalance = getDisplayPBalanceInr(order);
                       
                       return (
                         <Typography 
@@ -2505,7 +2725,7 @@ export default function AllOrdersSheetPage() {
                             color: pBalance < 0 ? 'error.main' : 'success.main'
                           }}
                         >
-                          ₹{parseFloat(pBalance).toFixed(2)}
+                          ₹{pBalance.toFixed(2)}
                         </Typography>
                       );
                     })()}
@@ -2629,11 +2849,7 @@ export default function AllOrdersSheetPage() {
                                          order.cancelStatus?.cancelState === 'CANCELLED';
                       const isPartiallyRefunded = order.orderPaymentStatus === 'PARTIALLY_REFUNDED';
                       
-                      // Use all values from DB
-                      const pBalance = parseFloat(order.pBalanceINR) || 0;
-                      const aTotalInr = parseFloat(order.amazonTotalINR) || 0;
-                      const totalCC = parseFloat(order.totalCC) || 0;
-                      const profit = pBalance - aTotalInr - totalCC;
+                      const profit = getDisplayOrderProfit(order);
                       
                       return (
                         <Typography 
@@ -2750,17 +2966,19 @@ export default function AllOrdersSheetPage() {
                     acc.subtotal += parseFloat(order.subtotal) || 0;
                     acc.shipping += parseFloat(order.shipping) || 0;
                     acc.salesTax += parseFloat(order.salesTax) || 0;
-                    acc.discount += parseFloat(order.discount) || 0;
+                    acc.discount += Math.abs(parseFloat(order.discount) || 0);
                     acc.transactionFees += parseFloat(order.transactionFees) || 0;
                     acc.adFeeGeneral += parseFloat(order.adFeeGeneral) || 0;
                     acc.orderTotal += order.orderTotal ?? ((parseFloat(order.pricingSummary?.total?.value) || 0) + (parseFloat(order.salesTax) || 0));
                   }
                   
-                  acc.orderEarnings += parseFloat(order.orderEarnings) || 0;
+                  acc.orderEarnings += parseFloat(getDisplayOrderEarnings(order)) || 0;
                   acc.tds += parseFloat(order.tds) || 0;
-                  acc.tid += parseFloat(order.tid) || 0;
-                  acc.net += parseFloat(order.net) || 0;
-                  acc.pBalanceINR += parseFloat(order.pBalanceINR) || 0;
+                  acc.tid += order.tid != null && order.tid !== ''
+                    ? (parseFloat(order.tid) || 0)
+                    : EBAY_PER_ORDER_TID;
+                  acc.net += getDisplayOrderNet(order);
+                  acc.pBalanceINR += getDisplayPBalanceInr(order);
                   
                   if (!isCancelled) {
                     acc.beforeTax += parseFloat(order.beforeTax) || 0;
@@ -2771,10 +2989,7 @@ export default function AllOrdersSheetPage() {
                     acc.igst += parseFloat(order.igst) || 0;
                     acc.totalCC += parseFloat(order.totalCC) || 0;
                     
-                    const pBalance = parseFloat(order.pBalanceINR) || 0;
-                    const aTotalInr = parseFloat(order.amazonTotalINR) || 0;
-                    const totalCC = parseFloat(order.totalCC) || 0;
-                    acc.profit += pBalance - aTotalInr - totalCC;
+                    acc.profit += getDisplayOrderProfit(order);
                   }
                   
                   return acc;
@@ -3066,7 +3281,7 @@ export default function AllOrdersSheetPage() {
                               </Stack>
                               <Stack direction="row" justifyContent="space-between">
                                 <Typography variant="caption">
-                                  TDS {order.tdsSource === 'finances' ? '(Finances)' : '(1% estimate)'}:
+                                  TDS {order.tdsSource === 'finances' ? '(Finances)' : '(0.1% subtotal)'}:
                                 </Typography>
                                 <Typography variant="caption" sx={{ color: 'error.main' }}>
                                   -${breakdown.tds.toFixed(2)}
@@ -3087,7 +3302,7 @@ export default function AllOrdersSheetPage() {
                               <Stack direction="row" justifyContent="space-between">
                                 <Typography variant="caption">Exchange Rate:</Typography>
                                 <Typography variant="caption">
-                                  {order.ebayExchangeRate || 85}
+                                  {order.ebayExchangeRate ?? order.exchangeRate ?? '—'}
                                 </Typography>
                               </Stack>
                               <Stack direction="row" justifyContent="space-between" sx={{ pt: 0.5, borderTop: '1px dashed #ccc' }}>

@@ -3,7 +3,8 @@ import {
   getExchangeRateMarketplace,
   getExchangeRateRecordForDate,
   getOrderRateDate,
-  getOrderTotalAmount,
+  computeCalculatedTds,
+  computeOrderEarningsFromComponents,
 } from './exchangeRateUtils.js';
 
 function rateCacheKey(marketplace, order) {
@@ -77,12 +78,11 @@ export function applyEbayFinancialsSync(orderObj, ebayExchangeRate) {
 
   const earnings = parseFloat(orderObj.orderEarnings) || 0;
   const tid = 0.24;
-  const orderTotal = getOrderTotalAmount(orderObj);
   // Prefer Finances TAX_DEDUCTION_AT_SOURCE when already stored on the order
   if (orderObj.tdsSource === 'finances' && orderObj.tds != null && orderObj.tds !== undefined) {
     orderObj.tds = parseFloat(Number(orderObj.tds).toFixed(2));
   } else {
-    orderObj.tds = parseFloat((orderTotal * 0.01).toFixed(2));
+    orderObj.tds = computeCalculatedTds(orderObj);
     orderObj.tdsSource = orderObj.tdsSource || 'calculated';
   }
   orderObj.tid = tid;
@@ -98,6 +98,12 @@ export function applyEbayFinancialsSync(orderObj, ebayExchangeRate) {
 export function enrichOrderLikeAllOrdersSheet(orderObj, rateCache) {
   const ebayRate = resolveRate(orderObj, 'EBAY', rateCache);
   const amazonRate = resolveRate(orderObj, 'AMAZON', rateCache);
+
+  // Live component earnings (same as Fulfilment / Earnings column) — never use stale DB orderEarnings for NET.
+  const liveEarnings = computeOrderEarningsFromComponents(orderObj);
+  if (Number.isFinite(liveEarnings)) {
+    orderObj.orderEarnings = liveEarnings;
+  }
 
   if (orderObj.orderEarnings != null && orderObj.orderEarnings !== undefined) {
     applyEbayFinancialsSync(orderObj, ebayRate);
@@ -133,6 +139,129 @@ export function computeOrderProfit(orderObj) {
   return orderObj;
 }
 
+/** Resolve TDS the same way as row enrichment (applyEbayFinancialsSync). */
+export function resolveLiveTds(orderObj) {
+  if (orderObj.tdsSource === 'finances' && orderObj.tds != null && orderObj.tds !== undefined) {
+    return parseFloat(Number(orderObj.tds).toFixed(2));
+  }
+  return computeCalculatedTds(orderObj);
+}
+
+/** Resolve live amazon-side INR fields — same as enrichOrderLikeAllOrdersSheet row path. */
+export function resolveLiveAmazonFinancials(orderObj, amazonRate = null, rateCache = null) {
+  const amazonTotalUsd = (parseFloat(orderObj.beforeTax) || 0) + (parseFloat(orderObj.estimatedTax) || 0);
+  if (amazonTotalUsd <= 0) {
+    return {
+      amazonTotalINR: parseFloat(orderObj.amazonTotalINR) || 0,
+      totalCC: parseFloat(orderObj.totalCC) || 0,
+    };
+  }
+
+  let rate = amazonRate;
+  if (rate == null) {
+    rate = rateCache
+      ? resolveRate(orderObj, 'AMAZON', rateCache)
+      : parseFloat(orderObj.amazonExchangeRate);
+  }
+  if (!Number.isFinite(rate) || rate <= 0) {
+    rate = getExchangeRateDefaultValue(getExchangeRateMarketplace('AMAZON', orderObj.purchaseMarketplaceId));
+  }
+
+  const scratch = { ...orderObj };
+  applyAmazonFinancialsSync(scratch, rate);
+  return {
+    amazonTotalINR: parseFloat(scratch.amazonTotalINR) || 0,
+    totalCC: parseFloat(scratch.totalCC) || 0,
+  };
+}
+
+export const EBAY_PER_ORDER_TID = 0.24;
+
+/** Resolve eBay INR rate — stored on order, rate cache, or marketplace default. */
+export function resolveEbayExchangeRate(orderObj, rateCache = null) {
+  if (rateCache) {
+    return resolveRate(orderObj, 'EBAY', rateCache);
+  }
+  const parsed = parseFloat(orderObj.ebayExchangeRate);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return getExchangeRateDefaultValue(getExchangeRateMarketplace('EBAY', orderObj.purchaseMarketplaceId));
+}
+
+/**
+ * Live eBay-side financials — same as All Orders USD Earnings / NET / P.Balance columns.
+ * Uses component earnings, not stale DB orderEarnings / pBalanceINR.
+ */
+export function computeLiveEbaySideFinancials(orderObj, ebayRate = null) {
+  const earnings = parseFloat(computeOrderEarningsFromComponents(orderObj)) || 0;
+  const tds = resolveLiveTds(orderObj);
+  const tid = orderObj.tid != null && orderObj.tid !== ''
+    ? (parseFloat(orderObj.tid) || 0)
+    : EBAY_PER_ORDER_TID;
+  const net = parseFloat((earnings - tds - tid).toFixed(2));
+  const rate = ebayRate ?? resolveEbayExchangeRate(orderObj);
+  const pBalanceINR = parseFloat((net * rate).toFixed(2));
+  return {
+    orderEarnings: earnings,
+    tds,
+    tid,
+    net,
+    pBalanceINR,
+    ebayExchangeRate: rate,
+  };
+}
+
+/** Live profit (INR) = live P.Balance − Amazon INR − Total CC — matches KPI cards. */
+export function computeLiveOrderProfit(orderObj, ebayRate = null, rateCache = null) {
+  const ebay = computeLiveEbaySideFinancials(orderObj, ebayRate);
+  const amazon = resolveLiveAmazonFinancials(orderObj, null, rateCache);
+  const profit = parseFloat((ebay.pBalanceINR - amazon.amazonTotalINR - amazon.totalCC).toFixed(2));
+  return { ...ebay, ...amazon, profit };
+}
+
+const LIVE_FINANCIAL_SELECT = [
+  'seller',
+  'subtotal', 'discount', 'transactionFees', 'adFeeGeneral', 'shipping',
+  'purchaseMarketplaceId', 'orderPaymentStatus', 'paymentSummary',
+  'totalDueSellerUSD', 'preRefundOrderEarnings', 'preRefundAdFeeGeneral',
+  'preRefundTransactionFees', 'refunds', 'lineItems',
+  'tds', 'tdsSource', 'tid', 'ebayExchangeRate', 'amazonExchangeRate',
+  'dateSold', 'creationDate',
+  'beforeTax', 'estimatedTax', 'amazonTotalINR', 'totalCC',
+].join(' ');
+
+/** Sum live earnings / NET / P.Balance / profit — uses same enrichment as API rows. */
+export async function sumLiveFinancialsForOrders(orders = []) {
+  const rateCache = await prefetchExchangeRatesForOrders(orders);
+  const totals = { orderEarnings: 0, net: 0, pBalanceINR: 0, profit: 0 };
+  const profitBySellerId = new Map();
+
+  for (const order of orders) {
+    const orderObj = order.toObject ? order.toObject() : { ...order };
+    enrichOrderLikeAllOrdersSheet(orderObj, rateCache);
+
+    totals.orderEarnings += parseFloat(orderObj.orderEarnings) || 0;
+    totals.net += parseFloat(orderObj.net) || 0;
+    totals.pBalanceINR += parseFloat(orderObj.pBalanceINR) || 0;
+    totals.profit += parseFloat(orderObj.profit) || 0;
+
+    const sellerKey = order.seller?.toString() || orderObj.seller?.toString() || 'unknown';
+    const prev = profitBySellerId.get(sellerKey) || { orderCount: 0, totalProfit: 0 };
+    profitBySellerId.set(sellerKey, {
+      orderCount: prev.orderCount + 1,
+      totalProfit: parseFloat((prev.totalProfit + (parseFloat(orderObj.profit) || 0)).toFixed(2)),
+    });
+  }
+
+  totals.orderEarnings = parseFloat(totals.orderEarnings.toFixed(2));
+  totals.net = parseFloat(totals.net.toFixed(2));
+  totals.pBalanceINR = parseFloat(totals.pBalanceINR.toFixed(2));
+  totals.profit = parseFloat(totals.profit.toFixed(2));
+
+  return { totals, profitBySellerId, rateCache };
+}
+
+export { LIVE_FINANCIAL_SELECT };
+
 export function enrichOrderFinancialsSync(orderObj, rateCache) {
   const ebayRate = resolveRate(orderObj, 'EBAY', rateCache);
   const amazonRate = resolveRate(orderObj, 'AMAZON', rateCache);
@@ -147,12 +276,11 @@ export function enrichOrderFinancialsSync(orderObj, rateCache) {
   if (needsEbayFinancialSync(orderObj)) {
     applyEbayFinancialsSync(orderObj, ebayRate);
   } else if (orderObj.orderEarnings != null && orderObj.orderEarnings !== undefined) {
-    const total = getOrderTotalAmount(orderObj);
     if (orderObj.tdsSource === 'finances' && orderObj.tds != null) {
       // keep Finances TDS
       orderObj.tds = parseFloat(Number(orderObj.tds).toFixed(2));
     } else if (orderObj.tds == null) {
-      orderObj.tds = parseFloat((total * 0.01).toFixed(2));
+      orderObj.tds = computeCalculatedTds(orderObj);
       orderObj.tdsSource = 'calculated';
     }
     if (orderObj.tid == null) orderObj.tid = 0.24;

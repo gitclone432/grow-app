@@ -41,6 +41,7 @@ export const BuyerChatPage = lazy(() => import('../pages/admin/BuyerChatPage.jsx
 export const FeedUploadPage = lazy(() => import('../pages/ebay/FeedUploadPage.jsx'));
 export const DirectListPage = lazy(() => import('../pages/ebay/DirectListPage.jsx'));
 export const StoreOverviewPage = lazy(() => import('../pages/admin/StoreOverviewPage.jsx'));
+export const SellingSummaryPage = lazy(() => import('../pages/admin/SellingSummaryPage.jsx'));
 export const EbayApiUsagePage = lazy(() => import('../pages/admin/EbayApiUsagePage.jsx'));
 export const EbayAnalyticsHubPage = lazy(() => import('../pages/admin/EbayAnalyticsHubPage.jsx'));
 export const EbayFeedbackPage = lazy(() => import('../pages/admin/EbayFeedbackPage.jsx'));
@@ -92,6 +93,7 @@ export const CronJobsPage = lazy(() => import('../pages/admin/CronJobsPage.jsx')
 export const ScraperTesterPage = lazy(() => import('../pages/admin/ScraperTesterPage.jsx'));
 export const ImageOverlaySettingsPage = lazy(() => import('../pages/admin/ImageOverlaySettingsPage.jsx'));
 export const GmailTesterPage = lazy(() => import('../pages/admin/GmailTesterPage.jsx'));
+export const AuthenticatorPage = lazy(() => import('../pages/admin/AuthenticatorPage.jsx'));
 export const EtsyDashboardPage = lazy(() => import('../pages/admin/etsy/EtsyDashboardPage.jsx'));
 export const EtsyProductsPage = lazy(() => import('../pages/admin/etsy/EtsyProductsPage.jsx'));
 export const EtsyOrderFulfilmentPage = lazy(() => import('../pages/admin/etsy/EtsyOrderFulfilmentPage.jsx'));

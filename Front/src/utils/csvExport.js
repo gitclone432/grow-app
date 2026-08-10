@@ -61,10 +61,14 @@ export function prepareCSVData(items, fieldMapping) {
   return items.map(item => {
     const row = {};
     Object.entries(fieldMapping).forEach(([csvHeader, accessor]) => {
-      // accessor can be a string (field name) or function (custom transformation)
-      row[csvHeader] = typeof accessor === 'function' 
-        ? accessor(item) 
-        : item[accessor];
+      try {
+        row[csvHeader] = typeof accessor === 'function'
+          ? accessor(item)
+          : item[accessor];
+      } catch (err) {
+        console.warn(`CSV export: failed column "${csvHeader}" for order ${item?.orderId || '?'}`, err);
+        row[csvHeader] = '';
+      }
     });
     return row;
   });

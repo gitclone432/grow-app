@@ -65,8 +65,11 @@ import {
 } from '../utils/buyerChatCommerce.js';
 import {
   applyUsdFieldsSync,
+  computeLiveOrderProfit,
   enrichOrderLikeAllOrdersSheet,
+  LIVE_FINANCIAL_SELECT,
   prefetchExchangeRatesForOrders,
+  sumLiveFinancialsForOrders,
 } from '../utils/allOrdersSheetEnrichment.js';
 import { parsePagination } from '../utils/pagination.js';
 import {
@@ -107,6 +110,11 @@ import OpenAI from 'openai';
 import {
   calculateOrderAmazonFinancials,
   calculateOrderEbayFinancials,
+  computeCalculatedTds,
+  computeOrderEarningsFromComponents,
+  computePaidOrderEarningsFromComponents,
+  computePartiallyRefundedOrderEarnings,
+  FULLY_REFUNDED_ORDER_EARNINGS,
   getExchangeRateDefaultValue,
   getExchangeRateMarketplace,
   getExchangeRateRecordForDate,
@@ -492,6 +500,7 @@ function getPollTotals(jobType, payload = {}) {
     return {
       totalPolled: payload.totalPolled || 0,
       totalNewOrders: payload.totalNewOrders || 0,
+      totalUpdatedOrders: payload.totalUpdatedOrders || 0,
       results: payload.pollResults || []
     };
   }
@@ -1689,6 +1698,57 @@ function getPTDayBoundsUTC(dateStr) {
   return { start, end };
 }
 
+function getTodayPtDateString(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+}
+
+function shiftYmdCalendar(ymd, days) {
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+}
+
+/** Poll New Orders window: yesterday 00:00 PT → today end (capped near now). */
+function getPollNewOrdersPtWindow(now = new Date()) {
+  const todayPt = getTodayPtDateString(now);
+  const yesterdayPt = shiftYmdCalendar(todayPt, -1);
+  const { start } = getPTDayBoundsUTC(yesterdayPt);
+  const { end: todayEnd } = getPTDayBoundsUTC(todayPt);
+  const pollEnd = getOrderPollEndDate(now instanceof Date ? now.getTime() : now);
+  const end = pollEnd.getTime() < todayEnd.getTime() ? pollEnd : todayEnd;
+  return {
+    yesterdayPt,
+    todayPt,
+    start,
+    end,
+    filter: `creationdate:[${start.toISOString()}..${end.toISOString()}]`,
+  };
+}
+
+/** Resync window: last N inclusive PT calendar days through today. */
+function getResyncPtWindow(days, now = new Date()) {
+  const n = Math.min(Math.max(parseInt(days, 10) || 7, 1), 730);
+  const todayPt = getTodayPtDateString(now);
+  const startPt = shiftYmdCalendar(todayPt, -(n - 1));
+  const { start } = getPTDayBoundsUTC(startPt);
+  const { end: todayEnd } = getPTDayBoundsUTC(todayPt);
+  const pollEnd = getOrderPollEndDate(now instanceof Date ? now.getTime() : now);
+  const end = pollEnd.getTime() < todayEnd.getTime() ? pollEnd : todayEnd;
+  return {
+    days: n,
+    startPt,
+    todayPt,
+    start,
+    end,
+    filter: `creationdate:[${start.toISOString()}..${end.toISOString()}]`,
+  };
+}
+
 // ============================================
 // HELPER: Recalculate USD Fields
 // ============================================
@@ -1947,8 +2007,25 @@ function sumFeeTypeFromTransactions(transactions, feeType) {
   return Math.max(0, parseFloat(total.toFixed(2)));
 }
 
+/** Promoted Listings AD_FEE: DEBIT charges only (ignore refund CREDITS). */
 function sumAdFeeFromTransactions(transactions) {
-  return sumFeeTypeFromTransactions(transactions, 'AD_FEE');
+  let total = 0;
+  for (const txn of transactions || []) {
+    if (String(txn.feeType || '').toUpperCase() === 'AD_FEE') {
+      if (String(txn.bookingEntry || '').toUpperCase() !== 'CREDIT') {
+        total += parseFinancesAmountAsUsd(txn.amount);
+      }
+    }
+    for (const line of txn.orderLineItems || []) {
+      for (const fee of line.marketplaceFees || []) {
+        if (String(fee?.feeType || '').toUpperCase() !== 'AD_FEE') continue;
+        const entry = String(fee?.bookingEntry || txn.bookingEntry || '').toUpperCase();
+        if (entry === 'CREDIT') continue;
+        total += parseFinancesAmountAsUsd(fee?.amount);
+      }
+    }
+  }
+  return Math.max(0, parseFloat(total.toFixed(2)));
 }
 
 function sumTdsFromTransactions(transactions) {
@@ -2176,18 +2253,16 @@ async function fetchNonSaleChargesIntoMap(accessToken, marketplaceId, adFeeMap) 
 
     for (const txn of transactions) {
       if (txn.feeType === 'AD_FEE' && txn.references) {
+        // Promoted Listings charge only — skip fee-credit (CREDIT) rows
+        if (String(txn.bookingEntry || '').toUpperCase() === 'CREDIT') continue;
+
         const orderRef = txn.references.find(ref => ref.referenceType === 'ORDER_ID');
 
         if (orderRef) {
           const orderId = orderRef.referenceId;
           const feeAmount = Math.abs(parseFloat(txn.amount?.value || 0));
-
           const existingFee = adFeeMap.get(orderId) || 0;
-          if (txn.bookingEntry === 'CREDIT') {
-            adFeeMap.set(orderId, existingFee - feeAmount);
-          } else {
-            adFeeMap.set(orderId, existingFee + feeAmount);
-          }
+          adFeeMap.set(orderId, existingFee + feeAmount);
         }
       }
     }
@@ -2288,11 +2363,13 @@ async function fetchOrderAdFeeFromNonSaleCharges(accessToken, orderId, marketpla
         if (orderRef?.referenceId !== orderId) continue;
 
         const feeAmount = parseFinancesAmountAsUsd(txn.amount);
-        const signed = txn.bookingEntry === 'CREDIT' ? -feeAmount : feeAmount;
         if (feeType === 'AD_FEE') {
+          // Promoted Listings charge only (DEBIT) — ignore refund CREDITS
+          if (String(txn.bookingEntry || '').toUpperCase() === 'CREDIT') continue;
           foundAnyAdFeeForOrder = true;
-          runningAdFee += signed;
+          runningAdFee += feeAmount;
         } else {
+          const signed = txn.bookingEntry === 'CREDIT' ? -feeAmount : feeAmount;
           foundAnyTdsForOrder = true;
           runningTds += signed;
         }
@@ -2325,7 +2402,8 @@ async function fetchOrderAdFeeFromNonSaleCharges(accessToken, orderId, marketpla
 async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplaceId = 'EBAY_US', marketplaceIds = null, options = {}) {
   if (adFeeMap) {
     const adFee = adFeeMap.get(orderId) || 0;
-    return { success: true, adFeeGeneral: adFee, tds: null, source: 'map' };
+    // Map path has no TDS — caller should not treat tds:null as "looked up"
+    return { success: true, adFeeGeneral: adFee, tds: null, source: 'map', nonSaleChargeChecked: false };
   }
 
   const idsToTry = [...new Set(
@@ -2337,51 +2415,46 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
   if (!idsToTry.length) idsToTry.push('EBAY_US');
 
   let lastError = null;
-  let bestResult = null;
+  let bestAdFee = 0;
   let bestTds = 0;
+  let bestMarketplace = idsToTry[0];
+  let bestSource = 'not_found';
+  let bestTransactionCount = 0;
+  let sawAnyTransactions = false;
 
-  // Step 1: orderId filter (paginated). Do not stop at first marketplace with sale txns but no AD_FEE.
+  // Step 1: orderId filter (paginated). Collect best ad fee + TDS — do NOT return early,
+  // because TAX_DEDUCTION_AT_SOURCE often only appears under NON_SALE_CHARGE (step 2).
   for (const mp of idsToTry) {
     try {
       const filter = `orderId:{${orderId}}`;
       const transactions = await fetchFinancesTransactionsAllPages(accessToken, mp, filter);
+      if (transactions.length > 0) sawAnyTransactions = true;
+
       const adFeeGeneral = sumAdFeeFromTransactions(transactions);
       const tds = sumTdsFromTransactions(transactions);
       if (tds > bestTds) bestTds = tds;
 
-      if (adFeeGeneral > 0) {
-        return {
-          success: true,
-          adFeeGeneral,
-          tds,
-          marketplace: mp,
-          source: 'orderId_filter',
-          transactionCount: transactions.length,
-        };
-      }
-
-      if (transactions.length > 0 && !bestResult) {
-        bestResult = {
-          success: true,
-          adFeeGeneral: 0,
-          tds,
-          marketplace: mp,
-          source: 'orderId_filter',
-          transactionCount: transactions.length,
-        };
-      } else if (bestResult && tds > (bestResult.tds || 0)) {
-        bestResult = { ...bestResult, tds };
+      if (adFeeGeneral > bestAdFee) {
+        bestAdFee = adFeeGeneral;
+        bestMarketplace = mp;
+        bestSource = 'orderId_filter';
+        bestTransactionCount = transactions.length;
+      } else if (transactions.length > 0 && bestSource === 'not_found') {
+        bestMarketplace = mp;
+        bestSource = 'orderId_filter';
+        bestTransactionCount = transactions.length;
       }
     } catch (error) {
       lastError = error;
       if (error.response?.status === 403) {
-        return { success: false, error: 'missing_scope', adFeeGeneral: null, tds: null };
+        return { success: false, error: 'missing_scope', adFeeGeneral: null, tds: null, nonSaleChargeChecked: false };
       }
       console.warn(`[Finances API] orderId filter for ${orderId} on ${mp}:`, error.message);
     }
   }
 
-  // Step 2: NON_SALE_CHARGE scan (matches backfill / what often works locally).
+  // Step 2: always scan NON_SALE_CHARGE — AD_FEE and TDS commonly live here.
+  let nonSaleChargeChecked = false;
   try {
     const fromNonSale = await fetchOrderAdFeeFromNonSaleCharges(
       accessToken,
@@ -2389,35 +2462,39 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
       idsToTry,
       options.creationDate
     );
-    const mergedTds = Math.max(fromNonSale.tds || 0, bestTds, bestResult?.tds || 0);
-    if (fromNonSale.adFeeGeneral > 0) {
-      return { ...fromNonSale, tds: mergedTds };
-    }
-    if (fromNonSale.source === 'non_sale_charge' && bestResult) {
-      return { ...bestResult, tds: mergedTds, triedNonSaleCharge: true };
-    }
-    if (fromNonSale.adFeeGeneral === 0 && fromNonSale.source === 'non_sale_charge') {
-      return { ...fromNonSale, tds: mergedTds };
+    nonSaleChargeChecked = true;
+    bestTds = Math.max(bestTds, fromNonSale.tds || 0);
+    if ((fromNonSale.adFeeGeneral || 0) > bestAdFee) {
+      bestAdFee = fromNonSale.adFeeGeneral || 0;
+      bestMarketplace = fromNonSale.marketplace || bestMarketplace;
+      bestSource = fromNonSale.source || 'non_sale_charge';
+    } else if (bestSource === 'not_found' && fromNonSale.source) {
+      bestSource = fromNonSale.source;
+      bestMarketplace = fromNonSale.marketplace || bestMarketplace;
     }
   } catch (error) {
     lastError = error;
     if (error.response?.status === 403) {
-      return { success: false, error: 'missing_scope', adFeeGeneral: null, tds: null };
+      return { success: false, error: 'missing_scope', adFeeGeneral: null, tds: null, nonSaleChargeChecked: false };
     }
     console.warn(`[Finances API] NON_SALE_CHARGE scan for ${orderId}:`, error.message);
   }
 
-  if (lastError && !bestResult) {
+  if (lastError && !sawAnyTransactions && !nonSaleChargeChecked) {
     const detail = lastError.response?.data?.errors?.[0]?.message || lastError.message;
     console.error(`[Finances API] Error fetching ad fee for ${orderId}:`, detail);
-    return { success: false, error: detail, adFeeGeneral: null, tds: null };
+    return { success: false, error: detail, adFeeGeneral: null, tds: null, nonSaleChargeChecked: false };
   }
 
-  if (bestResult) {
-    return { ...bestResult, tds: Math.max(bestResult.tds || 0, bestTds) };
-  }
-
-  return { success: true, adFeeGeneral: 0, tds: bestTds, source: 'not_found', marketplace: idsToTry[0] };
+  return {
+    success: true,
+    adFeeGeneral: bestAdFee,
+    tds: bestTds,
+    marketplace: bestMarketplace,
+    source: bestSource,
+    transactionCount: bestTransactionCount,
+    nonSaleChargeChecked,
+  };
 }
 
 /** Apply Finances AD_FEE + TAX_DEDUCTION_AT_SOURCE onto an order doc/plain object. */
@@ -2426,11 +2503,25 @@ function applyFinancesFeeResult(order, feeResult) {
   if (feeResult.adFeeGeneral != null) {
     order.adFeeGeneral = parseFloat(feeResult.adFeeGeneral) || 0;
   }
-  // Only pin TDS from Finances when a real TAX_DEDUCTION_AT_SOURCE amount was found
+  // Only overwrite TDS when eBay returned a real TAX_DEDUCTION_AT_SOURCE amount.
+  // If none found, keep existing DB TDS (usually 0.1% of subtotal) — never force $0.
   if (feeResult.tds != null && Number(feeResult.tds) > 0) {
     order.tds = parseFloat(feeResult.tds) || 0;
     order.tdsSource = 'finances';
   }
+  if (feeResult.nonSaleChargeChecked || (feeResult.tds != null && Number(feeResult.tds) > 0)) {
+    order.tdsFinancesChecked = true;
+  }
+}
+
+/** True when poll/resync should hit Finances for ad fee and/or TDS. */
+function orderNeedsFinancesFeeFetch(order) {
+  if (!order) return false;
+  const adFee = parseFloat(order.adFeeGeneral);
+  const needsAdFee = !Number.isFinite(adFee) || adFee === 0;
+  const hasFinancesTds = order.tdsSource === 'finances' && Number(order.tds) > 0;
+  const needsTds = !hasFinancesTds && !order.tdsFinancesChecked;
+  return needsAdFee || needsTds;
 }
 
 // ============================================
@@ -2438,15 +2529,17 @@ function applyFinancesFeeResult(order, feeResult) {
 // ============================================
 /**
  * Handles refund processing when orderPaymentStatus changes
- * FULLY_REFUNDED: Set earnings to $0
- * PARTIALLY_REFUNDED: Set earnings to $0
+ * FULLY_REFUNDED: Set earnings to $-0.40
+ * PARTIALLY_REFUNDED: Snapshot pre-refund earnings/ad fee, then
+ *   earnings = E0 − netRefund + adFeeCredit
  * @param {Object} existingOrder - The order document from DB
  * @param {String} newPaymentStatus - The new payment status from eBay
  * @param {String} accessToken - Valid eBay access token
  * @param {ObjectId} sellerId - The seller ID
+ * @param {Object} [ebayOrder] - Fresh eBay order payload (refunds / lineItems)
  * @returns {Object} - Updated order data or null if no action needed
  */
-async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, accessToken, sellerId) {
+async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, accessToken, sellerId, ebayOrder = null) {
   const oldStatus = existingOrder.orderPaymentStatus;
 
   // Only process if status actually changed
@@ -2457,13 +2550,16 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
   console.log(`[Refund Handler] Status change detected for ${existingOrder.orderId}: ${oldStatus} → ${newPaymentStatus}`);
 
   if (newPaymentStatus === 'FULLY_REFUNDED') {
-    // ========== FULLY REFUNDED: Set earnings to $0 ==========
-    console.log(`[Refund Handler] FULLY_REFUNDED: Setting earnings to $0 for ${existingOrder.orderId}`);
+    // ========== FULLY REFUNDED: Set earnings to $-0.40 ==========
+    console.log(`[Refund Handler] FULLY_REFUNDED: Setting earnings to $${FULLY_REFUNDED_ORDER_EARNINGS} for ${existingOrder.orderId}`);
 
-    // Calculate financial fields with $0 earnings
+    // Calculate financial fields with fixed fully-refunded earnings
     const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
       existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-    const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+    const financials = await calculateFinancials(
+      { ...existingOrder.toObject(), orderEarnings: FULLY_REFUNDED_ORDER_EARNINGS },
+      marketplace
+    );
 
     return {
       subtotal: 0,
@@ -2477,16 +2573,45 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
       transactionFees: 0,
       transactionFeesUSD: 0,
       adFeeGeneral: 0,
-      orderEarnings: 0,
+      orderEarnings: FULLY_REFUNDED_ORDER_EARNINGS,
       ...financials
     };
 
   } else if (newPaymentStatus === 'PARTIALLY_REFUNDED') {
-    // ========== PARTIALLY REFUNDED: Set earnings to $0 ==========
-    console.log(`[Refund Handler] PARTIALLY_REFUNDED: Setting earnings to $0 for ${existingOrder.orderId}`);
+    const existingObj = typeof existingOrder.toObject === 'function'
+      ? existingOrder.toObject()
+      : { ...existingOrder };
+
+    // Snapshot BEFORE Finances ad-fee refresh (post-refund ad fee is remaining, not original)
+    const preRefundAdFeeGeneral = existingObj.preRefundAdFeeGeneral != null
+      ? parseFloat(existingObj.preRefundAdFeeGeneral) || 0
+      : parseFloat(existingObj.adFeeGeneral) || 0;
+    const preRefundOrderEarnings = existingObj.preRefundOrderEarnings != null
+      ? parseFloat(existingObj.preRefundOrderEarnings)
+      : computePaidOrderEarningsFromComponents({
+        ...existingObj,
+        adFeeGeneral: preRefundAdFeeGeneral,
+        orderPaymentStatus: 'PAID'
+      });
+
+    const refundSnapshot = {
+      ...existingObj,
+      refunds: ebayOrder?.paymentSummary?.refunds || existingObj.refunds,
+      paymentSummary: ebayOrder?.paymentSummary || existingObj.paymentSummary,
+      lineItems: ebayOrder?.lineItems || existingObj.lineItems,
+      preRefundAdFeeGeneral,
+      preRefundOrderEarnings,
+      orderPaymentStatus: 'PARTIALLY_REFUNDED'
+    };
+    const orderEarnings = computePartiallyRefundedOrderEarnings(refundSnapshot);
+
+    console.log(
+      `[Refund Handler] PARTIALLY_REFUNDED: ${existingOrder.orderId} ` +
+      `E0=$${preRefundOrderEarnings} → earnings=$${orderEarnings}`
+    );
 
     try {
-      // Fetch updated ad fee from Finances API
+      // Fetch updated (remaining) ad fee from Finances for display — do not use for E0
       const sellerDoc = await Seller.findById(existingOrder.seller).select('ebayMarketplaces').lean();
       const financeMpIds = resolveOrderFinancesMarketplaceIds(sellerDoc, existingOrder.purchaseMarketplaceId);
       const adFeeResult = await fetchOrderAdFee(
@@ -2499,27 +2624,35 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
       );
       const adFeeGeneral = adFeeResult.success ? adFeeResult.adFeeGeneral : existingOrder.adFeeGeneral;
 
-      // Calculate financial fields with $0 earnings while preserving order total for TDS
       const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
         existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-      const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+      const financials = await calculateFinancials(
+        { ...existingObj, orderEarnings, preRefundOrderEarnings, preRefundAdFeeGeneral },
+        marketplace
+      );
 
       return {
         adFeeGeneral,
-        orderEarnings: 0,
+        preRefundOrderEarnings,
+        preRefundAdFeeGeneral,
+        orderEarnings,
         ...financials
       };
 
     } catch (error) {
       console.error(`[Refund Handler] Error fetching ad fee for ${existingOrder.orderId}:`, error.message);
 
-      // Calculate financial fields with $0 earnings while preserving order total for TDS
       const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
         existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-      const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+      const financials = await calculateFinancials(
+        { ...existingObj, orderEarnings, preRefundOrderEarnings, preRefundAdFeeGeneral },
+        marketplace
+      );
 
       return {
-        orderEarnings: 0,
+        preRefundOrderEarnings,
+        preRefundAdFeeGeneral,
+        orderEarnings,
         ...financials
       };
     }
@@ -2533,15 +2666,14 @@ async function handleOrderPaymentStatusChange(existingOrder, newPaymentStatus, a
 // HELPER: Calculate Order Earnings (Not needed anymore - kept for compatibility)
 // ============================================
 /**
- * Simple function that returns $0 for FULLY_REFUNDED orders
- * Not actively used - earnings are calculated in buildOrderData() for PAID orders
- * @returns {Object} - { orderEarnings: 0 }
+ * Compatibility helper — prefer computeOrderEarningsFromComponents(order).
+ * FULLY_REFUNDED → $-0.40 when status is known; otherwise $0.
  */
-function calculateOrderEarnings() {
-  // FULLY_REFUNDED orders always show $0 earnings
-  return {
-    orderEarnings: 0
-  };
+function calculateOrderEarnings(order = {}) {
+  if (order && (order.orderPaymentStatus || order.paymentSummary)) {
+    return { orderEarnings: computeOrderEarningsFromComponents(order) };
+  }
+  return { orderEarnings: 0 };
 }
 
 
@@ -3212,7 +3344,7 @@ const STORED_ORDER_LIST_OMIT = '-paymentSummary -fulfillmentStartInstructions -e
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, sortBy, sortDir, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient, remark } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, cancelStatus, issueType, caseCategory, caseStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, sortBy, sortDir, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient, remark } = req.query;
 
   try {
     let query = {};
@@ -3420,6 +3552,75 @@ router.get('/stored-orders', async (req, res) => {
     // Payment Status Filter
     if (paymentStatus && paymentStatus !== '') {
       query.orderPaymentStatus = paymentStatus;
+    }
+
+    // Cancel Status Filter
+    if (cancelStatus && cancelStatus !== '') {
+      if (cancelStatus === 'CANCELED') {
+        query.cancelState = { $in: ['CANCELED', 'CANCELLED'] };
+      } else if (cancelStatus === 'NONE_REQUESTED') {
+        query.$and = query.$and || [];
+        query.$and.push({
+          $or: [
+            { cancelState: 'NONE_REQUESTED' },
+            { cancelState: { $exists: false } },
+            { cancelState: null },
+            { cancelState: '' }
+          ]
+        });
+      } else {
+        query.cancelState = cancelStatus;
+      }
+    }
+
+    // Restrict to a set of eBay orderIds (intersects with any existing orderId clause)
+    const intersectOrderIds = (ids) => {
+      const unique = [...new Set((ids || []).map((id) => String(id || '').trim()).filter(Boolean))];
+      const clause = { orderId: { $in: unique.length ? unique : ['__no_match__'] } };
+      if (query.orderId) {
+        query.$and = query.$and || [];
+        query.$and.push({ orderId: query.orderId });
+        delete query.orderId;
+        query.$and.push(clause);
+      } else if (query.$and) {
+        query.$and.push(clause);
+      } else {
+        query.orderId = clause.orderId;
+      }
+    };
+
+    // Issues filter — Case / Return / PaymentDispute (matches Issues column)
+    if (issueType && issueType !== '') {
+      let issueOrderIds = [];
+      const type = String(issueType).trim().toUpperCase();
+      if (type === 'ANY') {
+        const [caseIds, returnIds, disputeIds] = await Promise.all([
+          Case.distinct('orderId', { orderId: { $nin: [null, ''] } }),
+          Return.distinct('orderId', { orderId: { $nin: [null, ''] } }),
+          PaymentDispute.distinct('orderId', { orderId: { $nin: [null, ''] } }),
+        ]);
+        issueOrderIds = [...caseIds, ...returnIds, ...disputeIds];
+      } else if (type === 'RETURN') {
+        issueOrderIds = await Return.distinct('orderId', { orderId: { $nin: [null, ''] } });
+      } else if (type === 'DISPUTE') {
+        issueOrderIds = await PaymentDispute.distinct('orderId', { orderId: { $nin: [null, ''] } });
+      } else {
+        // INR / SNAD / OTHER (Case.caseType)
+        issueOrderIds = await Case.distinct('orderId', {
+          orderId: { $nin: [null, ''] },
+          caseType: type === 'OTHER' ? 'OTHER' : type,
+        });
+      }
+      intersectOrderIds(issueOrderIds);
+    }
+
+    // Case Category / Case Status — ConversationMeta (matches Case columns)
+    if ((caseCategory && caseCategory !== '') || (caseStatus && caseStatus !== '')) {
+      const metaQuery = { orderId: { $nin: [null, ''] } };
+      if (caseCategory && caseCategory !== '') metaQuery.category = caseCategory;
+      if (caseStatus && caseStatus !== '') metaQuery.caseStatus = caseStatus;
+      const metaOrderIds = await ConversationMeta.distinct('orderId', metaQuery);
+      intersectOrderIds(metaOrderIds);
     }
 
     // Ship By Date Filter — default Pacific Time (handles DST); shipByDateTz=IST uses India calendar day
@@ -3714,7 +3915,7 @@ async function getExchangeRateForDate(date, marketplace = 'EBAY') {
 
 // NEW ENDPOINT: All Orders with USD conversion
 router.get('/all-orders-usd/account-profit', async (req, res) => {
-  const { sellerId, searchOrderId, searchBuyerName, searchItemNumber, productName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
+  const { sellerId, searchOrderId, searchBuyerName, searchItemNumber, productName, searchMarketplace, startDate, endDate, excludeCancelled, excludeRefunded, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
 
   try {
     const computedProfitExpression = {
@@ -3733,13 +3934,15 @@ router.get('/all-orders-usd/account-profit', async (req, res) => {
     const { activeSellerIds } = await applyActiveSellerScope(query, sellerId);
 
     query.$and = query.$and || [];
-    query.$and.push({
-      $or: [
-        { orderPaymentStatus: { $exists: false } },
-        { orderPaymentStatus: null },
-        { orderPaymentStatus: { $nin: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] } }
-      ]
-    });
+    if (excludeRefunded === 'true') {
+      query.$and.push({
+        $or: [
+          { orderPaymentStatus: { $exists: false } },
+          { orderPaymentStatus: null },
+          { orderPaymentStatus: { $nin: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] } }
+        ]
+      });
+    }
 
     if (excludeCancelled === 'true') {
       query.$and.push(
@@ -3882,21 +4085,14 @@ router.get('/all-orders-usd/account-profit', async (req, res) => {
       return activeSellerIds;
     })();
 
-    const [sellerAccounts, profitRows] = await Promise.all([
+    const [sellerAccounts, leanOrders] = await Promise.all([
       Seller.find({ _id: { $in: visibleSellerIds } })
         .populate('user', 'username email')
         .lean(),
-      Order.aggregate([
-        { $match: query },
-        {
-          $group: {
-            _id: '$seller',
-            orderCount: { $sum: 1 },
-            totalProfit: { $sum: computedProfitExpression }
-          }
-        }
-      ])
+      Order.find(query).select(LIVE_FINANCIAL_SELECT).lean(),
     ]);
+
+    const { profitBySellerId } = await sumLiveFinancialsForOrders(leanOrders);
 
     const rowsBySellerId = new Map();
     for (const seller of sellerAccounts) {
@@ -3910,8 +4106,7 @@ router.get('/all-orders-usd/account-profit', async (req, res) => {
       });
     }
 
-    for (const row of profitRows) {
-      const sellerKey = row._id?.toString() || 'unknown';
+    for (const [sellerKey, stats] of profitBySellerId.entries()) {
       const existing = rowsBySellerId.get(sellerKey) || {
         sellerId: sellerKey,
         accountName: 'Unknown Seller',
@@ -3921,8 +4116,8 @@ router.get('/all-orders-usd/account-profit', async (req, res) => {
 
       rowsBySellerId.set(sellerKey, {
         ...existing,
-        orderCount: row.orderCount || 0,
-        totalProfit: Number(row.totalProfit || 0)
+        orderCount: stats.orderCount || 0,
+        totalProfit: Number(stats.totalProfit || 0)
       });
     }
 
@@ -3944,7 +4139,7 @@ router.get('/all-orders-usd/account-profit', async (req, res) => {
 });
 
 router.get('/all-orders-usd', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemNumber, productName, searchMarketplace, startDate, endDate, excludeCancelled, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchBuyerName, searchItemNumber, productName, searchMarketplace, startDate, endDate, excludeCancelled, excludeRefunded, excludeLowValue, excludeNoAmazonAccount, minProfit, maxProfit, minSubtotal, maxSubtotal } = req.query;
 
   try {
     const computedProfitExpression = {
@@ -3963,13 +4158,17 @@ router.get('/all-orders-usd', async (req, res) => {
     await applyActiveSellerScope(query, sellerId);
 
     query.$and = query.$and || [];
-    query.$and.push({
-      $or: [
-        { orderPaymentStatus: { $exists: false } },
-        { orderPaymentStatus: null },
-        { orderPaymentStatus: { $nin: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] } }
-      ]
-    });
+
+    // Exclude refunded / partially refunded when requested (default on from UI)
+    if (excludeRefunded === 'true') {
+      query.$and.push({
+        $or: [
+          { orderPaymentStatus: { $exists: false } },
+          { orderPaymentStatus: null },
+          { orderPaymentStatus: { $nin: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] } }
+        ]
+      });
+    }
 
     // Exclude cancelled orders if requested
     if (excludeCancelled === 'true') {
@@ -4180,6 +4379,8 @@ router.get('/all-orders-usd', async (req, res) => {
     const includeCounts = req.query.includeCounts !== 'false';
 
     // Compute cross-page totals whenever a date filter is active (matches Grow parity).
+    // Earnings / NET / P.Balance use live component formula (same as Fulfilment Earnings column),
+    // not stale stored orderEarnings — e.g. luxy US 2026-07-25 should match live row sum.
     let filteredTotals = null;
     if (startDate || endDate) {
       const totalsAgg = await Order.aggregate([
@@ -4190,15 +4391,12 @@ router.get('/all-orders-usd', async (req, res) => {
             subtotal: { $sum: { $ifNull: ['$subtotal', 0] } },
             shipping: { $sum: { $ifNull: ['$shipping', 0] } },
             salesTax: { $sum: { $ifNull: ['$salesTax', 0] } },
-            discount: { $sum: { $ifNull: ['$discount', 0] } },
+            discount: { $sum: { $abs: { $ifNull: ['$discount', 0] } } },
             transactionFees: { $sum: { $ifNull: ['$transactionFees', 0] } },
             adFeeGeneral: { $sum: { $ifNull: ['$adFeeGeneral', 0] } },
-            orderEarnings: { $sum: { $ifNull: ['$orderEarnings', 0] } },
             orderTotal: { $sum: { $ifNull: ['$orderTotal', 0] } },
             tds: { $sum: { $ifNull: ['$tds', 0] } },
             tid: { $sum: { $ifNull: ['$tid', 0] } },
-            net: { $sum: { $ifNull: ['$net', 0] } },
-            pBalanceINR: { $sum: { $ifNull: ['$pBalanceINR', 0] } },
             beforeTax: { $sum: { $ifNull: ['$beforeTax', 0] } },
             estimatedTax: { $sum: { $ifNull: ['$estimatedTax', 0] } },
             amazonTotal: { $sum: { $ifNull: ['$amazonTotal', 0] } },
@@ -4207,21 +4405,20 @@ router.get('/all-orders-usd', async (req, res) => {
             igst: { $sum: { $ifNull: ['$igst', 0] } },
             totalCC: { $sum: { $ifNull: ['$totalCC', 0] } },
           }
-        },
-        {
-          $addFields: {
-            profit: {
-              $subtract: [
-                { $subtract: ['$pBalanceINR', '$amazonTotalINR'] },
-                '$totalCC'
-              ]
-            }
-          }
         }
       ]);
+
       if (totalsAgg.length > 0) {
         const { _id, ...rest } = totalsAgg[0];
         filteredTotals = rest;
+
+        const leanForEarnings = await Order.find(query).select(LIVE_FINANCIAL_SELECT).lean();
+        const { totals: liveTotals } = await sumLiveFinancialsForOrders(leanForEarnings);
+
+        filteredTotals.orderEarnings = liveTotals.orderEarnings;
+        filteredTotals.net = liveTotals.net;
+        filteredTotals.pBalanceINR = liveTotals.pBalanceINR;
+        filteredTotals.profit = liveTotals.profit;
       }
     }
 
@@ -4238,6 +4435,42 @@ router.get('/all-orders-usd', async (req, res) => {
       rawQuery.purchaseMarketplaceId = searchMarketplace === 'EBAY_ENCA' ? 'EBAY_CA' : searchMarketplace;
     }
     const rawCount = await Order.countDocuments(rawQuery);
+
+    // Breakdown of why Raw − Filtered differ (counts within raw date/seller/marketplace scope)
+    const [refundedCount, cancelledCount, lowValueCount, noAmazonCount] = await Promise.all([
+      Order.countDocuments({
+        ...rawQuery,
+        orderPaymentStatus: { $in: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] },
+      }),
+      Order.countDocuments({
+        ...rawQuery,
+        $or: [
+          { cancelState: { $in: ['CANCELED', 'CANCELLED'] } },
+          { 'cancelStatus.cancelState': { $in: ['CANCELED', 'CANCELLED'] } },
+        ],
+      }),
+      Order.countDocuments({
+        ...rawQuery,
+        $nor: [
+          { subtotalUSD: { $gte: 3 } },
+          { subtotal: { $gte: 3 } },
+        ],
+      }),
+      Order.countDocuments({
+        ...rawQuery,
+        $or: [
+          { amazonAccount: { $exists: false } },
+          { amazonAccount: null },
+          { amazonAccount: '' },
+        ],
+      }),
+    ]);
+    const exclusionBreakdown = {
+      refunded: refundedCount,
+      cancelled: cancelledCount,
+      lowValue: lowValueCount,
+      noAmazonAccount: noAmazonCount,
+    };
 
     const [totalOrders, orders, categoryData, rangeData, productData] = await Promise.all([
       Order.countDocuments(query),
@@ -4329,7 +4562,8 @@ router.get('/all-orders-usd', async (req, res) => {
         ordersPerPage: limitNum,
         hasNextPage: pageNum < totalPages,
         hasPrevPage: pageNum > 1,
-        rawCount
+        rawCount,
+        exclusionBreakdown,
       },
       counts: {
         uniqueCategories: categoriesWithCounts.length,
@@ -4532,11 +4766,8 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
     // Recalculate earnings only for non-refunded orders
     const paymentStatus = order.paymentSummary?.payments?.[0]?.paymentStatus;
     if (paymentStatus !== 'FULLY_REFUNDED' && paymentStatus !== 'PARTIALLY_REFUNDED') {
-      // Recalculate earnings: totalDueSeller.value - adFeeGeneral
-      const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
-      const adFee = parseFloat(adFeeGeneral) || 0;
-
-      order.orderEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
+      // Recalculate earnings from component columns
+      order.orderEarnings = computeOrderEarningsFromComponents(order);
 
       // Recalculate financial fields based on new earnings
       const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -4594,14 +4825,18 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
     order.adFeeGeneral = parseFloat(adFeeResult.adFeeGeneral ?? 0);
     applyFinancesFeeResult(order, adFeeResult);
 
-    if (order.orderPaymentStatus === 'FULLY_REFUNDED') {
-      order.orderEarnings = 0;
-    } else if (order.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-      order.orderEarnings = 0;
-    } else {
-      const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
-      order.orderEarnings = parseFloat((totalDueSeller - order.adFeeGeneral).toFixed(2));
+    // Miss on Finances TDS → keep DB calculated value; never force $0
+    if (!(adFeeResult.tds > 0)) {
+      order.tdsFinancesChecked = true;
+      if (order.tds == null || order.tds === undefined) {
+        order.tds = computeCalculatedTds(order);
+        order.tdsSource = 'calculated';
+      } else if (order.tdsSource !== 'finances') {
+        order.tdsSource = 'calculated';
+      }
     }
+
+    order.orderEarnings = computeOrderEarningsFromComponents(order);
 
     const financials = await calculateFinancials(order);
     Object.assign(order, financials);
@@ -4616,6 +4851,7 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
       adFeeGeneral: order.adFeeGeneral,
       tds: order.tds,
       tdsSource: order.tdsSource,
+      tdsFinancesChecked: order.tdsFinancesChecked,
       financesMarketplace: adFeeResult.marketplace,
       lookupSource: adFeeResult.source,
       order: order.toObject()
@@ -4623,6 +4859,86 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
   } catch (err) {
     console.error('Error fetching ad fee general for order:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Fetch cancel status for a single order from eBay Fulfillment API
+router.post('/orders/:orderId/fetch-cancel-status', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const seller = await Seller.findById(order.seller);
+    if (!seller?.ebayTokens?.refresh_token) {
+      return res.status(400).json({ error: 'Seller does not have valid eBay tokens' });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+    const previousCancelState = order.cancelState || 'NONE_REQUESTED';
+
+    const ebayRes = await axios.get(
+      `https://api.ebay.com/sell/fulfillment/v1/order/${encodeURIComponent(order.orderId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+        },
+        timeout: 30000,
+      }
+    );
+
+    const ebayOrder = ebayRes.data;
+    let cancelState = 'NONE_REQUESTED';
+    if (ebayOrder.cancelStatus) {
+      cancelState = ebayOrder.cancelStatus.cancelState
+        || ebayOrder.cancelStatus.state
+        || ebayOrder.cancelStatus.status
+        || (ebayOrder.cancelStatus.cancelled ? 'CANCELED' : 'NONE_REQUESTED');
+    }
+
+    order.cancelStatus = ebayOrder.cancelStatus || null;
+    order.cancelState = cancelState;
+    if (ebayOrder.orderPaymentStatus) {
+      order.orderPaymentStatus = ebayOrder.orderPaymentStatus;
+    }
+    if (ebayOrder.paymentSummary) {
+      order.paymentSummary = ebayOrder.paymentSummary;
+      order.refunds = ebayOrder.paymentSummary.refunds || [];
+    }
+    if (ebayOrder.lastModifiedDate) {
+      order.lastModifiedDate = ebayOrder.lastModifiedDate;
+    }
+
+    await order.save();
+
+    res.json({
+      success: true,
+      previousCancelState,
+      cancelState: order.cancelState,
+      changed: previousCancelState !== order.cancelState,
+      orderPaymentStatus: order.orderPaymentStatus,
+      order: {
+        _id: order._id,
+        orderId: order.orderId,
+        cancelState: order.cancelState,
+        cancelStatus: order.cancelStatus,
+        orderPaymentStatus: order.orderPaymentStatus,
+        refunds: order.refunds,
+        lastModifiedDate: order.lastModifiedDate,
+      },
+    });
+  } catch (err) {
+    const status = err.response?.status;
+    const ebayMsg = err.response?.data?.errors?.[0]?.message || err.response?.data?.error || err.message;
+    console.error(`[Fetch Cancel Status] Error for ${req.params.orderId}:`, ebayMsg);
+    if (status === 404) {
+      return res.status(404).json({ error: 'Order not found on eBay' });
+    }
+    res.status(500).json({ error: ebayMsg || 'Failed to fetch cancel status from eBay' });
   }
 });
 
@@ -4933,15 +5249,14 @@ router.post('/backfill-ad-fees', requireAuth, requirePageAccess('AllOrdersSheet'
               const updates = { adFeeGeneral: adFee };
 
               if (order.orderPaymentStatus === 'PAID') {
-                // Recalculate earnings: totalDueSeller.value - adFeeGeneral
-                const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
-                const newEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
+                // Recalculate earnings from component columns
+                const newEarnings = computeOrderEarningsFromComponents({ ...order.toObject(), adFeeGeneral: adFee });
                 updates.orderEarnings = newEarnings;
 
                 // Recalculate financial fields — pass full order so profit uses correct amazonTotalINR/totalCC
                 const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                   order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                const financials = await calculateFinancials({ ...order.toObject(), orderEarnings: newEarnings }, marketplace);
+                const financials = await calculateFinancials({ ...order.toObject(), orderEarnings: newEarnings, adFeeGeneral: adFee }, marketplace);
                 Object.assign(updates, financials);
               }
 
@@ -5013,7 +5328,8 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
     const processOrder = async (order, seller, accessToken) => {
       totals.total++;
       try {
-        if (skipAlreadySet && order.tdsSource === 'finances' && order.tds != null) {
+        const alreadyHasFinancesTds = order.tdsSource === 'finances' && Number(order.tds) > 0;
+        if (skipAlreadySet && (alreadyHasFinancesTds || order.tdsFinancesChecked)) {
           totals.skipped++;
           return;
         }
@@ -5036,15 +5352,20 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
           return;
         }
 
-        // Pin Finances result even when TDS is $0 so full-DB scans can progress
-        // and skipAlreadySet won't re-hit the same orders forever.
+        // No TAX_DEDUCTION_AT_SOURCE on eBay → keep DB TDS (0.1% subtotal), mark checked
         if (!(feeResult.tds > 0)) {
-          order.tds = 0;
-          order.tdsSource = 'finances';
-          if (feeResult.adFeeGeneral != null) {
-            order.adFeeGeneral = parseFloat(feeResult.adFeeGeneral) || 0;
+          if (feeResult.nonSaleChargeChecked) {
+            order.tdsFinancesChecked = true;
+            if (feeResult.adFeeGeneral != null) {
+              order.adFeeGeneral = parseFloat(feeResult.adFeeGeneral) || 0;
+            }
+            // Ensure calculated placeholder exists if TDS was never set
+            if (order.tds == null || order.tds === undefined) {
+              order.tds = computeCalculatedTds(order);
+              order.tdsSource = 'calculated';
+            }
+            await order.save();
           }
-          await order.save();
           totals.skipped++;
           return;
         }
@@ -5052,9 +5373,7 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
         applyFinancesFeeResult(order, feeResult);
 
         if (order.orderPaymentStatus === 'PAID' && feeResult.adFeeGeneral != null) {
-          const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
-          const adFeeVal = parseFloat(order.adFeeGeneral || 0);
-          order.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
+          order.orderEarnings = computeOrderEarningsFromComponents(order);
         }
 
         const financials = await calculateFinancials(order);
@@ -5146,11 +5465,10 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
       pendingQueryBase.creationDate = { $gte: effectiveSinceDate };
     }
     if (skipAlreadySet) {
-      pendingQueryBase.$or = [
-        { tdsSource: { $ne: 'finances' } },
-        { tdsSource: { $exists: false } },
-        { tds: { $exists: false } },
-        { tds: null },
+      // Skip rows that already have Finances TDS, or were checked with no eBay TDS (kept DB estimate)
+      pendingQueryBase.$nor = [
+        { tdsSource: 'finances', tds: { $gt: 0 } },
+        { tdsFinancesChecked: true },
       ];
     }
 
@@ -5198,7 +5516,8 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
   }
 });
 
-// Backfill / recalculate orderEarnings for existing orders using totalDueSeller.value - adFeeGeneral
+// Backfill / recalculate orderEarnings for existing orders using component formula
+// (subtotal − |discount| − transactionFees − adFeeGeneral − shipping)
 // Supports single seller (sellerId) or all sellers (allSellers: true)
 router.post('/backfill-earnings', requireAuth, requirePageAccess('AllOrdersSheet'), async (req, res) => {
   const { sellerId, sinceDate, allSellers } = req.body;
@@ -5232,25 +5551,17 @@ router.post('/backfill-earnings', requireAuth, requirePageAccess('AllOrdersSheet
       for (let i = 0; i < orders.length; i++) {
         const order = orders[i];
         try {
-          if (order.orderPaymentStatus === 'FULLY_REFUNDED' || order.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-            const financials = await calculateFinancials({ ...order.toObject(), orderEarnings: 0 });
-            await Order.findByIdAndUpdate(order._id, { orderEarnings: 0, ...financials });
-            totals.success++;
-          } else {
-            const totalDueSeller = parseFloat(order.paymentSummary?.totalDueSeller?.value || 0);
-            const adFee = parseFloat(order.adFeeGeneral || 0);
-            const newEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
+          const newEarnings = computeOrderEarningsFromComponents(order);
 
-            const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-              order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-            const financials = await calculateFinancials({ ...order.toObject(), orderEarnings: newEarnings }, marketplace);
+          const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+            order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+          const financials = await calculateFinancials({ ...order.toObject(), orderEarnings: newEarnings }, marketplace);
 
-            await Order.findByIdAndUpdate(order._id, { orderEarnings: newEarnings, ...financials });
-            totals.success++;
+          await Order.findByIdAndUpdate(order._id, { orderEarnings: newEarnings, ...financials });
+          totals.success++;
 
-            if ((i + 1) % 50 === 0) {
-              console.log(`[Backfill Earnings] Seller ${sid} progress: ${i + 1}/${orders.length}`);
-            }
+          if ((i + 1) % 50 === 0) {
+            console.log(`[Backfill Earnings] Seller ${sid} progress: ${i + 1}/${orders.length}`);
           }
         } catch (orderErr) {
           totals.failed++;
@@ -5935,7 +6246,8 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
                     existingOrder,
                     ebayOrder.orderPaymentStatus,
                     accessToken,
-                    seller._id
+                    seller._id,
+                    ebayOrder
                   );
 
                   // If refund handling returned data, merge it
@@ -6020,7 +6332,8 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
                     existingOrder,
                     ebayOrder.orderPaymentStatus,
                     accessToken,
-                    seller._id
+                    seller._id,
+                    ebayOrder
                   );
 
                   // If refund handling returned data, merge it with orderData
@@ -6182,6 +6495,20 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
 
 // Poll all sellers for NEW ORDERS ONLY (Phase 1)
 export async function scheduledPollNewOrders() {
+  // Preserve manually entered fulfillment fields when refreshing from eBay.
+  const MANUAL_FIELDS = new Set([
+    'amazonAccount', 'beforeTax', 'estimatedTax', 'beforeTaxUSD', 'estimatedTaxUSD',
+    'amazonTotal', 'amazonTotalINR', 'marketplaceFee', 'igst', 'totalCC', 'amazonExchangeRate',
+    'fulfillmentNotes', 'remark', 'messagingStatus', 'itemStatus', 'resolvedFrom',
+    'arrivingDate', 'allOrdersUsdRemark',
+    '_id', '__v', 'createdAt', 'updatedAt'
+  ]);
+
+  function normalizeDateForComparison(date) {
+    if (!date) return null;
+    return Math.floor(new Date(date).getTime() / 1000);
+  }
+
   try {
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true, $ne: null } })
       .populate('user', 'username email');
@@ -6191,163 +6518,202 @@ export async function scheduledPollNewOrders() {
         message: 'No sellers with connected eBay accounts found',
         pollResults: [],
         totalPolled: 0,
-        totalNewOrders: 0
+        totalNewOrders: 0,
+        totalUpdatedOrders: 0,
       };
     }
 
     const queueListingQtyUpdate = await isOrderListingQtyUpdateEnabled();
+    const now = new Date();
+    const ptWindow = getPollNewOrdersPtWindow(now);
 
-    const nowUTC = Date.now();
-    console.log(`\n========== POLLING NEW ORDERS FOR ${sellers.length} SELLERS ==========`);
-    console.log(`UTC Time: ${new Date(nowUTC).toISOString()}`);
+    console.log(`\n========== POLL NEW ORDERS (TODAY + YESTERDAY PT) FOR ${sellers.length} SELLERS ==========`);
+    console.log(`UTC Time: ${now.toISOString()}`);
+    console.log(`PT window: ${ptWindow.yesterdayPt} .. ${ptWindow.todayPt}`);
+    console.log(`eBay filter: ${ptWindow.filter}`);
 
     const pollingPromises = sellers.map(async (seller) => {
       const sellerName = seller.user?.username || seller.user?.email || seller._id.toString();
 
       try {
-        console.log(`\n[${sellerName}] Checking for new orders...`);
-
-        // Token refresh
-        const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-        const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-        let accessToken = seller.ebayTokens.access_token;
-
-        if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-          console.log(`[${sellerName}] Refreshing token...`);
-          const refreshRes = await axios.post(
-            'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify(buildRefreshTokenParams(seller)),
-            {
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-              },
-            }
-          );
-          seller.ebayTokens.access_token = refreshRes.data.access_token;
-          seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-          seller.ebayTokens.fetchedAt = new Date(nowUTC);
-          await seller.save();
-          accessToken = refreshRes.data.access_token;
-        }
-
-        const orderCount = await Order.countDocuments({ seller: seller._id });
-        const latestOrder = await Order.findOne({ seller: seller._id }).sort({ creationDate: -1 });
-        const latestCreationDate = latestOrder ? latestOrder.creationDate : null;
-        // Default initial sync date: Mar 1, 2026 00:00:00 UTC
-        const initialSyncDate = getEffectiveInitialSyncDate(seller.initialSyncDate);
-        const currentTimeUTC = getOrderPollEndDate(nowUTC);
+        console.log(`\n[${sellerName}] Polling today+yesterday PT orders...`);
+        const accessToken = await ensureValidToken(seller);
+        const ebayOrders = await fetchAllOrdersWithPagination(accessToken, ptWindow.filter, sellerName);
+        console.log(`[${sellerName}] Fetched ${ebayOrders.length} orders from eBay`);
 
         const newOrders = [];
-        let newOrdersFilter = null;
-        let newOrdersLimit = 15;
-        let ebayFetched = 0;
-        let skippedReason = null;
+        const updatedOrders = [];
 
-        if (orderCount === 0) {
-          newOrdersFilter = `creationdate:[${initialSyncDate.toISOString()}..${currentTimeUTC.toISOString()}]`;
-          newOrdersLimit = 200;
-          console.log(`[${sellerName}] Initial sync from ${initialSyncDate.toISOString()}`);
-        } else if (latestCreationDate) {
-          const afterLatestMs = new Date(latestCreationDate).getTime() + 1000;
-          const afterLatest = new Date(afterLatestMs);
-          const timeDiffMinutes = (currentTimeUTC.getTime() - afterLatestMs) / (1000 * 60);
+        for (const ebayOrder of ebayOrders) {
+          const existingOrder = await Order.findOne({
+            orderId: ebayOrder.orderId,
+            seller: seller._id,
+          });
 
-          if (timeDiffMinutes >= 1) {
-            newOrdersFilter = `creationdate:[${afterLatest.toISOString()}..${currentTimeUTC.toISOString()}]`;
-            newOrdersLimit = 200;
-            console.log(`[${sellerName}] Checking new orders after ${afterLatest.toISOString()}`);
-          } else {
-            skippedReason = 'poll_window_too_recent';
-            console.log(`[${sellerName}] Skipped (too recent: ${timeDiffMinutes.toFixed(2)} min)`);
-          }
-        }
-
-        if (newOrdersFilter) {
-          // Use pagination to fetch ALL orders (handles >200 orders)
-          const ebayNewOrders = await fetchAllOrdersWithPagination(accessToken, newOrdersFilter, sellerName);
-          ebayFetched = ebayNewOrders.length;
-          console.log(`[${sellerName}] Found ${ebayNewOrders.length} orders from eBay (${newOrders.length} new so far)`);
-
-          for (const ebayOrder of ebayNewOrders) {
-            const existingOrder = await Order.findOne({ orderId: ebayOrder.orderId });
-
-            if (!existingOrder) {
-              const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
-              await enrichNewOrderData(orderData, seller._id);
-              if (!orderData.policyMessageDisabled) {
-                const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
-                if (policyEligibleAt) {
-                  orderData.policyMessageEligibleAt = policyEligibleAt;
-                }
+          if (!existingOrder) {
+            const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+            await enrichNewOrderData(orderData, seller._id);
+            if (!orderData.policyMessageDisabled) {
+              const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
+              if (policyEligibleAt) {
+                orderData.policyMessageEligibleAt = policyEligibleAt;
               }
-              if (queueListingQtyUpdate) {
-                orderData.listingQtyUpdatePending = true;
-              }
-              const newOrder = await Order.create(orderData);
-              newOrders.push(newOrder);
-              console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
-              await sendAutoWelcomeMessage(seller, newOrder);
+            }
+            if (queueListingQtyUpdate) {
+              orderData.listingQtyUpdatePending = true;
+            }
+            const newOrder = await Order.create(orderData);
+            newOrders.push(newOrder);
+            console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
+            await sendAutoWelcomeMessage(seller, newOrder);
 
-              // Fetch ad fee from eBay Finances API
-              try {
-                const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, newOrder.purchaseMarketplaceId);
-                const adFeeResult = await fetchOrderAdFee(
-                  accessToken,
-                  ebayOrder.orderId,
-                  null,
-                  financeMpIds[0],
-                  financeMpIds,
-                  { creationDate: newOrder.creationDate || ebayOrder.creationDate }
+            try {
+              const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, newOrder.purchaseMarketplaceId);
+              const adFeeResult = await fetchOrderAdFee(
+                accessToken,
+                ebayOrder.orderId,
+                null,
+                financeMpIds[0],
+                financeMpIds,
+                { creationDate: newOrder.creationDate || ebayOrder.creationDate }
+              );
+              if (adFeeResult.success) {
+                applyFinancesFeeResult(newOrder, adFeeResult);
+                newOrder.adFeeGeneralUSD = parseFloat((newOrder.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
+                newOrder.orderEarnings = computeOrderEarningsFromComponents(newOrder);
+                const marketplace = newOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                  newOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                const financials = await calculateFinancials(
+                  { ...newOrder.toObject(), orderEarnings: newOrder.orderEarnings },
+                  marketplace
                 );
-                if (adFeeResult.success) {
-                  applyFinancesFeeResult(newOrder, adFeeResult);
-                  newOrder.adFeeGeneralUSD = parseFloat((newOrder.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
-
-                  // Recalculate orderEarnings if this is a PAID order
-                  if (newOrder.orderPaymentStatus === 'PAID') {
-                    const totalDueSeller = parseFloat(newOrder.paymentSummary?.totalDueSeller?.value || 0);
-                    const adFeeVal = parseFloat(newOrder.adFeeGeneral || 0);
-                    newOrder.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
-
-                    // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
-                    const marketplace = newOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-                      newOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                    const financials = await calculateFinancials({ ...newOrder.toObject(), orderEarnings: newOrder.orderEarnings }, marketplace);
-                    newOrder.tds = financials.tds;
-                    newOrder.tdsSource = financials.tdsSource;
-                    newOrder.tid = financials.tid;
-                    newOrder.net = financials.net;
-                    newOrder.pBalanceINR = financials.pBalanceINR;
-                    newOrder.ebayExchangeRate = financials.ebayExchangeRate;
-                    newOrder.profit = financials.profit;
-
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} TDS: $${adFeeResult.tds ?? newOrder.tds} - Calculated earnings: $${newOrder.orderEarnings}`);
-                  } else {
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} TDS: $${adFeeResult.tds ?? '-'} for ${ebayOrder.orderId}`);
-                  }
-
-                  await newOrder.save();
-                }
-              } catch (adFeeErr) {
-                console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
+                Object.assign(newOrder, {
+                  tds: financials.tds,
+                  tdsSource: financials.tdsSource,
+                  tid: financials.tid,
+                  net: financials.net,
+                  pBalanceINR: financials.pBalanceINR,
+                  ebayExchangeRate: financials.ebayExchangeRate,
+                  profit: financials.profit,
+                });
+                await newOrder.save();
               }
+            } catch (adFeeErr) {
+              console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
+            }
+            continue;
+          }
+
+          // Existing order: refresh full eBay payload (preserve manual fields)
+          const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+          const changedFields = [];
+
+          for (const [key, value] of Object.entries(orderData)) {
+            if (MANUAL_FIELDS.has(key) || key === 'seller') continue;
+
+            const oldVal = existingOrder[key];
+            const newVal = value;
+            let changed = false;
+
+            if (oldVal === null || oldVal === undefined) {
+              changed = newVal !== null && newVal !== undefined;
+            } else if (['creationDate', 'lastModifiedDate', 'dateSold', 'shipByDate', 'estimatedDelivery'].includes(key)) {
+              changed = normalizeDateForComparison(oldVal) !== normalizeDateForComparison(newVal);
+            } else if (typeof newVal === 'object' && newVal !== null) {
+              changed = JSON.stringify(oldVal) !== JSON.stringify(newVal);
+            } else {
+              changed = oldVal !== newVal;
+            }
+
+            if (changed) {
+              existingOrder[key] = value;
+              changedFields.push(key);
+            }
+          }
+
+          const prevEarnings = existingOrder.orderEarnings;
+          existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
+          if (prevEarnings !== existingOrder.orderEarnings) {
+            changedFields.push('orderEarnings');
+          }
+
+          if (changedFields.length > 0) {
+            const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+              existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+            const financials = await calculateFinancials(
+              { ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings },
+              marketplace
+            );
+            existingOrder.tds = financials.tds;
+            existingOrder.tdsSource = financials.tdsSource;
+            existingOrder.tid = financials.tid;
+            existingOrder.net = financials.net;
+            existingOrder.pBalanceINR = financials.pBalanceINR;
+            existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+            existingOrder.profit = financials.profit;
+            await existingOrder.save();
+            updatedOrders.push({ orderId: existingOrder.orderId, changedFields });
+            console.log(`  🔄 UPDATED: ${ebayOrder.orderId} - ${changedFields.join(', ')}`);
+          }
+
+          if (orderNeedsFinancesFeeFetch(existingOrder)) {
+            try {
+              const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
+              const adFeeResult = await fetchOrderAdFee(
+                accessToken,
+                ebayOrder.orderId,
+                null,
+                financeMpIds[0],
+                financeMpIds,
+                { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
+              );
+              if (adFeeResult.success) {
+                applyFinancesFeeResult(existingOrder, adFeeResult);
+                existingOrder.adFeeGeneralUSD = parseFloat((existingOrder.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
+                existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
+                const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                  existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                const financials = await calculateFinancials(
+                  { ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings },
+                  marketplace
+                );
+                Object.assign(existingOrder, {
+                  tds: financials.tds,
+                  tdsSource: financials.tdsSource,
+                  tid: financials.tid,
+                  net: financials.net,
+                  pBalanceINR: financials.pBalanceINR,
+                  ebayExchangeRate: financials.ebayExchangeRate,
+                  profit: financials.profit,
+                });
+                await existingOrder.save();
+                if (!updatedOrders.some((u) => u.orderId === existingOrder.orderId)) {
+                  updatedOrders.push({ orderId: existingOrder.orderId, changedFields: ['adFeeGeneral', 'tds'] });
+                }
+              }
+            } catch (adFeeErr) {
+              console.log(`  ⚠️ Ad fee/TDS refresh failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
             }
           }
         }
 
-        console.log(`[${sellerName}] ✅ Complete: ${newOrders.length} new orders`);
+        console.log(`[${sellerName}] ✅ Complete: ${newOrders.length} new, ${updatedOrders.length} updated`);
 
         return {
           sellerId: seller._id,
           sellerName,
           success: true,
-          newOrders: newOrders.map(o => o.orderId),
+          newOrders: newOrders.map((o) => o.orderId),
+          updatedOrders,
           totalNew: newOrders.length,
-          ebayFetched,
-          skippedReason,
+          totalUpdated: updatedOrders.length,
+          ebayFetched: ebayOrders.length,
+          ptWindow: {
+            yesterdayPt: ptWindow.yesterdayPt,
+            todayPt: ptWindow.todayPt,
+            filter: ptWindow.filter,
+          },
         };
-
       } catch (sellerErr) {
         console.error(`[${sellerName}] ❌ Error:`, sellerErr.message);
         return {
@@ -6356,24 +6722,36 @@ export async function scheduledPollNewOrders() {
           success: false,
           error: sellerErr.message,
           ebayFetched: 0,
+          totalNew: 0,
+          totalUpdated: 0,
         };
       }
     });
 
     const results = await Promise.allSettled(pollingPromises);
-    const pollResults = results.map(result => result.status === 'fulfilled' ? result.value : { success: false, error: result.reason?.message || 'Unknown error' });
+    const pollResults = results.map((result) =>
+      result.status === 'fulfilled'
+        ? result.value
+        : { success: false, error: result.reason?.message || 'Unknown error', totalNew: 0, totalUpdated: 0, ebayFetched: 0 }
+    );
     const totalNewOrders = pollResults.reduce((sum, r) => sum + (r.totalNew || 0), 0);
+    const totalUpdatedOrders = pollResults.reduce((sum, r) => sum + (r.totalUpdated || 0), 0);
     const totalEbayFetched = pollResults.reduce((sum, r) => sum + (r.ebayFetched || 0), 0);
 
     const responsePayload = {
-      message: 'New orders polling complete',
+      message: `Poll complete for PT ${ptWindow.yesterdayPt}–${ptWindow.todayPt}`,
       pollResults,
       totalPolled: sellers.length,
       totalNewOrders,
+      totalUpdatedOrders,
       totalEbayFetched,
+      ptWindow: {
+        yesterdayPt: ptWindow.yesterdayPt,
+        todayPt: ptWindow.todayPt,
+        filter: ptWindow.filter,
+      },
     };
 
-    // Trigger delayed policy messaging in background after polling (respects Cron Jobs toggle)
     processPendingPolicyMessagesIfEnabled(processPendingPolicyMessages, 50)
       .then((r) => {
         if (r.skipped) return;
@@ -6392,10 +6770,8 @@ export async function scheduledPollNewOrders() {
       })
       .catch((e) => console.error('[Quantity Update] Background run failed:', e.message));
 
-    console.log(`\n========== NEW ORDERS SUMMARY ==========`);
-    console.log(`Total new orders: ${totalNewOrders}`);
+    console.log(`\n========== POLL NEW (PT TODAY+YESTERDAY) SUMMARY ==========\nWindow: ${ptWindow.yesterdayPt} .. ${ptWindow.todayPt}\nFetched: ${totalEbayFetched}, new: ${totalNewOrders}, updated: ${totalUpdatedOrders}`);
     return responsePayload;
-
   } catch (err) {
     console.error('Error polling new orders:', err);
     throw err;
@@ -6807,14 +7183,14 @@ async function runPollOrderUpdatesJob() {
                 // Always save ALL changes to DB (even non-notifiable)
                 Object.assign(existingOrder, orderData);
 
-                // Check if order became FULLY_REFUNDED and set earnings to $0
+                // Check if order became FULLY_REFUNDED and set earnings to $-0.40
                 if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
-                  existingOrder.orderEarnings = 0;
+                  existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
 
-                  // Recalculate financial fields with $0 earnings
+                  // Recalculate financial fields with fully-refunded earnings
                   const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                     existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                  const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+                  const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                   existingOrder.tds = financials.tds;
                   existingOrder.tdsSource = financials.tdsSource;
                   existingOrder.tid = financials.tid;
@@ -6823,10 +7199,18 @@ async function runPollOrderUpdatesJob() {
                   existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                   existingOrder.profit = financials.profit;
 
-                  console.log(`  ❌ FULLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
+                  console.log(`  ❌ FULLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $-0.40`);
                 } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                  // For PARTIALLY_REFUNDED: earnings = $0
-                  existingOrder.orderEarnings = 0;
+                  // Snapshot once, then earnings = E0 − netRefund + adFeeCredit
+                  if (existingOrder.preRefundOrderEarnings == null) {
+                    existingOrder.preRefundAdFeeGeneral = parseFloat(existingOrder.adFeeGeneral) || 0;
+                    existingOrder.preRefundOrderEarnings = computePaidOrderEarningsFromComponents({
+                      ...existingOrder.toObject(),
+                      adFeeGeneral: existingOrder.preRefundAdFeeGeneral,
+                      orderPaymentStatus: 'PAID'
+                    });
+                  }
+                  existingOrder.orderEarnings = computePartiallyRefundedOrderEarnings(existingOrder);
 
                   // Recalculate financial fields
                   const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -6840,13 +7224,13 @@ async function runPollOrderUpdatesJob() {
                   existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                   existingOrder.profit = financials.profit;
 
-                  console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
+                  console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $${existingOrder.orderEarnings}`);
                 }
 
                 await existingOrder.save();
 
-                // Fetch ad fee if not already set
-                if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
+                // Fetch ad fee / TDS if missing from Finances
+                if (orderNeedsFinancesFeeFetch(existingOrder)) {
                   try {
                     const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
                     const adFeeResult = await fetchOrderAdFee(
@@ -6858,14 +7242,25 @@ async function runPollOrderUpdatesJob() {
                       { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
                     );
                     if (adFeeResult.success) {
+                      // Snapshot pre-refund ad fee BEFORE Finances overwrites with remaining fee
+                      if (
+                        existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED'
+                        && existingOrder.preRefundOrderEarnings == null
+                      ) {
+                        existingOrder.preRefundAdFeeGeneral = parseFloat(existingOrder.adFeeGeneral) || 0;
+                        existingOrder.preRefundOrderEarnings = computePaidOrderEarningsFromComponents({
+                          ...existingOrder.toObject(),
+                          adFeeGeneral: existingOrder.preRefundAdFeeGeneral,
+                          orderPaymentStatus: 'PAID'
+                        });
+                      }
+
                       applyFinancesFeeResult(existingOrder, adFeeResult);
                       existingOrder.adFeeGeneralUSD = parseFloat((existingOrder.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
 
                       // Recalculate orderEarnings based on payment status
                       if (existingOrder.orderPaymentStatus === 'PAID') {
-                        const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
-                        const adFeeVal = parseFloat(existingOrder.adFeeGeneral || 0);
-                        existingOrder.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
+                        existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
 
                         // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
                         const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -6881,8 +7276,7 @@ async function runPollOrderUpdatesJob() {
 
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} TDS: $${adFeeResult.tds ?? existingOrder.tds} - Recalculated earnings: $${existingOrder.orderEarnings}`);
                       } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                        // For PARTIALLY_REFUNDED: earnings remain $0
-                        existingOrder.orderEarnings = 0;
+                        existingOrder.orderEarnings = computePartiallyRefundedOrderEarnings(existingOrder);
 
                         // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
                         const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -6896,15 +7290,15 @@ async function runPollOrderUpdatesJob() {
                         existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                         existingOrder.profit = financials.profit;
 
-                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - PARTIALLY_REFUNDED earnings remain $0`);
+                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - PARTIALLY_REFUNDED earnings $${existingOrder.orderEarnings}`);
                       } else if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
-                        // For FULLY_REFUNDED: earnings = $0 (ad fee stored but not used in calculation)
-                        existingOrder.orderEarnings = 0;
+                        // For FULLY_REFUNDED: earnings = $-0.40 (ad fee stored but not used in calculation)
+                        existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
 
-                        // Recalculate financial fields with $0
+                        // Recalculate financial fields with fully-refunded earnings
                         const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                           existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                        const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+                        const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
                         existingOrder.tds = financials.tds;
                         existingOrder.tdsSource = financials.tdsSource;
                         existingOrder.tid = financials.tid;
@@ -6913,7 +7307,7 @@ async function runPollOrderUpdatesJob() {
                         existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
                         existingOrder.profit = financials.profit;
 
-                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - FULLY_REFUNDED earnings: $0`);
+                        console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - FULLY_REFUNDED earnings: $-0.40`);
                       } else {
                         console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
                       }
@@ -6960,23 +7354,23 @@ async function runPollOrderUpdatesJob() {
           creationDate: { $gte: lookbackFloor },
         }).select('orderId lastModifiedDate cancelState orderPaymentStatus');
 
-        // Also re-check a limited set of still-PAID recent orders whose eBay
-        // lastModified in DB is stale — catches NONE_REQUESTED → CANCELED misses.
-        const stalePaidCutoff = new Date(nowUTC - 2 * 24 * 60 * 60 * 1000);
-        const stalePaidOrders = await Order.find({
+        // Re-check recent NONE_REQUESTED orders every poll — catches
+        // NONE_REQUESTED → IN_PROGRESS / CANCELED when the seller watermark missed them.
+        // (Previously only orders with lastModified older than 2 days were checked, so
+        // brand-new cancel requests on fresh orders never got force-refreshed.)
+        const recentNoneRequestedOrders = await Order.find({
           seller: seller._id,
           creationDate: { $gte: lookbackFloor },
-          orderPaymentStatus: 'PAID',
+          orderPaymentStatus: { $in: ['PAID', 'PENDING'] },
           cancelState: { $in: ['NONE_REQUESTED', null, ''] },
-          lastModifiedDate: { $lte: stalePaidCutoff },
         })
-          .sort({ lastModifiedDate: 1 })
-          .limit(25)
+          .sort({ creationDate: -1 })
+          .limit(40)
           .select('orderId lastModifiedDate cancelState orderPaymentStatus');
 
         const forceRefreshOrders = [];
         const seenForceIds = new Set();
-        for (const row of [...openCancelOrders, ...stalePaidOrders]) {
+        for (const row of [...openCancelOrders, ...recentNoneRequestedOrders]) {
           const id = String(row.orderId);
           if (seenForceIds.has(id)) continue;
           seenForceIds.add(id);
@@ -6984,7 +7378,7 @@ async function runPollOrderUpdatesJob() {
         }
 
         if (forceRefreshOrders.length > 0) {
-          console.log(`[${sellerName}] Force-refreshing ${forceRefreshOrders.length} cancel/stale-paid order(s)...`);
+          console.log(`[${sellerName}] Force-refreshing ${forceRefreshOrders.length} cancel/recent-paid order(s)...`);
         }
 
         for (const openCancel of forceRefreshOrders) {
@@ -7026,10 +7420,10 @@ async function runPollOrderUpdatesJob() {
             Object.assign(existingOrder, orderData);
 
             if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED' || existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-              existingOrder.orderEarnings = 0;
+              existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
               const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                 existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-              const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+              const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
               existingOrder.tds = financials.tds;
               existingOrder.tdsSource = financials.tdsSource;
               existingOrder.tid = financials.tid;
@@ -7108,24 +7502,22 @@ router.post('/poll-order-updates', requireAuth, requirePageAccess('Fulfillment')
   }
 });
 
-// Resync recent orders (last 10 days) - catches silent eBay changes where lastModifiedDate wasn't updated
+// Resync recent orders — same full sync as Poll New Orders, for the last N PT calendar days
 router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), async (req, res) => {
+  const MANUAL_FIELDS = new Set([
+    'amazonAccount', 'beforeTax', 'estimatedTax', 'beforeTaxUSD', 'estimatedTaxUSD',
+    'amazonTotal', 'amazonTotalINR', 'marketplaceFee', 'igst', 'totalCC', 'amazonExchangeRate',
+    'fulfillmentNotes', 'remark', 'messagingStatus', 'itemStatus', 'resolvedFrom',
+    'arrivingDate', 'allOrdersUsdRemark',
+    '_id', '__v', 'createdAt', 'updatedAt'
+  ]);
+
+  function normalizeDateForComparison(date) {
+    if (!date) return null;
+    return Math.floor(new Date(date).getTime() / 1000);
+  }
+
   try {
-    // Fields that should NOT be overwritten (manually set by team)
-    const MANUAL_FIELDS = new Set([
-      'amazonAccount', 'beforeTax', 'estimatedTax', 'beforeTaxUSD', 'estimatedTaxUSD',
-      'amazonTotal', 'amazonTotalINR', 'marketplaceFee', 'igst', 'totalCC', 'amazonExchangeRate',
-      'fulfillmentNotes', 'remark', 'messagingStatus', 'itemStatus', 'resolvedFrom',
-      'arrivingDate',
-      '_id', '__v', 'createdAt', 'updatedAt'
-    ]);
-
-    // Helper to normalize dates for comparison (ignore milliseconds)
-    function normalizeDateForComparison(date) {
-      if (!date) return null;
-      return Math.floor(new Date(date).getTime() / 1000);
-    }
-
     const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true, $ne: null } })
       .populate('user', 'username email');
 
@@ -7135,229 +7527,180 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
         pollResults: [],
         totalPolled: 0,
         totalUpdated: 0,
-        totalNew: 0
+        totalNew: 0,
       });
     }
 
-    const nowUTC = Date.now();
-    const days = Math.min(Math.max(parseInt(req.body.days) || 10, 1), 90); // Default 10, max 90
-    const sinceDate = new Date(nowUTC - days * 24 * 60 * 60 * 1000);
+    const queueListingQtyUpdate = await isOrderListingQtyUpdateEnabled();
+    const now = new Date();
+    const ptWindow = getResyncPtWindow(req.body.days, now);
 
-    console.log(`\n========== RESYNC RECENT ORDERS (${days} DAYS) FOR ${sellers.length} SELLERS ==========`);
-    console.log(`UTC Time: ${new Date(nowUTC).toISOString()}`);
-    console.log(`Checking orders created since: ${sinceDate.toISOString()}`);
+    console.log(`\n========== RESYNC (LAST ${ptWindow.days} PT DAYS) FOR ${sellers.length} SELLERS ==========`);
+    console.log(`UTC Time: ${now.toISOString()}`);
+    console.log(`PT window: ${ptWindow.startPt} .. ${ptWindow.todayPt}`);
+    console.log(`eBay filter: ${ptWindow.filter}`);
 
     const pollingPromises = sellers.map(async (seller) => {
       const sellerName = seller.user?.username || seller.user?.email || seller._id.toString();
 
       try {
-        console.log(`\n[${sellerName}] Starting resync...`);
-
-        // Token refresh
-        const fetchedAt = seller.ebayTokens.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
-        const expiresInMs = (seller.ebayTokens.expires_in || 0) * 1000;
-        let accessToken = seller.ebayTokens.access_token;
-
-        if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
-          console.log(`[${sellerName}] Refreshing token...`);
-          const refreshRes = await axios.post(
-            'https://api.ebay.com/identity/v1/oauth2/token',
-            qs.stringify(buildRefreshTokenParams(seller)),
-            {
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
-              },
-            }
-          );
-          seller.ebayTokens.access_token = refreshRes.data.access_token;
-          seller.ebayTokens.expires_in = refreshRes.data.expires_in;
-          seller.ebayTokens.fetchedAt = new Date(nowUTC);
-          await seller.save();
-          accessToken = refreshRes.data.access_token;
-        }
-
-        // Fetch all orders created in last 10 days
-        const currentTimeUTC = getOrderPollEndDate(nowUTC);
-        const filter = `creationdate:[${sinceDate.toISOString()}..${currentTimeUTC.toISOString()}]`;
-        console.log(`[${sellerName}] Filter: ${filter}`);
-
-        const ebayOrders = await fetchAllOrdersWithPagination(accessToken, filter, sellerName);
+        console.log(`\n[${sellerName}] Resyncing last ${ptWindow.days} PT day(s)...`);
+        const accessToken = await ensureValidToken(seller);
+        const ebayOrders = await fetchAllOrdersWithPagination(accessToken, ptWindow.filter, sellerName);
         console.log(`[${sellerName}] Fetched ${ebayOrders.length} orders from eBay`);
 
-        const updatedOrders = [];
         const newOrders = [];
+        const updatedOrders = [];
 
         for (const ebayOrder of ebayOrders) {
           const existingOrder = await Order.findOne({
             orderId: ebayOrder.orderId,
-            seller: seller._id
+            seller: seller._id,
           });
 
-          if (existingOrder) {
-            // Build fresh order data from eBay
+          if (!existingOrder) {
             const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
-
-            // Only apply eBay-sourced fields (skip manual fields)
-            let hasChanges = false;
-            const changedFields = [];
-
-            for (const [key, value] of Object.entries(orderData)) {
-              if (MANUAL_FIELDS.has(key)) continue;
-              if (key === 'seller') continue;
-
-              // Compare values
-              const oldVal = existingOrder[key];
-              const newVal = value;
-              let changed = false;
-
-              if (oldVal === null || oldVal === undefined) {
-                changed = newVal !== null && newVal !== undefined;
-              } else if (key === 'creationDate' || key === 'lastModifiedDate' || key === 'dateSold' || key === 'shipByDate' || key === 'estimatedDelivery') {
-                // Date comparison - normalize to seconds
-                changed = normalizeDateForComparison(oldVal) !== normalizeDateForComparison(newVal);
-              } else if (typeof newVal === 'object' && newVal !== null) {
-                changed = JSON.stringify(oldVal) !== JSON.stringify(newVal);
-              } else {
-                changed = oldVal !== newVal;
-              }
-
-              if (changed) {
-                existingOrder[key] = value;
-                hasChanges = true;
-                changedFields.push(key);
+            await enrichNewOrderData(orderData, seller._id);
+            if (!orderData.policyMessageDisabled) {
+              const policyEligibleAt = getPolicyEligibilityDate(orderData.creationDate);
+              if (policyEligibleAt) {
+                orderData.policyMessageEligibleAt = policyEligibleAt;
               }
             }
-
-            if (hasChanges) {
-              // Check if order became FULLY_REFUNDED and set earnings to $0
-              if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
-                existingOrder.orderEarnings = 0;
-
-                // Recalculate financial fields with $0 earnings
-                const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-                  existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
-                existingOrder.tds = financials.tds;
-                existingOrder.tdsSource = financials.tdsSource;
-                existingOrder.tid = financials.tid;
-                existingOrder.net = financials.net;
-                existingOrder.pBalanceINR = financials.pBalanceINR;
-                existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
-                existingOrder.profit = financials.profit;
-
-                console.log(`  ❌ FULLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
-              } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                // For PARTIALLY_REFUNDED: earnings = $0
-                existingOrder.orderEarnings = 0;
-
-                // Recalculate financial fields
-                const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-                  existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
-                existingOrder.tds = financials.tds;
-                existingOrder.tdsSource = financials.tdsSource;
-                existingOrder.tid = financials.tid;
-                existingOrder.net = financials.net;
-                existingOrder.pBalanceINR = financials.pBalanceINR;
-                existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
-                existingOrder.profit = financials.profit;
-
-                console.log(`  ⚠️ PARTIALLY_REFUNDED: ${ebayOrder.orderId} - Earnings set to $0`);
-              }
-
-              await existingOrder.save();
-              updatedOrders.push({
-                orderId: existingOrder.orderId,
-                changedFields
-              });
-              console.log(`  🔄 RESYNCED: ${ebayOrder.orderId} - ${changedFields.join(', ')}`);
+            if (queueListingQtyUpdate) {
+              orderData.listingQtyUpdatePending = true;
             }
+            const newOrder = await Order.create(orderData);
+            newOrders.push(newOrder.orderId);
+            console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
+            await sendAutoWelcomeMessage(seller, newOrder);
 
-            // Fetch ad fee if not already set or is $0
-            if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
-              try {
-                const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
-                const adFeeResult = await fetchOrderAdFee(
-                  accessToken,
-                  ebayOrder.orderId,
-                  null,
-                  financeMpIds[0],
-                  financeMpIds,
-                  { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
+            try {
+              const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, newOrder.purchaseMarketplaceId);
+              const adFeeResult = await fetchOrderAdFee(
+                accessToken,
+                ebayOrder.orderId,
+                null,
+                financeMpIds[0],
+                financeMpIds,
+                { creationDate: newOrder.creationDate || ebayOrder.creationDate }
+              );
+              if (adFeeResult.success) {
+                applyFinancesFeeResult(newOrder, adFeeResult);
+                newOrder.adFeeGeneralUSD = parseFloat((newOrder.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
+                newOrder.orderEarnings = computeOrderEarningsFromComponents(newOrder);
+                const marketplace = newOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                  newOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                const financials = await calculateFinancials(
+                  { ...newOrder.toObject(), orderEarnings: newOrder.orderEarnings },
+                  marketplace
                 );
-                if (adFeeResult.success) {
-                  applyFinancesFeeResult(existingOrder, adFeeResult);
-                  existingOrder.adFeeGeneralUSD = parseFloat((existingOrder.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
-
-                  // Recalculate orderEarnings based on payment status
-                  if (existingOrder.orderPaymentStatus === 'PAID') {
-                    const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
-                    const adFeeVal = parseFloat(existingOrder.adFeeGeneral || 0);
-                    existingOrder.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
-
-                    // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
-                    const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-                      existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                    const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
-                    existingOrder.tds = financials.tds;
-                    existingOrder.tdsSource = financials.tdsSource;
-                    existingOrder.tid = financials.tid;
-                    existingOrder.net = financials.net;
-                    existingOrder.pBalanceINR = financials.pBalanceINR;
-                    existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
-                    existingOrder.profit = financials.profit;
-
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} TDS: $${adFeeResult.tds ?? existingOrder.tds} - Recalculated earnings: $${existingOrder.orderEarnings}`);
-                  } else if (existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-                    // For PARTIALLY_REFUNDED: earnings remain $0
-                    existingOrder.orderEarnings = 0;
-
-                    // Recalculate financial fields (TDS, TID, NET, P.Balance INR, Profit)
-                    const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-                      existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                    const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
-                    existingOrder.tds = financials.tds;
-                    existingOrder.tdsSource = financials.tdsSource;
-                    existingOrder.tid = financials.tid;
-                    existingOrder.net = financials.net;
-                    existingOrder.pBalanceINR = financials.pBalanceINR;
-                    existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
-                    existingOrder.profit = financials.profit;
-
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - PARTIALLY_REFUNDED earnings remain $0`);
-                  } else if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED') {
-                    // For FULLY_REFUNDED: earnings = $0 (ad fee stored but not used in calculation)
-                    existingOrder.orderEarnings = 0;
-
-                    // Recalculate financial fields with $0
-                    const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-                      existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                    const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
-                    existingOrder.tds = financials.tds;
-                    existingOrder.tdsSource = financials.tdsSource;
-                    existingOrder.tid = financials.tid;
-                    existingOrder.net = financials.net;
-                    existingOrder.pBalanceINR = financials.pBalanceINR;
-                    existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
-                    existingOrder.profit = financials.profit;
-
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} - FULLY_REFUNDED earnings: $0`);
-                  } else {
-                    console.log(`  💰 Ad Fee: $${adFeeResult.adFeeGeneral} for ${ebayOrder.orderId}`);
-                  }
-
-                  await existingOrder.save();
-                }
-              } catch (adFeeErr) {
-                console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
+                Object.assign(newOrder, {
+                  tds: financials.tds,
+                  tdsSource: financials.tdsSource,
+                  tid: financials.tid,
+                  net: financials.net,
+                  pBalanceINR: financials.pBalanceINR,
+                  ebayExchangeRate: financials.ebayExchangeRate,
+                  profit: financials.profit,
+                });
+                await newOrder.save();
               }
+            } catch (adFeeErr) {
+              console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
             }
-          } else {
-            // New order not in DB - ignore it.
-            // As per user request, new orders should ONLY be fetched via the "Poll New Orders" button.
-            // The resync button is strictly for updating existing orders.
-            console.log(`  ⏭️ NEW (resync): ${ebayOrder.orderId} - Ignored. Not in DB.`);
+            continue;
+          }
+
+          const orderData = await buildOrderData(ebayOrder, seller._id, accessToken);
+          const changedFields = [];
+
+          for (const [key, value] of Object.entries(orderData)) {
+            if (MANUAL_FIELDS.has(key) || key === 'seller') continue;
+
+            const oldVal = existingOrder[key];
+            const newVal = value;
+            let changed = false;
+
+            if (oldVal === null || oldVal === undefined) {
+              changed = newVal !== null && newVal !== undefined;
+            } else if (['creationDate', 'lastModifiedDate', 'dateSold', 'shipByDate', 'estimatedDelivery'].includes(key)) {
+              changed = normalizeDateForComparison(oldVal) !== normalizeDateForComparison(newVal);
+            } else if (typeof newVal === 'object' && newVal !== null) {
+              changed = JSON.stringify(oldVal) !== JSON.stringify(newVal);
+            } else {
+              changed = oldVal !== newVal;
+            }
+
+            if (changed) {
+              existingOrder[key] = value;
+              changedFields.push(key);
+            }
+          }
+
+          const prevEarnings = existingOrder.orderEarnings;
+          existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
+          if (prevEarnings !== existingOrder.orderEarnings) {
+            changedFields.push('orderEarnings');
+          }
+
+          if (changedFields.length > 0) {
+            const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+              existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+            const financials = await calculateFinancials(
+              { ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings },
+              marketplace
+            );
+            existingOrder.tds = financials.tds;
+            existingOrder.tdsSource = financials.tdsSource;
+            existingOrder.tid = financials.tid;
+            existingOrder.net = financials.net;
+            existingOrder.pBalanceINR = financials.pBalanceINR;
+            existingOrder.ebayExchangeRate = financials.ebayExchangeRate;
+            existingOrder.profit = financials.profit;
+            await existingOrder.save();
+            updatedOrders.push({ orderId: existingOrder.orderId, changedFields });
+            console.log(`  🔄 RESYNCED: ${ebayOrder.orderId} - ${changedFields.join(', ')}`);
+          }
+
+          if (orderNeedsFinancesFeeFetch(existingOrder)) {
+            try {
+              const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
+              const adFeeResult = await fetchOrderAdFee(
+                accessToken,
+                ebayOrder.orderId,
+                null,
+                financeMpIds[0],
+                financeMpIds,
+                { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
+              );
+              if (adFeeResult.success) {
+                applyFinancesFeeResult(existingOrder, adFeeResult);
+                existingOrder.adFeeGeneralUSD = parseFloat((existingOrder.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
+                existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
+                const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+                  existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+                const financials = await calculateFinancials(
+                  { ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings },
+                  marketplace
+                );
+                Object.assign(existingOrder, {
+                  tds: financials.tds,
+                  tdsSource: financials.tdsSource,
+                  tid: financials.tid,
+                  net: financials.net,
+                  pBalanceINR: financials.pBalanceINR,
+                  ebayExchangeRate: financials.ebayExchangeRate,
+                  profit: financials.profit,
+                });
+                await existingOrder.save();
+                if (!updatedOrders.some((u) => u.orderId === existingOrder.orderId)) {
+                  updatedOrders.push({ orderId: existingOrder.orderId, changedFields: ['adFeeGeneral', 'tds'] });
+                }
+              }
+            } catch (adFeeErr) {
+              console.log(`  ⚠️ Ad fee/TDS refresh failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
+            }
           }
         }
 
@@ -7371,48 +7714,56 @@ router.post('/resync-recent', requireAuth, requirePageAccess('Fulfillment'), asy
           updatedOrders,
           newOrders,
           totalUpdated: updatedOrders.length,
-          totalNew: newOrders.length
+          totalNew: newOrders.length,
         };
-
       } catch (sellerErr) {
         console.error(`[${sellerName}] ❌ Resync error:`, sellerErr.message);
         return {
           sellerId: seller._id,
           sellerName,
           success: false,
-          error: sellerErr.message
+          error: sellerErr.message,
+          totalUpdated: 0,
+          totalNew: 0,
         };
       }
     });
 
     const results = await Promise.allSettled(pollingPromises);
-    const pollResults = results.map(result =>
-      result.status === 'fulfilled' ? result.value : { success: false, error: result.reason?.message || 'Unknown error' }
+    const pollResults = results.map((result) =>
+      result.status === 'fulfilled'
+        ? result.value
+        : { success: false, error: result.reason?.message || 'Unknown error', totalUpdated: 0, totalNew: 0 }
     );
 
     const totalUpdated = pollResults.reduce((sum, r) => sum + (r.totalUpdated || 0), 0);
     const totalNew = pollResults.reduce((sum, r) => sum + (r.totalNew || 0), 0);
+    const totalFetched = pollResults.reduce((sum, r) => sum + (r.totalFetched || 0), 0);
 
     res.json({
-      message: 'Resync complete',
+      message: `Resync complete for PT ${ptWindow.startPt}–${ptWindow.todayPt} (${ptWindow.days} days)`,
       pollResults,
       totalPolled: sellers.length,
       totalUpdated,
-      totalNew
+      totalNew,
+      totalFetched,
+      ptWindow: {
+        days: ptWindow.days,
+        startPt: ptWindow.startPt,
+        todayPt: ptWindow.todayPt,
+        filter: ptWindow.filter,
+      },
     });
 
     console.log('\n========== RESYNC SUMMARY ==========');
-    console.log(`Total sellers: ${sellers.length}`);
-    console.log(`Total updated: ${totalUpdated}`);
-    console.log(`Total new: ${totalNew}`);
-
+    console.log(`PT window: ${ptWindow.startPt} .. ${ptWindow.todayPt}`);
+    console.log(`Fetched: ${totalFetched}, updated: ${totalUpdated}, new: ${totalNew}`);
   } catch (err) {
     console.error('Error in resync:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ============================================
 // PT (Pacific Time) Refresh — refreshes EXISTING orders created on a specific
 // PT calendar date/range from eBay. New orders in that window are intentionally
 // ignored (use "Poll New Orders" for those). Superadmin-only.
@@ -7566,10 +7917,10 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
 
           if (changedFields.length > 0) {
             if (existingOrder.orderPaymentStatus === 'FULLY_REFUNDED' || existingOrder.orderPaymentStatus === 'PARTIALLY_REFUNDED') {
-              existingOrder.orderEarnings = 0;
+              existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
               const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                 existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-              const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: 0 }, marketplace);
+              const financials = await calculateFinancials({ ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings }, marketplace);
               existingOrder.tds = financials.tds;
               existingOrder.tdsSource = financials.tdsSource;
               existingOrder.tid = financials.tid;
@@ -7580,8 +7931,8 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
             }
           }
 
-          // Refresh ad fee if not already set — mirrors /resync-recent behavior.
-          if (!existingOrder.adFeeGeneral || existingOrder.adFeeGeneral === 0) {
+          // Refresh ad fee / TDS from Finances when missing — mirrors /resync-recent behavior.
+          if (orderNeedsFinancesFeeFetch(existingOrder)) {
             try {
               const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
               const adFeeResult = await fetchOrderAdFee(
@@ -7592,16 +7943,14 @@ router.post('/resync-existing-orders-by-utc-date', requireAuth, requirePageAcces
                 financeMpIds,
                 { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
               );
-              if (adFeeResult.success && (adFeeResult.adFeeGeneral || adFeeResult.tds)) {
+              if (adFeeResult.success) {
                 applyFinancesFeeResult(existingOrder, adFeeResult);
                 existingOrder.adFeeGeneralUSD = parseFloat((existingOrder.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
-                if (adFeeResult.adFeeGeneral && !changedFields.includes('adFeeGeneral')) changedFields.push('adFeeGeneral');
+                if (adFeeResult.adFeeGeneral != null && !changedFields.includes('adFeeGeneral')) changedFields.push('adFeeGeneral');
                 if (adFeeResult.tds != null && !changedFields.includes('tds')) changedFields.push('tds');
 
                 if (existingOrder.orderPaymentStatus === 'PAID') {
-                  const totalDueSeller = parseFloat(existingOrder.paymentSummary?.totalDueSeller?.value || 0);
-                  const adFeeVal = parseFloat(existingOrder.adFeeGeneral || 0);
-                  existingOrder.orderEarnings = parseFloat((totalDueSeller - adFeeVal).toFixed(2));
+                  existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
 
                   const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
                     existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
@@ -8195,6 +8544,15 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     purchaseMarketplaceId
   };
 
+  // USD net due to seller (paymentSummary.totalDueSeller.value is USD when converted)
+  const dueSeller = ebayOrder.paymentSummary?.totalDueSeller;
+  if (dueSeller?.value != null && dueSeller.value !== '') {
+    const dueUsd = parseFloat(dueSeller.value);
+    if (Number.isFinite(dueUsd)) {
+      orderData.totalDueSellerUSD = parseFloat(dueUsd.toFixed(2));
+    }
+  }
+
   orderData.orderTotal = parseFloat(((parseFloat(ebayOrder.pricingSummary?.total?.value || 0)) + orderData.salesTax).toFixed(2));
 
   // Enhanced cancel state extraction with multiple fallbacks
@@ -8258,12 +8616,11 @@ async function buildOrderData(ebayOrder, sellerId, accessToken) {
     orderData.conversionRate = parseFloat(conversionRate.toFixed(5)); // Store rate with 5 decimal precision
   }
 
-  // Auto-calculate orderEarnings for PAID orders: totalDueSeller.value - adFeeGeneral
+  // Auto-calculate orderEarnings for PAID orders from component columns:
+  // subtotal − |discount| − transactionFees − adFeeGeneral − shipping
   // If adFeeGeneral is not yet available, it defaults to 0
   if (orderData.orderPaymentStatus === 'PAID') {
-    const totalDueSeller = parseFloat(ebayOrder.paymentSummary?.totalDueSeller?.value || 0);
-    const adFee = parseFloat(orderData.adFeeGeneral || 0);
-    orderData.orderEarnings = parseFloat((totalDueSeller - adFee).toFixed(2));
+    orderData.orderEarnings = computeOrderEarningsFromComponents(orderData);
 
     // Calculate downstream financial fields
     const marketplace = purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
@@ -13421,6 +13778,7 @@ const SYNC_ALL_STATUS_STALE_MS = 45 * 60 * 1000;
 
 let syncAllStatus = {
   running: false,
+  mode: 'incremental',
   sellersTotal: 0,
   sellersComplete: 0,
   currentSeller: '',
@@ -13595,7 +13953,12 @@ async function releaseSyncAllSellersLock() {
   }
 }
 
+function normalizeStoreListingsSyncMode(raw) {
+  return String(raw || 'incremental').trim().toLowerCase() === 'full' ? 'full' : 'incremental';
+}
+
 router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
+  const mode = normalizeStoreListingsSyncMode(req.body?.mode);
   const acquired = await acquireSyncAllSellersLock();
   if (!acquired) {
     return res.status(409).json({
@@ -13615,12 +13978,15 @@ router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
     }
     res.json({
       success: true,
-      message: `Sync started for ${sellersTotal} seller(s). Poll GET /ebay/sync-all-sellers-status for progress.`,
+      message: mode === 'full'
+        ? `Full resync started for ${sellersTotal} seller(s) (~${EBAY_LISTINGS_BACKFILL_DAYS}d). Poll GET /ebay/sync-all-sellers-status for progress.`
+        : `Incremental sync started for ${sellersTotal} seller(s). Poll GET /ebay/sync-all-sellers-status for progress.`,
       sellersTotal,
+      mode,
     });
     void (async () => {
       try {
-        await executeSyncAllSellersWork();
+        await executeSyncAllSellersWork({ mode });
       } catch (e) {
         console.error('[Sync All] Background error:', e?.message || e);
       } finally {
@@ -15270,7 +15636,7 @@ router.get('/store-listings/store-status', requireAuth, async (req, res) => {
     // GTC renews once per calendar month on the StartTime day-of-month (PDT), not every 30 days.
     const asOfForRenew = getEbayFreeListingRenewAsOf(monthStart, monthEnd);
 
-    const [countRows, endedCountRows, endedStartedThisMonthRows, renewRows] = await Promise.all([
+    const [countRows, endedCountRows, endedFreeInsertRows, renewRows] = await Promise.all([
       ActiveListing.aggregate([
         {
           $match: {
@@ -15326,27 +15692,20 @@ router.get('/store-listings/store-status', requireAuth, async (req, res) => {
           },
         },
       ]),
-      ActiveListing.aggregate([
-        {
-          $match: {
-            ...endedListingStatusFilter(),
-            seller: { $in: sellerInList },
-            startTime: { $gte: monthStart, $lt: monthEnd },
-          },
-        },
-        {
-          $group: {
-            _id: { $toString: { $ifNull: ['$seller', ''] } },
-            count: { $sum: 1 },
-          },
-        },
-      ]),
+      ActiveListing.aggregate(
+        buildEndedFreeInsertAggregateStages({
+          sellerInList,
+          monthStart,
+          monthEnd,
+          daysInMonth: asOfForRenew.daysInMonth,
+          statusMatch: endedListingStatusFilter(),
+        })
+      ),
       ActiveListing.aggregate(
         buildCalendarMonthRenewAggregateStages({
           sellerInList,
           monthStart,
-          asOfDay: asOfForRenew.asOfDay,
-          daysInMonth: asOfForRenew.daysInMonth,
+          monthEnd,
         })
       ),
     ]);
@@ -15376,7 +15735,7 @@ router.get('/store-listings/store-status', requireAuth, async (req, res) => {
       if (!key) continue;
       endedCountBySeller.set(key, (endedCountBySeller.get(key) || 0) + Number(c.count || 0));
     }
-    for (const c of endedStartedThisMonthRows) {
+    for (const c of endedFreeInsertRows) {
       const key = String(c._id || '');
       if (!key) continue;
       monthEndedInsertBySeller.set(key, (monthEndedInsertBySeller.get(key) || 0) + Number(c.count || 0));
@@ -15525,6 +15884,7 @@ router.get('/store-listings/store-status', requireAuth, async (req, res) => {
     res.json({
       sync: {
         running: Boolean(syncPayload?.running),
+        mode: syncPayload?.mode === 'full' ? 'full' : (syncPayload?.mode || 'incremental'),
         currentSeller: syncPayload?.currentSeller || '',
         sellersTotal: syncPayload?.sellersTotal ?? 0,
         sellersComplete: syncPayload?.sellersComplete ?? 0,
@@ -15592,11 +15952,13 @@ router.post('/store-listings/sync-one', requireAuth, async (req, res) => {
       });
     }
 
+    const mode = normalizeStoreListingsSyncMode(req.body?.mode);
     const sellerName = seller.user?.username || seller.user?.email || sellerId;
     const job = {
       running: true,
       sellerId,
       sellerName,
+      mode,
       currentPage: 0,
       currentTotalPages: 0,
       currentWindow: 0,
@@ -15610,14 +15972,18 @@ router.post('/store-listings/sync-one', requireAuth, async (req, res) => {
 
     res.json({
       success: true,
-      message: `Sync started for ${sellerName}. Progress appears in this row.`,
+      message: mode === 'full'
+        ? `Full resync started for ${sellerName}. Progress appears in this row.`
+        : `Sync started for ${sellerName}. Progress appears in this row.`,
       sellerId,
       sellerName,
+      mode,
     });
 
     void (async () => {
       try {
         const result = await syncOneSellerActiveListings(seller, {
+          mode,
           onPageProgress: ({ page, totalPages, windowIndex = 0, totalWindows = 0 }) => {
             job.currentPage = page;
             job.currentTotalPages = totalPages;
@@ -20309,9 +20675,9 @@ function freeListingsAllowanceForLevel(level) {
  * Enrich overview row with monthly remaining headroom.
  * Free listings (eBay has no remaining-free-insert API):
  *   used ≈ new (StartTime in PDT month, still active)
- *        + renew (older active whose calendar-month GTC day already fell)
- *        + endedStartedThisMonth (StartTime in month, then ended)
- * Early end before renew does not count (excluded: ended + startTime before month).
+ *        + renew (older active whose GTC EndTime already rolled past this month)
+ *        + ended (started this month then ended, OR renewed this month then ended)
+ * Early end before renew does not count.
  */
 function enrichStoreOverviewLimitFields(row, usage = null) {
   const allowance = freeListingsAllowanceForLevel(row.subscriptionLevel);
@@ -20405,14 +20771,16 @@ function getEbayFreeListingRenewAsOf(monthStart, monthEnd, refDate = new Date())
 }
 
 /**
- * Older actives whose calendar-month GTC renew day already fell in this allotment month.
- * eBay renews on the same day-of-month as StartTime (29/30/31 → last day in shorter months).
+ * Older actives that have already GTC-renewed in this allotment month.
+ *
+ * For active GTC, EndTime is the next renew instant. After this month's renew it
+ * rolls into the next month (>= monthEnd). Keep this a simple $match so store-status
+ * stays fast on large ActiveListing collections (no per-doc timezone projections).
  */
 function buildCalendarMonthRenewAggregateStages({
   sellerInList,
   monthStart,
-  asOfDay,
-  daysInMonth,
+  monthEnd,
 }) {
   return [
     {
@@ -20420,19 +20788,70 @@ function buildCalendarMonthRenewAggregateStages({
         ...activeListingStatusFilter(),
         seller: { $in: sellerInList },
         startTime: { $lt: monthStart, $type: 'date' },
+        endTime: { $gte: monthEnd, $type: 'date' },
+      },
+    },
+    {
+      $group: {
+        _id: { $toString: { $ifNull: ['$seller', ''] } },
+        count: { $sum: 1 },
+      },
+    },
+  ];
+}
+
+/**
+ * Ended free inserts in the allotment month:
+ *  - started this month, then ended (sold / ended early)
+ *  - older listing whose GTC renew day fell this month, then ended
+ * Early end before renew day does not count.
+ */
+function buildEndedFreeInsertAggregateStages({
+  sellerInList,
+  monthStart,
+  monthEnd,
+  daysInMonth,
+  statusMatch,
+  groupItemIds = false,
+}) {
+  return [
+    {
+      $match: {
+        ...statusMatch,
+        seller: { $in: sellerInList },
+        startTime: { $type: 'date' },
+        $or: [
+          { startTime: { $gte: monthStart, $lt: monthEnd } },
+          {
+            startTime: { $lt: monthStart },
+            endTime: { $gte: monthStart, $type: 'date' },
+          },
+        ],
       },
     },
     {
       $project: {
         sellerKey: { $toString: { $ifNull: ['$seller', ''] } },
+        itemId: 1,
+        startTime: 1,
+        endTime: 1,
         startDay: {
           $dayOfMonth: { date: '$startTime', timezone: 'America/Los_Angeles' },
+        },
+        startedThisMonth: {
+          $and: [
+            { $gte: ['$startTime', monthStart] },
+            { $lt: ['$startTime', monthEnd] },
+          ],
         },
       },
     },
     {
       $project: {
         sellerKey: 1,
+        itemId: 1,
+        startedThisMonth: 1,
+        endTime: 1,
         renewDay: {
           $cond: [
             { $gt: ['$startDay', daysInMonth] },
@@ -20444,15 +20863,45 @@ function buildCalendarMonthRenewAggregateStages({
     },
     {
       $match: {
-        $expr: { $lte: ['$renewDay', asOfDay] },
+        $expr: {
+          $or: [
+            '$startedThisMonth',
+            {
+              $and: [
+                { $eq: [{ $type: '$endTime' }, 'date'] },
+                {
+                  // Renew day already reached by endTime (days since monthStart >= renewDay - 1).
+                  $gte: [
+                    {
+                      $dateDiff: {
+                        startDate: monthStart,
+                        endDate: '$endTime',
+                        unit: 'day',
+                        timezone: 'America/Los_Angeles',
+                      },
+                    },
+                    { $subtract: ['$renewDay', 1] },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
       },
     },
-    {
-      $group: {
-        _id: '$sellerKey',
-        count: { $sum: 1 },
-      },
-    },
+    groupItemIds
+      ? {
+          $group: {
+            _id: '$sellerKey',
+            itemIds: { $addToSet: '$itemId' },
+          },
+        }
+      : {
+          $group: {
+            _id: '$sellerKey',
+            count: { $sum: 1 },
+          },
+        },
   ];
 }
 
@@ -20475,6 +20924,7 @@ async function buildFreeListingUsageMaps(sellerIds) {
   const asOfForRenew = getEbayFreeListingRenewAsOf(monthStart, monthEnd);
   const nonActiveStatuses = { $nin: ['Active', 'ACTIVE', 'active'] };
 
+  const endedStatusMatch = { listingStatus: nonActiveStatuses };
   const [activeGroups, newGroups, renewGroups, endedFromActiveListing, endedFromListing] = await Promise.all([
     ActiveListing.aggregate([
       { $match: { ...activeListingStatusFilter(), seller: { $in: sellerInList } } },
@@ -20494,30 +20944,29 @@ async function buildFreeListingUsageMaps(sellerIds) {
       buildCalendarMonthRenewAggregateStages({
         sellerInList,
         monthStart,
-        asOfDay: asOfForRenew.asOfDay,
-        daysInMonth: asOfForRenew.daysInMonth,
+        monthEnd,
       })
     ),
-    ActiveListing.aggregate([
-      {
-        $match: {
-          seller: { $in: sellerInList },
-          listingStatus: nonActiveStatuses,
-          startTime: { $gte: monthStart, $lt: monthEnd },
-        },
-      },
-      { $group: { _id: { $toString: { $ifNull: ['$seller', ''] } }, itemIds: { $addToSet: '$itemId' } } },
-    ]),
-    Listing.aggregate([
-      {
-        $match: {
-          seller: { $in: sellerInList },
-          listingStatus: nonActiveStatuses,
-          startTime: { $gte: monthStart, $lt: monthEnd },
-        },
-      },
-      { $group: { _id: { $toString: { $ifNull: ['$seller', ''] } }, itemIds: { $addToSet: '$itemId' } } },
-    ]),
+    ActiveListing.aggregate(
+      buildEndedFreeInsertAggregateStages({
+        sellerInList,
+        monthStart,
+        monthEnd,
+        daysInMonth: asOfForRenew.daysInMonth,
+        statusMatch: endedStatusMatch,
+        groupItemIds: true,
+      })
+    ),
+    Listing.aggregate(
+      buildEndedFreeInsertAggregateStages({
+        sellerInList,
+        monthStart,
+        monthEnd,
+        daysInMonth: asOfForRenew.daysInMonth,
+        statusMatch: endedStatusMatch,
+        groupItemIds: true,
+      })
+    ),
   ]);
 
   for (const g of activeGroups) {
@@ -20782,7 +21231,7 @@ router.get('/store-overview/all', requireAuth, requirePageAccess('StoreOverview'
       rows: enrichedRows,
       notes: {
         freeListingsEstimate:
-          'Free listings used ≈ new (StartTime in PDT month) + GTC renews already due this calendar month (same day-of-month as StartTime) + listings that started this month and already ended. Early end before renew is excluded. eBay does not expose free-insert remaining via API — Seller Hub is source of truth. Selling qty/$ remaining is live from eBay.',
+          'Free listings used ≈ new (StartTime in PDT month, still active) + renew (older active whose GTC EndTime already rolled into next month) + ended (started this month then ended, OR renewed this month then ended). Early end before renew is excluded. eBay does not expose free-insert remaining via API — Seller Hub is source of truth. Selling qty/$ remaining is live from eBay.',
       },
       cache: {
         hitCount,
@@ -20797,98 +21246,135 @@ router.get('/store-overview/all', requireAuth, requirePageAccess('StoreOverview'
   }
 });
 
+function ebayMoneyParts(node) {
+  if (node == null) return { value: null, currency: null };
+  const raw = Array.isArray(node) ? node[0] : node;
+  if (raw == null) return { value: null, currency: null };
+  const value = moneyFromEbayNode(raw);
+  const currency = typeof raw === 'object' && raw.$?.currencyID ? raw.$.currencyID : null;
+  return { value, currency };
+}
+
+function ebayInt(node) {
+  const v = firstXmlValue(node);
+  if (v == null || v === '') return null;
+  const n = Number.parseInt(String(v), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Parse GetMyeBaySelling SellingSummary / Summary into a flat row. */
+function parseEbaySellingSummaryContainers(responseRoot = {}) {
+  // Request SellingSummary.Include returns Summary (MyeBaySellingSummaryType).
+  // Some responses also include SellingSummary (SellingSummaryType) — merge both.
+  const summary = responseRoot.Summary?.[0] || responseRoot.Summary || {};
+  const sellingSummary = responseRoot.SellingSummary?.[0] || responseRoot.SellingSummary || {};
+  const src = { ...sellingSummary, ...summary };
+
+  const totalAuction = ebayMoneyParts(src.TotalAuctionSellingValue);
+  const totalSold = ebayMoneyParts(src.TotalSoldValue);
+  const amountLimit = ebayMoneyParts(src.AmountLimitRemaining);
+
+  return {
+    activeAuctionCount: ebayInt(src.ActiveAuctionCount),
+    auctionSellingCount: ebayInt(src.AuctionSellingCount),
+    auctionBidCount: ebayInt(src.AuctionBidCount),
+    totalAuctionSellingValue: totalAuction.value,
+    totalAuctionSellingCurrency: totalAuction.currency || 'USD',
+    totalSoldCount: ebayInt(src.TotalSoldCount),
+    totalSoldValue: totalSold.value,
+    totalSoldValueCurrency: totalSold.currency || 'USD',
+    soldDurationInDays: ebayInt(src.SoldDurationInDays),
+    quantityLimitRemaining: ebayInt(src.QuantityLimitRemaining),
+    amountLimitRemaining: amountLimit.value,
+    amountLimitCurrency: amountLimit.currency || 'USD',
+    classifiedAdCount: ebayInt(src.ClassifiedAdCount),
+    totalListingsWithLeads: ebayInt(src.TotalListingsWithLeads),
+  };
+}
+
+async function fetchSellerFullSellingSummary(seller) {
+  const sellerName = resolveStoreDisplayName(seller);
+  const base = { sellerId: seller._id, sellerName };
+
+  if (!seller.ebayTokens?.access_token || !seller.ebayTokens?.refresh_token) {
+    return { ...base, notConnected: true, success: false };
+  }
+
+  try {
+    const accessToken = await ensureValidToken(seller);
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>${accessToken}</eBayAuthToken>
+  </RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <SellingSummary>
+    <Include>true</Include>
+  </SellingSummary>
+  <DetailLevel>ReturnSummary</DetailLevel>
+  <Version>1423</Version>
+</GetMyeBaySellingRequest>`;
+
+    const response = await postEbayTradingApi(xmlRequest, {
+      'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'Content-Type': 'text/xml',
+    }, { logLabel: `SellingSummary ${sellerName}` });
+
+    const result = await parseStringPromise(response.data, { explicitArray: false });
+    const root = result?.GetMyeBaySellingResponse;
+    if (!root) {
+      return { ...base, success: false, error: 'Empty GetMyeBaySelling response' };
+    }
+    if (root.Ack === 'Failure') {
+      const errMsg = root.Errors?.LongMessage
+        || root.Errors?.ShortMessage
+        || (Array.isArray(root.Errors) ? root.Errors[0]?.LongMessage : null)
+        || 'eBay API Error';
+      return { ...base, success: false, error: errMsg };
+    }
+
+    return {
+      ...base,
+      success: true,
+      notConnected: false,
+      ...parseEbaySellingSummaryContainers(root),
+    };
+  } catch (err) {
+    console.error(`[Selling Summary] Failed for ${sellerName}:`, err.message);
+    return { ...base, success: false, error: err.message };
+  }
+}
+
 // ============================================
-// GET ALL SELLING PRIVILEGES (BULK)
+// GET ALL STORES — SellingSummary (GetMyeBaySelling)
 // ============================================
-router.get('/selling/summary/all', requireAuth, requirePageAccess('StoreOverview'), async (req, res) => {
+router.get('/selling/summary/all', requireAuth, requirePageAccess('SellingSummary'), async (req, res) => {
   try {
     const scoped = await getSellersMatchingAllRoute(req);
     const sellerIds = scoped.map((s) => s._id);
     const sellers = sellerIds.length
       ? await Seller.find({ _id: { $in: sellerIds } }).populate('user', 'username email active')
       : [];
-    console.log(`[Selling Limits] Fetching limits for ${sellers.length} stores...`);
+    console.log(`[Selling Summary] Fetching GetMyeBaySelling SellingSummary for ${sellers.length} stores...`);
 
-    const results = await Promise.all(sellers.map(async (seller) => {
-      const sellerName = resolveStoreDisplayName(seller);
-      try {
-        if (!seller.ebayTokens?.access_token || !seller.ebayTokens?.refresh_token) {
-          return {
-            sellerId: seller._id,
-            sellerName,
-            notConnected: true,
-          };
-        }
+    const runLimited = pLimit(STORE_OVERVIEW_SELLER_CONCURRENCY);
+    const rows = await Promise.all(
+      sellers.map((seller) => runLimited(() => fetchSellerFullSellingSummary(seller)))
+    );
 
-        const accessToken = await ensureValidToken(seller);
-
-        const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
-<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <RequesterCredentials>
-    <eBayAuthToken>${accessToken}</eBayAuthToken>
-  </RequesterCredentials>
-  <SellingSummary>
-    <Include>true</Include>
-  </SellingSummary>
-  <DetailLevel>ReturnAll</DetailLevel>
-  <Version>1173</Version>
-</GetMyeBaySellingRequest>`;
-
-        const response = await axios.post(
-          'https://api.ebay.com/ws/api.dll',
-          xmlRequest,
-          {
-            headers: {
-              'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
-              'X-EBAY-API-SITEID': '0',
-              'X-EBAY-API-COMPATIBILITY-LEVEL': '1173',
-              'Content-Type': 'text/xml'
-            }
-          }
-        );
-
-        const result = await parseStringPromise(response.data, { explicitArray: false });
-
-        if (result.GetMyeBaySellingResponse.Ack === 'Failure') {
-          return {
-            sellerId: seller._id,
-            sellerName,
-            error: result.GetMyeBaySellingResponse.Errors?.LongMessage || 'eBay API Error'
-          };
-        }
-
-        const summary = result.GetMyeBaySellingResponse.Summary;
-
-        return {
-          sellerId: seller._id,
-          sellerName,
-          quantityLimitRemaining: summary?.QuantityLimitRemaining,
-          amountLimitRemaining: summary?.AmountLimitRemaining?._,
-          amountLimitCurrency: summary?.AmountLimitRemaining?.$?.currencyID,
-          activeAuctionCount: summary?.ActiveAuctionCount,
-          auctionSellingCount: summary?.AuctionSellingCount,
-          totalSoldCount: summary?.TotalSoldCount,
-          totalSoldValue: summary?.TotalSoldValue?._,
-          totalSoldValueCurrency: summary?.TotalSoldValue?.$?.currencyID,
-        };
-
-      } catch (err) {
-        console.error(`[Selling Limits] Failed for seller ${seller._id}:`, err.message);
-        return {
-          sellerId: seller._id,
-          sellerName,
-          error: err.message
-        };
-      }
-    }));
-
-    results.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
+    rows.sort((a, b) => String(a.sellerName).localeCompare(String(b.sellerName)));
 
     res.json({
       success: true,
-      data: results
+      fetchedAt: new Date().toISOString(),
+      storeCount: rows.length,
+      rows,
+      source: 'GetMyeBaySelling.SellingSummary / Summary',
+      docsUrl: 'https://developer.ebay.com/devzone/xml/docs/Reference/eBay/GetMyeBaySelling.html#Response.SellingSummary',
     });
-
   } catch (error) {
     console.error('[Selling Summary All] Error:', error);
     res.status(500).json({ error: error.message });
@@ -28159,6 +28645,18 @@ router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res)
 // ============================================
 
 const RECENT_LISTINGS_LOOKBACK_DAYS = 14;
+/** Overlap when incremental syncing from lastAllListingsPolledAt. */
+const INCREMENTAL_SYNC_OVERLAP_DAYS = 2;
+/** Parallel stores during Sync All (bounded for TradingAPI rate limits). */
+const SYNC_ALL_SELLER_CONCURRENCY = 2;
+/** Prefer smaller pages — deep GetSellerList pagination often stalls on eBay. */
+const STORE_LISTINGS_GET_SELLER_LIST_PAGE_SIZE = 100;
+/**
+ * If a StartTime window needs more pages than this, bisect the window instead of
+ * paging deeply (eBay frequently hangs/fails around page 40–100 on dense stores).
+ */
+const MAX_GET_SELLER_LIST_PAGES_BEFORE_SPLIT = 25;
+const MIN_GET_SELLER_LIST_SPLIT_MS = 12 * 60 * 60 * 1000; // 12 hours
 const STORE_LISTINGS_MOTORS_CATEGORIES = [
   'eBay Motors',
   'Parts & Accessories',
@@ -28166,10 +28664,72 @@ const STORE_LISTINGS_MOTORS_CATEGORIES = [
   'Tools & Supplies',
 ];
 
+function firstXmlTextNode(node) {
+  if (node == null) return null;
+  if (Array.isArray(node)) return firstXmlTextNode(node[0]);
+  if (typeof node === 'object' && node._ != null) return String(node._);
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  return null;
+}
+
+/**
+ * Resolve listing status from GetSellerList (lean OutputSelector responses often omit
+ * SellingStatus.ListingStatus). Never treat "missing" as Ended — that emptied Active counts.
+ */
+function resolveGetSellerListStatus(item, endTimeRaw) {
+  const raw =
+    firstXmlTextNode(item?.SellingStatus?.[0]?.ListingStatus)
+    || firstXmlTextNode(item?.SellingStatus?.ListingStatus)
+    || firstXmlTextNode(item?.ListingStatus);
+  if (raw) {
+    const normalized = String(raw).trim();
+    if (/^active$/i.test(normalized)) return 'Active';
+    return normalized;
+  }
+  if (endTimeRaw) {
+    const end = new Date(endTimeRaw);
+    if (!Number.isNaN(end.getTime()) && end.getTime() <= Date.now()) return 'Ended';
+  }
+  const timeLeft = firstXmlTextNode(item?.TimeLeft);
+  if (timeLeft && (/^PT0S$/i.test(timeLeft.trim()) || /^ended$/i.test(timeLeft.trim()))) {
+    return 'Ended';
+  }
+  return 'Active';
+}
+
+function resolveStoreListingsSyncRange(seller, mode, pollFinishedAt = new Date()) {
+  const normalizedMode = normalizeStoreListingsSyncMode(mode);
+  const fullStart = getListingsBackfillStart(seller);
+  const lastPolled = seller?.lastAllListingsPolledAt
+    ? new Date(seller.lastAllListingsPolledAt)
+    : null;
+  const hasValidLastPoll = lastPolled && !Number.isNaN(lastPolled.getTime());
+
+  if (normalizedMode === 'incremental' && hasValidLastPoll) {
+    const incrementalStart = new Date(lastPolled);
+    incrementalStart.setUTCDate(
+      incrementalStart.getUTCDate() - INCREMENTAL_SYNC_OVERLAP_DAYS
+    );
+    const rangeStart = incrementalStart > fullStart ? incrementalStart : fullStart;
+    return {
+      mode: 'incremental',
+      rangeStart,
+      usedFullBackfill: false,
+    };
+  }
+
+  return {
+    mode: hasValidLastPoll ? normalizedMode : 'full',
+    rangeStart: fullStart,
+    usedFullBackfill: true,
+  };
+}
+
 /**
  * Paginate GetSellerList (StartTime window) into ActiveListing (+ Motors Listing).
  * Pass a fixed startTimeTo for historical windows. Omit it (null) for the live
  * "up to now" window so StartTimeTo refreshes each page mid-sync.
+ * Dense windows (many pages) are auto-bisected — deep page numbers often stall on eBay.
  */
 async function paginateGetSellerListForActiveListings({
   seller,
@@ -28181,12 +28741,16 @@ async function paginateGetSellerListForActiveListings({
   bumpGlobalProcessed = null,
   shouldCancel = null,
   logLabel = null,
+  _splitDepth = 0,
 }) {
   let page = 1;
   let totalPages = 1;
   let processedCount = 0;
   let skippedCount = 0;
-  const startFromIso = new Date(startTimeFrom).toISOString();
+  const rangeStart = new Date(startTimeFrom);
+  if (Number.isNaN(rangeStart.getTime())) {
+    throw new Error('Invalid startTimeFrom for GetSellerList window');
+  }
   const fixedEnd = startTimeTo ? new Date(startTimeTo) : null;
   if (fixedEnd && Number.isNaN(fixedEnd.getTime())) {
     throw new Error('Invalid startTimeTo for GetSellerList window');
@@ -28202,19 +28766,23 @@ async function paginateGetSellerListForActiveListings({
     }
     const end = fixedEnd || new Date();
     if (onPageProgress) onPageProgress({ page, totalPages });
+    console.log(
+      `${callLabel} — fetching page ${page}/${totalPages || '?'} `
+      + `(${rangeStart.toISOString()} → ${end.toISOString()})`
+    );
 
+    // Lean payload: no Description / ItemCompatibilityList (heavy HTML).
     const xmlRequest = `
         <?xml version="1.0" encoding="utf-8"?>
         <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
           <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
           <ErrorLanguage>en_US</ErrorLanguage>
           <WarningLevel>High</WarningLevel>
-          <DetailLevel>ItemReturnDescription</DetailLevel>
-          <StartTimeFrom>${startFromIso}</StartTimeFrom>
+          <StartTimeFrom>${rangeStart.toISOString()}</StartTimeFrom>
           <StartTimeTo>${end.toISOString()}</StartTimeTo>
           <IncludeWatchCount>true</IncludeWatchCount>
           <Pagination>
-            <EntriesPerPage>100</EntriesPerPage>
+            <EntriesPerPage>${STORE_LISTINGS_GET_SELLER_LIST_PAGE_SIZE}</EntriesPerPage>
             <PageNumber>${page}</PageNumber>
           </Pagination>
           <OutputSelector>ItemArray.Item.ItemID</OutputSelector>
@@ -28225,9 +28793,7 @@ async function paginateGetSellerListForActiveListings({
           <OutputSelector>ItemArray.Item.WatchCount</OutputSelector>
           <OutputSelector>ItemArray.Item.TimeLeft</OutputSelector>
           <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
-          <OutputSelector>ItemArray.Item.Description</OutputSelector>
           <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
-          <OutputSelector>ItemArray.Item.ItemCompatibilityList</OutputSelector>
           <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
           <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
           <OutputSelector>PaginationResult</OutputSelector>
@@ -28241,6 +28807,8 @@ async function paginateGetSellerListForActiveListings({
       'Content-Type': 'text/xml',
     }, {
       logLabel: `${callLabel} p${page}`,
+      timeoutMs: 90000,
+      maxRetries: 4,
     });
 
     const result = await parseStringPromise(response.data);
@@ -28252,130 +28820,180 @@ async function paginateGetSellerListForActiveListings({
     totalPages = parseInt(pagination.TotalNumberOfPages[0], 10) || 1;
     if (onPageProgress) onPageProgress({ page, totalPages });
 
+    // Dense window: bisect instead of paging deeply (avoids eBay stalls ~p40–p100).
+    const spanMs = end.getTime() - rangeStart.getTime();
+    if (
+      page === 1
+      && totalPages > MAX_GET_SELLER_LIST_PAGES_BEFORE_SPLIT
+      && spanMs > MIN_GET_SELLER_LIST_SPLIT_MS
+      && _splitDepth < 8
+    ) {
+      const mid = new Date(rangeStart.getTime() + Math.floor(spanMs / 2));
+      const rightStart = new Date(mid.getTime() + 1000);
+      console.warn(
+        `${callLabel} — ${totalPages} pages in window (>${MAX_GET_SELLER_LIST_PAGES_BEFORE_SPLIT}); `
+        + `bisecting at ${mid.toISOString()} (depth ${_splitDepth + 1})`
+      );
+      const left = await paginateGetSellerListForActiveListings({
+        seller,
+        token,
+        sellerName,
+        startTimeFrom: rangeStart,
+        startTimeTo: mid,
+        onPageProgress,
+        bumpGlobalProcessed,
+        shouldCancel,
+        logLabel: `${callLabel} L`,
+        _splitDepth: _splitDepth + 1,
+      });
+      const right = await paginateGetSellerListForActiveListings({
+        seller,
+        token,
+        sellerName,
+        startTimeFrom: rightStart,
+        startTimeTo: fixedEnd, // null keeps live end for right half of open window
+        onPageProgress,
+        bumpGlobalProcessed,
+        shouldCancel,
+        logLabel: `${callLabel} R`,
+        _splitDepth: _splitDepth + 1,
+      });
+      return {
+        processedCount: left.processedCount + right.processedCount,
+        skippedCount: left.skippedCount + right.skippedCount,
+      };
+    }
+
     const items = result.GetSellerListResponse.ItemArray?.[0]?.Item || [];
+    const activeOps = [];
+    const motorsOps = [];
+
     for (const item of items) {
-      const status = item.SellingStatus?.[0]?.ListingStatus?.[0];
-      const itemId = item.ItemID?.[0];
+      const itemId = firstXmlTextNode(item.ItemID);
       if (!itemId) continue;
 
-      const startTimeRaw = item.ListingDetails?.[0]?.StartTime?.[0];
-      const endTimeRaw = item.ListingDetails?.[0]?.EndTime?.[0];
+      const startTimeRaw = firstXmlTextNode(item.ListingDetails?.[0]?.StartTime)
+        || firstXmlTextNode(item.ListingDetails?.StartTime);
+      const endTimeRaw = firstXmlTextNode(item.ListingDetails?.[0]?.EndTime)
+        || firstXmlTextNode(item.ListingDetails?.EndTime);
+      const status = resolveGetSellerListStatus(item, endTimeRaw);
+      const title = firstXmlTextNode(item.Title) || '';
+      const sku = firstXmlTextNode(item.SKU) || '';
+      const priceNode = item.SellingStatus?.[0]?.CurrentPrice?.[0]
+        || item.SellingStatus?.[0]?.CurrentPrice
+        || item.SellingStatus?.CurrentPrice;
+      const currentPrice = priceNode?._ != null
+        ? parseFloat(priceNode._)
+        : (typeof priceNode === 'string' || typeof priceNode === 'number'
+          ? parseFloat(priceNode)
+          : undefined);
+      const currency = priceNode?.$?.currencyID || null;
+      const quantity = parseInt(firstXmlTextNode(item.Quantity) || '0', 10) || 0;
+      const mainImageUrl = firstXmlTextNode(item.PictureDetails?.[0]?.PictureURL)
+        || firstXmlTextNode(item.PictureDetails?.PictureURL)
+        || '';
+      const categoryName = firstXmlTextNode(item.PrimaryCategory?.[0]?.CategoryName)
+        || firstXmlTextNode(item.PrimaryCategory?.CategoryName)
+        || '';
 
       // Persist ended/completed rows too — free-listing usage needs "relist then ended" inserts.
-      if (status !== 'Active') {
+      if (!/^active$/i.test(status)) {
         const endedStatus = status || 'Ended';
-        await ActiveListing.findOneAndUpdate(
-          { itemId },
-          {
-            seller: seller._id,
-            title: item.Title?.[0] || '',
-            sku: item.SKU ? item.SKU[0] : '',
-            currentPrice: item.SellingStatus?.[0]?.CurrentPrice?.[0]?._
-              ? parseFloat(item.SellingStatus[0].CurrentPrice[0]._)
-              : undefined,
-            currency: item.SellingStatus?.[0]?.CurrentPrice?.[0]?.$?.currencyID,
-            quantity: item.Quantity ? parseInt(item.Quantity[0], 10) || 0 : 0,
-            listingStatus: endedStatus,
-            mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
-            categoryName: item.PrimaryCategory?.[0]?.CategoryName?.[0] || '',
-            startTime: startTimeRaw || undefined,
-            endTime: endTimeRaw || new Date(),
+        activeOps.push({
+          updateOne: {
+            filter: { itemId },
+            update: {
+              $set: {
+                seller: seller._id,
+                title,
+                sku,
+                ...(currentPrice != null && !Number.isNaN(currentPrice) ? { currentPrice } : {}),
+                ...(currency ? { currency } : {}),
+                quantity,
+                listingStatus: endedStatus,
+                mainImageUrl,
+                categoryName,
+                ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
+                endTime: endTimeRaw || new Date(),
+              },
+            },
+            upsert: true,
           },
-          { upsert: true }
-        );
+        });
+        processedCount++;
+        if (bumpGlobalProcessed) bumpGlobalProcessed();
         continue;
       }
 
-      const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
       const isMotorsItem = STORE_LISTINGS_MOTORS_CATEGORIES.some((keyword) => categoryName.includes(keyword));
-      const rawHtml = item.Description ? item.Description[0] : '';
-      const cleanHtml = extractCleanDescription(rawHtml);
-      const promotedStatusRaw =
-        item.PromotedListingStatus?.[0]
-        || item.ListingDetails?.[0]?.PromotedListingStatus?.[0]
-        || item.AdvertisingStatus?.[0]
-        || '';
-      const adRateRaw =
-        item.PromotedListingDetails?.[0]?.PromotedListingAdRate?.[0]
-        || item.PromotedListingAdRate?.[0]
-        || item.AdRate?.[0]
-        || item.ListingDetails?.[0]?.AdRate?.[0]
-        || null;
-      const parsedAdRate = Number.parseFloat(adRateRaw);
-      const adRate = Number.isFinite(parsedAdRate) ? parsedAdRate : null;
-      let promoted = null;
-      if (typeof promotedStatusRaw === 'string' && promotedStatusRaw.trim()) {
-        const normalizedStatus = promotedStatusRaw.trim().toLowerCase();
-        promoted = !(normalizedStatus.includes('not')
-          || normalizedStatus.includes('off')
-          || normalizedStatus.includes('disabled')
-          || normalizedStatus.includes('ineligible'));
-      } else if (adRate !== null) {
-        promoted = adRate > 0;
-      }
+      const soldQuantity = parseInt(
+        firstXmlTextNode(item.SellingStatus?.[0]?.QuantitySold)
+          || firstXmlTextNode(item.SellingStatus?.QuantitySold)
+          || '0',
+        10
+      ) || 0;
+      const watchCount = parseInt(firstXmlTextNode(item.WatchCount) || '0', 10) || 0;
+      const timeLeft = firstXmlTextNode(item.TimeLeft) || '';
 
-      let parsedCompatibility = [];
-      if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
-        parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map((comp) => ({
-          notes: comp.CompatibilityNotes ? comp.CompatibilityNotes[0] : '',
-          nameValueList: comp.NameValueList.map((nv) => ({
-            name: nv.Name[0],
-            value: nv.Value[0],
-          })),
-        }));
-      }
-
-      await ActiveListing.findOneAndUpdate(
-        { itemId },
-        {
-          seller: seller._id,
-          title: item.Title[0],
-          sku: item.SKU ? item.SKU[0] : '',
-          currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
-          currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
-          quantity: item.Quantity ? parseInt(item.Quantity[0], 10) || 0 : 0,
-          soldQuantity: item.SellingStatus?.[0]?.QuantitySold
-            ? parseInt(item.SellingStatus[0].QuantitySold[0], 10) || 0
-            : 0,
-          watchCount: item.WatchCount ? parseInt(item.WatchCount[0], 10) || 0 : 0,
-          timeLeft: item.TimeLeft?.[0] || '',
-          listingStatus: status,
-          mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
-          categoryName,
-          descriptionPreview: cleanHtml,
-          startTime: startTimeRaw,
-          endTime: endTimeRaw || undefined,
-          ...(promoted !== null ? { promoted } : {}),
-          ...(adRate !== null ? { adRate } : {}),
+      activeOps.push({
+        updateOne: {
+          filter: { itemId },
+          update: {
+            $set: {
+              seller: seller._id,
+              title,
+              sku,
+              ...(currentPrice != null && !Number.isNaN(currentPrice) ? { currentPrice } : {}),
+              ...(currency ? { currency } : {}),
+              quantity,
+              soldQuantity,
+              watchCount,
+              timeLeft,
+              listingStatus: 'Active',
+              mainImageUrl,
+              categoryName,
+              ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
+              ...(endTimeRaw ? { endTime: endTimeRaw } : {}),
+            },
+          },
+          upsert: true,
         },
-        { upsert: true }
-      );
+      });
 
       if (isMotorsItem) {
-        await Listing.findOneAndUpdate(
-          { itemId },
-          {
-            seller: seller._id,
-            title: item.Title[0],
-            sku: item.SKU ? item.SKU[0] : '',
-            currentPrice: parseFloat(item.SellingStatus[0].CurrentPrice[0]._),
-            currency: item.SellingStatus[0].CurrentPrice[0].$.currencyID,
-            listingStatus: status,
-            mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
-            categoryName,
-            descriptionPreview: cleanHtml,
-            compatibility: parsedCompatibility,
-            startTime: startTimeRaw,
-            endTime: endTimeRaw || undefined,
+        motorsOps.push({
+          updateOne: {
+            filter: { itemId },
+            update: {
+              $set: {
+                seller: seller._id,
+                title,
+                sku,
+                ...(currentPrice != null && !Number.isNaN(currentPrice) ? { currentPrice } : {}),
+                ...(currency ? { currency } : {}),
+                listingStatus: 'Active',
+                mainImageUrl,
+                categoryName,
+                ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
+                ...(endTimeRaw ? { endTime: endTimeRaw } : {}),
+              },
+            },
+            upsert: true,
           },
-          { upsert: true }
-        );
+        });
       } else {
         skippedCount++;
       }
 
       processedCount++;
       if (bumpGlobalProcessed) bumpGlobalProcessed();
+    }
+
+    if (activeOps.length) {
+      await ActiveListing.bulkWrite(activeOps, { ordered: false });
+    }
+    if (motorsOps.length) {
+      await Listing.bulkWrite(motorsOps, { ordered: false });
     }
 
     page++;
@@ -28385,11 +29003,12 @@ async function paginateGetSellerListForActiveListings({
 }
 
 /**
- * Sync ActiveListing (+ Motors Listing) for one seller:
- * 1) recent StartTime window (fast refresh)
- * 2) multi-window walk from listings backfill start → now (each window < 120 days)
+ * Sync ActiveListing (+ Motors Listing) for one seller.
+ * mode=incremental (default): since lastAllListingsPolledAt − overlap (or full if never polled).
+ * mode=full: ~730d StartTime backfill in &lt;120d windows.
  */
 async function syncOneSellerActiveListings(seller, {
+  mode = 'incremental',
   onPageProgress = null,
   bumpProcessed = null,
   shouldCancel = null,
@@ -28402,92 +29021,167 @@ async function syncOneSellerActiveListings(seller, {
 
   const token = await ensureValidToken(seller);
   const pollFinishedAt = new Date();
-  const backfillStart = getListingsBackfillStart(seller);
-
-  const recentStartTimeFrom = new Date(pollFinishedAt);
-  recentStartTimeFrom.setUTCDate(recentStartTimeFrom.getUTCDate() - RECENT_LISTINGS_LOOKBACK_DAYS);
-  const recentFrom = recentStartTimeFrom < backfillStart ? backfillStart : recentStartTimeFrom;
+  const { mode: resolvedMode, rangeStart, usedFullBackfill } = resolveStoreListingsSyncRange(
+    seller,
+    mode,
+    pollFinishedAt
+  );
 
   let processedCount = 0;
   let skippedCount = 0;
+  let windowsRun = 0;
 
-  console.log(`${logPrefix} ${sellerName} — recent pass (${RECENT_LISTINGS_LOOKBACK_DAYS}d start window)...`);
-  const recentResult = await paginateGetSellerListForActiveListings({
-    seller,
-    token,
-    sellerName,
-    startTimeFrom: recentFrom,
-    startTimeTo: null,
-    onPageProgress: onPageProgress
-      ? (p) => onPageProgress({ ...p, windowIndex: 0, totalWindows: 0, pass: 'recent' })
-      : null,
-    bumpGlobalProcessed: bumpProcessed,
-    shouldCancel,
-    logLabel: `${logPrefix} ${sellerName} recent`,
-  });
-  processedCount += recentResult.processedCount;
-  skippedCount += recentResult.skippedCount;
-
-  const windows = buildSellerListStartWindows(backfillStart, pollFinishedAt);
-  console.log(
-    `${logPrefix} ${sellerName} — historical backfill: ${windows.length} window(s) `
-    + `from ${backfillStart.toISOString()} → ${pollFinishedAt.toISOString()}`
-  );
-
-  for (let i = 0; i < windows.length; i++) {
-    if (shouldCancel && await shouldCancel()) {
-      throw new SyncAllCancelledError();
-    }
-    const window = windows[i];
-    // Recent pass already covered [recentFrom → now]; only fetch older StartTime slices.
-    if (window.from >= recentFrom) {
-      console.log(
-        `${logPrefix} ${sellerName} — skip window ${i + 1}/${windows.length} `
-        + `(already covered by recent pass)`
-      );
-      continue;
-    }
-    const windowTo = window.to > recentFrom ? recentFrom : window.to;
-    const windowFrom = window.from;
-    if (windowFrom >= windowTo) continue;
-
+  if (!usedFullBackfill) {
+    // Incremental: last poll − overlap → now. Split if span approaches eBay's 120d limit.
+    const incrementalWindows = buildSellerListStartWindows(rangeStart, pollFinishedAt);
+    const useSingleLiveWindow = incrementalWindows.length <= 1;
     console.log(
-      `${logPrefix} ${sellerName} — window ${i + 1}/${windows.length}: `
-      + `${windowFrom.toISOString()} → ${windowTo.toISOString()}`
+      `${logPrefix} ${sellerName} — incremental from ${rangeStart.toISOString()} → now`
+      + (useSingleLiveWindow ? '' : ` (${incrementalWindows.length} windows)`)
     );
 
-    const windowResult = await paginateGetSellerListForActiveListings({
+    if (useSingleLiveWindow) {
+      const result = await paginateGetSellerListForActiveListings({
+        seller,
+        token,
+        sellerName,
+        startTimeFrom: rangeStart,
+        startTimeTo: null,
+        onPageProgress: onPageProgress
+          ? (p) => onPageProgress({ ...p, windowIndex: 1, totalWindows: 1, pass: 'incremental' })
+          : null,
+        bumpGlobalProcessed: bumpProcessed,
+        shouldCancel,
+        logLabel: `${logPrefix} ${sellerName} incremental`,
+      });
+      processedCount += result.processedCount;
+      skippedCount += result.skippedCount;
+      windowsRun = 1;
+    } else {
+      for (let i = 0; i < incrementalWindows.length; i++) {
+        if (shouldCancel && await shouldCancel()) {
+          throw new SyncAllCancelledError();
+        }
+        const window = incrementalWindows[i];
+        const isLast = i === incrementalWindows.length - 1;
+        const windowResult = await paginateGetSellerListForActiveListings({
+          seller,
+          token,
+          sellerName,
+          startTimeFrom: window.from,
+          startTimeTo: isLast ? null : window.to,
+          onPageProgress: onPageProgress
+            ? (p) => onPageProgress({
+              ...p,
+              windowIndex: i + 1,
+              totalWindows: incrementalWindows.length,
+              pass: 'incremental',
+            })
+            : null,
+          bumpGlobalProcessed: bumpProcessed,
+          shouldCancel,
+          logLabel: `${logPrefix} ${sellerName} incr w${i + 1}/${incrementalWindows.length}`,
+        });
+        processedCount += windowResult.processedCount;
+        skippedCount += windowResult.skippedCount;
+        windowsRun++;
+      }
+    }
+  } else {
+    const recentStartTimeFrom = new Date(pollFinishedAt);
+    recentStartTimeFrom.setUTCDate(recentStartTimeFrom.getUTCDate() - RECENT_LISTINGS_LOOKBACK_DAYS);
+    const recentFrom = recentStartTimeFrom < rangeStart ? rangeStart : recentStartTimeFrom;
+
+    console.log(
+      `${logPrefix} ${sellerName} — full sync recent pass (${RECENT_LISTINGS_LOOKBACK_DAYS}d)...`
+    );
+    const recentResult = await paginateGetSellerListForActiveListings({
       seller,
       token,
       sellerName,
-      startTimeFrom: windowFrom,
-      startTimeTo: windowTo,
+      startTimeFrom: recentFrom,
+      startTimeTo: null,
       onPageProgress: onPageProgress
-        ? (p) => onPageProgress({
-          ...p,
-          windowIndex: i + 1,
-          totalWindows: windows.length,
-          pass: 'backfill',
-        })
+        ? (p) => onPageProgress({ ...p, windowIndex: 0, totalWindows: 0, pass: 'recent' })
         : null,
       bumpGlobalProcessed: bumpProcessed,
       shouldCancel,
-      logLabel: `${logPrefix} ${sellerName} w${i + 1}/${windows.length}`,
+      logLabel: `${logPrefix} ${sellerName} recent`,
     });
-    processedCount += windowResult.processedCount;
-    skippedCount += windowResult.skippedCount;
+    processedCount += recentResult.processedCount;
+    skippedCount += recentResult.skippedCount;
+
+    const windows = buildSellerListStartWindows(rangeStart, pollFinishedAt);
+    console.log(
+      `${logPrefix} ${sellerName} — historical backfill: ${windows.length} window(s) `
+      + `from ${rangeStart.toISOString()} → ${pollFinishedAt.toISOString()}`
+    );
+
+    for (let i = 0; i < windows.length; i++) {
+      if (shouldCancel && await shouldCancel()) {
+        throw new SyncAllCancelledError();
+      }
+      const window = windows[i];
+      if (window.from >= recentFrom) {
+        console.log(
+          `${logPrefix} ${sellerName} — skip window ${i + 1}/${windows.length} `
+          + `(already covered by recent pass)`
+        );
+        continue;
+      }
+      const windowTo = window.to > recentFrom ? recentFrom : window.to;
+      const windowFrom = window.from;
+      if (windowFrom >= windowTo) continue;
+
+      console.log(
+        `${logPrefix} ${sellerName} — window ${i + 1}/${windows.length}: `
+        + `${windowFrom.toISOString()} → ${windowTo.toISOString()}`
+      );
+
+      const windowResult = await paginateGetSellerListForActiveListings({
+        seller,
+        token,
+        sellerName,
+        startTimeFrom: windowFrom,
+        startTimeTo: windowTo,
+        onPageProgress: onPageProgress
+          ? (p) => onPageProgress({
+            ...p,
+            windowIndex: i + 1,
+            totalWindows: windows.length,
+            pass: 'backfill',
+          })
+          : null,
+        bumpGlobalProcessed: bumpProcessed,
+        shouldCancel,
+        logLabel: `${logPrefix} ${sellerName} w${i + 1}/${windows.length}`,
+      });
+      processedCount += windowResult.processedCount;
+      skippedCount += windowResult.skippedCount;
+      windowsRun++;
+    }
   }
 
   seller.lastListingPolledAt = pollFinishedAt;
   seller.lastAllListingsPolledAt = new Date();
   await seller.save();
-  console.log(`${logPrefix} ${sellerName} — Done: ${processedCount} processed, ${skippedCount} skipped`);
-  return { sellerName, processedCount, skippedCount, windows: windows.length };
+  console.log(
+    `${logPrefix} ${sellerName} — Done (${resolvedMode}): ${processedCount} processed, `
+    + `${skippedCount} skipped`
+  );
+  return {
+    sellerName,
+    processedCount,
+    skippedCount,
+    windows: windowsRun,
+    mode: resolvedMode,
+  };
 }
 
 // Core logic for "Poll All Sellers".
 // Called by: POST /sync-all-sellers-listings (background) and the 1:00 AM IST cron job.
-async function executeSyncAllSellersWork() {
+async function executeSyncAllSellersWork({ mode = 'incremental' } = {}) {
+  const syncMode = normalizeStoreListingsSyncMode(mode);
   syncAllCancelRequested = false;
   syncAllRunGeneration += 1;
   const runGeneration = syncAllRunGeneration;
@@ -28500,6 +29194,7 @@ async function executeSyncAllSellersWork() {
     console.log('[Sync All] No sellers with eBay tokens found.');
     syncAllStatus = {
       running: false,
+      mode: syncMode,
       sellersTotal: 0,
       sellersComplete: 0,
       currentSeller: '',
@@ -28521,6 +29216,7 @@ async function executeSyncAllSellersWork() {
   }
   syncAllStatus = {
     running: true,
+    mode: syncMode,
     sellersTotal: allSellers.length,
     sellersComplete: 0,
     currentSeller: '',
@@ -28537,14 +29233,16 @@ async function executeSyncAllSellersWork() {
     cancelRequested: false,
     cancelled: false,
   };
-  console.log(`[Sync All] Started for ${allSellers.length} seller(s).`);
+  console.log(
+    `[Sync All] Started for ${allSellers.length} seller(s), mode=${syncMode}, `
+    + `concurrency=${SYNC_ALL_SELLER_CONCURRENCY}`
+  );
   await persistSyncAllStatusToDb();
   try {
-    for (const seller of allSellers) {
-      if (await checkSyncAllCancelRequested()) {
+    await runWithConcurrency(allSellers, SYNC_ALL_SELLER_CONCURRENCY, async (seller) => {
+      if (await checkSyncAllCancelRequested() || syncAllStatus.cancelled) {
         syncAllStatus.cancelled = true;
-        console.log('[Sync All] Cancelled before next seller.');
-        break;
+        return;
       }
       await renewSyncAllSellersLock();
       const sellerName = seller.user?.username || seller.user?.email || seller._id;
@@ -28553,9 +29251,10 @@ async function executeSyncAllSellersWork() {
       syncAllStatus.currentTotalPages = 0;
       syncAllStatus.currentWindow = 0;
       syncAllStatus.totalWindows = 0;
-      console.log(`[Sync All] Starting sync for seller: ${sellerName}`);
+      console.log(`[Sync All] Starting sync for seller: ${sellerName} (${syncMode})`);
       try {
         const onPageProgress = ({ page, totalPages, windowIndex = 0, totalWindows = 0 }) => {
+          syncAllStatus.currentSeller = sellerName;
           syncAllStatus.currentPage = page;
           syncAllStatus.currentTotalPages = totalPages;
           syncAllStatus.currentWindow = windowIndex;
@@ -28565,9 +29264,12 @@ async function executeSyncAllSellersWork() {
           }
         };
         const result = await syncOneSellerActiveListings(seller, {
+          mode: syncMode,
           onPageProgress,
           bumpProcessed: () => { syncAllStatus.totalProcessed++; },
-          shouldCancel: checkSyncAllCancelRequested,
+          shouldCancel: async () => (
+            syncAllStatus.cancelled || await checkSyncAllCancelRequested()
+          ),
           logPrefix: '[Sync All]',
         });
         syncAllStatus.results.push({
@@ -28575,6 +29277,7 @@ async function executeSyncAllSellersWork() {
           sellerName: result.sellerName,
           processedCount: result.processedCount,
           skippedCount: result.skippedCount,
+          mode: result.mode,
         });
         syncAllStatus.totalSkipped += result.skippedCount;
       } catch (sellerErr) {
@@ -28588,7 +29291,7 @@ async function executeSyncAllSellersWork() {
             error: 'Cancelled',
           });
           console.log(`[Sync All] Cancelled while syncing ${sellerName}`);
-          break;
+          return;
         }
         console.error(`[Sync All] Error for seller ${sellerName}:`, sellerErr.message);
         syncAllStatus.errors.push(`${sellerName}: ${sellerErr.message}`);
@@ -28602,7 +29305,7 @@ async function executeSyncAllSellersWork() {
       }
       syncAllStatus.sellersComplete++;
       await persistSyncAllStatusToDb();
-    }
+    });
     if (syncAllStatus.cancelled) {
       console.log(`[Sync All] Stopped early: ${syncAllStatus.totalProcessed} processed, ${syncAllStatus.sellersComplete}/${syncAllStatus.sellersTotal} sellers`);
     } else {

@@ -114,8 +114,11 @@ router.delete('/marketplaces/:region', requireAuth, requireRole('seller'), async
   res.json(seller);
 });
 
-// Admin edit seller/store details from Stores page
-router.patch('/:id', requireAuth, requirePageAccess('StoresPage', ['superadmin', 'listingadmin']), async (req, res) => {
+// Admin edit seller/store details (Stores page + Seller Management)
+router.patch('/:id', requireAuth, requirePageAccess(
+  ['StoresPage', 'AddSeller', 'ManageStores'],
+  ['superadmin', 'listingadmin', 'hradmin', 'operationhead']
+), async (req, res) => {
   try {
     const { id } = req.params;
     const { username, email, isStoreActive, ebayMarketplaces } = req.body || {};

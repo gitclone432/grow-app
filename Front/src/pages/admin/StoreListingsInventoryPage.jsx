@@ -11,6 +11,7 @@ import {
   FormControl,
   FormControlLabel,
   Grid,
+  IconButton,
   InputLabel,
   Menu,
   MenuItem,
@@ -144,6 +145,10 @@ export default function StoreListingsInventoryPage({
     freeListingMonthEndLabel: null,
   });
   const [storeStatusLoading, setStoreStatusLoading] = useState(false);
+  const [storeStatusError, setStoreStatusError] = useState('');
+  const [storeStatusSortBy, setStoreStatusSortBy] = useState('activeListings');
+  const [storeStatusSortDir, setStoreStatusSortDir] = useState('desc');
+  const [storeRowMenu, setStoreRowMenu] = useState({ anchorEl: null, store: null });
   const [visibleColumns, setVisibleColumns] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_VISIBLE);
@@ -251,10 +256,14 @@ export default function StoreListingsInventoryPage({
   }, [page, rowsPerPage, search, selectedSellerId, dateFilterParams, sortBy, sortOrder, isEndedView]);
 
   const loadStoreStatus = useCallback(async ({ silent = false, refreshEbayCounts = false } = {}) => {
-    if (!silent) setStoreStatusLoading(true);
+    if (!silent) {
+      setStoreStatusLoading(true);
+      setStoreStatusError('');
+    }
     try {
       const { data } = await api.get('/ebay/store-listings/store-status', {
         params: refreshEbayCounts ? { ebayCounts: 1 } : undefined,
+        timeout: refreshEbayCounts ? 180000 : 120000,
       });
       setStoreStatus((prev) => {
         const nextStores = Array.isArray(data?.stores) ? data.stores : [];
@@ -282,8 +291,17 @@ export default function StoreListingsInventoryPage({
           }),
         };
       });
+      if (!silent) setStoreStatusError('');
     } catch (error) {
       console.error('Failed to load store status:', error);
+      if (!silent) {
+        const timedOut = error?.code === 'ECONNABORTED' || /timeout/i.test(String(error?.message || ''));
+        setStoreStatusError(
+          timedOut
+            ? 'Store status timed out. Try again — renew counts now use a faster query.'
+            : (error?.response?.data?.error || error.message || 'Failed to load store status')
+        );
+      }
     } finally {
       if (!silent) setStoreStatusLoading(false);
     }
@@ -359,10 +377,17 @@ export default function StoreListingsInventoryPage({
     localStorage.setItem(STORAGE_KEY_VISIBLE, JSON.stringify(visibleColumns));
   }, [visibleColumns]);
 
-  const handleSyncAllStores = async () => {
+  const handleSyncAllStores = async (mode = 'incremental') => {
+    const syncMode = mode === 'full' ? 'full' : 'incremental';
+    if (syncMode === 'full') {
+      const ok = window.confirm(
+        'Full resync re-scans ~730 days of listing StartTime for every store (many GetSellerList calls). Use only when Mongo is missing older history. Continue?'
+      );
+      if (!ok) return;
+    }
     setSyncing(true);
     try {
-      const { data } = await api.post('/ebay/sync-all-sellers-listings');
+      const { data } = await api.post('/ebay/sync-all-sellers-listings', { mode: syncMode });
       if (!data?.success) {
         setSnackbar({
           open: true,
@@ -416,12 +441,22 @@ export default function StoreListingsInventoryPage({
     }
   };
 
-  const handleSyncOneStore = async (sellerId, sellerName, event) => {
+  const handleSyncOneStore = async (sellerId, sellerName, event, mode = 'incremental') => {
     event?.stopPropagation?.();
+    const syncMode = mode === 'full' ? 'full' : 'incremental';
+    if (syncMode === 'full') {
+      const ok = window.confirm(
+        `Full resync for ${sellerName || 'this store'} re-scans ~730 days of listing StartTime. Continue?`
+      );
+      if (!ok) return;
+    }
     const sid = String(sellerId);
     setSyncingSellerId(sid);
     try {
-      const { data } = await api.post('/ebay/store-listings/sync-one', { sellerId: sid });
+      const { data } = await api.post('/ebay/store-listings/sync-one', {
+        sellerId: sid,
+        mode: syncMode,
+      });
       setSnackbar({
         open: true,
         message: data?.message || `Sync started for ${sellerName || 'store'}.`,
@@ -529,6 +564,65 @@ export default function StoreListingsInventoryPage({
     if (!selectedSellerId) return null;
     return storeStatus.stores.find((s) => String(s.sellerId) === String(selectedSellerId)) || null;
   }, [selectedSellerId, storeStatus.stores]);
+
+  const storeStatusSortValue = useCallback((store, columnId) => {
+    switch (columnId) {
+      case 'sellerName':
+        return String(store.sellerName || '').toLowerCase();
+      case 'activeListings':
+        return store.ebayActiveCount != null
+          ? Number(store.ebayActiveCount)
+          : Number(store.listingCount || 0);
+      case 'endedListings':
+        return Number(store.endedListingCount || 0);
+      case 'monthInserts':
+        return Number(store.monthFreeInserts || 0);
+      case 'lastPolled': {
+        const t = store.lastAllListingsPolledAt ? new Date(store.lastAllListingsPolledAt).getTime() : 0;
+        return Number.isFinite(t) ? t : 0;
+      }
+      case 'lastSync': {
+        if (!store.hasOAuth) return 0;
+        if (store.rowSync?.running) return 3;
+        if (store.rowSync?.error || store.lastSync?.error) return 1;
+        if (store.listingCount === 0) return 2;
+        return 4;
+      }
+      case 'error':
+        return String(store.rowSync?.error || store.lastSync?.error || '').toLowerCase();
+      default:
+        return '';
+    }
+  }, []);
+
+  const handleStoreStatusSort = (columnId) => {
+    if (storeStatusSortBy === columnId) {
+      setStoreStatusSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+    setStoreStatusSortBy(columnId);
+    setStoreStatusSortDir(
+      columnId === 'sellerName' || columnId === 'error' ? 'asc' : 'desc'
+    );
+  };
+
+  const sortedStoreStatusStores = useMemo(() => {
+    const dir = storeStatusSortDir === 'asc' ? 1 : -1;
+    return [...storeStatus.stores].sort((a, b) => {
+      const av = storeStatusSortValue(a, storeStatusSortBy);
+      const bv = storeStatusSortValue(b, storeStatusSortBy);
+      if (typeof av === 'string' || typeof bv === 'string') {
+        const cmp = String(av).localeCompare(String(bv), undefined, { sensitivity: 'base' });
+        if (cmp !== 0) return cmp * dir;
+      } else {
+        const an = Number(av);
+        const bn = Number(bv);
+        if (an < bn) return -1 * dir;
+        if (an > bn) return 1 * dir;
+      }
+      return String(a.sellerName || '').localeCompare(String(b.sellerName || ''));
+    });
+  }, [storeStatus.stores, storeStatusSortBy, storeStatusSortDir, storeStatusSortValue]);
 
   const hasDateFilter = Object.keys(dateFilterParams).length > 0;
 
@@ -819,7 +913,12 @@ export default function StoreListingsInventoryPage({
         <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => { loadListings(); loadStoreStatus(); }} disabled={loading}>
           Refresh
         </Button>
-        <Button variant="contained" startIcon={<RefreshIcon />} onClick={handleSyncAllStores} disabled={syncing || anyStoreRowSyncing}>
+        <Button
+          variant="contained"
+          startIcon={<RefreshIcon />}
+          onClick={() => handleSyncAllStores('incremental')}
+          disabled={syncing || anyStoreRowSyncing}
+        >
           {syncing ? 'Syncing...' : 'Sync All Stores'}
         </Button>
         {(syncing || storeStatus.sync?.running) && !storeStatus.sync?.cancelRequested ? (
@@ -1084,10 +1183,19 @@ export default function StoreListingsInventoryPage({
               size="small"
               variant="contained"
               startIcon={<RefreshIcon />}
-              onClick={handleSyncAllStores}
+              onClick={() => handleSyncAllStores('incremental')}
               disabled={syncing || anyStoreRowSyncing}
             >
               {syncing ? 'Syncing...' : 'Sync All Stores'}
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => handleSyncAllStores('full')}
+              disabled={syncing || anyStoreRowSyncing}
+              sx={{ textTransform: 'none' }}
+            >
+              Full resync
             </Button>
             {(syncing || storeStatus.sync?.running) && !storeStatus.sync?.cancelRequested ? (
               <Button
@@ -1115,16 +1223,25 @@ export default function StoreListingsInventoryPage({
             ) : null}
           </Box>
         </Box>
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
-          Auto nightly store sync is <strong>off</strong> — use <strong>Sync All Stores</strong> or per-store{' '}
-          <strong>Sync listings</strong> when you want an update.{' '}
-          <strong>Active listings</strong> = Mongo active count (shows <em>DB</em>); click{' '}
-          <strong>Refresh status (live eBay)</strong> for live eBay counts (cached ~15 min).{' '}
-          <strong>Ended listings</strong> = all Ended/Completed in Mongo.{' '}
-          <strong>Month inserts</strong> ≈ free inserts already used in the eBay PDT month (estimate — Seller Hub is source of truth):{' '}
-          <em>new</em> (StartTime in month, still active) + <em>renew</em> (older listing whose calendar-month GTC day already fell) +{' '}
-          <em>ended</em> (StartTime in month, then ended/relist). Not equal to Active count.
-        </Typography>
+        {storeStatus.sync?.running && storeStatus.sync?.mode ? (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            Running mode: <strong>{storeStatus.sync.mode === 'full' ? 'Full resync' : 'Incremental'}</strong>
+          </Typography>
+        ) : null}
+
+        {storeStatusError ? (
+          <Alert
+            severity="error"
+            sx={{ mb: 1.5 }}
+            action={(
+              <Button color="inherit" size="small" onClick={() => loadStoreStatus({ refreshEbayCounts: false })}>
+                Retry
+              </Button>
+            )}
+          >
+            {storeStatusError}
+          </Alert>
+        ) : null}
 
         {(storeStatus.freeListingMonthStartLabel || storeStatus.freeListingMonthEndLabel) ? (
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
@@ -1198,35 +1315,55 @@ export default function StoreListingsInventoryPage({
             <Table size="small">
               <TableHead>
                 <TableRow>
-                  <TableCell sx={{ fontWeight: 700 }}>Store</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>OAuth</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700 }}>Active listings</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700 }}>Ended listings</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 700 }}>Month inserts</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Last polled</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Last sync</TableCell>
-                  <TableCell sx={{ fontWeight: 700 }}>Error</TableCell>
+                  {[
+                    { id: 'sellerName', label: 'Store', align: 'left' },
+                    { id: 'activeListings', label: 'Active listings', align: 'right' },
+                    { id: 'endedListings', label: 'Ended listings', align: 'right' },
+                    { id: 'monthInserts', label: 'Month inserts', align: 'right' },
+                    { id: 'lastPolled', label: 'Last polled', align: 'left' },
+                    { id: 'lastSync', label: 'Last sync', align: 'left' },
+                    { id: 'error', label: 'Error', align: 'left' },
+                  ].map((col) => (
+                    <TableCell
+                      key={col.id}
+                      align={col.align}
+                      sortDirection={storeStatusSortBy === col.id ? storeStatusSortDir : false}
+                      sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}
+                    >
+                      <TableSortLabel
+                        active={storeStatusSortBy === col.id}
+                        direction={storeStatusSortBy === col.id ? storeStatusSortDir : 'asc'}
+                        onClick={() => handleStoreStatusSort(col.id)}
+                      >
+                        {col.label}
+                      </TableSortLabel>
+                    </TableCell>
+                  ))}
                   <TableCell sx={{ fontWeight: 700 }} align="right">Actions</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                {storeStatus.stores.length === 0 ? (
+                {sortedStoreStatusStores.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9}>
+                    <TableCell colSpan={8}>
                       <Typography variant="body2" color="text.secondary">
                         No stores in scope for your account.
                       </Typography>
                     </TableCell>
                   </TableRow>
                 ) : (
-                  storeStatus.stores.map((store) => {
+                  sortedStoreStatusStores.map((store) => {
                     const syncErr = store.rowSync?.error || store.lastSync?.error;
                     const rowRunning = Boolean(store.rowSync?.running);
                     let statusChip = { label: 'OK', color: 'success' };
                     if (!store.hasOAuth) statusChip = { label: 'No OAuth', color: 'error' };
                     else if (rowRunning) statusChip = { label: 'Syncing', color: 'info' };
                     else if (syncErr) statusChip = { label: 'Sync failed', color: 'error' };
-                    else if (store.listingCount === 0) statusChip = { label: 'Empty', color: 'warning' };
+                    else if (store.listingCount === 0) {
+                      statusChip = Number(store.endedListingCount || 0) > 0
+                        ? { label: 'No active', color: 'warning' }
+                        : { label: 'Empty', color: 'warning' };
+                    }
 
                     const pageLabel = rowRunning && store.rowSync?.currentTotalPages
                       ? [
@@ -1266,14 +1403,6 @@ export default function StoreListingsInventoryPage({
                             </Typography>
                           ) : null}
                         </TableCell>
-                        <TableCell>
-                          <Chip
-                            size="small"
-                            label={store.hasOAuth ? 'Connected' : 'Missing'}
-                            color={store.hasOAuth ? 'success' : 'default'}
-                            variant="outlined"
-                          />
-                        </TableCell>
                         <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
                           {store.ebayActiveCount != null
                             ? Number(store.ebayActiveCount).toLocaleString('en-US')
@@ -1290,14 +1419,6 @@ export default function StoreListingsInventoryPage({
                         </TableCell>
                         <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
                           {Number(store.endedListingCount || 0).toLocaleString('en-US')}
-                          {store.rowSync?.completedAt && store.rowSync.processedCount ? (
-                            <Typography variant="caption" display="block" color="text.secondary" sx={{ fontWeight: 400 }}>
-                              writes: {Number(store.rowSync.processedCount).toLocaleString('en-US')}
-                              {store.rowSync.skippedCount
-                                ? ` · skipped ${Number(store.rowSync.skippedCount).toLocaleString('en-US')}`
-                                : ''}
-                            </Typography>
-                          ) : null}
                         </TableCell>
                         <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
                           {Number(store.monthFreeInserts || 0).toLocaleString('en-US')}
@@ -1318,9 +1439,10 @@ export default function StoreListingsInventoryPage({
                         </TableCell>
                         <TableCell>
                           <Chip size="small" label={statusChip.label} color={statusChip.color} variant="outlined" />
-                          {store.lastSync && !syncErr && !rowRunning ? (
+                          {(store.rowSync?.completedAt || store.lastSync) && !syncErr && !rowRunning ? (
                             <Typography variant="caption" display="block" color="text.secondary">
-                              +{store.lastSync.processedCount} processed
+                              {Number(store.rowSync?.processedCount ?? store.lastSync?.processedCount ?? 0).toLocaleString('en-US')}
+                              {' '}items upserted
                             </Typography>
                           ) : null}
                         </TableCell>
@@ -1330,23 +1452,41 @@ export default function StoreListingsInventoryPage({
                           </Typography>
                         </TableCell>
                         <TableCell align="right" onClick={(e) => e.stopPropagation()}>
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            startIcon={rowRunning || syncingSellerId === String(store.sellerId)
-                              ? <CircularProgress size={14} color="inherit" />
-                              : <RefreshIcon fontSize="small" />}
-                            disabled={
-                              !store.hasOAuth
-                              || syncing
-                              || rowRunning
-                              || syncingSellerId === String(store.sellerId)
-                            }
-                            onClick={(e) => handleSyncOneStore(store.sellerId, store.sellerName, e)}
-                            sx={{ textTransform: 'none', whiteSpace: 'nowrap' }}
-                          >
-                            {rowRunning ? 'Syncing…' : 'Sync listings'}
-                          </Button>
+                          <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              startIcon={rowRunning || syncingSellerId === String(store.sellerId)
+                                ? <CircularProgress size={14} color="inherit" />
+                                : <RefreshIcon fontSize="small" />}
+                              disabled={
+                                !store.hasOAuth
+                                || syncing
+                                || rowRunning
+                                || syncingSellerId === String(store.sellerId)
+                              }
+                              onClick={(e) => handleSyncOneStore(store.sellerId, store.sellerName, e, 'incremental')}
+                              sx={{ textTransform: 'none', whiteSpace: 'nowrap' }}
+                            >
+                              {rowRunning ? 'Syncing…' : 'Sync listings'}
+                            </Button>
+                            <IconButton
+                              size="small"
+                              disabled={
+                                !store.hasOAuth
+                                || syncing
+                                || rowRunning
+                                || syncingSellerId === String(store.sellerId)
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setStoreRowMenu({ anchorEl: e.currentTarget, store });
+                              }}
+                              aria-label="More sync options"
+                            >
+                              <MoreVertIcon fontSize="small" />
+                            </IconButton>
+                          </Box>
                         </TableCell>
                       </TableRow>
                     );
@@ -1358,6 +1498,35 @@ export default function StoreListingsInventoryPage({
         )}
       </Paper>
       )}
+
+      <Menu
+        anchorEl={storeRowMenu.anchorEl}
+        open={Boolean(storeRowMenu.anchorEl)}
+        onClose={() => setStoreRowMenu({ anchorEl: null, store: null })}
+      >
+        <MenuItem
+          onClick={(e) => {
+            const store = storeRowMenu.store;
+            setStoreRowMenu({ anchorEl: null, store: null });
+            if (store) {
+              void handleSyncOneStore(store.sellerId, store.sellerName, e, 'incremental');
+            }
+          }}
+        >
+          Sync listings (incremental)
+        </MenuItem>
+        <MenuItem
+          onClick={(e) => {
+            const store = storeRowMenu.store;
+            setStoreRowMenu({ anchorEl: null, store: null });
+            if (store) {
+              void handleSyncOneStore(store.sellerId, store.sellerName, e, 'full');
+            }
+          }}
+        >
+          Full resync (~730 days)
+        </MenuItem>
+      </Menu>
 
       <Snackbar
         open={snackbar.open}

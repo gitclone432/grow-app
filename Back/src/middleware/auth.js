@@ -47,6 +47,7 @@ export function invalidateAuthVersionCache(userId) {
 export const PAGE_DEFAULT_ROLES = {
   // Store Listings
   'StoreListings': ['superadmin', 'listingadmin'],
+  'SellingSummary': ['superadmin', 'listingadmin'],
   'ListingRecommendations': ['superadmin', 'listingadmin'],
   'SendOfferEligible': ['superadmin', 'listingadmin'],
 

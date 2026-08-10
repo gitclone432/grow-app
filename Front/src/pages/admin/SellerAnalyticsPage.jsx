@@ -33,6 +33,75 @@ import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
 import AttachMoneyIcon from '@mui/icons-material/AttachMoney';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
 import api from '../../lib/api';
+import { getTodayPtDateString } from '../../lib/pacificDate.js';
+
+const createEmptyDateFilter = () => ({ mode: 'none', single: '', from: '', to: '' });
+
+const DATE_PRESET_MODES = new Set([
+  'last90',
+  'today',
+  'yesterday',
+  'thisMonth',
+  'lastMonth',
+  'thisYear',
+  'lastYear',
+]);
+
+/** Shift a YYYY-MM-DD calendar date by N days (timezone-agnostic calendar math). */
+const shiftYmd = (ymd, days) => {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+};
+
+/** Preset ranges use Pacific (America/Los_Angeles) calendar days — same as Fulfilment. */
+const getPresetDateRange = (mode) => {
+  const todayPt = getTodayPtDateString();
+  const [y, m] = todayPt.split('-').map(Number);
+
+  switch (mode) {
+    case 'today':
+      return { from: todayPt, to: todayPt };
+    case 'yesterday': {
+      const yesterday = shiftYmd(todayPt, -1);
+      return { from: yesterday, to: yesterday };
+    }
+    case 'last90':
+      return { from: shiftYmd(todayPt, -89), to: todayPt };
+    case 'thisMonth':
+      return {
+        from: `${y}-${String(m).padStart(2, '0')}-01`,
+        to: todayPt,
+      };
+    case 'lastMonth': {
+      const lastDayPrev = new Date(Date.UTC(y, m - 1, 0));
+      const from = `${lastDayPrev.getUTCFullYear()}-${String(lastDayPrev.getUTCMonth() + 1).padStart(2, '0')}-01`;
+      const to = `${lastDayPrev.getUTCFullYear()}-${String(lastDayPrev.getUTCMonth() + 1).padStart(2, '0')}-${String(lastDayPrev.getUTCDate()).padStart(2, '0')}`;
+      return { from, to };
+    }
+    case 'thisYear':
+      return { from: `${y}-01-01`, to: todayPt };
+    case 'lastYear':
+      return { from: `${y - 1}-01-01`, to: `${y - 1}-12-31` };
+    default:
+      return null;
+  }
+};
+
+const normalizeDateFilter = (value) => {
+  const base = value && typeof value === 'object'
+    ? { ...createEmptyDateFilter(), ...value }
+    : createEmptyDateFilter();
+
+  if (DATE_PRESET_MODES.has(base.mode)) {
+    const range = getPresetDateRange(base.mode);
+    if (range) {
+      return { ...base, single: '', from: range.from, to: range.to };
+    }
+  }
+
+  return base;
+};
 
 export default function SellerAnalyticsPage() {
   const [sellers, setSellers] = useState([]);
@@ -40,19 +109,8 @@ export default function SellerAnalyticsPage() {
   const [groupBy, setGroupBy] = useState('day'); // day, week, month
   const [searchMarketplace, setSearchMarketplace] = useState(''); // marketplace filter
   
-  // Date filter state - similar to FulfillmentDashboard
-  const [dateFilter, setDateFilter] = useState(() => {
-    // Default to last 30 days range
-    const today = new Date();
-    const thirtyDaysAgo = new Date(today);
-    thirtyDaysAgo.setDate(today.getDate() - 30);
-    return {
-      mode: 'range',
-      single: '',
-      from: thirtyDaysAgo.toISOString().split('T')[0],
-      to: today.toISOString().split('T')[0]
-    };
-  });
+  // Date filter — same modes/presets as Fulfilment (All Orders)
+  const [dateFilter, setDateFilter] = useState(() => normalizeDateFilter({ mode: 'last90' }));
   
   // Month/Year selector for monthly grouping
   const [selectedMonth, setSelectedMonth] = useState(() => {
@@ -90,6 +148,9 @@ export default function SellerAnalyticsPage() {
     if (dateFilter.mode === 'range' && (!dateFilter.from || !dateFilter.to)) {
       return;
     }
+    if (DATE_PRESET_MODES.has(dateFilter.mode) && (!dateFilter.from || !dateFilter.to)) {
+      return;
+    }
     
     loadAnalytics();
   }, [selectedSeller, groupBy, dateFilter, selectedMonth, searchMarketplace]);
@@ -124,7 +185,7 @@ export default function SellerAnalyticsPage() {
         const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
         endDate = `${year}-${month}-${lastDay.toString().padStart(2, '0')}`;
       } else {
-        // For day/week grouping, use date filter
+        // For day/week grouping, use date filter (same resolution as Fulfilment)
         if (dateFilter.mode === 'none') {
           setError('Please select a date range');
           setLoading(false);
@@ -144,9 +205,17 @@ export default function SellerAnalyticsPage() {
         if (dateFilter.mode === 'single') {
           startDate = dateFilter.single;
           endDate = dateFilter.single;
-        } else if (dateFilter.mode === 'range') {
-          startDate = dateFilter.from;
-          endDate = dateFilter.to;
+        } else if (dateFilter.mode === 'range' || DATE_PRESET_MODES.has(dateFilter.mode)) {
+          const resolved = DATE_PRESET_MODES.has(dateFilter.mode)
+            ? (getPresetDateRange(dateFilter.mode) || dateFilter)
+            : dateFilter;
+          if (!resolved.from || !resolved.to) {
+            setError('Please select start and end dates');
+            setLoading(false);
+            return;
+          }
+          startDate = resolved.from;
+          endDate = resolved.to;
         }
       }
 
@@ -288,16 +357,40 @@ export default function SellerAnalyticsPage() {
               </LocalizationProvider>
             ) : (
               <>
-                <FormControl size="small" sx={{ minWidth: 130 }}>
-                  <InputLabel>Date Mode</InputLabel>
+                <FormControl size="small" sx={{ minWidth: 150 }}>
+                  <InputLabel id="date-mode-label">Date Mode</InputLabel>
                   <Select
+                    labelId="date-mode-label"
                     value={dateFilter.mode}
                     label="Date Mode"
-                    onChange={(e) => setDateFilter(prev => ({ ...prev, mode: e.target.value }))}
+                    onChange={(e) => {
+                      const mode = e.target.value;
+                      if (mode === 'none') {
+                        setDateFilter(createEmptyDateFilter());
+                        return;
+                      }
+                      const preset = getPresetDateRange(mode);
+                      if (preset) {
+                        setDateFilter({ mode, single: '', from: preset.from, to: preset.to });
+                        return;
+                      }
+                      setDateFilter((prev) => ({
+                        ...prev,
+                        mode,
+                        ...(mode === 'single' ? { from: '', to: '' } : { single: '' }),
+                      }));
+                    }}
                   >
                     <MenuItem value="none">None</MenuItem>
                     <MenuItem value="single">Single Day</MenuItem>
                     <MenuItem value="range">Date Range</MenuItem>
+                    <MenuItem value="today">Today</MenuItem>
+                    <MenuItem value="yesterday">Yesterday</MenuItem>
+                    <MenuItem value="thisMonth">This Month</MenuItem>
+                    <MenuItem value="lastMonth">Last Month</MenuItem>
+                    <MenuItem value="last90">Last 90 Days</MenuItem>
+                    <MenuItem value="thisYear">This Year</MenuItem>
+                    <MenuItem value="lastYear">Last Year</MenuItem>
                   </Select>
                 </FormControl>
 
@@ -344,16 +437,8 @@ export default function SellerAnalyticsPage() {
                 setSelectedSeller('');
                 setSearchMarketplace('');
                 setGroupBy('day');
-                const today = new Date();
-                const thirtyDaysAgo = new Date(today);
-                thirtyDaysAgo.setDate(today.getDate() - 30);
-                setDateFilter({
-                  mode: 'range',
-                  single: '',
-                  from: thirtyDaysAgo.toISOString().split('T')[0],
-                  to: today.toISOString().split('T')[0]
-                });
-                setSelectedMonth(today.toISOString().slice(0, 7));
+                setDateFilter(normalizeDateFilter({ mode: 'last90' }));
+                setSelectedMonth(getTodayPtDateString().slice(0, 7));
               }}
               sx={{ minWidth: 80 }}
             >

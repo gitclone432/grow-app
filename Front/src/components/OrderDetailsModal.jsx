@@ -55,18 +55,19 @@ const formatCurrency = (amount, currency = 'USD') => {
   return `${currency} ${parseFloat(amount).toFixed(2)}`;
 };
 
-const getOrderTotalForTds = (order = {}) => {
-  const stored = parseFloat(order.orderTotal);
-  if (Number.isFinite(stored)) return stored;
-  const pricingTotal = parseFloat(order.pricingSummary?.total?.value);
-  const salesTax = parseFloat(order.salesTaxUSD ?? order.salesTax);
-  return (Number.isFinite(pricingTotal) ? pricingTotal : 0) + (Number.isFinite(salesTax) ? salesTax : 0);
+const getOrderSubtotalForTds = (order = {}) => {
+  const subtotal = parseFloat(order.subtotal);
+  if (Number.isFinite(subtotal)) return subtotal;
+  const subtotalUsd = parseFloat(order.subtotalUSD);
+  if (Number.isFinite(subtotalUsd)) return subtotalUsd;
+  return 0;
 };
 
 const getOrderTds = (order = {}) => {
   if (order.tds != null && order.tds !== undefined) return parseFloat(order.tds);
   if (order.orderEarnings == null) return null;
-  return Math.round(getOrderTotalForTds(order) * 0.01 * 100) / 100;
+  // 0.1% of subtotal until Poll TDS loads Finances value
+  return Math.round(getOrderSubtotalForTds(order) * 0.001 * 100) / 100;
 };
 
 const getStatusColor = (status) => {

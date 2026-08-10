@@ -28,12 +28,14 @@ import {
 import AddIcon from '@mui/icons-material/Add';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import DeleteForeverIcon from '@mui/icons-material/DeleteForever';
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import LockResetIcon from '@mui/icons-material/LockReset';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SearchIcon from '@mui/icons-material/Search';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
 import api from '../../lib/api.js';
+import { invalidateSellersAllCache } from '../../lib/sellersAllCache.js';
 
 const EMPTY_FORM = { username: '', password: '', email: '' };
 
@@ -83,6 +85,10 @@ export default function AddSellerPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
+
+  const [usernameDialog, setUsernameDialog] = useState(null);
+  const [editUsername, setEditUsername] = useState('');
+  const [usernameSaving, setUsernameSaving] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteSaving, setDeleteSaving] = useState(false);
@@ -174,6 +180,34 @@ export default function AddSellerPage() {
       setError(err?.response?.data?.error || 'Failed to change password');
     } finally {
       setPasswordSaving(false);
+    }
+  };
+
+  const handleUsernameChange = async () => {
+    if (!usernameDialog?.sellerId) return;
+    const next = editUsername.trim();
+    if (!next) {
+      setError('Username is required');
+      return;
+    }
+    if (next === usernameDialog.username) {
+      setUsernameDialog(null);
+      return;
+    }
+
+    setUsernameSaving(true);
+    setError('');
+    try {
+      await api.patch(`/sellers/${usernameDialog.sellerId}`, { username: next });
+      invalidateSellersAllCache();
+      setSuccess(`Username updated: ${usernameDialog.username} → ${next}`);
+      setUsernameDialog(null);
+      setEditUsername('');
+      await loadSellers();
+    } catch (err) {
+      setError(err?.response?.data?.error || 'Failed to update username');
+    } finally {
+      setUsernameSaving(false);
     }
   };
 
@@ -393,6 +427,24 @@ export default function AddSellerPage() {
                         <TableCell>{ebayChip(seller)}</TableCell>
                         <TableCell align="right">
                           <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                            <Tooltip title="Edit username">
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => {
+                                    setError('');
+                                    setUsernameDialog({
+                                      sellerId: seller.sellerId,
+                                      username: seller.username || '',
+                                    });
+                                    setEditUsername(seller.username || '');
+                                  }}
+                                  disabled={!seller.sellerId || !seller.userId}
+                                >
+                                  <EditOutlinedIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
                             <Tooltip title="Change password">
                               <span>
                                 <IconButton
@@ -446,6 +498,48 @@ export default function AddSellerPage() {
           </Paper>
         </Grid>
       </Grid>
+
+      <Dialog
+        open={Boolean(usernameDialog)}
+        onClose={() => !usernameSaving && setUsernameDialog(null)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 600 }}>
+          Edit username — {usernameDialog?.username}
+        </DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="New username"
+            value={editUsername}
+            onChange={(e) => setEditUsername(e.target.value)}
+            fullWidth
+            size="small"
+            disabled={usernameSaving}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void handleUsernameChange();
+              }
+            }}
+          />
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setUsernameDialog(null)} disabled={usernameSaving}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={() => void handleUsernameChange()}
+            disabled={usernameSaving || !editUsername.trim()}
+            startIcon={usernameSaving ? <CircularProgress size={16} color="inherit" /> : null}
+          >
+            {usernameSaving ? 'Saving…' : 'Save'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog open={Boolean(passwordDialog)} onClose={() => !passwordSaving && setPasswordDialog(null)} fullWidth maxWidth="xs">
         <DialogTitle sx={{ fontWeight: 600 }}>Change password — {passwordDialog?.username}</DialogTitle>

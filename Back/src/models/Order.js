@@ -64,8 +64,15 @@ const OrderSchema = new mongoose.Schema(
       default: 'open'
     }, // Manual status for worksheet tracking
     refunds: Array, // Array of refund objects from paymentSummary.refunds (for display only)
-    // Simple earnings field (auto for non-refunded orders, $0 for FULLY_REFUNDED/PARTIALLY_REFUNDED)
+    // Earnings: PAID from components (AU: totalDueSellerUSD − adFee);
+    // FULLY_REFUNDED → $-0.40;
+    // PARTIALLY_REFUNDED → preRefundEarnings − netRefund + adFeeCredit
     orderEarnings: Number,
+    // Denormalized from paymentSummary.totalDueSeller.value (USD) for list/earnings
+    totalDueSellerUSD: Number,
+    // Frozen at first PARTIALLY_REFUNDED transition (before Finances ad-fee refresh)
+    preRefundOrderEarnings: Number,
+    preRefundAdFeeGeneral: Number,
     trackingNumber: String, // Extracted from fulfillmentHrefs
     manualTrackingNumber: String, // Manually entered tracking number (separate from trackingNumber)
     purchaseMarketplaceId: String, // e.g., EBAY_US, EBAY_AUS, EBAY_Canada
@@ -110,12 +117,14 @@ const OrderSchema = new mongoose.Schema(
     },
     orderTotal: Number, // Stored order total for sheet editing; defaults to pricingSummary.total.value + salesTax
     // Financial calculations (All Orders Sheet)
-    tds: Number, // Tax Deduction at Source — Finances API TAX_DEDUCTION_AT_SOURCE, else 1% estimate
+    tds: Number, // Tax Deduction at Source — Finances API TAX_DEDUCTION_AT_SOURCE, else 0.1% of subtotal
     tdsSource: {
       type: String,
       enum: ['calculated', 'finances'],
       default: 'calculated'
     },
+    // True after a Finances TDS lookup ran (hit or miss). Miss keeps calculated DB TDS — never force $0.
+    tdsFinancesChecked: { type: Boolean, default: false },
     tid: { type: Number, default: 0.24 }, // Transaction ID (fixed at $0.24)
     net: Number, // orderEarnings - tds - tid
     pBalanceINR: Number, // net * exchangeRate (for selected marketplace)

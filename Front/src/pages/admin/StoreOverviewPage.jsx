@@ -419,9 +419,9 @@ export default function StoreOverviewPage() {
         <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>
           {notes || (
             <>
-              Free listings used ≈ active (monthly auto-renew) + listings that started this month and already
-              ended (relist-then-end). Early end before renew is not counted. Sync Store Listings so ended
-              inserts are stored. Qty/$ left is live from eBay.
+              Free listings used ≈ new + renew (EndTime already rolled to next month) + ended (started this
+              month then ended, or renewed this month then ended). Early end before renew is not counted. Sync Store
+              Listings so ended inserts are stored. Qty/$ left is live from eBay.
             </>
           )}
         </Typography>
@@ -483,9 +483,9 @@ export default function StoreOverviewPage() {
                           hint={
                             [
                               'Estimate (eBay has no free-insert remaining API).',
-                              `Used = ${formatNumber(row.activeListingsCount)} active (renewals)`,
-                              `+ ${formatNumber(row.freeListingsEndedStartedThisMonth || 0)} started this month then ended (relist/new).`,
-                              'Early end before renew is excluded. Sync Store Listings to refresh ended inserts.',
+                              `Used = new + renew (active) + ended.`,
+                              `Ended includes started-this-month then ended, and renew-then-ended (${formatNumber(row.freeListingsEndedStartedThisMonth || 0)}).`,
+                              'Early end before renew day is excluded. Sync Store Listings to refresh ended inserts.',
                             ].join(' ')
                           }
                         />

@@ -45,6 +45,12 @@ import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { DatePicker } from '@mui/x-date-pickers/DatePicker';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { format, parseISO, isValid } from 'date-fns';
+import {
+  computePartialRefundEnterAmount,
+  getOrderEarnings,
+  PARTIAL_REFUND_TARGET_EARNINGS,
+  EBAY_PER_ORDER_FIXED_FEE
+} from '../../utils/partialRefundEarnings';
 
 import { Dialog, DialogTitle, DialogContent, DialogActions } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
@@ -76,6 +82,7 @@ import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import api from '../../lib/api';
 import { fetchAllPages } from '../../lib/fetchAllPages';
 import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderSyncEvents';
+import { getTodayPtDateString } from '../../lib/pacificDate.js';
 import { sortSellersByName } from '../../lib/sellersSort';
 import ChatModal from '../../components/ChatModal';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
@@ -264,15 +271,21 @@ function ImageDialog({ open, onClose, images }) {
 }
 
 // --- EARNINGS HELPER ---
-// Returns the stored orderEarnings value directly (calculated backend-side as totalDueSeller.value - adFeeGeneral)
-function getOrderEarnings(order) {
-  if (order.orderEarnings === null || order.orderEarnings === undefined) return null;
-  return order.orderEarnings;
-}
-
+// Live from row components (not stale DB orderEarnings):
+// subtotal − |discount| − transactionFees − adFeeGeneral − shipping
 function isEbayAuOrder(order) {
   const mp = String(order?.purchaseMarketplaceId || '').toUpperCase();
   return mp === 'EBAY_AU' || mp === 'EBAY_AUS';
+}
+
+function isEbayGbOrder(order) {
+  const mp = String(order?.purchaseMarketplaceId || '').toUpperCase();
+  return mp === 'EBAY_GB' || mp === 'EBAY_UK' || mp === 'GB' || mp === 'UK';
+}
+
+function isEbayCaOrder(order) {
+  const mp = String(order?.purchaseMarketplaceId || '').toUpperCase();
+  return mp === 'EBAY_CA' || mp === 'EBAY_ENCA' || mp === 'EBAY_MOTORS_CA' || mp === 'CA';
 }
 
 function formatMoneyAmount(value, prefix = '$') {
@@ -282,9 +295,26 @@ function formatMoneyAmount(value, prefix = '$') {
   return `${prefix}${num.toFixed(2)}`;
 }
 
-/** AU line items (subtotal, fees, etc.) in AUD; other marketplaces use $. */
+/** Local marketplace currency: AU$ / £ / C $ / $ for line amounts. */
 function formatOrderLocalAmount(order, value) {
-  return formatMoneyAmount(value, isEbayAuOrder(order) ? 'AU$' : '$');
+  let prefix = '$';
+  if (isEbayAuOrder(order)) prefix = 'AU$';
+  else if (isEbayGbOrder(order)) prefix = '£';
+  else if (isEbayCaOrder(order)) prefix = 'C $';
+  return formatMoneyAmount(value, prefix);
+}
+
+/** TDS and Ad Fee are always shown in USD ($), even for AU/UK/CA. */
+function formatOrderTdsAmount(order, value) {
+  return formatMoneyAmount(value, '$');
+}
+
+/** eBay discounts are often negative; show as positive in the UI. */
+function formatOrderDiscountAmount(order, value) {
+  if (value === null || value === undefined || value === '') return '-';
+  const num = Number(value);
+  if (Number.isNaN(num)) return '-';
+  return formatOrderLocalAmount(order, Math.abs(num));
 }
 
 /** Ad fees and earnings are stored in USD for all marketplaces. */
@@ -1012,11 +1042,91 @@ const getOrderSku = (order) => {
 const getSupplierLink = (order) => String(order?.supplierLink || order?.affiliateLink || '').trim();
 
 const createEmptyDateFilter = () => ({ mode: 'none', single: '', from: '', to: '' });
-const normalizeDateFilter = (value) => (
-  value && typeof value === 'object'
+
+const DATE_PRESET_MODES = new Set([
+  'last90',
+  'today',
+  'yesterday',
+  'thisMonth',
+  'lastMonth',
+  'thisYear',
+  'lastYear',
+]);
+
+/** Shift a YYYY-MM-DD calendar date by N days (timezone-agnostic calendar math). */
+const shiftYmd = (ymd, days) => {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+};
+
+/** Preset ranges use Pacific (America/Los_Angeles) calendar days — matches stored-orders PT bounds. */
+const getPresetDateRange = (mode) => {
+  const todayPt = getTodayPtDateString(); // YYYY-MM-DD in PDT/PST
+  const [y, m] = todayPt.split('-').map(Number);
+
+  switch (mode) {
+    case 'today':
+      return { from: todayPt, to: todayPt };
+    case 'yesterday': {
+      const yesterday = shiftYmd(todayPt, -1);
+      return { from: yesterday, to: yesterday };
+    }
+    case 'last90':
+      // Inclusive of today → 90 PT calendar days
+      return { from: shiftYmd(todayPt, -89), to: todayPt };
+    case 'thisMonth':
+      return {
+        from: `${y}-${String(m).padStart(2, '0')}-01`,
+        to: todayPt,
+      };
+    case 'lastMonth': {
+      const lastDayPrev = new Date(Date.UTC(y, m - 1, 0)); // day 0 of current month
+      const from = `${lastDayPrev.getUTCFullYear()}-${String(lastDayPrev.getUTCMonth() + 1).padStart(2, '0')}-01`;
+      const to = `${lastDayPrev.getUTCFullYear()}-${String(lastDayPrev.getUTCMonth() + 1).padStart(2, '0')}-${String(lastDayPrev.getUTCDate()).padStart(2, '0')}`;
+      return { from, to };
+    }
+    case 'thisYear':
+      return { from: `${y}-01-01`, to: todayPt };
+    case 'lastYear':
+      return { from: `${y - 1}-01-01`, to: `${y - 1}-12-31` };
+    default:
+      return null;
+  }
+};
+
+const normalizeDateFilter = (value) => {
+  const base = value && typeof value === 'object'
     ? { ...createEmptyDateFilter(), ...value }
-    : createEmptyDateFilter()
-);
+    : createEmptyDateFilter();
+
+  if (DATE_PRESET_MODES.has(base.mode)) {
+    const range = getPresetDateRange(base.mode);
+    if (range) {
+      return { ...base, single: '', from: range.from, to: range.to };
+    }
+  }
+
+  return base;
+};
+
+const applyDateFilterParams = (params, dateFilter) => {
+  if (!dateFilter || dateFilter.mode === 'none') return;
+
+  if (dateFilter.mode === 'single' && dateFilter.single) {
+    params.startDate = dateFilter.single;
+    params.endDate = dateFilter.single;
+    return;
+  }
+
+  if (dateFilter.mode === 'range' || DATE_PRESET_MODES.has(dateFilter.mode)) {
+    const resolved = DATE_PRESET_MODES.has(dateFilter.mode)
+      ? (getPresetDateRange(dateFilter.mode) || dateFilter)
+      : dateFilter;
+    if (resolved.from) params.startDate = resolved.from;
+    if (resolved.to) params.endDate = resolved.to;
+  }
+};
 
 const DateModeSearchBar = memo(function DateModeSearchBar({
   sellers = [],
@@ -1075,17 +1185,40 @@ const DateModeSearchBar = memo(function DateModeSearchBar({
         </Select>
       )}
 
-      <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 130 } }}>
+      <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 150 } }}>
         <InputLabel id="date-mode-label">Date Mode</InputLabel>
         <Select
           labelId="date-mode-label"
           value={draftDateFilter.mode}
           label="Date Mode"
-          onChange={(e) => setDraftDateFilter((prev) => ({ ...prev, mode: e.target.value }))}
+          onChange={(e) => {
+            const mode = e.target.value;
+            if (mode === 'none') {
+              setDraftDateFilter(createEmptyDateFilter());
+              return;
+            }
+            const preset = getPresetDateRange(mode);
+            if (preset) {
+              setDraftDateFilter({ mode, single: '', from: preset.from, to: preset.to });
+              return;
+            }
+            setDraftDateFilter((prev) => ({
+              ...prev,
+              mode,
+              ...(mode === 'single' ? { from: '', to: '' } : { single: '' }),
+            }));
+          }}
         >
           <MenuItem value="none">None</MenuItem>
           <MenuItem value="single">Single Day</MenuItem>
           <MenuItem value="range">Date Range</MenuItem>
+          <MenuItem value="today">Today</MenuItem>
+          <MenuItem value="yesterday">Yesterday</MenuItem>
+          <MenuItem value="thisMonth">This Month</MenuItem>
+          <MenuItem value="lastMonth">Last Month</MenuItem>
+          <MenuItem value="last90">Last 90 Days</MenuItem>
+          <MenuItem value="thisYear">This Year</MenuItem>
+          <MenuItem value="lastYear">Last Year</MenuItem>
         </Select>
       </FormControl>
 
@@ -1154,9 +1287,14 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
   searchSku, setSearchSku,
   searchProductName, setSearchProductName,
   searchPaymentStatus, setSearchPaymentStatus,
+  searchCancelStatus, setSearchCancelStatus,
+  searchIssueType, setSearchIssueType,
+  searchCaseCategory, setSearchCaseCategory,
+  searchCaseStatus, setSearchCaseStatus,
   draftSelectedSeller, setDraftSelectedSeller, setSelectedSeller,
   draftDateFilter, setDraftDateFilter,
   setDateFilter,
+  onApplyFilters,
   isSmallMobile,
 }, ref) {
   const [filtersExpanded, setFiltersExpanded] = useState(() => {
@@ -1176,24 +1314,33 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     }
   }, []); // Only run on mount
 
-  // Local state for all filter inputs — typing/changing only re-renders this small component.
-  // Values are pushed to parent only when the user clicks Search (or presses Enter).
+  // Local draft for ALL search filters — only committed when Search (or Enter) is pressed.
   const [localOrderId, setLocalOrderId] = useState(searchOrderId);
   const [localAzOrderId, setLocalAzOrderId] = useState(searchAzOrderId);
   const [localBuyerName, setLocalBuyerName] = useState(searchBuyerName);
   const [localItemId, setLocalItemId] = useState(searchItemId);
   const [localSku, setLocalSku] = useState(searchSku);
   const [localProductName, setLocalProductName] = useState(searchProductName);
+  const [localPaymentStatus, setLocalPaymentStatus] = useState(searchPaymentStatus);
+  const [localCancelStatus, setLocalCancelStatus] = useState(searchCancelStatus);
+  const [localIssueType, setLocalIssueType] = useState(searchIssueType);
+  const [localCaseCategory, setLocalCaseCategory] = useState(searchCaseCategory);
+  const [localCaseStatus, setLocalCaseStatus] = useState(searchCaseStatus);
 
-  // Sync local state when parent resets externally (e.g. Clear button calling parent setters).
+  // Keep local drafts in sync when parent clears / applies externally.
   useEffect(() => { setLocalOrderId(searchOrderId); }, [searchOrderId]);
   useEffect(() => { setLocalAzOrderId(searchAzOrderId); }, [searchAzOrderId]);
   useEffect(() => { setLocalBuyerName(searchBuyerName); }, [searchBuyerName]);
   useEffect(() => { setLocalItemId(searchItemId); }, [searchItemId]);
   useEffect(() => { setLocalSku(searchSku); }, [searchSku]);
   useEffect(() => { setLocalProductName(searchProductName); }, [searchProductName]);
+  useEffect(() => { setLocalPaymentStatus(searchPaymentStatus); }, [searchPaymentStatus]);
+  useEffect(() => { setLocalCancelStatus(searchCancelStatus); }, [searchCancelStatus]);
+  useEffect(() => { setLocalIssueType(searchIssueType); }, [searchIssueType]);
+  useEffect(() => { setLocalCaseCategory(searchCaseCategory); }, [searchCaseCategory]);
+  useEffect(() => { setLocalCaseStatus(searchCaseStatus); }, [searchCaseStatus]);
 
-  // Push all local values to parent → triggers the API fetch in parent's filter useEffect.
+  // Commit drafts → parent (seller/date + search filters), then force a fetch.
   const handleSearch = useCallback(() => {
     setSearchOrderId(localOrderId);
     setSearchAzOrderId(localAzOrderId);
@@ -1201,13 +1348,35 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     setSearchItemId(localItemId);
     setSearchSku(localSku);
     setSearchProductName(localProductName);
+    setSearchPaymentStatus(localPaymentStatus);
+    setSearchCancelStatus(localCancelStatus);
+    setSearchIssueType(localIssueType);
+    setSearchCaseCategory(localCaseCategory);
+    setSearchCaseStatus(localCaseStatus);
     setSelectedSeller(draftSelectedSeller);
     setDateFilter(normalizeDateFilter(draftDateFilter));
+    onApplyFilters?.({
+      sellerId: draftSelectedSeller,
+      dateFilter: normalizeDateFilter(draftDateFilter),
+      searchOrderId: localOrderId,
+      searchAzOrderId: localAzOrderId,
+      searchBuyerName: localBuyerName,
+      searchItemId: localItemId,
+      searchSku: localSku,
+      searchProductName: localProductName,
+      searchPaymentStatus: localPaymentStatus,
+      searchCancelStatus: localCancelStatus,
+      searchIssueType: localIssueType,
+      searchCaseCategory: localCaseCategory,
+      searchCaseStatus: localCaseStatus,
+    });
   }, [
     localOrderId, localAzOrderId, localBuyerName, localItemId, localSku, localProductName,
+    localPaymentStatus, localCancelStatus, localIssueType, localCaseCategory, localCaseStatus,
     draftSelectedSeller, draftDateFilter,
     setSearchOrderId, setSearchAzOrderId, setSearchBuyerName, setSearchItemId, setSearchSku, setSearchProductName,
-    setSelectedSeller, setDateFilter,
+    setSearchPaymentStatus, setSearchCancelStatus, setSearchIssueType, setSearchCaseCategory, setSearchCaseStatus,
+    setSelectedSeller, setDateFilter, onApplyFilters,
   ]);
 
   const handleClear = useCallback(() => {
@@ -1219,6 +1388,11 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     setLocalItemId('');
     setLocalSku('');
     setLocalProductName('');
+    setLocalPaymentStatus('');
+    setLocalCancelStatus('');
+    setLocalIssueType('');
+    setLocalCaseCategory('');
+    setLocalCaseStatus('');
     setDraftSelectedSeller('');
     setDraftDateFilter(clearedDateFilter);
 
@@ -1229,13 +1403,34 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     setSearchSku('');
     setSearchProductName('');
     setSearchPaymentStatus('');
+    setSearchCancelStatus('');
+    setSearchIssueType('');
+    setSearchCaseCategory('');
+    setSearchCaseStatus('');
     setSelectedSeller('');
     setDateFilter(clearedDateFilter);
+    onApplyFilters?.({
+      sellerId: '',
+      dateFilter: clearedDateFilter,
+      searchOrderId: '',
+      searchAzOrderId: '',
+      searchBuyerName: '',
+      searchItemId: '',
+      searchSku: '',
+      searchProductName: '',
+      searchPaymentStatus: '',
+      searchCancelStatus: '',
+      searchIssueType: '',
+      searchCaseCategory: '',
+      searchCaseStatus: '',
+    });
   }, [
     setDraftSelectedSeller, setDraftDateFilter,
     setSearchOrderId, setSearchAzOrderId, setSearchBuyerName, setSearchItemId, setSearchSku, setSearchProductName,
-    setSearchPaymentStatus, setSelectedSeller,
+    setSearchPaymentStatus, setSearchCancelStatus, setSearchIssueType, setSearchCaseCategory, setSearchCaseStatus,
+    setSelectedSeller,
     setDateFilter,
+    onApplyFilters,
   ]);
 
   useImperativeHandle(ref, () => ({
@@ -1253,6 +1448,9 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
       >
         <Typography variant="subtitle2" fontWeight="bold" sx={{ fontSize: { xs: '0.8rem', sm: '0.875rem' } }}>
           Search Filters
+        </Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ ml: 1, flex: 1, display: { xs: 'none', sm: 'block' } }}>
+          Fill fields, then click Search above (or press Enter)
         </Typography>
         <IconButton size="small">
           {filtersExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
@@ -1323,21 +1521,96 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
             />
           </Stack>
 
-          <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 200 }, maxWidth: { sm: 240 } }}>
-            <InputLabel id="payment-status-filter-label">Payment Status</InputLabel>
-            <Select
-              labelId="payment-status-filter-label"
-              value={searchPaymentStatus}
-              label="Payment Status"
-              onChange={(e) => setSearchPaymentStatus(e.target.value)}
-            >
-              <MenuItem value="">
-                <em>All</em>
-              </MenuItem>
-              <MenuItem value="FULLY_REFUNDED">FULLY_REFUNDED</MenuItem>
-              <MenuItem value="PARTIALLY_REFUNDED">PARTIALLY_REFUNDED</MenuItem>
-            </Select>
-          </FormControl>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={{ xs: 1, sm: 2 }}>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 200 }, maxWidth: { sm: 240 } }}>
+              <InputLabel id="payment-status-filter-label">Payment Status</InputLabel>
+              <Select
+                labelId="payment-status-filter-label"
+                value={localPaymentStatus}
+                label="Payment Status"
+                onChange={(e) => setLocalPaymentStatus(e.target.value)}
+              >
+                <MenuItem value="">
+                  <em>All</em>
+                </MenuItem>
+                <MenuItem value="FULLY_REFUNDED">FULLY_REFUNDED</MenuItem>
+                <MenuItem value="PARTIALLY_REFUNDED">PARTIALLY_REFUNDED</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 200 }, maxWidth: { sm: 240 } }}>
+              <InputLabel id="cancel-status-filter-label">Cancel Status</InputLabel>
+              <Select
+                labelId="cancel-status-filter-label"
+                value={localCancelStatus}
+                label="Cancel Status"
+                onChange={(e) => setLocalCancelStatus(e.target.value)}
+              >
+                <MenuItem value="">
+                  <em>All</em>
+                </MenuItem>
+                <MenuItem value="NONE_REQUESTED">NONE_REQUESTED</MenuItem>
+                <MenuItem value="CANCEL_REQUESTED">CANCEL_REQUESTED</MenuItem>
+                <MenuItem value="IN_PROGRESS">IN_PROGRESS</MenuItem>
+                <MenuItem value="CANCELED">CANCELED</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 180 }, maxWidth: { sm: 220 } }}>
+              <InputLabel id="issue-type-filter-label">Issues</InputLabel>
+              <Select
+                labelId="issue-type-filter-label"
+                value={localIssueType}
+                label="Issues"
+                onChange={(e) => setLocalIssueType(e.target.value)}
+              >
+                <MenuItem value="">
+                  <em>All</em>
+                </MenuItem>
+                <MenuItem value="ANY">Any Issue</MenuItem>
+                <MenuItem value="INR">INR</MenuItem>
+                <MenuItem value="SNAD">SNAD</MenuItem>
+                <MenuItem value="Return">Return</MenuItem>
+                <MenuItem value="Dispute">Dispute</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 200 }, maxWidth: { sm: 240 } }}>
+              <InputLabel id="case-category-filter-label">Case Category</InputLabel>
+              <Select
+                labelId="case-category-filter-label"
+                value={localCaseCategory}
+                label="Case Category"
+                onChange={(e) => setLocalCaseCategory(e.target.value)}
+              >
+                <MenuItem value="">
+                  <em>All</em>
+                </MenuItem>
+                <MenuItem value="On Hold">On Hold</MenuItem>
+                <MenuItem value="INR">INR</MenuItem>
+                <MenuItem value="Cancellation">Cancellation</MenuItem>
+                <MenuItem value="Return">Return</MenuItem>
+                <MenuItem value="Refund">Refund</MenuItem>
+                <MenuItem value="Replace">Replace</MenuItem>
+                <MenuItem value="Out of Stock">Out of Stock</MenuItem>
+                <MenuItem value="Issue with Product">Issue with Product</MenuItem>
+                <MenuItem value="Issue with Delivery">Issue with Delivery</MenuItem>
+                <MenuItem value="Inquiry">Inquiry</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 180 }, maxWidth: { sm: 220 } }}>
+              <InputLabel id="case-status-filter-label">Case Status</InputLabel>
+              <Select
+                labelId="case-status-filter-label"
+                value={localCaseStatus}
+                label="Case Status"
+                onChange={(e) => setLocalCaseStatus(e.target.value)}
+              >
+                <MenuItem value="">
+                  <em>All</em>
+                </MenuItem>
+                <MenuItem value="Case Opened">Case Opened</MenuItem>
+                <MenuItem value="Case Not Opened">Case Not Opened</MenuItem>
+              </Select>
+            </FormControl>
+          </Stack>
         </Stack>
       </Collapse>
     </Box>
@@ -1402,6 +1675,10 @@ function FulfillmentDashboard() {
   //const [searchSoldDate, setSearchSoldDate] = useState('');
   const [searchMarketplace, setSearchMarketplace] = useState(() => getInitialState('searchMarketplace', ''));
   const [searchPaymentStatus, setSearchPaymentStatus] = useState(() => getInitialState('searchPaymentStatus', ''));
+  const [searchCancelStatus, setSearchCancelStatus] = useState(() => getInitialState('searchCancelStatus', ''));
+  const [searchIssueType, setSearchIssueType] = useState(() => getInitialState('searchIssueType', ''));
+  const [searchCaseCategory, setSearchCaseCategory] = useState(() => getInitialState('searchCaseCategory', ''));
+  const [searchCaseStatus, setSearchCaseStatus] = useState(() => getInitialState('searchCaseStatus', ''));
   const [excludeClient, setExcludeClient] = useState(() => getInitialState('excludeClient', true));
   const [excludeLowValue, setExcludeLowValue] = useState(() => getInitialState('excludeLowValue', true));
   const [missingAmazonAccount, setMissingAmazonAccount] = useState(() => getInitialState('missingAmazonAccount', false));
@@ -1450,13 +1727,14 @@ function FulfillmentDashboard() {
   const [backfillEverythingLoading, setBackfillEverythingLoading] = useState(false);
   const [pollTdsLoading, setPollTdsLoading] = useState(false);
   const [fetchingAdFeeGeneral, setFetchingAdFeeGeneral] = useState({});
+  const [fetchingCancelStatus, setFetchingCancelStatus] = useState({});
 
   // Auto-message state
   const [autoMessageLoading, setAutoMessageLoading] = useState(false);
   const [autoMessageStats, setAutoMessageStats] = useState(null);
 
   // Resync window state
-  const [resyncDays, setResyncDays] = useState(10);
+  const [resyncDays, setResyncDays] = useState(7);
   const [moreActionsAnchor, setMoreActionsAnchor] = useState(null);
 
   // PT (Pacific Time) refresh state — refreshes existing orders created on a specific PT date/range
@@ -1492,6 +1770,7 @@ function FulfillmentDashboard() {
 
   // CSV Export dialog state
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportingCSV, setExportingCSV] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   // selectedExportColumns is initialized after ALL_COLUMNS is defined
 
@@ -1503,7 +1782,7 @@ function FulfillmentDashboard() {
   const [updatedOrderDetails, setUpdatedOrderDetails] = useState([]); // Store { orderId, changedFields }
 
   // Editing order earnings
-  // (orderEarnings is now read-only, calculated server-side as totalDueSeller - adFeeGeneral)
+  // (orderEarnings is now read-only, calculated server-side from order components)
 
   const [selectedOrderForMessage, setSelectedOrderForMessage] = useState(null);
 
@@ -1528,7 +1807,7 @@ function FulfillmentDashboard() {
     'seller', 'orderId', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'sku', 'supplierLink', 'itemCategory', 'buyerNote',
     'buyerName', 'shippingAddress', 'marketplace', 'subtotal',
     'shipping', 'salesTax', 'discount', 'transactionFees',
-    'adFeeGeneral', 'tds', 'cancelStatus', 'refunds', 'orderEarnings', 'trackingNumber',
+    'adFeeGeneral', 'tds', 'cancelStatus', 'refunds', 'reviewedRefund', 'orderEarnings', 'trackingNumber',
     'amazonAccount', 'arriving', 'beforeTax', 'estimatedTax',
     'azOrderId', 'amazonRefund', 'cardName', 'resolution', 'notes', 'messagingStatus', 'remark', 'issueFlags',
     'convoCategory', 'convoCaseStatus'
@@ -1557,6 +1836,7 @@ function FulfillmentDashboard() {
     { id: 'tds', label: 'TDS' },
     { id: 'cancelStatus', label: 'Cancel Status' },
     { id: 'refunds', label: 'Refunds' },
+    { id: 'reviewedRefund', label: 'Reviewed Refund' },
     { id: 'refundItemAmount', label: 'Refund Item' },
     { id: 'refundTaxAmount', label: 'Refund Tax' },
     { id: 'refundTotalToBuyer', label: 'Refund Total' },
@@ -1584,9 +1864,16 @@ function FulfillmentDashboard() {
 
   const [visibleColumns, setVisibleColumns] = useState(() => {
     const stored = getInitialState('visibleColumns', DEFAULT_VISIBLE_COLUMNS);
-    // Merge any newly added default columns that aren't in the cached list yet
-    const missing = DEFAULT_VISIBLE_COLUMNS.filter(col => !stored.includes(col));
-    return missing.length > 0 ? [...stored, ...missing] : stored;
+    let next = Array.isArray(stored) ? [...stored] : [...DEFAULT_VISIBLE_COLUMNS];
+    // Place new column beside Refunds for existing saved layouts
+    if (!next.includes('reviewedRefund')) {
+      const refundIdx = next.indexOf('refunds');
+      if (refundIdx >= 0) next.splice(refundIdx + 1, 0, 'reviewedRefund');
+      else next.push('reviewedRefund');
+    }
+    const missing = DEFAULT_VISIBLE_COLUMNS.filter(col => !next.includes(col));
+    if (missing.length > 0) next = [...next, ...missing];
+    return next;
   });
 
   // Convert to Set for O(1) lookups instead of O(n) .includes() per column per row
@@ -1891,6 +2178,7 @@ function FulfillmentDashboard() {
   // Track if this is the initial mount
   const isInitialMount = useRef(true);
   const hasFetchedInitialData = useRef(false);
+  const skipNextPageLoad = useRef(false);
 
   // Track previous filter values to detect changes
   const prevFilters = useRef({
@@ -1903,6 +2191,10 @@ function FulfillmentDashboard() {
     searchProductName,
     searchMarketplace,
     searchPaymentStatus,
+    searchCancelStatus,
+    searchIssueType,
+    searchCaseCategory,
+    searchCaseStatus,
     excludeClient,
     excludeLowValue,
     missingAmazonAccount,
@@ -1959,6 +2251,10 @@ function FulfillmentDashboard() {
       isInitialMount.current = false;
       return;
     }
+    if (skipNextPageLoad.current) {
+      skipNextPageLoad.current = false;
+      return;
+    }
     loadStoredOrders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPage]);
@@ -1980,6 +2276,10 @@ function FulfillmentDashboard() {
       prev.selectedSeller !== selectedSeller ||
       prev.searchMarketplace !== searchMarketplace ||
       prev.searchPaymentStatus !== searchPaymentStatus ||
+      prev.searchCancelStatus !== searchCancelStatus ||
+      prev.searchIssueType !== searchIssueType ||
+      prev.searchCaseCategory !== searchCaseCategory ||
+      prev.searchCaseStatus !== searchCaseStatus ||
       prev.excludeClient !== excludeClient ||
       prev.excludeLowValue !== excludeLowValue ||
       prev.missingAmazonAccount !== missingAmazonAccount ||
@@ -1996,6 +2296,10 @@ function FulfillmentDashboard() {
       searchProductName,
       searchMarketplace,
       searchPaymentStatus,
+      searchCancelStatus,
+      searchIssueType,
+      searchCaseCategory,
+      searchCaseStatus,
       excludeClient,
       excludeLowValue,
       missingAmazonAccount,
@@ -2013,10 +2317,107 @@ function FulfillmentDashboard() {
       setCurrentPage(1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchProductName, searchMarketplace, searchPaymentStatus, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
+  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchProductName, searchMarketplace, searchPaymentStatus, searchCancelStatus, searchIssueType, searchCaseCategory, searchCaseStatus, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
 
   // orderEarnings is now read-only (auto-calculated server-side)
   // No manual editing handlers needed
+
+  function buildStoredOrdersParams(overrides = {}) {
+    const includePagination = overrides.includePagination !== false;
+    const page = overrides.page ?? currentPage;
+    const sellerId = overrides.sellerId !== undefined ? overrides.sellerId : selectedSeller;
+    const activeDateFilter = overrides.dateFilter !== undefined ? overrides.dateFilter : dateFilter;
+    const activeOrderId = overrides.searchOrderId !== undefined ? overrides.searchOrderId : searchOrderId;
+    const activeAzOrderId = overrides.searchAzOrderId !== undefined ? overrides.searchAzOrderId : searchAzOrderId;
+    const activeBuyerName = overrides.searchBuyerName !== undefined ? overrides.searchBuyerName : searchBuyerName;
+    const activeItemId = overrides.searchItemId !== undefined ? overrides.searchItemId : searchItemId;
+    const activeSku = overrides.searchSku !== undefined ? overrides.searchSku : searchSku;
+    const activeProductName = overrides.searchProductName !== undefined ? overrides.searchProductName : searchProductName;
+    const activePaymentStatus = overrides.searchPaymentStatus !== undefined ? overrides.searchPaymentStatus : searchPaymentStatus;
+    const activeCancelStatus = overrides.searchCancelStatus !== undefined ? overrides.searchCancelStatus : searchCancelStatus;
+    const activeIssueType = overrides.searchIssueType !== undefined ? overrides.searchIssueType : searchIssueType;
+    const activeCaseCategory = overrides.searchCaseCategory !== undefined ? overrides.searchCaseCategory : searchCaseCategory;
+    const activeCaseStatus = overrides.searchCaseStatus !== undefined ? overrides.searchCaseStatus : searchCaseStatus;
+
+    const params = {};
+    if (includePagination) {
+      params.page = page;
+      params.limit = ordersPerPage;
+    }
+
+    if (sellerId) params.sellerId = sellerId;
+    if (String(activeProductName || '').trim()) params.productName = String(activeProductName).trim();
+    if (String(activeOrderId || '').trim()) params.searchOrderId = String(activeOrderId).trim();
+    if (String(activeAzOrderId || '').trim()) params.searchAzOrderId = String(activeAzOrderId).trim();
+    if (String(activeBuyerName || '').trim()) params.searchBuyerName = String(activeBuyerName).trim();
+    if (String(activeItemId || '').trim()) params.searchItemId = String(activeItemId).trim();
+    if (String(activeSku || '').trim()) params.searchSku = String(activeSku).trim();
+    if (searchMarketplace) params.searchMarketplace = searchMarketplace;
+    if (activePaymentStatus) params.paymentStatus = activePaymentStatus;
+    if (activeCancelStatus) params.cancelStatus = activeCancelStatus;
+    if (activeIssueType) params.issueType = activeIssueType;
+    if (activeCaseCategory) params.caseCategory = activeCaseCategory;
+    if (activeCaseStatus) params.caseStatus = activeCaseStatus;
+    params.excludeClient = excludeClient ? 'true' : 'false';
+    params.excludeLowValue = excludeLowValue ? 'true' : 'false';
+    params.missingAmazonAccount = missingAmazonAccount ? 'true' : 'false';
+    params.includeSupplierLinks = visibleColumnsSet.has('supplierLink') ? 'true' : 'false';
+
+    applyDateFilterParams(params, activeDateFilter);
+    return params;
+  }
+
+  /** Called by Search / Clear — applies drafts immediately and fetches page 1. */
+  const applyCommittedFilters = useCallback((draft = {}) => {
+    prevFilters.current = {
+      selectedSeller: draft.sellerId ?? '',
+      searchOrderId: draft.searchOrderId ?? '',
+      searchAzOrderId: draft.searchAzOrderId ?? '',
+      searchBuyerName: draft.searchBuyerName ?? '',
+      searchItemId: draft.searchItemId ?? '',
+      searchSku: draft.searchSku ?? '',
+      searchProductName: draft.searchProductName ?? '',
+      searchMarketplace,
+      searchPaymentStatus: draft.searchPaymentStatus ?? '',
+      searchCancelStatus: draft.searchCancelStatus ?? '',
+      searchIssueType: draft.searchIssueType ?? '',
+      searchCaseCategory: draft.searchCaseCategory ?? '',
+      searchCaseStatus: draft.searchCaseStatus ?? '',
+      excludeClient,
+      excludeLowValue,
+      missingAmazonAccount,
+      dateFilter: draft.dateFilter || createEmptyDateFilter(),
+    };
+
+    if (currentPage !== 1) {
+      skipNextPageLoad.current = true;
+      setCurrentPage(1);
+    }
+
+    loadStoredOrders({
+      page: 1,
+      sellerId: draft.sellerId ?? '',
+      dateFilter: draft.dateFilter || createEmptyDateFilter(),
+      searchOrderId: draft.searchOrderId ?? '',
+      searchAzOrderId: draft.searchAzOrderId ?? '',
+      searchBuyerName: draft.searchBuyerName ?? '',
+      searchItemId: draft.searchItemId ?? '',
+      searchSku: draft.searchSku ?? '',
+      searchProductName: draft.searchProductName ?? '',
+      searchPaymentStatus: draft.searchPaymentStatus ?? '',
+      searchCancelStatus: draft.searchCancelStatus ?? '',
+      searchIssueType: draft.searchIssueType ?? '',
+      searchCaseCategory: draft.searchCaseCategory ?? '',
+      searchCaseStatus: draft.searchCaseStatus ?? '',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    currentPage,
+    searchMarketplace,
+    excludeClient,
+    excludeLowValue,
+    missingAmazonAccount,
+  ]);
 
   async function fetchSellers() {
     setError('');
@@ -2028,40 +2429,12 @@ function FulfillmentDashboard() {
     }
   }
 
-  async function loadStoredOrders() {
+  async function loadStoredOrders(overrides = {}) {
     setLoading(true);
     setError('');
 
     try {
-      const params = {
-        page: currentPage,
-        limit: ordersPerPage
-      };
-
-      if (selectedSeller) params.sellerId = selectedSeller;
-      if (searchProductName.trim()) params.productName = searchProductName.trim();
-      if (searchOrderId.trim()) params.searchOrderId = searchOrderId.trim();
-      if (searchAzOrderId.trim()) params.searchAzOrderId = searchAzOrderId.trim();
-      if (searchBuyerName.trim()) params.searchBuyerName = searchBuyerName.trim();
-      if (searchItemId.trim()) params.searchItemId = searchItemId.trim();
-      if (searchSku.trim()) params.searchSku = searchSku.trim();
-      if (searchMarketplace) params.searchMarketplace = searchMarketplace;
-      if (searchPaymentStatus) params.paymentStatus = searchPaymentStatus;
-      params.excludeClient = excludeClient;
-      params.excludeLowValue = excludeLowValue;
-      params.missingAmazonAccount = missingAmazonAccount;
-      params.includeSupplierLinks = visibleColumnsSet.has('supplierLink');
-
-      // --- NEW DATE LOGIC START ---
-      if (dateFilter.mode === 'single' && dateFilter.single) {
-        // For single day, start and end are the same day
-        params.startDate = dateFilter.single;
-        params.endDate = dateFilter.single;
-      } else if (dateFilter.mode === 'range') {
-        if (dateFilter.from) params.startDate = dateFilter.from;
-        if (dateFilter.to) params.endDate = dateFilter.to;
-      }
-      // --- NEW DATE LOGIC END ---
+      const params = buildStoredOrdersParams(overrides);
 
       const { data } = await api.get('/ebay/stored-orders', { params });
       const loadedOrders = data?.orders || [];
@@ -2404,15 +2777,24 @@ function FulfillmentDashboard() {
       const newOrderIds = (data?.pollResults || [])
         .filter((r) => r.success && Array.isArray(r.newOrders) && r.newOrders.length > 0)
         .flatMap((r) => r.newOrders);
+      const updatedCount = Number(data?.totalUpdatedOrders) || 0;
+      const ptLabel = data?.ptWindow
+        ? `PT ${data.ptWindow.yesterdayPt} → ${data.ptWindow.todayPt}`
+        : 'today + yesterday (PT)';
 
       let severity = 'info';
       let msg = '';
-      if (data && data.totalNewOrders > 0) {
+      if (data && (data.totalNewOrders > 0 || updatedCount > 0)) {
         const sellerSummary = data.pollResults
-          .filter(r => r.success && r.newOrders && r.newOrders.length > 0)
-          .map(r => `${r.sellerName}: ${r.newOrders.length} new order${r.newOrders.length > 1 ? 's' : ''}`)
+          .filter(r => r.success && ((r.newOrders && r.newOrders.length > 0) || (r.totalUpdated > 0)))
+          .map(r => {
+            const parts = [];
+            if (r.newOrders?.length) parts.push(`${r.newOrders.length} new`);
+            if (r.totalUpdated) parts.push(`${r.totalUpdated} updated`);
+            return `${r.sellerName}: ${parts.join(', ')}`;
+          })
           .join('\n');
-        msg = `Found ${data.totalNewOrders} new order${data.totalNewOrders > 1 ? 's' : ''}!\n\n${sellerSummary}`;
+        msg = `Poll (${ptLabel}): ${data.totalNewOrders || 0} new, ${updatedCount} updated.\n\n${sellerSummary}`;
         severity = 'success';
       } else if (data) {
         const failures = (data.pollResults || []).filter((r) => !r.success && r.error);
@@ -2421,13 +2803,10 @@ function FulfillmentDashboard() {
           msg = `Poll failed: ${failures.map((f) => `${f.sellerName}: ${f.error}`).join('; ')}`;
           severity = 'error';
         } else if (fetched > 0) {
-          msg = `eBay returned ${fetched} order(s) in range; all are already in the database.`;
+          msg = `eBay returned ${fetched} order(s) for ${ptLabel}; all already match the database.`;
           severity = 'info';
         } else {
-          const skipped = (data.pollResults || []).find((r) => r.skippedReason === 'poll_window_too_recent');
-          msg = skipped
-            ? 'Poll skipped — last sync was less than 1 minute ago. Try again shortly or use Resync.'
-            : 'No new orders from eBay for this window — you are likely already up to date. Poll only checks after your latest stored order (end time is ~5 minutes before now). Use Resync 30D if you expect missing orders. If polls never return anything, verify server/PC date and time are correct.';
+          msg = `No eBay orders found for ${ptLabel}.`;
           severity = 'info';
         }
       }
@@ -2536,32 +2915,52 @@ function FulfillmentDashboard() {
     }
   }
 
-  // Resync recent orders (last 10 days) - catches silent eBay changes
+  // Resync last N PT calendar days — same full sync as Poll New Orders
   async function resyncRecent() {
     setLoading(true);
     setError('');
     setPollResults(null);
     setSnackbarOrderIds([]);
     setUpdatedOrderDetails([]);
-    setUpdatedOrderDetails([]);
     try {
       const { data } = await api.post('/ebay/resync-recent', { days: resyncDays });
       setPollResults(data || null);
 
-      // Reset filters to show all sellers and go to page 1
-      setSelectedSeller('');
-      setCurrentPage(1);
+      // Show the same PT window that was just synced (not older DB rows outside the window)
+      const syncedDateFilter = data?.ptWindow?.startPt && data?.ptWindow?.todayPt
+        ? {
+            mode: 'range',
+            single: '',
+            from: data.ptWindow.startPt,
+            to: data.ptWindow.todayPt,
+          }
+        : null;
 
-      // Reload orders with reset filters
-      await loadStoredOrders();
+      setSelectedSeller('');
+      setDraftSelectedSeller('');
+      setCurrentPage(1);
+      if (syncedDateFilter) {
+        setDateFilter(syncedDateFilter);
+        setDraftDateFilter(syncedDateFilter);
+      }
+
+      // Pass overrides — setState is async, so don't rely on closure values yet
+      await loadStoredOrders({
+        page: 1,
+        sellerId: '',
+        ...(syncedDateFilter ? { dateFilter: syncedDateFilter } : {}),
+      });
+
+      const ptLabel = data?.ptWindow
+        ? `PT ${data.ptWindow.startPt} → ${data.ptWindow.todayPt}`
+        : `last ${resyncDays} days (PT)`;
 
       if (data && (data.totalUpdated > 0 || data.totalNew > 0)) {
-        // Collect updated order details
-        const updatedDetails = data.pollResults
+        const updatedDetails = (data.pollResults || [])
           .filter(r => r.success && r.updatedOrders && r.updatedOrders.length > 0)
           .flatMap(r => r.updatedOrders);
 
-        const newOrderIds = data.pollResults
+        const newOrderIds = (data.pollResults || [])
           .filter(r => r.success && r.newOrders && r.newOrders.length > 0)
           .flatMap(r => r.newOrders);
 
@@ -2573,12 +2972,17 @@ function FulfillmentDashboard() {
         setUpdatedOrderDetails(updatedDetails);
 
         setSnackbarMsg(
-          `Resync Complete! Updated: ${data.totalUpdated}, New: ${data.totalNew}`
+          `Resync (${ptLabel}): ${data.totalNew || 0} new, ${data.totalUpdated || 0} updated`
         );
         setSnackbarSeverity('success');
         setSnackbarOpen(true);
       } else if (data) {
-        setSnackbarMsg('Resync Complete! All orders are up to date.');
+        const fetched = Number(data.totalFetched) || 0;
+        setSnackbarMsg(
+          fetched > 0
+            ? `Resync (${ptLabel}): ${fetched} order(s) fetched; already up to date.`
+            : `Resync (${ptLabel}): no eBay orders found.`
+        );
         setSnackbarSeverity('info');
         setSnackbarOpen(true);
       }
@@ -2791,14 +3195,14 @@ function FulfillmentDashboard() {
       const tds = data?.tds ?? data?.order?.tds;
       const tdsSource = data?.tdsSource ?? data?.order?.tdsSource;
       const src = data?.lookupSource ? ` via ${data.lookupSource}` : '';
-      if (tdsSource === 'finances' && tds != null) {
+      if (tdsSource === 'finances' && tds != null && Number(tds) > 0) {
         setSnackbarMsg(`TDS $${Number(tds).toFixed(2)} (Finances) · Ad fee $${Number(fee || 0).toFixed(2)} for ${order.orderId}${src}`);
       } else if (fee > 0) {
-        setSnackbarMsg(`Ad fee $${Number(fee).toFixed(2)} loaded for ${order.orderId}, but no TAX_DEDUCTION_AT_SOURCE found on eBay${src}`);
+        setSnackbarMsg(`Ad fee $${Number(fee).toFixed(2)} for ${order.orderId}; no eBay TDS — kept DB estimate $${Number(tds || 0).toFixed(2)}${src}`);
       } else if (data?.lookupSource === 'not_found') {
-        setSnackbarMsg(`No AD_FEE / TDS charge found on eBay for ${order.orderId}.`);
+        setSnackbarMsg(`No AD_FEE / TDS on eBay for ${order.orderId} — kept DB TDS $${Number(tds || 0).toFixed(2)}.`);
       } else {
-        setSnackbarMsg(`Ad fee is $0 for ${order.orderId}; no Finances TDS found${src}.`);
+        setSnackbarMsg(`No Finances TDS for ${order.orderId} — kept DB estimate $${Number(tds || 0).toFixed(2)}${src}.`);
       }
       setSnackbarSeverity('success');
       setSnackbarOpen(true);
@@ -2811,6 +3215,43 @@ function FulfillmentDashboard() {
     }
   }, []);
 
+  const handleFetchCancelStatus = useCallback(async (order) => {
+    try {
+      setFetchingCancelStatus(prev => ({ ...prev, [order._id]: true }));
+
+      const { data } = await api.post(`/ebay/orders/${order._id}/fetch-cancel-status`);
+
+      setOrders(prev => prev.map(existingOrder => (
+        existingOrder._id === order._id
+          ? {
+            ...existingOrder,
+            cancelState: data.cancelState ?? data.order?.cancelState,
+            cancelStatus: data.order?.cancelStatus ?? existingOrder.cancelStatus,
+            orderPaymentStatus: data.orderPaymentStatus ?? data.order?.orderPaymentStatus ?? existingOrder.orderPaymentStatus,
+            refunds: data.order?.refunds ?? existingOrder.refunds,
+            lastModifiedDate: data.order?.lastModifiedDate ?? existingOrder.lastModifiedDate,
+          }
+          : existingOrder
+      )));
+
+      const next = data.cancelState || 'NONE_REQUESTED';
+      const prev = data.previousCancelState || order.cancelState || 'NONE_REQUESTED';
+      if (data.changed) {
+        setSnackbarMsg(`Cancel status updated for ${order.orderId}: ${prev} → ${next}`);
+      } else {
+        setSnackbarMsg(`Cancel status unchanged for ${order.orderId}: ${next}`);
+      }
+      setSnackbarSeverity('success');
+      setSnackbarOpen(true);
+    } catch (e) {
+      setSnackbarMsg(e?.response?.data?.error || 'Failed to fetch cancel status');
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setFetchingCancelStatus(prev => ({ ...prev, [order._id]: false }));
+    }
+  }, []);
+
   // Recalculate Earnings for all orders of selected seller
   const recalculateEarnings = async () => {
     const SINCE_DATE = '2026-02-28';
@@ -2820,9 +3261,9 @@ function FulfillmentDashboard() {
 
     const confirmed = window.confirm(
       `This will recalculate orderEarnings for ${scopeMsg}, orders on/after ${SINCE_DATE}, across ALL marketplaces.\n\n` +
-      'Formula: totalDueSeller.value − adFeeGeneral\n\n' +
-      '• FULLY_REFUNDED → $0\n' +
-      '• PARTIALLY_REFUNDED → skipped (enter manually)\n' +
+      'Formula: Subtotal − Discount − Transaction Fees − Ad Fee − Shipping\n\n' +
+      '• FULLY_REFUNDED → $-0.40\n' +
+      '• PARTIALLY_REFUNDED → pre-refund earnings − net refund + ad fee credit\n' +
       '• All other statuses → recalculated\n\n' +
       'Continue?'
     );
@@ -3142,7 +3583,7 @@ function FulfillmentDashboard() {
             </Box>
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography>Discount</Typography>
-              <Typography fontWeight="medium" color="success.main">{formatOrderLocalAmount(order, order.discount)}</Typography>
+              <Typography fontWeight="medium" color="success.main">{formatOrderDiscountAmount(order, order.discount)}</Typography>
             </Box>
             {order.refundTotalToBuyerUSD > 0 && (
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
@@ -3309,44 +3750,22 @@ function FulfillmentDashboard() {
       return;
     }
 
+    setExportingCSV(true);
+    setExportDialogOpen(false);
+
     try {
-      // Show loading state
-      setLoading(true);
-      setExportDialogOpen(false); // Close dialog immediately
+      const params = buildStoredOrdersParams({ includePagination: false });
 
-      // Build params with all current filters, but without pagination limits
-      const params = {};
-
-      if (selectedSeller) params.sellerId = selectedSeller;
-      if (searchProductName.trim()) params.productName = searchProductName.trim();
-      if (searchOrderId.trim()) params.searchOrderId = searchOrderId.trim();
-      if (searchAzOrderId.trim()) params.searchAzOrderId = searchAzOrderId.trim();
-      if (searchBuyerName.trim()) params.searchBuyerName = searchBuyerName.trim();
-      if (searchItemId.trim()) params.searchItemId = searchItemId.trim();
-      if (searchSku.trim()) params.searchSku = searchSku.trim();
-      if (searchMarketplace) params.searchMarketplace = searchMarketplace;
-      if (searchPaymentStatus) params.paymentStatus = searchPaymentStatus;
-      params.excludeClient = excludeClient;
-      params.excludeLowValue = excludeLowValue;
-      params.missingAmazonAccount = missingAmazonAccount;
-
-      // Apply date filters
-      if (dateFilter.mode === 'single' && dateFilter.single) {
-        params.startDate = dateFilter.single;
-        params.endDate = dateFilter.single;
-      } else if (dateFilter.mode === 'range') {
-        if (dateFilter.from) params.startDate = dateFilter.from;
-        if (dateFilter.to) params.endDate = dateFilter.to;
-      }
-
-      // Fetch all orders with current filters (paginated on server, max 200/page)
-      const allOrders = await fetchAllPages('/ebay/stored-orders', params, { itemsKey: 'orders' });
+      const allOrders = await fetchAllPages('/ebay/stored-orders', params, {
+        itemsKey: 'orders',
+        limit: 200,
+        timeout: 300000,
+      });
 
       if (allOrders.length === 0) {
         setSnackbarMsg('No orders found to export');
         setSnackbarSeverity('warning');
         setSnackbarOpen(true);
-        setLoading(false);
         return;
       }
 
@@ -3385,7 +3804,13 @@ function FulfillmentDashboard() {
         subtotal: { header: 'Subtotal', accessor: 'subtotal' },
         shipping: { header: 'Shipping', accessor: 'shipping' },
         salesTax: { header: 'Sales Tax', accessor: 'salesTax' },
-        discount: { header: 'Discount', accessor: 'discount' },
+        discount: {
+          header: 'Discount',
+          accessor: (o) => {
+            const n = Number(o.discount);
+            return Number.isNaN(n) ? o.discount : Math.abs(n);
+          }
+        },
         transactionFees: { header: 'Transaction Fees', accessor: 'transactionFees' },
         adFeeGeneral: { header: 'Ad Fee General', accessor: 'adFeeGeneral' },
         tds: { header: 'TDS', accessor: 'tds' },
@@ -3394,11 +3819,30 @@ function FulfillmentDashboard() {
           header: 'Refunds',
           accessor: (o) => o.refunds?.map((refund) => `${refund.orderPaymentStatus === 'FULLY_REFUNDED' ? 'Full' : 'Partial'}: $${(Number(refund.amount?.value || refund.refundAmount?.value || 0) * (o.conversionRate || 1)).toFixed(2)}`).join('; ') || ''
         },
+        reviewedRefund: {
+          header: 'Reviewed Refund',
+          accessor: (o) => {
+            const status = String(o.orderPaymentStatus || '').toUpperCase();
+            if (status !== 'PAID' && status !== 'PARTIALLY_REFUNDED') return '';
+            const planOrder = status === 'PARTIALLY_REFUNDED'
+              ? {
+                ...o,
+                adFeeGeneral: o.preRefundAdFeeGeneral != null ? o.preRefundAdFeeGeneral : o.adFeeGeneral,
+                orderPaymentStatus: 'PAID'
+              }
+              : o;
+            const plan = computePartialRefundEnterAmount(planOrder, PARTIAL_REFUND_TARGET_EARNINGS);
+            return plan ? plan.enterRefundAmount : '';
+          }
+        },
         refundItemAmount: { header: 'Refund Item', accessor: 'refundItemAmount' },
         refundTaxAmount: { header: 'Refund Tax', accessor: 'refundTaxAmount' },
         refundTotalToBuyer: { header: 'Refund Total', accessor: 'refundTotalToBuyer' },
         orderTotalAfterRefund: { header: 'Order Total (After Refund)', accessor: 'orderTotalAfterRefund' },
-        orderEarnings: { header: 'Order Earnings', accessor: 'orderEarnings' },
+        orderEarnings: {
+          header: 'Order Earnings',
+          accessor: (o) => getOrderEarnings(o)
+        },
         trackingNumber: { header: 'Tracking Number', accessor: 'trackingNumber' },
         amazonAccount: { header: 'Amazon Acc', accessor: 'amazonAccount' },
         arriving: { header: 'Arriving', accessor: 'arrivingDate' },
@@ -3446,11 +3890,11 @@ function FulfillmentDashboard() {
       setSnackbarOpen(true);
     } catch (error) {
       console.error('CSV export error:', error);
-      setSnackbarMsg('Failed to export orders to CSV');
+      setSnackbarMsg(`Failed to export orders to CSV: ${error?.response?.data?.error || error.message || 'Unknown error'}`);
       setSnackbarSeverity('error');
       setSnackbarOpen(true);
     } finally {
-      setLoading(false);
+      setExportingCSV(false);
     }
   };
 
@@ -3589,11 +4033,12 @@ function FulfillmentDashboard() {
                 <Button
                   variant="outlined"
                   size="small"
-                  startIcon={<DownloadIcon />}
+                  startIcon={exportingCSV ? <CircularProgress size={14} color="inherit" /> : <DownloadIcon />}
                   onClick={handleOpenExportDialog}
+                  disabled={exportingCSV}
                   sx={{ ...yellowOutlinedButtonSx, fontSize: { xs: '0.7rem', sm: '0.75rem' }, py: 0.25, minHeight: 28 }}
                 >
-                  {isSmallMobile ? 'CSV' : 'Download CSV'}
+                  {exportingCSV ? 'Exporting...' : (isSmallMobile ? 'CSV' : 'Download CSV')}
                 </Button>
               )}
               <Button
@@ -3626,39 +4071,27 @@ function FulfillmentDashboard() {
                 sellerFullWidth
               />
 
-              {/* Row 2: Poll Buttons + More actions */}
+              {/* Row 2: Poll New + More actions */}
               <Stack direction="row" spacing={1}>
-                <Button
-                  variant="contained"
-                  startIcon={!isSmallMobile && (loading ? <CircularProgress size={16} color="inherit" /> : <ShoppingCartIcon />)}
-                  onClick={pollNewOrders}
-                  disabled={loading}
-                  size="small"
-                  fullWidth
-                  sx={{
-                    ...yellowFilledButtonSx,
-                    fontSize: { xs: '0.7rem', sm: '0.8rem' },
-                    px: { xs: 0.5, sm: 1 }
-                  }}
-                >
-                  {loading ? 'Polling...' : isSmallMobile ? 'Poll New' : 'Poll New Orders'}
-                </Button>
-
-                <Button
-                  variant="contained"
-                  startIcon={!isSmallMobile && (loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />)}
-                  onClick={pollOrderUpdates}
-                  disabled={loading}
-                  size="small"
-                  fullWidth
-                  sx={{
-                    ...yellowFilledButtonSx,
-                    fontSize: { xs: '0.7rem', sm: '0.8rem' },
-                    px: { xs: 0.5, sm: 1 }
-                  }}
-                >
-                  {loading ? 'Updating...' : isSmallMobile ? 'Poll Updates' : 'Poll Order Updates'}
-                </Button>
+                <Tooltip title="Fetches all eBay orders created today + yesterday (Pacific Time). Creates new orders and refreshes existing ones.">
+                  <span style={{ display: 'flex', flex: 1 }}>
+                    <Button
+                      variant="contained"
+                      startIcon={!isSmallMobile && (loading ? <CircularProgress size={16} color="inherit" /> : <ShoppingCartIcon />)}
+                      onClick={pollNewOrders}
+                      disabled={loading}
+                      size="small"
+                      fullWidth
+                      sx={{
+                        ...yellowFilledButtonSx,
+                        fontSize: { xs: '0.7rem', sm: '0.8rem' },
+                        px: { xs: 0.5, sm: 1 }
+                      }}
+                    >
+                      {loading ? 'Polling...' : isSmallMobile ? 'Poll New' : 'Poll New Orders'}
+                    </Button>
+                  </span>
+                </Tooltip>
 
                 {isSuperAdmin && (
                   <>
@@ -3678,9 +4111,9 @@ function FulfillmentDashboard() {
                       onClose={() => setMoreActionsAnchor(null)}
                       anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
                       transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+                      PaperProps={{ sx: { maxWidth: 320 } }}
                     >
-                      <ListSubheader sx={{ lineHeight: 2, fontSize: '0.7rem' }}>Resync window</ListSubheader>
-                      <Box sx={{ px: 2, pb: 1 }}>
+                      <Box sx={{ px: 2, pb: 1, pt: 1 }}>
                         <Select
                           value={resyncDays}
                           onChange={(e) => setResyncDays(e.target.value)}
@@ -3690,16 +4123,21 @@ function FulfillmentDashboard() {
                         >
                           <MenuItem value={3}>3 Days</MenuItem>
                           <MenuItem value={7}>7 Days</MenuItem>
-                          <MenuItem value={10}>10 Days</MenuItem>
-                          <MenuItem value={15}>15 Days</MenuItem>
                           <MenuItem value={30}>30 Days</MenuItem>
+                          <MenuItem value={90}>90 Days</MenuItem>
+                          <MenuItem value={365}>1 Year</MenuItem>
+                          <MenuItem value={730}>2 Year</MenuItem>
                         </Select>
                       </Box>
                       <MenuItem
                         onClick={() => { setMoreActionsAnchor(null); resyncRecent(); }}
                         disabled={loading}
                       >
-                        {loading ? 'Syncing...' : `Resync ${resyncDays} Days`}
+                        {loading ? 'Syncing...' : `Resync ${
+                          Number(resyncDays) === 365 ? '1 Year'
+                            : Number(resyncDays) === 730 ? '2 Year'
+                              : `${resyncDays} Days`
+                        }`}
                       </MenuItem>
                       <MenuItem
                         onClick={() => { setMoreActionsAnchor(null); pollTds(); }}
@@ -3718,12 +4156,6 @@ function FulfillmentDashboard() {
                         disabled={recalcAmazonLoading}
                       >
                         {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
-                      </MenuItem>
-                      <MenuItem
-                        onClick={() => { setMoreActionsAnchor(null); backfillEverythingAllStores(); }}
-                        disabled={backfillEverythingLoading}
-                      >
-                        {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
                       </MenuItem>
                     </Menu>
                   </>
@@ -3826,27 +4258,20 @@ function FulfillmentDashboard() {
                     onClear={() => searchFiltersRef.current?.clear()}
                   />
 
-                  <Button
-                    variant="contained"
-                    size="small"
-                    startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <ShoppingCartIcon />}
-                    onClick={pollNewOrders}
-                    disabled={loading}
-                    sx={{ ...yellowFilledButtonSx, minWidth: 'auto' }}
-                  >
-                    {loading ? 'Polling...' : 'Poll New Orders'}
-                  </Button>
-
-                  <Button
-                    variant="contained"
-                    size="small"
-                    startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
-                    onClick={pollOrderUpdates}
-                    disabled={loading}
-                    sx={{ ...yellowFilledButtonSx, minWidth: 'auto' }}
-                  >
-                    {loading ? 'Updating...' : 'Poll Order Updates'}
-                  </Button>
+                  <Tooltip title="Fetches all eBay orders created today + yesterday (Pacific Time). Creates new orders and refreshes existing ones.">
+                    <span>
+                      <Button
+                        variant="contained"
+                        size="small"
+                        startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <ShoppingCartIcon />}
+                        onClick={pollNewOrders}
+                        disabled={loading}
+                        sx={{ ...yellowFilledButtonSx, minWidth: 'auto' }}
+                      >
+                        {loading ? 'Polling...' : 'Poll New Orders'}
+                      </Button>
+                    </span>
+                  </Tooltip>
 
                   {isSuperAdmin && (
                     <>
@@ -3865,9 +4290,9 @@ function FulfillmentDashboard() {
                         onClose={() => setMoreActionsAnchor(null)}
                         anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
                         transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                        PaperProps={{ sx: { maxWidth: 360 } }}
                       >
-                        <ListSubheader sx={{ lineHeight: 2, fontSize: '0.75rem' }}>Resync window</ListSubheader>
-                        <Box sx={{ px: 2, pb: 1 }}>
+                        <Box sx={{ px: 2, pb: 1, pt: 1 }}>
                           <Select
                             value={resyncDays}
                             onChange={(e) => setResyncDays(e.target.value)}
@@ -3877,16 +4302,21 @@ function FulfillmentDashboard() {
                           >
                             <MenuItem value={3}>3 Days</MenuItem>
                             <MenuItem value={7}>7 Days</MenuItem>
-                            <MenuItem value={10}>10 Days</MenuItem>
-                            <MenuItem value={15}>15 Days</MenuItem>
                             <MenuItem value={30}>30 Days</MenuItem>
+                            <MenuItem value={90}>90 Days</MenuItem>
+                            <MenuItem value={365}>1 Year</MenuItem>
+                            <MenuItem value={730}>2 Year</MenuItem>
                           </Select>
                         </Box>
                         <MenuItem
                           onClick={() => { setMoreActionsAnchor(null); resyncRecent(); }}
                           disabled={loading}
                         >
-                          {loading ? 'Syncing...' : `Resync ${resyncDays} Days`}
+                          {loading ? 'Syncing...' : `Resync ${
+                            Number(resyncDays) === 365 ? '1 Year'
+                              : Number(resyncDays) === 730 ? '2 Year'
+                                : `${resyncDays} Days`
+                          }`}
                         </MenuItem>
                         <MenuItem
                           onClick={() => { setMoreActionsAnchor(null); pollTds(); }}
@@ -3905,12 +4335,6 @@ function FulfillmentDashboard() {
                           disabled={recalcAmazonLoading}
                         >
                           {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
-                        </MenuItem>
-                        <MenuItem
-                          onClick={() => { setMoreActionsAnchor(null); backfillEverythingAllStores(); }}
-                          disabled={backfillEverythingLoading}
-                        >
-                          {backfillEverythingLoading ? 'Running...' : 'Backfill All'}
                         </MenuItem>
                       </Menu>
                     </>
@@ -4017,12 +4441,21 @@ function FulfillmentDashboard() {
             setSearchProductName={setSearchProductName}
             searchPaymentStatus={searchPaymentStatus}
             setSearchPaymentStatus={setSearchPaymentStatus}
+            searchCancelStatus={searchCancelStatus}
+            setSearchCancelStatus={setSearchCancelStatus}
+            searchIssueType={searchIssueType}
+            setSearchIssueType={setSearchIssueType}
+            searchCaseCategory={searchCaseCategory}
+            setSearchCaseCategory={setSearchCaseCategory}
+            searchCaseStatus={searchCaseStatus}
+            setSearchCaseStatus={setSearchCaseStatus}
             draftSelectedSeller={draftSelectedSeller}
             setDraftSelectedSeller={setDraftSelectedSeller}
             setSelectedSeller={setSelectedSeller}
             draftDateFilter={draftDateFilter}
             setDraftDateFilter={setDraftDateFilter}
             setDateFilter={setDateFilter}
+            onApplyFilters={applyCommittedFilters}
             isSmallMobile={isSmallMobile}
           />
 
@@ -4036,7 +4469,7 @@ function FulfillmentDashboard() {
             <Paper sx={{ p: { xs: 2, sm: 4 }, textAlign: 'center' }}>
               <ShoppingCartIcon sx={{ fontSize: { xs: 36, sm: 48 }, color: 'text.secondary', mb: 2 }} />
               <Typography variant="body1" color="text.secondary" sx={{ fontSize: { xs: '0.875rem', sm: '1rem' } }}>
-                No orders found. Click "Poll New Orders" to fetch orders from all sellers.
+                No orders found. Click "Poll New Orders" to fetch today + yesterday (PT) from eBay.
               </Typography>
             </Paper>
           ) : (
@@ -4122,6 +4555,7 @@ function FulfillmentDashboard() {
                       {visibleColumnsSet.has('tds') && <TableCell sx={HEADER_CELL_RIGHT_SX}>TDS</TableCell>}
                       {visibleColumnsSet.has('cancelStatus') && <TableCell sx={HEADER_CELL_SX}>Cancel Status</TableCell>}
                       {visibleColumnsSet.has('refunds') && <TableCell sx={HEADER_CELL_SX}>Refunds</TableCell>}
+                      {visibleColumnsSet.has('reviewedRefund') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Reviewed Refund</TableCell>}
                       {visibleColumnsSet.has('refundItemAmount') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Refund Item</TableCell>}
                       {visibleColumnsSet.has('refundTaxAmount') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Refund Tax</TableCell>}
                       {visibleColumnsSet.has('refundTotalToBuyer') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Refund Total</TableCell>}
@@ -4167,10 +4601,22 @@ function FulfillmentDashboard() {
                           )}
                           {visibleColumnsSet.has('orderId') && (
                             <TableCell>
-                              <Stack direction="row" alignItems="center" spacing={1}>
+                              <Stack direction="row" alignItems="center" spacing={0.5}>
                                 <Typography variant="body2" fontWeight="medium" sx={{ color: 'primary.main', fontSize: '0.8125rem' }}>
                                   {order.orderId || order.legacyOrderId || '-'}
                                 </Typography>
+                                {(order.orderId || order.legacyOrderId) && (
+                                  <Tooltip title="Copy Order ID">
+                                    <IconButton
+                                      size="small"
+                                      onClick={() => handleCopy(order.orderId || order.legacyOrderId)}
+                                      aria-label="copy order id"
+                                      sx={{ p: 0.25 }}
+                                    >
+                                      <ContentCopyIcon fontSize="small" sx={{ fontSize: '0.875rem' }} />
+                                    </IconButton>
+                                  </Tooltip>
+                                )}
 
                                 {/* Auto-Message Status Indicator */}
                                 {order.autoMessageSent ? (
@@ -4473,101 +4919,124 @@ function FulfillmentDashboard() {
                             </TableCell>
                           )}
                           {visibleColumnsSet.has('subtotal') && (
-                            order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">
-                                <Typography variant="body2" fontWeight="medium">
-                                  {formatOrderLocalAmount(order, order.subtotal)}
-                                </Typography>
-                              </TableCell>
-                            ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
+                            <TableCell align="right">
+                              <Typography variant="body2" fontWeight="medium">
+                                {formatOrderLocalAmount(order, order.subtotal)}
+                              </Typography>
+                            </TableCell>
                           )}
                           {visibleColumnsSet.has('shipping') && (
-                            order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">{formatOrderLocalAmount(order, order.shipping)}</TableCell>
-                            ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
+                            <TableCell align="right">{formatOrderLocalAmount(order, order.shipping)}</TableCell>
                           )}
                           {visibleColumnsSet.has('salesTax') && (
-                            order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">{formatOrderLocalAmount(order, order.salesTax)}</TableCell>
-                            ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
+                            <TableCell align="right">{formatOrderLocalAmount(order, order.salesTax)}</TableCell>
                           )}
                           {visibleColumnsSet.has('discount') && (
-                            order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">
-                                <Typography variant="body2">
-                                  {formatOrderLocalAmount(order, order.discount)}
-                                </Typography>
-                              </TableCell>
-                            ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
+                            <TableCell align="right">
+                              <Typography variant="body2">
+                                {formatOrderDiscountAmount(order, order.discount)}
+                              </Typography>
+                            </TableCell>
                           )}
                           {visibleColumnsSet.has('transactionFees') && (
-                            order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">{formatOrderLocalAmount(order, order.transactionFees)}</TableCell>
-                            ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
+                            <TableCell align="right">{formatOrderLocalAmount(order, order.transactionFees)}</TableCell>
                           )}
                           {visibleColumnsSet.has('adFeeGeneral') && (
-                            order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">
+                            <TableCell align="right">
+                              {order.adFeeGeneral ? (
                                 <Typography
                                   variant="body2"
                                   sx={{
-                                    fontWeight: order.adFeeGeneral ? 'medium' : 'normal',
-                                    color: order.adFeeGeneral ? 'error.main' : 'text.secondary'
+                                    fontWeight: 'medium',
+                                    color: 'error.main'
                                   }}
                                 >
-                                  {order.adFeeGeneral ? formatOrderUsdAmount(order, order.adFeeGeneral) : '-'}
+                                  {formatOrderUsdAmount(order, order.adFeeGeneral)}
                                 </Typography>
-                              </TableCell>
-                            ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
+                              ) : (
+                                <Typography variant="body2" color="text.secondary">-</Typography>
+                              )}
+                            </TableCell>
                           )}
                           {visibleColumnsSet.has('tds') && (
-                            order.orderPaymentStatus !== 'PARTIALLY_REFUNDED' ? (
-                              <TableCell align="right">
-                                {order.tdsSource === 'finances' && order.tds != null ? (
-                                  <Typography
-                                    variant="body2"
-                                    sx={{
-                                      fontWeight: order.tds ? 'medium' : 'normal',
-                                      color: order.tds ? 'error.main' : 'text.secondary'
-                                    }}
+                            <TableCell align="right">
+                              <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, justifyContent: 'flex-end' }}>
+                                {order.tds != null ? (
+                                  <Tooltip
+                                    title={
+                                      order.tdsSource === 'finances'
+                                        ? 'TDS from eBay Finances'
+                                        : '0.1% of subtotal (no Finances TDS found — DB estimate kept)'
+                                    }
                                   >
-                                    {formatOrderUsdAmount(order, order.tds)}
-                                  </Typography>
+                                    <Typography
+                                      variant="body2"
+                                      sx={{
+                                        fontWeight: order.tds ? 'medium' : 'normal',
+                                        color: order.tdsSource === 'finances'
+                                          ? (order.tds ? 'error.main' : 'text.secondary')
+                                          : 'text.secondary'
+                                      }}
+                                    >
+                                      {formatOrderTdsAmount(order, order.tds)}
+                                    </Typography>
+                                  </Tooltip>
                                 ) : (
-                                  <Tooltip title="Load Tax Deduction at Source from eBay Finances (same API as Ad Fee)">
-                                    <Button
+                                  <Typography variant="body2" color="text.secondary">-</Typography>
+                                )}
+                                <Tooltip title="Fetch Ad Fee + TDS from eBay Finances">
+                                  <span>
+                                    <IconButton
                                       size="small"
-                                      variant="outlined"
                                       onClick={() => handleFetchAdFeeGeneral(order)}
                                       disabled={Boolean(fetchingAdFeeGeneral[order._id])}
-                                      startIcon={fetchingAdFeeGeneral[order._id] ? <CircularProgress size={14} color="inherit" /> : <SyncIcon />}
-                                      sx={{ minWidth: 100, fontSize: '0.72rem', py: 0.4 }}
+                                      aria-label="fetch ad fee and tds"
+                                      sx={{ p: 0.35 }}
                                     >
-                                      {fetchingAdFeeGeneral[order._id] ? 'Fetching...' : 'Fetch TDS'}
-                                    </Button>
-                                  </Tooltip>
-                                )}
-                              </TableCell>
-                            ) : <TableCell align="center"><Typography variant="body2" color="text.disabled">-</Typography></TableCell>
+                                      {fetchingAdFeeGeneral[order._id]
+                                        ? <CircularProgress size={14} color="inherit" />
+                                        : <SyncIcon sx={{ fontSize: 16 }} />}
+                                    </IconButton>
+                                  </span>
+                                </Tooltip>
+                              </Box>
+                            </TableCell>
                           )}
                           {visibleColumnsSet.has('cancelStatus') && (
                             <TableCell>
-                              <Chip
-                                label={order.cancelState || 'NONE_REQUESTED'}
-                                size="small"
-                                color={
-                                  order.cancelState === 'CANCELED' ? 'error' :
-                                    order.cancelState === 'CANCEL_REQUESTED' ? 'warning' :
-                                      order.cancelState === 'IN_PROGRESS' ? 'warning' :
-                                        'success'
-                                }
-                                sx={{
-                                  fontSize: '0.7rem',
-                                  backgroundColor: order.cancelState === 'IN_PROGRESS' ? '#ffd700' : undefined,
-                                  color: order.cancelState === 'IN_PROGRESS' ? '#000' : undefined,
-                                  fontWeight: order.cancelState === 'IN_PROGRESS' ? 'bold' : 'normal'
-                                }}
-                              />
+                              <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                                <Chip
+                                  label={order.cancelState || 'NONE_REQUESTED'}
+                                  size="small"
+                                  color={
+                                    order.cancelState === 'CANCELED' ? 'error' :
+                                      order.cancelState === 'CANCEL_REQUESTED' ? 'warning' :
+                                        order.cancelState === 'IN_PROGRESS' ? 'warning' :
+                                          'success'
+                                  }
+                                  sx={{
+                                    fontSize: '0.7rem',
+                                    backgroundColor: order.cancelState === 'IN_PROGRESS' ? '#ffd700' : undefined,
+                                    color: order.cancelState === 'IN_PROGRESS' ? '#000' : undefined,
+                                    fontWeight: order.cancelState === 'IN_PROGRESS' ? 'bold' : 'normal'
+                                  }}
+                                />
+                                <Tooltip title="Fetch cancel status from eBay">
+                                  <span>
+                                    <IconButton
+                                      size="small"
+                                      onClick={() => handleFetchCancelStatus(order)}
+                                      disabled={Boolean(fetchingCancelStatus[order._id])}
+                                      aria-label="fetch cancel status"
+                                      sx={{ p: 0.35 }}
+                                    >
+                                      {fetchingCancelStatus[order._id]
+                                        ? <CircularProgress size={14} color="inherit" />
+                                        : <SyncIcon sx={{ fontSize: 16 }} />}
+                                    </IconButton>
+                                  </span>
+                                </Tooltip>
+                              </Box>
                             </TableCell>
                           )}
                           {/* --- REPLACEMENT FOR REFUNDS CELL --- */}
@@ -4609,6 +5078,67 @@ function FulfillmentDashboard() {
                               )}
                             </TableCell>
                           )}
+                          {visibleColumnsSet.has('reviewedRefund') && (
+                            <TableCell align="right">
+                              {(() => {
+                                const status = String(order.orderPaymentStatus || '').toUpperCase();
+                                // Show suggested Enter-refund amount for PAID (plan ahead)
+                                // and PARTIALLY_REFUNDED (what should have been entered for $1.10).
+                                if (status !== 'PAID' && status !== 'PARTIALLY_REFUNDED') {
+                                  return <Typography variant="body2" color="text.secondary">-</Typography>;
+                                }
+                                const planOrder = status === 'PARTIALLY_REFUNDED'
+                                  ? {
+                                    ...order,
+                                    // Prefer frozen pre-refund fee/ad when present
+                                    adFeeGeneral: order.preRefundAdFeeGeneral != null
+                                      ? order.preRefundAdFeeGeneral
+                                      : order.adFeeGeneral,
+                                    orderPaymentStatus: 'PAID'
+                                  }
+                                  : order;
+                                const plan = computePartialRefundEnterAmount(planOrder, PARTIAL_REFUND_TARGET_EARNINGS);
+                                if (!plan) {
+                                  return <Typography variant="body2" color="text.secondary">-</Typography>;
+                                }
+                                const copyText = plan.enterRefundAmount.toFixed(2);
+                                return (
+                                  <Tooltip
+                                    title={
+                                      `Enter refund $${plan.enterRefundAmount.toFixed(2)} ` +
+                                      `(leave $${plan.leaveAmount.toFixed(2)} of $${plan.purchasePrice.toFixed(2)}) ` +
+                                      `→ ~$${plan.estimatedEarnings.toFixed(2)} earnings ` +
+                                      `(target $${PARTIAL_REFUND_TARGET_EARNINGS.toFixed(2)}). ` +
+                                      `eBay proportional fee credits ~$${plan.estimatedFeeCredits.toFixed(2)} ` +
+                                      `(excl. $${EBAY_PER_ORDER_FIXED_FEE.toFixed(2)} fixed), ` +
+                                      `you owe ~$${plan.estimatedNetOwed.toFixed(2)}. Click to copy.`
+                                    }
+                                    arrow
+                                  >
+                                    <Chip
+                                      size="small"
+                                      color="info"
+                                      variant="outlined"
+                                      label={`$${plan.enterRefundAmount.toFixed(2)}`}
+                                      onClick={async () => {
+                                        try {
+                                          await navigator.clipboard.writeText(copyText);
+                                        } catch {
+                                          /* ignore */
+                                        }
+                                      }}
+                                      sx={{
+                                        fontWeight: 'bold',
+                                        fontSize: '0.75rem',
+                                        height: 24,
+                                        cursor: 'pointer'
+                                      }}
+                                    />
+                                  </Tooltip>
+                                );
+                              })()}
+                            </TableCell>
+                          )}
                           {/* --- NEW: Refund Breakdown Columns --- */}
                           {visibleColumnsSet.has('refundItemAmount') && (
                             <TableCell align="right">
@@ -4634,27 +5164,12 @@ function FulfillmentDashboard() {
                           )}
                           {visibleColumnsSet.has('refundTotalToBuyer') && (
                             <TableCell align="right">
-                              {order.adFeeGeneral ? (
-                                <Typography
-                                  variant="body2"
-                                  sx={{
-                                    fontWeight: 'medium',
-                                    color: 'error.main'
-                                  }}
-                                >
-                                  {formatOrderUsdAmount(order, order.adFeeGeneral)}
+                              {order.refundTotalToBuyer ? (
+                                <Typography variant="body2" sx={{ color: 'error.main', fontWeight: 'medium' }}>
+                                  {formatOrderLocalAmount(order, order.refundTotalToBuyer)}
                                 </Typography>
                               ) : (
-                                <Button
-                                  size="small"
-                                  variant="outlined"
-                                  onClick={() => handleFetchAdFeeGeneral(order)}
-                                  disabled={Boolean(fetchingAdFeeGeneral[order._id])}
-                                  startIcon={fetchingAdFeeGeneral[order._id] ? <CircularProgress size={14} color="inherit" /> : <SyncIcon />}
-                                  sx={{ minWidth: 110, fontSize: '0.72rem', py: 0.4 }}
-                                >
-                                  {fetchingAdFeeGeneral[order._id] ? 'Fetching...' : 'Fetch Ad Fee'}
-                                </Button>
+                                <Typography variant="body2" color="text.secondary">-</Typography>
                               )}
                             </TableCell>
                           )}
@@ -4677,19 +5192,34 @@ function FulfillmentDashboard() {
                           )}
                           {visibleColumnsSet.has('orderEarnings') && (
                             <TableCell align="right">
-                              <Typography
-                                variant="body2"
-                                sx={{
-                                  fontWeight: 'bold',
-                                  color: order.orderPaymentStatus === 'FULLY_REFUNDED'
-                                    ? 'text.secondary'
-                                    : (order.orderEarnings ?? 0) >= 0 ? 'success.main' : 'error.main'
-                                }}
-                              >
-                                {order.orderPaymentStatus === 'FULLY_REFUNDED'
-                                  ? '$0.00'
-                                  : formatOrderUsdAmount(order, order.orderEarnings)}
-                              </Typography>
+                              {(() => {
+                                const earnings = getOrderEarnings(order);
+                                const isPartial = String(order.orderPaymentStatus || '').toUpperCase() === 'PARTIALLY_REFUNDED';
+                                const belowFloor = isPartial && earnings < PARTIAL_REFUND_TARGET_EARNINGS;
+                                return (
+                                  <Tooltip
+                                    title={belowFloor
+                                      ? `Below $${PARTIAL_REFUND_TARGET_EARNINGS.toFixed(2)} defect floor`
+                                      : ''}
+                                    arrow
+                                    disableHoverListener={!belowFloor}
+                                  >
+                                    <Typography
+                                      variant="body2"
+                                      sx={{
+                                        fontWeight: 'bold',
+                                        color: belowFloor
+                                          ? 'warning.main'
+                                          : (earnings ?? 0) < 0
+                                            ? 'error.main'
+                                            : 'success.main'
+                                      }}
+                                    >
+                                      {formatOrderUsdAmount(order, earnings)}
+                                    </Typography>
+                                  </Tooltip>
+                                );
+                              })()}
                             </TableCell>
                           )}
                           {visibleColumnsSet.has('trackingNumber') && (
@@ -5254,10 +5784,10 @@ function FulfillmentDashboard() {
               onClick={handleExecuteExport}
               variant="contained"
               color="primary"
-              startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <DownloadIcon />}
-              disabled={loading || selectedExportColumns.length === 0}
+              startIcon={exportingCSV ? <CircularProgress size={16} color="inherit" /> : <DownloadIcon />}
+              disabled={exportingCSV || selectedExportColumns.length === 0}
             >
-              {loading ? 'Exporting...' : 'Export CSV'}
+              {exportingCSV ? 'Exporting...' : 'Export CSV'}
             </Button>
           </DialogActions>
         </Dialog>

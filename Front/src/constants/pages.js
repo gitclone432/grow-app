@@ -45,6 +45,7 @@ export const PAGE_REGISTRY = [
   { id: 'StoreListings', name: 'Store Listings', path: '/store-listings', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ListingRecommendations', name: 'Listing Recommendations', path: '/listing-recommendations', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'SendOfferEligible', name: 'Send Offer Eligible', path: '/send-offer-eligible', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'SellingSummary', name: 'Selling Summary', path: '/selling-summary', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
 
   // ====== ORDER FULFILMENT ======
   { id: 'OrdersDashboard', name: 'Orders Dashboard', path: '/orders-dashboard', category: 'orderFulfilment', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
@@ -131,6 +132,7 @@ export const PAGE_REGISTRY = [
   { id: 'ScraperTester', name: 'Scraper Tester', path: '/scraper-tester', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ImageOverlaySettings', name: 'Image Overlay', path: '/image-overlay', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'GmailTester', name: 'Gmail Tester', path: '/gmail-tester', category: 'settingsSection', defaultRoles: ['superadmin'] },
+  { id: 'Authenticator', name: 'Authenticator', path: '/authenticator', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'AffiliateOrders', name: 'Affiliate Orders', path: '/affiliate-orders', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
 
   // ====== EBAY PARAMETERS ======
