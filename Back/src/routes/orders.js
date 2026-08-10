@@ -1980,8 +1980,14 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         updatedAt: { $gte: COMPLIANCE_BOARD_MIN_DATE }
       };
       if (startDate || endDate) {
-        if (startDate) returnQuery.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
-        if (endDate) returnQuery.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
+        if (startDate) {
+          returnQuery.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
+          conversationQuery.updatedAt.$gte = getPTDayBoundsUTC(startDate).start;
+        }
+        if (endDate) {
+          returnQuery.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
+          conversationQuery.updatedAt.$lte = getPTDayBoundsUTC(endDate).end;
+        }
       }
 
       const [returnRequests, returnConversations, assignedOrders] = await Promise.all([

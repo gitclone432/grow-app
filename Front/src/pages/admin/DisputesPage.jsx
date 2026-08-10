@@ -173,6 +173,7 @@ export default function DisputesPage({ initialTab = 0 }) {
     { id: 'status', label: 'Status' },
     { id: 'created', label: 'Created (PST)' },
     { id: 'responseDue', label: 'Response Due (PST)' },
+    { id: 'note', label: 'Note' },
     { id: 'logs', label: 'Logs' },
     { id: 'action', label: 'Action' },
   ];
@@ -634,6 +635,7 @@ export default function DisputesPage({ initialTab = 0 }) {
       'Status': 'paymentDisputeStatus',
       'Opened Date': (d) => formatDate(d.openDate),
       'Response Due': (d) => formatDate(d.respondByDate),
+      'Note': 'note',
     });
     downloadCSV(csvData, 'Payment_Disputes');
   };
@@ -650,6 +652,22 @@ export default function DisputesPage({ initialTab = 0 }) {
       );
     } catch (err) {
       console.error('Failed to save case logs:', err);
+      throw err;
+    }
+  };
+
+  // Handler for saving dispute notes
+  const handleSaveDisputeNote = async (disputeId, note) => {
+    try {
+      await api.patch(`/ebay/disputes/${disputeId}/note`, { note });
+      // Update local state
+      setDisputes(prevDisputes =>
+        prevDisputes.map(d =>
+          d.paymentDisputeId === disputeId ? { ...d, note } : d
+        )
+      );
+    } catch (err) {
+      console.error('Failed to save dispute note:', err);
       throw err;
     }
   };
@@ -1242,6 +1260,7 @@ export default function DisputesPage({ initialTab = 0 }) {
                   {disputeVisibleColumns.includes('amount') && <TableCell sx={tableHeaderCellSx}>Amount</TableCell>}
                   {disputeVisibleColumns.includes('openedDate') && <TableCell sx={tableHeaderCellSx}>Open Date (PST)</TableCell>}
                   {disputeVisibleColumns.includes('responseDue') && <TableCell sx={tableHeaderCellSx}>Respond By (PST)</TableCell>}
+                  {disputeVisibleColumns.includes('note') && <TableCell sx={tableHeaderCellSx}>Note</TableCell>}
                   {disputeVisibleColumns.includes('outcome') && <TableCell sx={tableHeaderCellSx}>Resolution</TableCell>}
                 </TableRow>
               </TableHead>
@@ -1346,6 +1365,13 @@ export default function DisputesPage({ initialTab = 0 }) {
                             />
                           )}
                         </Stack>
+                      </TableCell>}
+                      {disputeVisibleColumns.includes('note') && <TableCell>
+                        <LogsCell
+                          value={d.note}
+                          id={d.paymentDisputeId}
+                          onSave={handleSaveDisputeNote}
+                        />
                       </TableCell>}
                       {disputeVisibleColumns.includes('outcome') && <TableCell>
                         <Typography variant="body2" fontSize="0.75rem">

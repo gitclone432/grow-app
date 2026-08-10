@@ -35,7 +35,10 @@ const PaymentDisputeSchema = new mongoose.Schema({
   evidenceSubmitted: { type: Boolean, default: false },
   
   // Raw eBay data for reference
-  rawData: Object
+  rawData: Object,
+  
+  // User notes
+  note: { type: String, default: '' }
 }, { timestamps: true });
 
 // Index for faster queries (paymentDisputeId already indexed via unique: true)
