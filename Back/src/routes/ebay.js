@@ -12075,11 +12075,23 @@ router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'D
     }
 
     if (orderId) {
-      const order = await Order.findOne({ orderId }).populate('seller');
+      // Try to find by orderId first, then fallback to MongoDB _id
+      let order = await Order.findOne({ orderId }).populate('seller');
+      if (!order) {
+        // Fallback: try to find by MongoDB _id (for Amazon Arrivals Amazon orders)
+        try {
+          order = await Order.findById(orderId).populate('seller');
+        } catch (e) {
+          // Invalid MongoDB ObjectId format
+          order = null;
+        }
+      }
       if (!order) return res.status(404).json({ error: 'Order not found' });
       seller = order.seller;
-      finalItemId = order.lineItems?.[0]?.legacyItemId;
-      finalBuyer = order.buyer.username;
+      // Use provided itemId if available, otherwise get from order
+      finalItemId = itemId || order.lineItems?.[0]?.legacyItemId;
+      // Use provided buyerUsername if available, otherwise get from order
+      finalBuyer = buyerUsername || order.buyer?.username;
       isTransaction = true;
     } else if (reqSellerId) {
       seller = await Seller.findById(reqSellerId);

@@ -45,6 +45,7 @@ import InfoIcon from '@mui/icons-material/Info';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import AttachFileIcon from '@mui/icons-material/AttachFile';
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import api from '../../lib/api';
@@ -551,6 +552,9 @@ export default function AwaitingShipmentPage() {
   const [remarkConfirmOpen, setRemarkConfirmOpen] = useState(false);
   const [pendingRemarkUpdate, setPendingRemarkUpdate] = useState(null); // { orderId, remarkValue, order }
   const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
+  const [editableRemarkMessage, setEditableRemarkMessage] = useState('');
+  const [remarkAttachments, setRemarkAttachments] = useState([]);
+  const fileInputRefRemark = useRef(null);
   const [remarkTemplates, setRemarkTemplates] = useState([]);
   const [manageRemarkTemplatesOpen, setManageRemarkTemplatesOpen] = useState(false);
 
@@ -873,16 +877,28 @@ export default function AwaitingShipmentPage() {
     const { orderId, remarkValue, order } = pendingRemarkUpdate;
     setSendingRemarkMessage(true);
     try {
+      const mediaUrls = remarkAttachments.map((a) => a.url);
+      const res = await api.post('/ebay/send-message', {
+        orderId: order.orderId || order.legacyOrderId || order._id,
+        buyerUsername: order.buyer?.username || order.buyerUsername || 'eBay Buyer',
+        itemId: order.itemId || order.itemNumber || order.lineItems?.[0]?.legacyItemId,
+        sellerId: order.sellerId || order.seller?._id,
+        conversationId: null,
+        body: editableRemarkMessage,
+        mediaUrls: mediaUrls.length > 0 ? mediaUrls : []
+      });
       const updated = await applyRemarkUpdateOnly(orderId, remarkValue);
-      if (!updated) return;
-      await sendAutoMessageForRemark(order, remarkValue);
-      showSnack('success', `✅ Remark updated to "${remarkValue}" and message sent`);
+      if (updated) {
+        showSnack('success', `✅ Remark updated to "${remarkValue}" and message sent`);
+      }
     } catch (err) {
       showSnack('error', err?.response?.data?.error || 'Failed to send message');
     } finally {
       setSendingRemarkMessage(false);
       setRemarkConfirmOpen(false);
       setPendingRemarkUpdate(null);
+      setEditableRemarkMessage('');
+      setRemarkAttachments([]);
     }
   };
 
@@ -895,6 +911,38 @@ export default function AwaitingShipmentPage() {
     }
     setRemarkConfirmOpen(false);
     setPendingRemarkUpdate(null);
+    setEditableRemarkMessage('');
+    setRemarkAttachments([]);
+  };
+
+  const handleRemarkFileSelect = async (e) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    try {
+      const formData = new FormData();
+      for (let i = 0; i < files.length; i++) {
+        formData.append('files', files[i]);
+      }
+
+      const { data } = await api.post('/internal-messages/upload-files', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+
+      const uploaded = (data?.urls || []).map((url, index) => ({
+        url,
+        name: files[index]?.name || 'Image'
+      }));
+
+      setRemarkAttachments((prev) => [...prev, ...uploaded]);
+    } catch (err) {
+      showSnack('error', 'Failed to upload attachment');
+    }
+
+    // Reset input
+    if (fileInputRefRemark.current) {
+      fileInputRefRemark.current.value = '';
+    }
   };
 
   const handleRemarkUpdate = async (orderId, remarkValue) => {
@@ -912,7 +960,11 @@ export default function AwaitingShipmentPage() {
     const order = orders.find(o => o._id === orderId);
     const hasTemplate = findRemarkTemplateText(remarkTemplates, remarkValue);
     if (order && hasTemplate) {
+      const templateText = findRemarkTemplateText(remarkTemplates, remarkValue);
+      const replacedText = replaceTemplateVariables(templateText, order);
       setPendingRemarkUpdate({ orderId, remarkValue, order });
+      setEditableRemarkMessage(replacedText);
+      setRemarkAttachments([]);
       setRemarkConfirmOpen(true);
       return;
     }
@@ -1851,43 +1903,78 @@ export default function AwaitingShipmentPage() {
             if (!sendingRemarkMessage) {
               setRemarkConfirmOpen(false);
               setPendingRemarkUpdate(null);
+              setEditableRemarkMessage('');
+              setRemarkAttachments([]);
             }
           }}
-          maxWidth="sm"
+          maxWidth="md"
           fullWidth
         >
           <DialogTitle>
             <Stack direction="row" alignItems="center" spacing={1}>
               <ChatIcon color="primary" />
-              <Typography variant="h6">Send Message to Buyer?</Typography>
+              <Typography variant="h6">Send Message to Buyer - Edit & Preview</Typography>
             </Stack>
           </DialogTitle>
-          <DialogContent>
+          <DialogContent dividers>
             <Stack spacing={2}>
               <Alert severity="info" icon={<InfoIcon />}>
                 You are updating the remark to <strong>"{pendingRemarkUpdate?.remarkValue}"</strong>.
               </Alert>
-              <Typography variant="body2" color="text.secondary">
-                Send the related message template to the buyer as well?
+              <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                Message Preview (Edit as needed):
               </Typography>
-              <Paper elevation={0} sx={{ p: 2, bgcolor: 'grey.50', border: '1px solid', borderColor: 'divider' }}>
-                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                  {pendingRemarkUpdate && findRemarkTemplateText(remarkTemplates, pendingRemarkUpdate.remarkValue)
-                    ? replaceTemplateVariables(
-                      findRemarkTemplateText(remarkTemplates, pendingRemarkUpdate.remarkValue),
-                      pendingRemarkUpdate.order
-                    )
-                    : ''}
-                </Typography>
-              </Paper>
+              <TextField
+                fullWidth
+                multiline
+                minRows={6}
+                maxRows={12}
+                value={editableRemarkMessage}
+                onChange={(e) => setEditableRemarkMessage(e.target.value)}
+                placeholder="Enter your message to the buyer..."
+              />
+              {remarkAttachments.length > 0 && (
+                <Box>
+                  <Typography variant="caption" sx={{ fontWeight: 500, mb: 1, display: 'block' }}>
+                    Attachments:
+                  </Typography>
+                  <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+                    {remarkAttachments.map((attachment, index) => (
+                      <Chip
+                        key={`${attachment.url}-${index}`}
+                        label={attachment.name}
+                        onDelete={() => setRemarkAttachments(remarkAttachments.filter((_, i) => i !== index))}
+                        variant="outlined"
+                        size="small"
+                      />
+                    ))}
+                  </Stack>
+                </Box>
+              )}
             </Stack>
           </DialogContent>
           <DialogActions sx={{ p: 2 }}>
-            <Button onClick={handleSkipRemarkMessage} disabled={sendingRemarkMessage} variant="outlined">
-              No, Just Update Remark
+            <input
+              ref={fileInputRefRemark}
+              type="file"
+              multiple
+              accept="image/*"
+              style={{ display: 'none' }}
+              onChange={handleRemarkFileSelect}
+            />
+            <Button onClick={() => fileInputRefRemark.current?.click()}>
+              <AttachFileIcon sx={{ mr: 1 }} />
+              Add Attachment
             </Button>
-            <Button onClick={handleConfirmRemarkMessage} disabled={sendingRemarkMessage} variant="contained">
-              {sendingRemarkMessage ? 'Sending...' : 'Yes, Send Message'}
+            <Button onClick={handleSkipRemarkMessage} disabled={sendingRemarkMessage} variant="outlined">
+              Just Update Remark
+            </Button>
+            <Button 
+              onClick={handleConfirmRemarkMessage} 
+              disabled={!editableRemarkMessage.trim() || sendingRemarkMessage}
+              variant="contained"
+            >
+              {sendingRemarkMessage ? 'Sending...' : 'Send Message & Update Remark'}
             </Button>
           </DialogActions>
         </Dialog>
