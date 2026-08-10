@@ -39,6 +39,7 @@ import EditIcon from '@mui/icons-material/Edit';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
 import InfoIcon from '@mui/icons-material/Info';
+import AttachFileIcon from '@mui/icons-material/AttachFile';
 import api from '../../lib/api';
 import ChatModal from '../../components/ChatModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
@@ -205,14 +206,25 @@ function NotesCell({
         e.stopPropagation();
         setIsEditing(true);
       }}
-      sx={{ cursor: 'pointer', minHeight: 24 }}
+      sx={{
+        cursor: 'pointer',
+        minHeight: 24,
+        maxWidth: 220,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word'
+      }}
     >
       <Typography
         variant="body2"
         sx={{
           fontSize: '0.85rem',
           fontStyle: !order[valueKey] ? 'italic' : 'normal',
-          color: !order[valueKey] ? 'text.secondary' : 'text.primary'
+          color: !order[valueKey] ? 'text.secondary' : 'text.primary',
+          maxWidth: 220,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
         }}
       >
         {order[valueKey] || emptyText}
@@ -259,6 +271,9 @@ export default function AmazonArrivalsPage() {
   const [remarkConfirmOpen, setRemarkConfirmOpen] = useState(false);
   const [pendingRemarkUpdate, setPendingRemarkUpdate] = useState(null); // { orderId, remarkValue, order }
   const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
+  const [editableRemarkMessage, setEditableRemarkMessage] = useState('');
+  const [remarkAttachments, setRemarkAttachments] = useState([]);
+  const fileInputRefRemark = useRef(null);
   const [remarkTemplates, setRemarkTemplates] = useState([]);
   const [manageRemarkTemplatesOpen, setManageRemarkTemplatesOpen] = useState(false);
 
@@ -512,17 +527,33 @@ export default function AmazonArrivalsPage() {
     const { orderId, remarkValue, order } = pendingRemarkUpdate;
     setSendingRemarkMessage(true);
     try {
+      const mediaUrls = remarkAttachments.map((a) => a.url);
+      const res = await api.post('/ebay/send-message', {
+        orderId: order.orderId || order.legacyOrderId || order._id,
+        buyerUsername: order.buyerName || order.buyerUsername || order.buyer?.username || 'Amazon Buyer',
+        itemId: order.itemId || order.lineItems?.[0]?.legacyItemId,
+        sellerId: order.sellerId || order.seller?._id,
+        conversationId: null,
+        body: editableRemarkMessage,
+        mediaUrls: mediaUrls.length > 0 ? mediaUrls : []
+      });
+      showSnack('success', `✅ Message sent and remark updated to "${remarkValue}"`);
       const updated = await applyRemarkUpdateOnly(orderId, remarkValue);
-      if (!updated) return;
-
-      await sendAutoMessageForRemark(order, remarkValue);
-      showSnack('success', `✅ Remark updated to "${remarkValue}" and message sent`);
+      if (updated) {
+        setOrders(prev =>
+          prev.map(o =>
+            o._id === orderId ? { ...o, remark: remarkValue } : o
+          )
+        );
+      }
     } catch (err) {
       showSnack('error', err?.response?.data?.error || 'Failed to send message');
     } finally {
       setSendingRemarkMessage(false);
       setRemarkConfirmOpen(false);
       setPendingRemarkUpdate(null);
+      setEditableRemarkMessage('');
+      setRemarkAttachments([]);
     }
   };
 
@@ -535,6 +566,38 @@ export default function AmazonArrivalsPage() {
     }
     setRemarkConfirmOpen(false);
     setPendingRemarkUpdate(null);
+    setEditableRemarkMessage('');
+    setRemarkAttachments([]);
+  };
+
+  const handleRemarkFileSelect = async (e) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    try {
+      const formData = new FormData();
+      for (let i = 0; i < files.length; i++) {
+        formData.append('files', files[i]);
+      }
+
+      const { data } = await api.post('/internal-messages/upload-files', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+
+      const uploaded = (data?.urls || []).map((url, index) => ({
+        url,
+        name: files[index]?.name || 'Image'
+      }));
+
+      setRemarkAttachments((prev) => [...prev, ...uploaded]);
+    } catch (err) {
+      showSnack('error', 'Failed to upload attachment');
+    }
+
+    // Reset input
+    if (fileInputRefRemark.current) {
+      fileInputRefRemark.current.value = '';
+    }
   };
 
   const handleRemarkUpdate = async (orderId, remarkValue) => {
@@ -553,7 +616,11 @@ export default function AmazonArrivalsPage() {
     const order = orders.find(o => o._id === orderId);
     const hasTemplate = findRemarkTemplateText(remarkTemplates, remarkValue);
     if (order && hasTemplate) {
+      const templateText = findRemarkTemplateText(remarkTemplates, remarkValue);
+      const replacedText = replaceTemplateVariables(templateText, order);
       setPendingRemarkUpdate({ orderId, remarkValue, order });
+      setEditableRemarkMessage(replacedText);
+      setRemarkAttachments([]);
       setRemarkConfirmOpen(true);
       return;
     }
@@ -1185,43 +1252,99 @@ export default function AmazonArrivalsPage() {
             if (!sendingRemarkMessage) {
               setRemarkConfirmOpen(false);
               setPendingRemarkUpdate(null);
+              setEditableRemarkMessage('');
+              setRemarkAttachments([]);
             }
           }}
-          maxWidth="sm"
+          maxWidth="md"
           fullWidth
         >
           <DialogTitle>
             <Stack direction="row" alignItems="center" spacing={1}>
               <ChatIcon color="primary" />
-              <Typography variant="h6">Send Message to Buyer?</Typography>
+              <Typography variant="h6">Send Message to Buyer - Edit & Preview</Typography>
             </Stack>
           </DialogTitle>
-          <DialogContent>
+          <DialogContent dividers>
             <Stack spacing={2}>
               <Alert severity="info" icon={<InfoIcon />}>
                 You are updating the remark to <strong>"{pendingRemarkUpdate?.remarkValue}"</strong>.
               </Alert>
-              <Typography variant="body2" color="text.secondary">
-                Send the related message template to the buyer as well?
-              </Typography>
-              <Paper elevation={0} sx={{ p: 2, bgcolor: 'grey.50', border: '1px solid', borderColor: 'divider' }}>
-                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-                  {pendingRemarkUpdate && findRemarkTemplateText(remarkTemplates, pendingRemarkUpdate.remarkValue)
-                    ? replaceTemplateVariables(
-                      findRemarkTemplateText(remarkTemplates, pendingRemarkUpdate.remarkValue),
-                      pendingRemarkUpdate.order
-                    )
-                    : ''}
+              
+              <Box>
+                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                  Message Preview (Edit as needed):
                 </Typography>
-              </Paper>
+                <TextField
+                  fullWidth
+                  multiline
+                  minRows={6}
+                  maxRows={12}
+                  value={editableRemarkMessage}
+                  onChange={(e) => setEditableRemarkMessage(e.target.value)}
+                  placeholder="Message text..."
+                  variant="outlined"
+                  size="small"
+                />
+              </Box>
+
+              {remarkAttachments.length > 0 && (
+                <Box>
+                  <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                    Attachments ({remarkAttachments.length}):
+                  </Typography>
+                  <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                    {remarkAttachments.map((attachment, index) => (
+                      <Chip
+                        key={`${attachment.url}-${index}`}
+                        label={attachment.name}
+                        onDelete={() => setRemarkAttachments((prev) => prev.filter((_, i) => i !== index))}
+                        size="small"
+                        variant="outlined"
+                        sx={{ maxWidth: 200 }}
+                      />
+                    ))}
+                  </Box>
+                </Box>
+              )}
             </Stack>
           </DialogContent>
-          <DialogActions sx={{ p: 2 }}>
-            <Button onClick={handleSkipRemarkMessage} disabled={sendingRemarkMessage} variant="outlined">
-              No, Just Update Remark
+          <DialogActions sx={{ p: 2, gap: 1 }}>
+            <input 
+              ref={fileInputRefRemark} 
+              type="file" 
+              multiple 
+              accept="image/*" 
+              hidden 
+              onChange={handleRemarkFileSelect} 
+            />
+            <Tooltip title="Attach images">
+              <span>
+                <Button
+                  size="small"
+                  startIcon={<AttachFileIcon />}
+                  onClick={() => fileInputRefRemark.current?.click()}
+                  disabled={sendingRemarkMessage}
+                  variant="outlined"
+                >
+                  Add Attachment
+                </Button>
+              </span>
+            </Tooltip>
+            <Box sx={{ flex: 1 }} />
+            <Button 
+              onClick={handleSkipRemarkMessage} 
+              disabled={sendingRemarkMessage} 
+              variant="outlined"
+            >
+              Just Update Remark
             </Button>
-            <Button onClick={handleConfirmRemarkMessage} disabled={sendingRemarkMessage} variant="contained">
-              {sendingRemarkMessage ? 'Sending...' : 'Yes, Send Message'}
+            <Button 
+              onClick={handleConfirmRemarkMessage} 
+              disabled={sendingRemarkMessage || !editableRemarkMessage.trim()} 
+              variant="contained"
+            >
+              {sendingRemarkMessage ? 'Sending...' : 'Send Message & Update Remark'}
             </Button>
           </DialogActions>
         </Dialog>
