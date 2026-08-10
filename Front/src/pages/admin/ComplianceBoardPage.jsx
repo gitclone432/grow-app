@@ -677,7 +677,9 @@ function ComplianceBoardPage() {
       
       if (dateFilter.mode === 'single' && dateFilter.single) {
         params.dateFrom = dateFilter.single;
-        params.dateTo = dateFilter.single;
+        // Set dateTo to today's date to show all cases from selected date to present
+        const today = new Date();
+        params.dateTo = today.toISOString().split('T')[0]; // YYYY-MM-DD format
       } else if (dateFilter.mode === 'range') {
         if (dateFilter.from) params.dateFrom = dateFilter.from;
         if (dateFilter.to) params.dateTo = dateFilter.to;
@@ -713,6 +715,120 @@ function ComplianceBoardPage() {
       }));
     } catch (err) {
       console.warn('Failed to fetch INR cases for board:', err);
+      return [];
+    }
+  };
+
+  const fetchStoredReturnCasesForBoard = async () => {
+    try {
+      const params = {
+        limit: 200,
+      };
+      
+      if (dateFilter.mode === 'single' && dateFilter.single) {
+        // For single date: set startDate to that date and endDate to today
+        // This shows cases from the selected date onwards
+        params.startDate = dateFilter.single;
+        // Set endDate to today's date to show all cases from selected date to present
+        const today = new Date();
+        params.endDate = today.toISOString().split('T')[0]; // YYYY-MM-DD format
+      } else if (dateFilter.mode === 'range') {
+        if (dateFilter.from) params.startDate = dateFilter.from;
+        if (dateFilter.to) params.endDate = dateFilter.to;
+      }
+
+      const response = await api.get('/ebay/stored-returns', {
+        params,
+        timeout: BOARD_REQUEST_TIMEOUT_MS,
+      });
+      const returnCases = ensureArray(response.data?.returns || response.data?.cases);
+      
+      // Transform return cases to board format with proper field mapping for card display
+      return returnCases.map(returnItem => ({
+        ...returnItem,
+        orderObjectId: returnItem._id, // Store original _id for API calls if case has one
+        _id: toDraggableId('return', returnItem, returnItem.returnId),
+        originalOrderId: returnItem.orderId,
+        caseOrderId: returnItem.orderId,
+        orderId: returnItem.orderId || returnItem.itemId, // Display actual order ID
+        returnId: returnItem.returnId, // Store returnId separately for return reference
+        dateSold: returnItem.dateSold, // Use backend's dateSold (return's creationDate)
+        buyer: {
+          username: returnItem.buyerUsername,
+          buyerRegistrationAddress: { fullName: returnItem.buyerName }
+        },
+        // Use persisted complianceBoardStatus if set, otherwise default to CASE_OPENED
+        complianceBoardStatus: returnItem.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED,
+        complianceBoardCategories: Array.isArray(returnItem.complianceBoardCategories) 
+          ? returnItem.complianceBoardCategories 
+          : (returnItem.complianceBoardCategory ? [returnItem.complianceBoardCategory] : ['return_refund']),
+        complianceBoardCategory: returnItem.complianceBoardCategory || 'return_refund',
+        status: returnItem.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED,
+        returnBoardSource: 'return_request', // Mark as return request for proper filtering
+        returnInfo: {
+          returnId: returnItem.returnId,
+          returnStatus: returnItem.returnStatus,
+          returnReason: returnItem.returnReason,
+          createdDate: returnItem.creationDate,
+          responseDate: returnItem.responseDate,
+        },
+        sourceType: 'return-case' // Mark as return case for display
+      }));
+    } catch (err) {
+      console.warn('Failed to fetch stored return cases for board:', err);
+      return [];
+    }
+  };
+
+  const fetchStoredCancellationCasesForBoard = async () => {
+    try {
+      const params = {
+        limit: 200,
+      };
+      
+      if (dateFilter.mode === 'single' && dateFilter.single) {
+        // For single date: set startDate to that date and endDate to today
+        // This shows cases from the selected date onwards
+        params.startDate = dateFilter.single;
+        // Set endDate to today's date to show all cases from selected date to present
+        const today = new Date();
+        params.endDate = today.toISOString().split('T')[0]; // YYYY-MM-DD format
+      } else if (dateFilter.mode === 'range') {
+        if (dateFilter.from) params.startDate = dateFilter.from;
+        if (dateFilter.to) params.endDate = dateFilter.to;
+      }
+
+      const response = await api.get('/ebay/stored-cancellations', {
+        params,
+        timeout: BOARD_REQUEST_TIMEOUT_MS,
+      });
+      const cancellationCases = ensureArray(response.data?.cancellations);
+      
+      // Transform cancellation cases to board format with proper field mapping for card display
+      return cancellationCases.map(caseItem => ({
+        ...caseItem,
+        orderObjectId: caseItem._id, // Store original _id for API calls if case has one
+        _id: toDraggableId('cancellation', caseItem, caseItem.cancelId),
+        originalOrderId: caseItem.orderId,
+        caseOrderId: caseItem.orderId,
+        orderId: caseItem.orderId || caseItem.legacyOrderId, // Display actual order ID
+        cancelId: caseItem.cancelId, // Store cancelId separately for case reference
+        dateSold: caseItem.dateSold, // Use backend's dateSold (cancellation's cancelRequestDate)
+        buyer: {
+          username: caseItem.buyerUsername,
+          buyerRegistrationAddress: { fullName: caseItem.buyerLoginName }
+        },
+        // Use persisted complianceBoardStatus if set, otherwise default to CANCELLATION_REQUEST
+        complianceBoardStatus: caseItem.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST,
+        complianceBoardCategories: Array.isArray(caseItem.complianceBoardCategories) 
+          ? caseItem.complianceBoardCategories 
+          : (caseItem.complianceBoardCategory ? [caseItem.complianceBoardCategory] : ['cancellation']),
+        complianceBoardCategory: caseItem.complianceBoardCategory || 'cancellation',
+        status: caseItem.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST,
+        sourceType: 'cancellation-case' // Mark as cancellation case for display
+      }));
+    } catch (err) {
+      console.warn('Failed to fetch stored cancellation cases for board:', err);
       return [];
     }
   };
@@ -910,13 +1026,23 @@ function ComplianceBoardPage() {
       
       console.log(`[BOARD-API-CALL] Calling /orders/compliance-board with params:`, JSON.stringify(params));
       
-      const [response, inrCasesResult, cancelledOrdersResult] = await Promise.all([
+      const [response, inrCasesResult, returnCasesResult, cancellationCasesResult, cancelledOrdersResult] = await Promise.all([
         api.get('/orders/compliance-board', {
           params,
           timeout: BOARD_REQUEST_TIMEOUT_MS,
         }),
         selectedCategory === 'inr'
           ? fetchINRCasesForBoard()
+          : Promise.resolve(null),
+        // Fetch stored return cases for 'return_refund' board
+        // This brings in the actual return cases from Issues & Resolutions
+        selectedCategory === 'return_refund'
+          ? fetchStoredReturnCasesForBoard()
+          : Promise.resolve(null),
+        // Fetch stored cancellation cases for 'cancellation' board
+        // This brings in the actual cancellation cases from Issues & Resolutions
+        selectedCategory === 'cancellation'
+          ? fetchStoredCancellationCasesForBoard()
           : Promise.resolve(null),
         // Fetch cancelled orders for both 'cancellation' and 'order_fulfillment' boards
         // This allows users to search for cancelled orders in Order Fulfillment board
@@ -925,16 +1051,32 @@ function ComplianceBoardPage() {
           : Promise.resolve(null)
       ]);
 
-      // Log search results from both main and cancelled orders calls
+      // Log search results from both main and special board calls
       if (searchOrderId.trim()) {
         console.log(`[BOARD-API] Main compliance-board API returned ${ensureArray(response.data?.orders).length} orders`);
         const mainMatches = ensureArray(response.data?.orders).filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
         mainMatches.forEach(o => console.log(`  - Main API: orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
         
+        const returnCases = ensureArray(returnCasesResult);
+        if (returnCases.length > 0) {
+          console.log(`[BOARD-API] fetchStoredReturnCasesForBoard returned ${returnCases.length} cases`);
+          const returnMatches = returnCases.filter(o => o.orderId?.toString().includes(searchOrderId.trim()) || o.returnId?.toString().includes(searchOrderId.trim()));
+          returnMatches.forEach(o => console.log(`  - Return Cases API: returnId ${o.returnId}, orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
+        }
+        
+        const cancellationCases = ensureArray(cancellationCasesResult);
+        if (cancellationCases.length > 0) {
+          console.log(`[BOARD-API] fetchStoredCancellationCasesForBoard returned ${cancellationCases.length} cases`);
+          const cancellationMatches = cancellationCases.filter(o => o.orderId?.toString().includes(searchOrderId.trim()) || o.cancelId?.toString().includes(searchOrderId.trim()));
+          cancellationMatches.forEach(o => console.log(`  - Cancellation Cases API: cancelId ${o.cancelId}, orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
+        }
+        
         const cancelledOrders = ensureArray(cancelledOrdersResult);
-        console.log(`[BOARD-API] fetchCancelledOrdersForBoard returned ${cancelledOrders.length} orders`);
-        const cancelledMatches = cancelledOrders.filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
-        cancelledMatches.forEach(o => console.log(`  - Cancelled API: orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
+        if (cancelledOrders.length > 0) {
+          console.log(`[BOARD-API] fetchCancelledOrdersForBoard returned ${cancelledOrders.length} orders`);
+          const cancelledMatches = cancelledOrders.filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
+          cancelledMatches.forEach(o => console.log(`  - Cancelled Orders API: orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
+        }
       }
       
       // Group orders by their board status
@@ -1083,70 +1225,71 @@ function ComplianceBoardPage() {
         // grouped[COLUMN_STATUS.CASE_NOT_OPENED] is already populated by the status-based grouping above
       }
 
-      // Merge cancelled orders from Issues & Resolutions into Cancellation board's columns
+      // Merge stored cancellation cases from Issues & Resolutions into Cancellation board's columns
       if (selectedCategory === 'cancellation') {
-        // Cancelled orders should be grouped by their complianceBoardStatus (respects persisted status after updates)
-        let cancelledOrdersForBoard = cancelledOrdersResult ? [...cancelledOrdersResult] : [];
+        // Stored cancellation cases should be grouped by their complianceBoardStatus
+        let cancellationCasesForBoard = cancellationCasesResult ? [...cancellationCasesResult] : [];
         
         // Apply only basic filters: search order ID and buyer name
         if (searchOrderId.trim()) {
-          cancelledOrdersForBoard = cancelledOrdersForBoard.filter(o => {
-            const orderId = String(o.orderId || o.legacyOrderId || '');
-            return orderId.toLowerCase().includes(searchOrderId.trim().toLowerCase());
+          cancellationCasesForBoard = cancellationCasesForBoard.filter(c => {
+            const orderId = String(c.orderId || c.legacyOrderId || '');
+            const caseId = String(c.cancelId || '');
+            return orderId.toLowerCase().includes(searchOrderId.trim().toLowerCase()) || 
+                   caseId.toLowerCase().includes(searchOrderId.trim().toLowerCase());
           });
         }
         
         if (searchBuyerName.trim()) {
-          cancelledOrdersForBoard = cancelledOrdersForBoard.filter(o => {
-            const buyerName = String(o.buyer?.buyerRegistrationAddress?.fullName || o.buyerName || o.buyer?.username || '');
+          cancellationCasesForBoard = cancellationCasesForBoard.filter(c => {
+            const buyerName = String(c.buyer?.buyerRegistrationAddress?.fullName || c.buyerName || c.buyerUsername || '');
             return buyerName.toLowerCase().includes(searchBuyerName.trim().toLowerCase());
           });
         }
         
-        // Deduplicate cancelledOrdersForBoard by orderId
-        // Keep the one with case_opened status if multiple exist for same orderId, otherwise keep first
-        const cancelledByOrderId = new Map();
-        cancelledOrdersForBoard.forEach((order) => {
-          const orderId = String(order.orderId || order.legacyOrderId || '').toLowerCase();
-          if (!orderId) return;
+        // Deduplicate cancellationCasesForBoard by cancelId
+        // Keep the one with cancellation_request status if multiple exist for same cancelId, otherwise keep first
+        const cancellationByOrderId = new Map();
+        cancellationCasesForBoard.forEach((caseItem) => {
+          const caseId = String(caseItem.cancelId || '').toLowerCase();
+          if (!caseId) return;
           
-          const status = order.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
-          const existing = cancelledByOrderId.get(orderId);
+          const status = caseItem.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
+          const existing = cancellationByOrderId.get(caseId);
           
-          // Keep this order if:
+          // Keep this case if:
           // - No existing entry, OR
-          // - This one has case_opened status and existing doesn't
+          // - This one has cancellation_request status and existing doesn't
           if (!existing || 
-              (status === COLUMN_STATUS.CASE_OPENED && existing.status !== COLUMN_STATUS.CASE_OPENED)) {
-            cancelledByOrderId.set(orderId, { order, status });
+              (status === COLUMN_STATUS.CANCELLATION_REQUEST && existing.status !== COLUMN_STATUS.CANCELLATION_REQUEST)) {
+            cancellationByOrderId.set(caseId, { caseItem, status });
           }
         });
         
-        // Extract deduplicated orders and build Set of orderIds for filtering
-        const dedupCancelledOrders = Array.from(cancelledByOrderId.values()).map(item => item.order);
-        const cancelledOrderIds = new Set(cancelledByOrderId.keys());
+        // Extract deduplicated cases and build Set of orderIds for filtering
+        const dedupCancellationCases = Array.from(cancellationByOrderId.values()).map(item => item.caseItem);
+        const cancellationOrderIds = new Set(dedupCancellationCases.map(c => String(c.orderId || c.legacyOrderId || '').toLowerCase()).filter(Boolean));
         
-        // Remove duplicate Order Communication entries if same orderId exists in cancelled orders
+        // Remove duplicate Order Communication entries if same orderId exists in cancellation cases
         Object.keys(grouped).forEach((status) => {
           grouped[status] = grouped[status].filter((order) => {
             const orderId = String(order.orderId || order.legacyOrderId || '').toLowerCase();
-            return !cancelledOrderIds.has(orderId);
+            return !cancellationOrderIds.has(orderId);
           });
         });
         
-        // Group deduplicated cancelled orders by their complianceBoardStatus
-        dedupCancelledOrders.forEach((order) => {
-          const status = order.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
+        // Group deduplicated cancellation cases by their complianceBoardStatus
+        dedupCancellationCases.forEach((caseItem) => {
+          const status = caseItem.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
           if (grouped[status]) {
-            grouped[status].push(order);
+            grouped[status].push(caseItem);
           }
         });
         
-        // Case Not Opened = Orders with status 'case_not_opened'
+        // Case Opened = Cancellation cases (from Issues & Resolutions / stored cancellation cases)
+        // Case Not Opened = Orders with status 'case_not_opened' from Order Communication
         // Backend already filters to only return orders with 'cancellation' category, so we just need to check status
-        // These are typically from Order Communication messages assigned to Cancellation
-        // Note: Orders are already grouped by status above, so this just uses that existing grouped data
-        // grouped[COLUMN_STATUS.CASE_NOT_OPENED] is already populated by the status-based grouping above
+        // Note: Cases are already grouped by status above, so this uses that existing grouped data
       }
 
       // Merge cancelled orders into Order Fulfillment board as well
@@ -1216,6 +1359,70 @@ function ComplianceBoardPage() {
         }
       }
 
+      if (selectedCategory === 'return_refund') {
+        // Stored return cases should be grouped by their complianceBoardStatus
+        let storedReturnCasesForBoard = returnCasesResult ? [...returnCasesResult] : [];
+        
+        // Apply only basic filters: search order ID and buyer name
+        if (searchOrderId.trim()) {
+          storedReturnCasesForBoard = storedReturnCasesForBoard.filter(c => {
+            const orderId = String(c.orderId || c.itemId || '');
+            const returnId = String(c.returnId || '');
+            return orderId.toLowerCase().includes(searchOrderId.trim().toLowerCase()) || 
+                   returnId.toLowerCase().includes(searchOrderId.trim().toLowerCase());
+          });
+        }
+        
+        if (searchBuyerName.trim()) {
+          storedReturnCasesForBoard = storedReturnCasesForBoard.filter(c => {
+            const buyerName = String(c.buyer?.buyerRegistrationAddress?.fullName || c.buyerName || c.buyerUsername || '');
+            return buyerName.toLowerCase().includes(searchBuyerName.trim().toLowerCase());
+          });
+        }
+        
+        // Deduplicate storedReturnCasesForBoard by returnId
+        const returnByOrderId = new Map();
+        storedReturnCasesForBoard.forEach((returnItem) => {
+          const returnId = String(returnItem.returnId || '').toLowerCase();
+          if (!returnId) return;
+          
+          const status = returnItem.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED;
+          const existing = returnByOrderId.get(returnId);
+          
+          // Keep this case if:
+          // - No existing entry, OR
+          // - This one has case_opened status and existing doesn't
+          if (!existing || 
+              (status === COLUMN_STATUS.CASE_OPENED && existing.status !== COLUMN_STATUS.CASE_OPENED)) {
+            returnByOrderId.set(returnId, { returnItem, status });
+          }
+        });
+        
+        // Extract deduplicated cases and build Set of orderIds for filtering
+        const dedupReturnCases = Array.from(returnByOrderId.values()).map(item => item.returnItem);
+        const returnOrderIds = new Set(dedupReturnCases.map(r => String(r.orderId || r.itemId || '').toLowerCase()).filter(Boolean));
+        
+        // Remove duplicate Order Communication entries if same orderId exists in return cases
+        Object.keys(grouped).forEach((status) => {
+          grouped[status] = grouped[status].filter((order) => {
+            const orderId = String(order.orderId || order.itemId || '').toLowerCase();
+            return !returnOrderIds.has(orderId);
+          });
+        });
+        
+        // Group deduplicated return cases by their complianceBoardStatus
+        dedupReturnCases.forEach((returnItem) => {
+          const status = returnItem.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED;
+          if (grouped[status]) {
+            grouped[status].push(returnItem);
+          }
+        });
+        
+        // Case Opened = Return cases (from Issues & Resolutions / stored return cases)
+        // Case Not Opened = Conversation items assigned to Return/Refund/Replace
+        // Note: Cases are already grouped by status above
+      }
+      
       if (selectedCategory === 'return_refund') {
         // Case Opened: Only Return Request items (from Return Search / Issues & Resolutions)
         grouped[COLUMN_STATUS.CASE_OPENED] = boardOrders.filter((order) => 

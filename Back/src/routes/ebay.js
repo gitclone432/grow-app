@@ -10626,14 +10626,11 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
     if (status) query.cancelStatus = status;
     if (state) query.cancelState = state;
 
+    // Date range filter on cancelRequestDate using PT timezone-aware parsing
     if (startDate || endDate) {
       query.cancelRequestDate = {};
-      if (startDate) query.cancelRequestDate.$gte = new Date(startDate);
-      if (endDate) {
-        const endOfDay = new Date(endDate);
-        endOfDay.setHours(23, 59, 59, 999);
-        query.cancelRequestDate.$lte = endOfDay;
-      }
+      if (startDate) query.cancelRequestDate.$gte = getPTDayBoundsUTC(startDate).start;
+      if (endDate) query.cancelRequestDate.$lte = getPTDayBoundsUTC(endDate).end;
     }
 
     const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
@@ -10682,7 +10679,9 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
       return {
         ...c,
         productName: orderMap[key]?.productName || c.itemTitle || null,
-        dateSold: orderMap[key]?.dateSold || null
+        // For compliance board: use cancellation's cancelRequestDate (when case was opened)
+        // Not the order's date
+        dateSold: c.cancelRequestDate || null
       };
     });
 
@@ -10721,16 +10720,11 @@ router.get('/stored-returns', async (req, res) => {
       }
     }
 
-    // Date range filter on creationDate
+    // Date range filter on creationDate using PT timezone-aware parsing
     if (startDate || endDate) {
       query.creationDate = {};
-      if (startDate) query.creationDate.$gte = new Date(startDate);
-      if (endDate) {
-        // Include the entire end date (end of day)
-        const endOfDay = new Date(endDate);
-        endOfDay.setHours(23, 59, 59, 999);
-        query.creationDate.$lte = endOfDay;
-      }
+      if (startDate) query.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
+      if (endDate) query.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
     }
 
     // Urgent filter - response due within next 2 days (48 hours) to match the URGENT chip
@@ -10790,7 +10784,9 @@ router.get('/stored-returns', async (req, res) => {
     const returnsWithOrderData = returns.map(r => ({
       ...r,
       productName: orderMap[r.orderId]?.productName || null,
-      dateSold: orderMap[r.orderId]?.dateSold || null,
+      // For compliance board: use return's creationDate (when case was opened)
+      // For API table: keep transactionDate as order sale date
+      dateSold: r.creationDate || r.createdDate || null,
       // Order sale / transaction date for Return API table
       transactionDate: orderMap[r.orderId]?.dateSold || r.transactionDate || null,
     }));
@@ -11361,6 +11357,35 @@ router.get('/stored-payment-disputes', async (req, res) => {
     const totalCount = await PaymentDispute.countDocuments(query);
 
     res.json({ disputes, totalDisputes: disputes.length, totalCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Save or update dispute note
+router.patch('/disputes/:disputeId/note', requireAuth, async (req, res) => {
+  const { disputeId } = req.params;
+  const { note } = req.body;
+
+  try {
+    const dispute = await PaymentDispute.findOneAndUpdate(
+      { paymentDisputeId: disputeId },
+      { note },
+      { new: true }
+    ).populate({
+      path: 'seller',
+      select: 'user',
+      populate: {
+        path: 'user',
+        select: 'username'
+      }
+    });
+
+    if (!dispute) {
+      return res.status(404).json({ error: 'Dispute not found' });
+    }
+
+    res.json({ dispute });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
