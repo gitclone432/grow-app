@@ -10770,13 +10770,14 @@ router.get('/stored-returns', async (req, res) => {
     // Lookup product names and order dates from Orders collection
     const orderIds = returns.map(r => r.orderId).filter(Boolean);
     const orders = orderIds.length
-      ? await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1, creationDate: 1 }).lean()
+      ? await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1, creationDate: 1, purchaseMarketplaceId: 1 }).lean()
       : [];
     const orderMap = {};
     orders.forEach(o => {
       orderMap[o.orderId] = {
         productName: o.productName,
-        dateSold: o.creationDate
+        dateSold: o.creationDate,
+        purchaseMarketplaceId: o.purchaseMarketplaceId
       };
     });
 
@@ -10784,11 +10785,12 @@ router.get('/stored-returns', async (req, res) => {
     const returnsWithOrderData = returns.map(r => ({
       ...r,
       productName: orderMap[r.orderId]?.productName || null,
-      // For compliance board: use return's creationDate (when case was opened)
-      // For API table: keep transactionDate as order sale date
-      dateSold: r.creationDate || r.createdDate || null,
-      // Order sale / transaction date for Return API table
-      transactionDate: orderMap[r.orderId]?.dateSold || r.transactionDate || null,
+      // Date Sold = Order's creation date (when order was placed)
+      dateSold: orderMap[r.orderId]?.dateSold || r.transactionDate || null,
+      // Purchase Marketplace for timezone formatting
+      purchaseMarketplaceId: orderMap[r.orderId]?.purchaseMarketplaceId || r.marketplaceId || null,
+      // Return creation date for reference
+      returnCreatedDate: r.creationDate || r.createdDate || null,
     }));
 
     // Get total count for the query
