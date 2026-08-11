@@ -435,17 +435,77 @@ export default function ReturnRequestedPage({
     }
   };
 
-  const formatDate = (dateStr) => {
+  const formatDate = (dateStr, marketplaceId, { showIst = true } = {}) => {
     if (!dateStr) return '-';
     try {
-      const d = new Date(dateStr);
-      // Convert to PST (America/Los_Angeles)
-      return d.toLocaleDateString('en-US', {
-        timeZone: 'America/Los_Angeles',
+      const date = new Date(dateStr);
+
+      // Determine Timezone based on Marketplace (defaults to US Pacific if not specified)
+      let timeZone = 'America/Los_Angeles';
+      let timeZoneLabel = 'PT';
+
+      if (marketplaceId === 'EBAY_CA' || marketplaceId === 'EBAY_ENCA') {
+        timeZone = 'America/New_York';    // Covers EST and EDT automatically
+        timeZoneLabel = 'ET';
+      } else if (marketplaceId === 'EBAY_AU') {
+        timeZone = 'Australia/Sydney';    // Covers AEST and AEDT automatically
+        timeZoneLabel = 'AET';
+      } else if (marketplaceId === 'EBAY_GB') {
+        timeZone = 'Europe/London';       // Covers GMT and BST automatically
+        timeZoneLabel = 'GMT';
+      }
+
+      const formattedDate = date.toLocaleDateString('en-US', {
+        year: 'numeric',
         month: '2-digit',
         day: '2-digit',
-        year: 'numeric'
+        timeZone: timeZone,
       });
+
+      // Include time with AM/PM
+      const formattedTime = date.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: timeZone,
+      });
+
+      const primaryLine = (
+        <Typography variant="body2" sx={{ whiteSpace: 'nowrap', fontSize: '0.8125rem', lineHeight: 1.25 }}>
+          {formattedDate}{' '}
+          <Box component="span" sx={{ color: 'text.secondary', fontSize: '0.7rem' }}>
+            {formattedTime} ({timeZoneLabel})
+          </Box>
+        </Typography>
+      );
+
+      if (!showIst) return primaryLine;
+
+      const istDate = date.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        timeZone: 'Asia/Kolkata',
+      });
+      const istTime = date.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'Asia/Kolkata',
+      });
+
+      return (
+        <Stack spacing={0.15}>
+          {primaryLine}
+          <Typography
+            variant="caption"
+            sx={{ whiteSpace: 'nowrap', fontSize: '0.68rem', lineHeight: 1.2, color: 'text.secondary' }}
+          >
+            {istDate}{' '}
+            <Box component="span" sx={{ fontSize: '0.65rem' }}>
+              {istTime} (IST)
+            </Box>
+          </Typography>
+        </Stack>
+      );
     } catch {
       return '-';
     }
@@ -563,7 +623,35 @@ export default function ReturnRequestedPage({
         'Return ID': 'returnId',
         'Order ID': 'orderId',
         'Product Name': 'productName',
-        'Date Sold': (r) => r.dateSold ? new Date(r.dateSold).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }) : '',
+        'Date Sold': (r) => {
+          if (!r.dateSold) return '';
+          const date = new Date(r.dateSold);
+          const marketplaceId = r.purchaseMarketplaceId || 'EBAY_US';
+          let timeZone = 'America/Los_Angeles';
+          let timeZoneLabel = 'PT';
+          if (marketplaceId === 'EBAY_CA' || marketplaceId === 'EBAY_ENCA') {
+            timeZone = 'America/New_York';
+            timeZoneLabel = 'ET';
+          } else if (marketplaceId === 'EBAY_AU') {
+            timeZone = 'Australia/Sydney';
+            timeZoneLabel = 'AET';
+          } else if (marketplaceId === 'EBAY_GB') {
+            timeZone = 'Europe/London';
+            timeZoneLabel = 'GMT';
+          }
+          const formattedDate = date.toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            timeZone
+          });
+          const formattedTime = date.toLocaleTimeString('en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            timeZone
+          });
+          return `${formattedDate} ${formattedTime} (${timeZoneLabel})`;
+        },
         'Seller': (r) => r.seller?.user?.username || '',
         'Buyer': 'buyerUsername',
         'Reason': (r) => {
@@ -980,20 +1068,18 @@ export default function ReturnRequestedPage({
                       </Stack>
                     </TableCell>}
                     {visibleColumns.includes('createdDate') && <TableCell>
-                      <Typography variant="body2" fontSize="0.75rem">
-                        {formatDate(ret.creationDate)}
-                      </Typography>
+                      {formatDate(ret.creationDate, ret.purchaseMarketplaceId)}
                     </TableCell>}
                     {visibleColumns.includes('responseDue') && <TableCell>
                       <Stack direction="row" alignItems="center" spacing={0.5}>
-                        <Typography
-                          variant="body2"
-                          fontSize="0.75rem"
-                          color={ret.returnStatus !== 'CLOSED' && isResponseOverdue(ret.responseDate) ? 'error' : 'inherit'}
-                          fontWeight={ret.returnStatus !== 'CLOSED' && (isResponseOverdue(ret.responseDate) || isResponseUrgent(ret.responseDate)) ? 'bold' : 'normal'}
+                        <Box
+                          sx={{
+                            color: ret.returnStatus !== 'CLOSED' && isResponseOverdue(ret.responseDate) ? 'error.main' : 'inherit',
+                            fontWeight: ret.returnStatus !== 'CLOSED' && (isResponseOverdue(ret.responseDate) || isResponseUrgent(ret.responseDate)) ? 'bold' : 'normal'
+                          }}
                         >
-                          {formatDate(ret.responseDate)}
-                        </Typography>
+                          {formatDate(ret.responseDate, ret.purchaseMarketplaceId)}
+                        </Box>
                         {ret.returnStatus !== 'CLOSED' && isResponseOverdue(ret.responseDate) && (
                           <Chip
                             label="OVERDUE"
@@ -1059,9 +1145,7 @@ export default function ReturnRequestedPage({
                       </Stack>
                     </TableCell>}
                     {visibleColumns.includes('dateSold') && <TableCell>
-                      <Typography variant="body2" fontSize="0.75rem">
-                        {ret.dateSold ? formatDate(ret.dateSold) : '-'}
-                      </Typography>
+                      {ret.dateSold ? formatDate(ret.dateSold, ret.purchaseMarketplaceId) : '-'}
                     </TableCell>}
                     {visibleColumns.includes('seller') && <TableCell>
                       <Typography variant="body2">{ret.seller?.user?.username || '-'}</Typography>
@@ -1325,7 +1409,7 @@ export default function ReturnRequestedPage({
                 <Typography variant="body2"><strong>Buyer:</strong> {snadConfirm.ret.buyerUsername || '-'}</Typography>
                 <Typography variant="body2"><strong>Return Reason:</strong> {snadConfirm.ret.returnReason?.replace(/_/g, ' ') || '-'}</Typography>
                 <Typography variant="body2"><strong>Refund Amount:</strong> {snadConfirm.ret.refundAmount?.value ? `${snadConfirm.ret.refundAmount.currency} ${snadConfirm.ret.refundAmount.value}` : '-'}</Typography>
-                <Typography variant="body2"><strong>Created:</strong> {formatDate(snadConfirm.ret.creationDate)}</Typography>
+                <Box><strong>Created:</strong> {formatDate(snadConfirm.ret.creationDate, snadConfirm.ret.purchaseMarketplaceId)}</Box>
               </Stack>
             </Box>
           )}
