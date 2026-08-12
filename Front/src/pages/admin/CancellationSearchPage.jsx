@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   Box,
   Table,
@@ -27,6 +27,7 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
+  TextField,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import CancelIcon from '@mui/icons-material/Cancel';
@@ -35,11 +36,172 @@ import ChatIcon from '@mui/icons-material/Chat';
 import DownloadIcon from '@mui/icons-material/Download';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import HighlightOffIcon from '@mui/icons-material/HighlightOff';
+import AttachFileIcon from '@mui/icons-material/AttachFile';
+import SendIcon from '@mui/icons-material/Send';
 import api from '../../lib/api';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ChatModal from '../../components/ChatModal';
 import ColumnSelector from '../../components/ColumnSelector';
+import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
+import {
+  findRemarkTemplateText,
+  loadRemarkTemplates,
+  remarkOptionsFromTemplates,
+  saveRemarkTemplates
+} from '../../constants/remarkTemplates';
 import { yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
+
+/**
+ * AutoSaveSelect component for remark dropdown
+ */
+const AutoSaveSelect = React.memo(function AutoSaveSelect({ value, options, onSave, onManage, manageLabel = 'Manage Options' }) {
+  const [localValue, setLocalValue] = useState(value || '');
+
+  useEffect(() => {
+    setLocalValue(value || '');
+  }, [value]);
+
+  const handleChange = (e) => {
+    const newVal = e.target.value;
+    if (newVal === '__manage_templates__') {
+      if (onManage) onManage();
+      return;
+    }
+    setLocalValue(newVal);
+    onSave(newVal); // Auto-save immediately on selection
+  };
+
+  return (
+    <Select
+      value={localValue}
+      onChange={handleChange}
+      displayEmpty
+      size="small"
+      sx={{
+        backgroundColor: '#fff',
+        borderRadius: 1,
+        minWidth: 130,
+        height: 32,
+        fontSize: '0.85rem',
+        '& .MuiSelect-select': { py: 0.5, px: 1 }
+      }}
+    >
+      <MenuItem value="">
+        <em style={{ color: '#aaa' }}>- Select -</em>
+      </MenuItem>
+      {options.map((opt) => (
+        <MenuItem key={opt._id} value={opt.name}>
+          {opt.name}
+        </MenuItem>
+      ))}
+      {onManage ? (
+        <MenuItem value="__manage_templates__" sx={{ borderTop: '1px solid', borderColor: 'divider', mt: 0.5 }}>
+          {manageLabel}
+        </MenuItem>
+      ) : null}
+    </Select>
+  );
+});
+
+/**
+ * NotesCell component for editable notes
+ */
+const NotesCell = React.memo(function NotesCell({ row, onSave, onNotify }) {
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [tempValue, setTempValue] = React.useState(row.notes || '');
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isEditing) {
+      setTempValue(row.notes || '');
+    }
+  }, [row.notes, isEditing]);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await onSave(row.cancelId, tempValue);
+      setIsEditing(false);
+      onNotify('success', 'Note saved successfully');
+    } catch (e) {
+      onNotify('error', 'Failed to save note');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setTempValue(row.notes || '');
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <Box
+        onClick={(e) => e.stopPropagation()}
+        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 200 }}
+      >
+        <TextField
+          fullWidth
+          multiline
+          minRows={2}
+          size="small"
+          value={tempValue}
+          onChange={(e) => setTempValue(e.target.value)}
+          placeholder="Enter note..."
+          autoFocus
+        />
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="contained"
+            size="small"
+            onClick={handleSave}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5 }}
+          >
+            {isSaving ? 'Saving...' : 'Save'}
+          </Button>
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={handleCancel}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5 }}
+          >
+            Cancel
+          </Button>
+        </Stack>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      onClick={(e) => {
+        e.stopPropagation();
+        setIsEditing(true);
+      }}
+      sx={{
+        cursor: 'pointer',
+        minHeight: 30,
+        minWidth: 150,
+        display: 'flex',
+        alignItems: 'center',
+        '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1 }
+      }}
+    >
+      {row.notes ? (
+        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
+          {row.notes}
+        </Typography>
+      ) : (
+        <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+          + Add Note
+        </Typography>
+      )}
+    </Box>
+  );
+});
 
 const headerSx = {
   backgroundColor: 'error.dark',
@@ -78,11 +240,21 @@ export default function CancellationSearchPage({
   const [actionBusyId, setActionBusyId] = useState('');
   const [approveDialog, setApproveDialog] = useState({ open: false, row: null });
   const [rejectDialog, setRejectDialog] = useState({ open: false, row: null });
+  const [savingRemarks, setSavingRemarks] = useState({}); // { cancelId: boolean }
+  const [remarkTemplates, setRemarkTemplates] = useState([]);
+  const [manageRemarkTemplatesOpen, setManageRemarkTemplatesOpen] = useState(false);
+  const [remarkConfirmOpen, setRemarkConfirmOpen] = useState(false);
+  const [pendingRemarkUpdate, setPendingRemarkUpdate] = useState(null);
+  const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
+  const [editableRemarkMessage, setEditableRemarkMessage] = useState('');
+  const [remarkAttachments, setRemarkAttachments] = useState([]);
+  const fileInputRefRemark = useRef(null);
   const limit = 25;
 
   const ALL_COLUMNS = [
     { id: 'cancelId', label: 'Cancel ID' },
     { id: 'orderId', label: 'Order ID' },
+    { id: 'dateSold', label: 'Date Sold' },
     { id: 'seller', label: 'Seller' },
     { id: 'buyerLoginName', label: 'buyerLoginName' },
     { id: 'itemId', label: 'itemId' },
@@ -95,6 +267,8 @@ export default function CancellationSearchPage({
     { id: 'marketplace', label: 'Marketplace' },
     { id: 'requestDate', label: 'Request Date' },
     { id: 'sellerDue', label: 'Seller Response Due' },
+    { id: 'remark', label: 'Remark' },
+    { id: 'notes', label: 'Notes' },
     { id: 'worksheetStatus', label: 'Worksheet Status' },
     { id: 'action', label: 'Action' },
   ];
@@ -110,6 +284,12 @@ export default function CancellationSearchPage({
     api.get('/sellers/all')
       .then((res) => setSellers(res.data || []))
       .catch(() => setSellers([]));
+  }, []);
+
+  useEffect(() => {
+    loadRemarkTemplates()
+      .then((templates) => setRemarkTemplates(templates))
+      .catch((err) => console.error('Failed to load remark templates:', err));
   }, []);
 
   useEffect(() => {
@@ -233,11 +413,19 @@ export default function CancellationSearchPage({
     }
   };
 
-  const formatDate = (dateStr) => {
+  const formatDate = (dateStr, marketplaceId) => {
     if (!dateStr) return '-';
     try {
-      return new Date(dateStr).toLocaleString('en-US', {
-        timeZone: 'America/Los_Angeles',
+      const date = new Date(dateStr);
+      
+      // Determine timezone based on marketplace
+      let timezone = 'America/Los_Angeles'; // Default PT
+      if (marketplaceId === 'EBAY_AU') timezone = 'Australia/Sydney';
+      else if (marketplaceId === 'EBAY_CA') timezone = 'America/Toronto';
+      else if (marketplaceId === 'EBAY_GB') timezone = 'Europe/London';
+      
+      return date.toLocaleString('en-US', {
+        timeZone: timezone,
         month: 'short',
         day: 'numeric',
         year: 'numeric',
@@ -353,6 +541,211 @@ export default function CancellationSearchPage({
       setSnackbar({ open: true, severity: 'error', message: msg });
     } finally {
       setActionBusyId('');
+    }
+  }
+
+  const replaceTemplateVariables = (template, row) => {
+    if (!template || !row) return template;
+    const buyerFirstName = (row.buyerLoginName || 'Buyer').split(' ')[0];
+    const itemTitle = row.itemTitle || row.productName || 'item';
+    
+    return template
+      .replace(/\{\{buyer_first_name\}\}/g, buyerFirstName)
+      .replace(/\{\{buyer_name\}\}/gi, buyerFirstName)
+      .replace(/\{BUYER_NAME\}/g, buyerFirstName)
+      .replace(/\{\{item_title\}\}/g, itemTitle);
+  };
+
+  const handleRemarkUpdate = (cancelId, remarkValue) => {
+    if (remarkValue === '__manage_templates__') {
+      setManageRemarkTemplatesOpen(true);
+      return;
+    }
+    // Find the cancellation
+    const cancellation = rows.find(r => r.cancelId === cancelId);
+    if (!cancellation) return;
+
+    // Check if there's a template for this remark
+    const hasTemplate = findRemarkTemplateText(remarkTemplates, remarkValue);
+
+    if (hasTemplate) {
+      // Get the template text and pre-fill the editable message
+      const templateText = findRemarkTemplateText(remarkTemplates, remarkValue);
+      const replacedText = replaceTemplateVariables(templateText, cancellation);
+      setPendingRemarkUpdate({ cancelId, remarkValue, cancellation });
+      setEditableRemarkMessage(replacedText);
+      setRemarkAttachments([]);
+      setRemarkConfirmOpen(true);
+    } else {
+      // No template, update remark directly
+      updateCancellationRemark(cancelId, remarkValue, false);
+    }
+  };
+
+  const updateCancellationRemark = async (cancelId, remarkValue, sendMessage = false, messageBody = '') => {
+    if (!cancelId) return;
+    setSavingRemarks(prev => ({ ...prev, [cancelId]: true }));
+    try {
+      // Find the cancellation to get orderDbId
+      const cancellation = rows.find(r => r.cancelId === cancelId);
+      if (!cancellation) {
+        throw new Error('Cancellation not found');
+      }
+
+      const orderDbId = cancellation.orderDbId;
+      if (!orderDbId) {
+        throw new Error('Order ID not found');
+      }
+
+      // Use the SAME endpoint as FulfillmentDashboard for consistency
+      // This ensures remarks are updated in the exact same way on both pages
+      const payload = { remark: remarkValue };
+      
+      const { data } = await api.patch(`/ebay/orders/${orderDbId}/manual-fields`, payload);
+      
+      // Update local state with the returned remark value
+      setRows(prevRows =>
+        prevRows.map(row =>
+          row.cancelId === cancelId ? { ...row, remark: data.order.remark } : row
+        )
+      );
+
+      // Send message separately if requested
+      if (sendMessage && messageBody && cancellation.cancelId) {
+        try {
+          await api.patch(`/ebay/cancellations/${cancellation.cancelId}/remark`, {
+            remark: remarkValue,
+            message: messageBody,
+            attachments: remarkAttachments
+          });
+        } catch (msgErr) {
+          console.error('Message send failed (remark still saved):', msgErr);
+        }
+      }
+
+      setSnackbar({
+        open: true,
+        severity: 'success',
+        message: sendMessage ? 'Remark updated and message sent' : 'Remark saved'
+      });
+    } catch (err) {
+      console.error('Failed to save cancellation remark:', err);
+      setSnackbar({
+        open: true,
+        severity: 'error',
+        message: 'Failed to save remark: ' + (err.response?.data?.error || err.message)
+      });
+    } finally {
+      setSavingRemarks(prev => ({ ...prev, [cancelId]: false }));
+    }
+  };
+
+  const updateCancellationNotes = async (cancelId, notesValue) => {
+    if (!cancelId) return;
+    try {
+      // Find the cancellation to get orderDbId
+      const cancellation = rows.find(r => r.cancelId === cancelId);
+      if (!cancellation) {
+        throw new Error('Cancellation not found');
+      }
+
+      const orderDbId = cancellation.orderDbId;
+      if (!orderDbId) {
+        throw new Error('Order ID not found');
+      }
+
+      // Use the SAME endpoint as FulfillmentDashboard for consistency
+      const payload = { fulfillmentNotes: notesValue };
+      
+      const { data } = await api.patch(`/ebay/orders/${orderDbId}/fulfillment-notes`, payload);
+      
+      // Update local state with the returned notes value
+      setRows(prevRows =>
+        prevRows.map(row =>
+          row.cancelId === cancelId ? { ...row, notes: data.order.fulfillmentNotes } : row
+        )
+      );
+    } catch (err) {
+      console.error('Failed to save cancellation notes:', err);
+      throw err; // Re-throw for NotesCell to handle
+    }
+  };
+
+  const handleSkipRemarkMessage = async () => {
+    if (!pendingRemarkUpdate) return;
+    const { cancelId, remarkValue } = pendingRemarkUpdate;
+    setRemarkConfirmOpen(false);
+    setPendingRemarkUpdate(null);
+    setEditableRemarkMessage('');
+    await updateCancellationRemark(cancelId, remarkValue, false);
+  };
+
+  const handleConfirmRemarkMessage = async () => {
+    if (!pendingRemarkUpdate || !editableRemarkMessage.trim()) return;
+    setSendingRemarkMessage(true);
+    try {
+      const { cancelId, remarkValue } = pendingRemarkUpdate;
+      await updateCancellationRemark(cancelId, remarkValue, true, editableRemarkMessage);
+      setRemarkConfirmOpen(false);
+      setPendingRemarkUpdate(null);
+      setEditableRemarkMessage('');
+      setRemarkAttachments([]);
+    } catch (err) {
+      console.error('Failed to send remark message:', err);
+    } finally {
+      setSendingRemarkMessage(false);
+    }
+  };
+
+  const handleRemarkFileSelect = async (e) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    try {
+      const formData = new FormData();
+      for (let i = 0; i < files.length; i++) {
+        formData.append('files', files[i]);
+      }
+
+      const { data } = await api.post('/internal-messages/upload-files', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+
+      const uploaded = (data?.urls || []).map((url, index) => ({
+        url,
+        name: files[index]?.name || 'Image'
+      }));
+
+      setRemarkAttachments((prev) => [...prev, ...uploaded]);
+    } catch (err) {
+      setSnackbar({
+        open: true,
+        severity: 'error',
+        message: 'Failed to upload attachment'
+      });
+    }
+
+    // Reset input
+    if (fileInputRefRemark.current) {
+      fileInputRefRemark.current.value = '';
+    }
+  };
+
+  const handleSaveRemarkTemplates = async (nextTemplates) => {
+    try {
+      const savedTemplates = await saveRemarkTemplates(nextTemplates);
+      setRemarkTemplates(savedTemplates);
+      setSnackbar({
+        open: true,
+        severity: 'success',
+        message: 'Remark templates saved'
+      });
+    } catch (error) {
+      setSnackbar({
+        open: true,
+        severity: 'error',
+        message: error?.response?.data?.error || 'Failed to save remark templates'
+      });
     }
   }
 
@@ -476,6 +869,7 @@ export default function CancellationSearchPage({
               const csvData = prepareCSVData(rows, {
                 'Cancel ID': 'cancelId',
                 'Order ID': (r) => r.orderId || r.legacyOrderId || '',
+                'Date Sold': (r) => formatDate(r.dateSold, r.purchaseMarketplaceId),
                 Seller: (r) => r.seller?.user?.username || '',
                 buyerLoginName: (r) => r.buyerLoginName || r.buyerUsername || '',
                 itemId: 'itemId',
@@ -488,8 +882,9 @@ export default function CancellationSearchPage({
                   ? `${r.requestRefundAmount.currency || 'USD'} ${r.requestRefundAmount.value}`
                   : ''),
                 Marketplace: 'marketplaceId',
-                'Request Date': (r) => formatDate(r.cancelRequestDate),
-                'Seller Response Due': (r) => formatDate(r.sellerResponseDueDate),
+                'Request Date': (r) => formatDate(r.cancelRequestDate, r.purchaseMarketplaceId),
+                'Seller Response Due': (r) => formatDate(r.sellerResponseDueDate, r.purchaseMarketplaceId),
+                Remark: 'remark',
               });
               downloadCSV(csvData, 'Cancellation_Search');
             }}
@@ -535,6 +930,7 @@ export default function CancellationSearchPage({
               <TableRow>
                 {visibleColumns.includes('cancelId') && <TableCell sx={headerSx}>Cancel ID</TableCell>}
                 {visibleColumns.includes('orderId') && <TableCell sx={headerSx}>Order ID</TableCell>}
+                {visibleColumns.includes('dateSold') && <TableCell sx={headerSx}>Date Sold</TableCell>}
                 {visibleColumns.includes('seller') && <TableCell sx={headerSx}>Seller</TableCell>}
                 {visibleColumns.includes('buyerLoginName') && <TableCell sx={headerSx}>buyerLoginName</TableCell>}
                 {visibleColumns.includes('itemId') && <TableCell sx={headerSx}>itemId</TableCell>}
@@ -577,6 +973,8 @@ export default function CancellationSearchPage({
                   </TableCell>
                 )}
                 {visibleColumns.includes('sellerDue') && <TableCell sx={headerSx}>Seller Response Due</TableCell>}
+                {visibleColumns.includes('remark') && <TableCell sx={headerSx}>Remark</TableCell>}
+                {visibleColumns.includes('notes') && <TableCell sx={headerSx}>Notes</TableCell>}
                 {visibleColumns.includes('worksheetStatus') && <TableCell sx={headerSx}>Worksheet Status</TableCell>}
                 {visibleColumns.includes('action') && <TableCell sx={headerSx} align="center">Action</TableCell>}
               </TableRow>
@@ -616,6 +1014,9 @@ export default function CancellationSearchPage({
                           </IconButton>
                         </Stack>
                       </TableCell>
+                    )}
+                    {visibleColumns.includes('dateSold') && (
+                      <TableCell>{formatDate(row.dateSold, row.purchaseMarketplaceId)}</TableCell>
                     )}
                     {visibleColumns.includes('seller') && (
                       <TableCell>{row.seller?.user?.username || '-'}</TableCell>
@@ -685,6 +1086,26 @@ export default function CancellationSearchPage({
                     )}
                     {visibleColumns.includes('sellerDue') && (
                       <TableCell>{formatDate(row.sellerResponseDueDate)}</TableCell>
+                    )}
+                    {visibleColumns.includes('remark') && (
+                      <TableCell>
+                        <AutoSaveSelect
+                          value={row.remark || ''}
+                          options={remarkOptionsFromTemplates(remarkTemplates)}
+                          onSave={(val) => handleRemarkUpdate(row.cancelId, val)}
+                          onManage={() => setManageRemarkTemplatesOpen(true)}
+                          manageLabel="Manage Templates"
+                        />
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('notes') && (
+                      <TableCell>
+                        <NotesCell
+                          row={row}
+                          onSave={updateCancellationNotes}
+                          onNotify={(severity, message) => setSnackbar({ open: true, severity, message })}
+                        />
+                      </TableCell>
                     )}
                     {visibleColumns.includes('worksheetStatus') && (
                       <TableCell>
@@ -790,6 +1211,94 @@ export default function CancellationSearchPage({
           entityType="cancellation"
         />
       )}
+
+      {/* Remark message confirmation dialog */}
+      <Dialog
+        open={remarkConfirmOpen}
+        onClose={() => !sendingRemarkMessage && setRemarkConfirmOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Send Message to Buyer - Edit & Preview</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            {pendingRemarkUpdate && (
+              <Alert severity="info">
+                You're updating the remark to "<strong>{pendingRemarkUpdate.remarkValue}</strong>"
+              </Alert>
+            )}
+            <Box>
+              <Typography variant="body2" sx={{ fontWeight: 500, mb: 1 }}>
+                Message Preview (Edit as needed):
+              </Typography>
+              <TextField
+                fullWidth
+                multiline
+                minRows={6}
+                maxRows={12}
+                value={editableRemarkMessage}
+                onChange={(e) => setEditableRemarkMessage(e.target.value)}
+                placeholder="Enter your message to the buyer..."
+              />
+            </Box>
+            {remarkAttachments.length > 0 && (
+              <Box>
+                <Typography variant="caption" sx={{ fontWeight: 500, mb: 1, display: 'block' }}>
+                  Attachments:
+                </Typography>
+                <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+                  {remarkAttachments.map((attachment, index) => (
+                    <Chip
+                      key={`${attachment.url}-${index}`}
+                      label={attachment.name}
+                      onDelete={() => setRemarkAttachments(remarkAttachments.filter((_, i) => i !== index))}
+                      variant="outlined"
+                      size="small"
+                    />
+                  ))}
+                </Stack>
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <input
+            ref={fileInputRefRemark}
+            type="file"
+            multiple
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={handleRemarkFileSelect}
+          />
+          <Button onClick={() => fileInputRefRemark.current?.click()}>
+            <AttachFileIcon sx={{ mr: 1 }} />
+            Add Attachment
+          </Button>
+          <Button
+            onClick={handleSkipRemarkMessage}
+            disabled={sendingRemarkMessage}
+            color="inherit"
+          >
+            Just Update Remark
+          </Button>
+          <Button
+            onClick={handleConfirmRemarkMessage}
+            variant="contained"
+            disabled={!editableRemarkMessage.trim() || sendingRemarkMessage}
+            startIcon={sendingRemarkMessage ? <CircularProgress size={20} /> : undefined}
+          >
+            {sendingRemarkMessage ? 'Sending...' : 'Send Message & Update Remark'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Manage remark templates modal */}
+      <RemarkTemplateManagerModal
+        open={manageRemarkTemplatesOpen}
+        onClose={() => setManageRemarkTemplatesOpen(false)}
+        templates={remarkTemplates}
+        onSaveTemplates={handleSaveRemarkTemplates}
+      />
 
       <Dialog
         open={approveDialog.open}

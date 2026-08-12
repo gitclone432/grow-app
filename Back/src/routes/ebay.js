@@ -10617,6 +10617,80 @@ router.post('/cancellations/:cancelId/reject', requireAuth, requirePageAccess('D
   }
 });
 
+/**
+ * Save or update cancellation remark using Order.allOrdersUsdRemark (single source of truth)
+ * PATCH /ebay/cancellations/:cancelId/remark
+ * Body: { remark, message?, attachments? }
+ */
+router.patch('/cancellations/:cancelId/remark', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const cancelId = String(req.params.cancelId || '').trim();
+    const { remark, message, attachments } = req.body || {};
+
+    if (!cancelId) {
+      return res.status(400).json({ error: 'cancelId is required' });
+    }
+
+    const cancellation = await Cancellation.findOne({ cancelId }).populate('seller');
+    if (!cancellation) {
+      return res.status(404).json({ error: 'Cancellation not found' });
+    }
+
+    // Only update the related Order's allOrdersUsdRemark (single source of truth)
+    // Do NOT save to Cancellation.remark - we want a single remark field on Order that both pages use
+    let savedRemark = '';
+    if (cancellation.orderId || cancellation.legacyOrderId) {
+      const order = await Order.findOne({
+        $or: [
+          { orderId: cancellation.orderId },
+          { legacyOrderId: cancellation.legacyOrderId }
+        ]
+      });
+      if (order) {
+        // Save remark to Order's allOrdersUsdRemark field
+        order.allOrdersUsdRemark = remark == null ? '' : String(remark);
+        await order.save();
+        savedRemark = order.allOrdersUsdRemark;
+      }
+    }
+
+    // Send message if provided
+    if (message && message.trim() && cancellation.seller) {
+      try {
+        // Store message in internal messages system
+        const InternalMessage = mongoose.model('InternalMessage');
+        const newMessage = new InternalMessage({
+          seller: cancellation.seller._id,
+          orderId: cancellation.orderId || cancellation.legacyOrderId,
+          buyerUsername: cancellation.buyerLoginName || cancellation.buyerUsername,
+          subject: `Cancellation Update: ${cancellation.cancelId}`,
+          body: message,
+          messageType: 'outbound',
+          category: 'Cancellation',
+          attachments: attachments || [],
+          timestamp: new Date()
+        });
+        await newMessage.save();
+      } catch (msgErr) {
+        console.error('[Cancellation Message Save] Warning - message not saved:', msgErr.message);
+        // Don't fail the remark update if message save fails
+      }
+    }
+
+    res.json({
+      success: true,
+      cancellation: {
+        cancelId: cancellation.cancelId,
+        orderId: cancellation.orderId,
+        remark: savedRemark // Return the remark from Order.allOrdersUsdRemark
+      }
+    });
+  } catch (err) {
+    console.error('[Cancellation Remark] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const { sellerId, status, state, startDate, endDate, sortBy, sortDir } = req.query;
@@ -10664,12 +10738,19 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
     const orders = orderIds.length
       ? await Order.find(
         { $or: [{ orderId: { $in: orderIds } }, { legacyOrderId: { $in: orderIds } }] },
-        { orderId: 1, legacyOrderId: 1, productName: 1, creationDate: 1 }
+        { _id: 1, orderId: 1, legacyOrderId: 1, productName: 1, creationDate: 1, dateSold: 1, purchaseMarketplaceId: 1, remark: 1, fulfillmentNotes: 1 }
       ).lean()
       : [];
     const orderMap = {};
     orders.forEach((o) => {
-      const payload = { productName: o.productName, dateSold: o.creationDate };
+      const payload = { 
+        _id: o._id.toString(), // Include Order MongoDB _id for API calls
+        productName: o.productName, 
+        orderDateSold: o.dateSold || o.creationDate, // dateSold from order (actual order sale date)
+        purchaseMarketplaceId: o.purchaseMarketplaceId,
+        remark: o.remark || '', // Get remark from Order (same field as FulfillmentDashboard)
+        notes: o.fulfillmentNotes || '' // Get notes from Order (same field as FulfillmentDashboard)
+      };
       if (o.orderId) orderMap[o.orderId] = payload;
       if (o.legacyOrderId) orderMap[o.legacyOrderId] = payload;
     });
@@ -10678,10 +10759,12 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
       const key = c.orderId || c.legacyOrderId;
       return {
         ...c,
+        orderDbId: orderMap[key]?._id, // Include Order._id for consistency with FulfillmentDashboard endpoint
         productName: orderMap[key]?.productName || c.itemTitle || null,
-        // For compliance board: use cancellation's cancelRequestDate (when case was opened)
-        // Not the order's date
-        dateSold: c.cancelRequestDate || null
+        dateSold: orderMap[key]?.orderDateSold || c.dateSold || null, // Order's date sold, not cancellation request date
+        purchaseMarketplaceId: orderMap[key]?.purchaseMarketplaceId || c.marketplaceId || 'EBAY_US',
+        remark: orderMap[key]?.remark || '', // Use remark from Order (same field as FulfillmentDashboard)
+        notes: orderMap[key]?.notes || '' // Use notes from Order (same field as FulfillmentDashboard)
       };
     });
 
