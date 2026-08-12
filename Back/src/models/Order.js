@@ -199,9 +199,9 @@ const OrderSchema = new mongoose.Schema(
     complianceBoardStatus: {
       type: String,
       enum: [
-        'todo', 'out_of_stock', 'cancellation', 'address_issue', 'not_fulfilled', 'fulfilled', 'buyer_confirmation',
+        'todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation',
         // Return/Refund statuses
-        'case_opened', 'case_not_opened', 'provide_return_label', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement',
+        'case_opened', 'case_not_opened', 'return_follow_up', 'provide_return_label', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement',
         // Cancellation statuses
         'cancellation_request', 'accepted', 'declined',
         // INR statuses
