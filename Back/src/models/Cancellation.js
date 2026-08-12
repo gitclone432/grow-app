@@ -42,6 +42,9 @@ const CancellationSchema = new mongoose.Schema(
       default: 'open'
     }, // Manual status for worksheet tracking
 
+    dateSold: Date, // Date the order was sold (from related Order.creationDate or Order.dateSold)
+    remark: String, // Cancellation-specific remark/note
+
     rawData: Object,
     logs: { type: String, default: '' }
   },
