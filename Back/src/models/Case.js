@@ -23,6 +23,8 @@ const CaseSchema = new mongoose.Schema({
   // Item Info
   itemId: String,
   itemTitle: String,
+  itemPictureUrl: String,
+  marketplaceId: String,
   
   // Amount
   claimAmount: {
@@ -32,8 +34,18 @@ const CaseSchema = new mongoose.Schema({
   
   // Resolution
   resolution: String,
+  reasonForClosure: String,
+  sellerOutcome: String,
   sellerResponse: String,
-  
+
+  shipmentTrackingDetails: {
+    trackingURL: String,
+    trackingNumber: String,
+    carrier: String,
+    estimateFromDate: Date,
+    currentStatus: String,
+  },
+
   // Raw eBay data for reference
   rawData: Object,
   

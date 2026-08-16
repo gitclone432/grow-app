@@ -4,6 +4,7 @@ const PaymentDisputeSchema = new mongoose.Schema({
   seller: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', required: true },
   paymentDisputeId: { type: String, required: true, unique: true },
   orderId: String,
+  itemId: String,
   buyerUsername: String,
   
   // Status & Reason
@@ -29,11 +30,21 @@ const PaymentDisputeSchema = new mongoose.Schema({
   // Resolution
   sellerProtectionDecision: String, // ELIGIBLE, NOT_ELIGIBLE, PARTIAL
   resolution: String,
+  reasonForClosure: String,
+  protectionStatus: String,
   
   // Evidence info
   evidenceDeadline: Date,
   evidenceSubmitted: { type: Boolean, default: false },
-  
+
+  shipmentTrackingDetails: {
+    trackingURL: String,
+    trackingNumber: String,
+    carrier: String,
+    estimateFromDate: Date,
+    currentStatus: String,
+  },
+
   // Raw eBay data for reference
   rawData: Object,
   

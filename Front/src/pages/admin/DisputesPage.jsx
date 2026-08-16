@@ -35,6 +35,7 @@ import PaymentIcon from '@mui/icons-material/Payment';
 import AssignmentReturnIcon from '@mui/icons-material/AssignmentReturn';
 import CancelIcon from '@mui/icons-material/Cancel';
 import ListAltIcon from '@mui/icons-material/ListAlt';
+import GavelIcon from '@mui/icons-material/Gavel';
 import ChatIcon from '@mui/icons-material/Chat';
 import DownloadIcon from '@mui/icons-material/Download';
 import api from '../../lib/api';
@@ -44,6 +45,7 @@ import ReturnPostOrderPage from './ReturnPostOrderPage.jsx';
 import CancelledStatusPage from './CancelledStatusPage.jsx';
 import CancellationSearchPage from './CancellationSearchPage.jsx';
 import WorksheetPage from './WorksheetPage.jsx';
+import InrApiPage from './InrApiPage.jsx';
 import ColumnSelector from '../../components/ColumnSelector';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 import ChatModal from '../../components/ChatModal';
@@ -813,6 +815,11 @@ export default function DisputesPage({ initialTab = 0 }) {
               label="Worksheet"
               iconPosition="start"
             />
+            <Tab
+              icon={<GavelIcon sx={{ fontSize: 16 }} />}
+              label="INR API"
+              iconPosition="start"
+            />
           </Tabs>
         </SectionCard>
 
@@ -1422,6 +1429,11 @@ export default function DisputesPage({ initialTab = 0 }) {
       {/* Worksheet Tab */}
       <TabPanel value={tabValue} index={6}>
         <WorksheetPage dateFilter={dateFilter} hideDateFilter embedded />
+      </TabPanel>
+
+      {/* INR API Tab (Post-Order inquiry + casemanagement) */}
+      <TabPanel value={tabValue} index={7}>
+        <InrApiPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
       {/* Manage Case dialog for INR Cases */}

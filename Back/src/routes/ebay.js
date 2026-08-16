@@ -23,6 +23,7 @@ import Order from '../models/Order.js';
 import Return from '../models/Return.js';
 import Cancellation from '../models/Cancellation.js';
 import Case from '../models/Case.js';
+import CaseManagement from '../models/CaseManagement.js';
 import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import Listing from '../models/Listing.js';
@@ -10934,6 +10935,373 @@ async function resolveInrCaseOrderId({ sellerId, buyerUsername, itemId }) {
   return String(conv?.orderId || '').trim();
 }
 
+function asNonEmptyId(value) {
+  if (value == null) return '';
+  if (typeof value === 'object') {
+    return asNonEmptyId(value.value ?? value.orderId ?? value.legacyOrderId ?? value.id);
+  }
+  const s = String(value).trim();
+  if (!s || s === 'undefined' || s === 'null') return '';
+  return s;
+}
+
+function extractIssueStatus(source, prefer = '') {
+  if (!source || typeof source !== 'object') return '';
+  const inquiry = asNonEmptyId(source.inquiryStatusEnum)
+    || asNonEmptyId(source.inquiryDetails?.inquiryStatusEnum)
+    || asNonEmptyId(source.state);
+  const cse = asNonEmptyId(source.caseStatusEnum)
+    || asNonEmptyId(source.caseDetails?.caseStatusEnum);
+  const dispute = asNonEmptyId(source.paymentDisputeStatus);
+  if (prefer === 'case') return cse || asNonEmptyId(source.status) || inquiry;
+  if (prefer === 'inquiry') return inquiry || asNonEmptyId(source.status);
+  if (prefer === 'dispute') return dispute || asNonEmptyId(source.status);
+  return cse || inquiry || dispute || asNonEmptyId(source.status);
+}
+
+function fillIssueStatusOnRow(row, persistModel, prefer = '') {
+  if (!row) return row;
+  const live = extractIssueStatus(row.rawData, prefer) || extractIssueStatus(row, prefer);
+  if (!live) return row;
+  if (prefer === 'dispute') {
+    row.status = live;
+    if (live !== row.paymentDisputeStatus) {
+      row.paymentDisputeStatus = live;
+      if (persistModel && row._id) {
+        persistModel.updateOne({ _id: row._id }, { $set: { paymentDisputeStatus: live } }).catch(() => {});
+      }
+    }
+    return row;
+  }
+  if (live === row.status) return row;
+  row.status = live;
+  if (persistModel && row._id) {
+    persistModel.updateOne({ _id: row._id }, { $set: { status: live } }).catch(() => {});
+  }
+  return row;
+}
+
+function extractIssueReason(source, depth = 0) {
+  if (!source || typeof source !== 'object' || depth > 6) return '';
+  const keys = [
+    'caseTypeEnum',
+    'inquiryTypeEnum',
+    'inquiryType',
+    'caseType',
+    'reason',
+    'claimReason',
+    'escalationReason',
+    'escalateReason',
+    'returnReason',
+    'buyerRequestedReason',
+  ];
+  for (const key of keys) {
+    const v = asNonEmptyId(source[key]);
+    if (v && !['OPEN', 'CLOSED'].includes(v.toUpperCase())) return v;
+  }
+  const values = Array.isArray(source) ? source : Object.values(source);
+  for (const value of values) {
+    if (!value || typeof value !== 'object') continue;
+    const found = extractIssueReason(value, depth + 1);
+    if (found) return found;
+  }
+  return '';
+}
+
+function extractSellerOutcome(source, depth = 0) {
+  if (!source || typeof source !== 'object' || depth > 6) return '';
+  const keys = ['sellerOutcome', 'seller_outcome', 'sellerCaseOutcome'];
+  for (const key of keys) {
+    const v = asNonEmptyId(source[key]);
+    if (v) return v;
+  }
+  for (const nest of ['caseDetails', 'inquiryDetails', 'decision', 'caseDecision', 'resolutionDetails']) {
+    if (source[nest] && typeof source[nest] === 'object') {
+      const found = extractSellerOutcome(source[nest], depth + 1);
+      if (found) return found;
+    }
+  }
+  return '';
+}
+
+function scalarReasonForClosure(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (!s || s === '[object Object]') return '';
+    return s;
+  }
+  if (typeof value === 'object') {
+    return scalarReasonForClosure(value.reasonForClosure)
+      || scalarReasonForClosure(value.reason_for_closure)
+      || scalarReasonForClosure(value.value);
+  }
+  return '';
+}
+
+function extractReasonForClosure(source, depth = 0) {
+  if (source == null || depth > 6) return '';
+  if (typeof source === 'string') {
+    const s = scalarReasonForClosure(source);
+    return /WON|LOST|LOSE|WIN|FAVOUR|FAVOR/i.test(s) ? s : '';
+  }
+  if (typeof source !== 'object') return '';
+  const direct = scalarReasonForClosure(source.reasonForClosure)
+    || scalarReasonForClosure(source.reason_for_closure)
+    || scalarReasonForClosure(source.resolution?.reasonForClosure)
+    || scalarReasonForClosure(source.resolution?.reason_for_closure);
+  if (direct && /WON|LOST|LOSE|WIN|FAVOUR|FAVOR/i.test(direct)) return direct;
+  if (typeof source.resolution === 'string') {
+    const s = scalarReasonForClosure(source.resolution);
+    if (s && /WON|LOST|LOSE|WIN|FAVOUR|FAVOR/i.test(s)) return s;
+  }
+  if (source.rawData && typeof source.rawData === 'object' && depth === 0) {
+    const nested = extractReasonForClosure(source.rawData, depth + 1);
+    if (nested) return nested;
+  }
+  try {
+    const blob = JSON.stringify(source.rawData || source);
+    const match = blob && blob.match(/"reason(?:For|_for_)Closure"\s*:\s*"([^"]+)"/i);
+    if (match?.[1] && /WON|LOST|LOSE|WIN|FAVOUR|FAVOR/i.test(match[1])) return match[1];
+  } catch (_) { /* ignore circular / oversized payloads */ }
+  return '';
+}
+
+function fillReasonForClosureOnRow(row, persistModel) {
+  if (!row) return row;
+  const closure = extractReasonForClosure(row) || extractReasonForClosure(row.rawData);
+  if (!closure) return fillProtectionStatusOnRow(row, persistModel);
+  row.reasonForClosure = closure;
+  if (typeof row.resolution !== 'string' || !row.resolution || row.resolution === '[object Object]') {
+    row.resolution = closure;
+  }
+  if (persistModel && row._id) {
+    persistModel.updateOne({ _id: row._id }, { $set: { reasonForClosure: closure } }).catch(() => {});
+  }
+  return fillProtectionStatusOnRow(row, persistModel);
+}
+
+function extractProtectionStatus(source) {
+  if (!source || typeof source !== 'object') return '';
+  const containers = [
+    source,
+    source.resolution && typeof source.resolution === 'object' ? source.resolution : null,
+    source.rawData && typeof source.rawData === 'object' ? source.rawData : null,
+    source.rawData?.resolution && typeof source.rawData.resolution === 'object' ? source.rawData.resolution : null,
+  ].filter(Boolean);
+  for (const obj of containers) {
+    const s = scalarReasonForClosure(obj.protectionStatus)
+      || scalarReasonForClosure(obj.protection_status);
+    if (s) return s;
+  }
+  try {
+    for (const blobSource of [source.rawData, source]) {
+      if (!blobSource) continue;
+      const blob = JSON.stringify(blobSource);
+      const match = blob && blob.match(/"protection(?:Status|_status)"\s*:\s*"([^"]+)"/i);
+      if (match?.[1]?.trim()) return match[1].trim();
+    }
+  } catch (_) { /* ignore */ }
+  return scalarReasonForClosure(source.sellerProtectionDecision)
+    || scalarReasonForClosure(source.rawData?.sellerProtectionDecision)
+    || '';
+}
+
+function fillProtectionStatusOnRow(row, persistModel) {
+  if (!row) return row;
+  const status = extractProtectionStatus(row) || extractProtectionStatus(row.rawData);
+  if (!status) return row;
+  row.protectionStatus = status;
+  if (persistModel && row._id && persistModel.schema?.paths?.protectionStatus) {
+    persistModel.updateOne({ _id: row._id }, { $set: { protectionStatus: status } }).catch(() => {});
+  }
+  return row;
+}
+
+function extractItemPictureUrl(source) {
+  if (!source || typeof source !== 'object') return '';
+  const url = asNonEmptyId(source.itemPictureUrl)
+    || asNonEmptyId(source.inquiryDetails?.itemPictureUrl)
+    || asNonEmptyId(source.caseDetails?.itemPictureUrl)
+    || asNonEmptyId(source.itemDetails?.itemPictureUrl)
+    || asNonEmptyId(source.lineItems?.[0]?.itemPictureUrl)
+    || asNonEmptyId(source.itemPicture?.url);
+  return url.startsWith('http') ? url : '';
+}
+
+function fillItemPictureUrlOnRow(row, persistModel) {
+  if (!row) return row;
+  const url = asNonEmptyId(row.itemPictureUrl)
+    || extractItemPictureUrl(row.rawData)
+    || extractItemPictureUrl(row);
+  if (!url) return row;
+  row.itemPictureUrl = url;
+  if (persistModel && row._id) {
+    persistModel.updateOne({ _id: row._id }, { $set: { itemPictureUrl: url } }).catch(() => {});
+  }
+  return row;
+}
+
+function fillSellerOutcomeOnRow(row, persistModel) {
+  if (!row) return row;
+  const outcome = asNonEmptyId(row.sellerOutcome)
+    || extractSellerOutcome(row.rawData)
+    || extractSellerOutcome(row);
+  if (outcome) {
+    row.sellerOutcome = outcome;
+    if (persistModel && row._id) {
+      persistModel.updateOne({ _id: row._id }, { $set: { sellerOutcome: outcome } }).catch(() => {});
+    }
+  }
+  return row;
+}
+
+function mapInquiryCaseType(inquiryType) {
+  const t = String(inquiryType || '').toUpperCase();
+  if (t === 'SNAD' || t === 'SIGNIFICANTLY_NOT_AS_DESCRIBED') return 'SNAD';
+  if (!t || t === 'INR' || t === 'ITEM_NOT_RECEIVED') return 'INR';
+  return 'OTHER';
+}
+
+function extractPostOrderOrderId(source, depth = 0) {
+  if (!source || typeof source !== 'object' || depth > 8) return '';
+  const keys = ['orderId', 'legacyOrderId', 'orderNumber', 'extOrderId', 'ebayOrderId', 'legacyOrderID'];
+  for (const key of keys) {
+    const v = asNonEmptyId(source[key]);
+    if (v) return v;
+  }
+  for (const value of Object.values(source)) {
+    if (!value || typeof value !== 'object') continue;
+    const found = extractPostOrderOrderId(value, depth + 1);
+    if (found) return found;
+  }
+  return '';
+}
+
+function extractPostOrderItemId(source, depth = 0) {
+  if (!source || typeof source !== 'object' || depth > 8) return '';
+  const keys = ['itemId', 'legacyItemId', 'itemID', 'ItemID', 'legacyItemID'];
+  for (const key of keys) {
+    const v = asNonEmptyId(source[key]);
+    if (v) return v;
+  }
+  const lineItems = source.lineItems || source.lineItem;
+  const first = Array.isArray(lineItems) ? lineItems[0] : lineItems;
+  if (first && typeof first === 'object') {
+    const fromLine = extractPostOrderItemId(first, depth + 1);
+    if (fromLine) return fromLine;
+  }
+  const values = Array.isArray(source) ? source : Object.values(source);
+  for (const value of values) {
+    if (!value || typeof value !== 'object') continue;
+    const found = extractPostOrderItemId(value, depth + 1);
+    if (found) return found;
+  }
+  return '';
+}
+
+async function lookupItemIdFromOrder(sellerId, orderId) {
+  const oid = asNonEmptyId(orderId);
+  if (!oid) return '';
+  const query = { $or: [{ orderId: oid }, { legacyOrderId: oid }] };
+  if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) query.seller = sellerId;
+  const order = await Order.findOne(query).select('itemNumber lineItems').lean();
+  if (!order) return '';
+  return asNonEmptyId(order.itemNumber)
+    || asNonEmptyId(order.lineItems?.[0]?.legacyItemId)
+    || asNonEmptyId(order.lineItems?.[0]?.itemId)
+    || '';
+}
+
+async function lookupRestOrderId(sellerId, candidate) {
+  const id = asNonEmptyId(candidate);
+  if (!id) return '';
+  const query = { $or: [{ orderId: id }, { legacyOrderId: id }] };
+  if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
+    query.seller = sellerId;
+  }
+  const order = await Order.findOne(query).select('orderId').lean();
+  return String(order?.orderId || id);
+}
+
+async function resolveDisplayOrderId({
+  sellerId,
+  buyerUsername,
+  itemId,
+  sources = [],
+  existingOrderId,
+} = {}) {
+  if (existingOrderId) return lookupRestOrderId(sellerId, existingOrderId);
+  for (const source of sources) {
+    const extracted = extractPostOrderOrderId(source);
+    if (extracted) return lookupRestOrderId(sellerId, extracted);
+  }
+  return resolveInrCaseOrderId({ sellerId, buyerUsername, itemId });
+}
+
+async function fillMissingOrderIdOnRow(row, persistModel) {
+  if (!row || asNonEmptyId(row.orderId)) return row;
+  try {
+    const filled = await resolveDisplayOrderId({
+      sellerId: row.seller?._id || row.seller,
+      buyerUsername: row.buyerUsername,
+      itemId: row.itemId
+        || row.rawData?.itemId
+        || row.rawData?.lineItems?.[0]?.itemId
+        || row.rawData?.lineItems?.[0]?.legacyItemId,
+      sources: [row, row.rawData],
+    });
+    if (filled) {
+      row.orderId = filled;
+      if (persistModel && row._id) {
+        persistModel.updateOne({ _id: row._id }, { $set: { orderId: filled } }).catch(() => {});
+      }
+    }
+  } catch (_) {
+    // leave blank
+  }
+  return row;
+}
+
+async function fillMissingItemIdOnRow(row, persistModel) {
+  if (!row || asNonEmptyId(row.itemId)) return row;
+  try {
+    let itemId = extractPostOrderItemId(row.rawData || row);
+    if (!itemId) {
+      itemId = await lookupItemIdFromOrder(row.seller?._id || row.seller, row.orderId);
+    }
+    if (itemId) {
+      row.itemId = itemId;
+      if (persistModel && row._id) {
+        persistModel.updateOne({ _id: row._id }, { $set: { itemId } }).catch(() => {});
+      }
+    }
+  } catch (_) {
+    // leave blank
+  }
+  return row;
+}
+
+function fillMissingIssueReasonOnRow(row, persistModel, { mapInquiry = false } = {}) {
+  if (!row) return row;
+  const extracted = extractIssueReason(row.rawData || row);
+  if (!extracted) return row;
+  const next = mapInquiry ? mapInquiryCaseType(extracted) : extracted;
+  const patch = {};
+  if (!asNonEmptyId(row.caseType)) {
+    row.caseType = next;
+    if (persistModel && persistModel.modelName !== 'PaymentDispute') patch.caseType = next;
+  }
+  if (!asNonEmptyId(row.reason) && persistModel?.modelName === 'PaymentDispute') {
+    row.reason = extracted;
+    patch.reason = extracted;
+  }
+  if (persistModel && row._id && Object.keys(patch).length) {
+    persistModel.updateOne({ _id: row._id }, { $set: patch }).catch(() => {});
+  }
+  return row;
+}
+
 // Fetch INR cases from eBay Post-Order API and store in DB
 router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
@@ -11066,6 +11434,7 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
               // Resolution
               resolution: ebayCase.resolution || null,
               sellerResponse: ebayCase.sellerResponse || null,
+              shipmentTrackingDetails: parseShipmentTrackingDetails(ebayCase),
 
               rawData: ebayCase
             };
@@ -11144,7 +11513,7 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
 
 // Get stored INR cases from database
 router.get('/stored-inr-cases', async (req, res) => {
-  const { sellerId, status, caseType, limit = 200, dateFrom, dateTo } = req.query;
+    const { sellerId, status, caseType, marketplace, limit = 200, dateFrom, dateTo } = req.query;
 
   try {
     // Minimum date for compliance boards: July 19, 2026
@@ -11180,11 +11549,18 @@ router.get('/stored-inr-cases', async (req, res) => {
     if (sellerId) query.seller = sellerId;
     if (status) query.status = status;
     if (caseType) query.caseType = caseType;
+    if (marketplace) {
+      const sellerIdsForMarket = await Seller.find({ ebayMarketplaces: marketplace }).distinct('_id');
+      query.$or = [
+        { marketplaceId: marketplace },
+        { seller: { $in: sellerIdsForMarket } },
+      ];
+    }
 
     const cases = await Case.find(query)
       .populate({
         path: 'seller',
-        select: 'user',
+        select: 'user ebayMarketplaces',
         populate: {
           path: 'user',
           select: 'username'
@@ -11195,33 +11571,988 @@ router.get('/stored-inr-cases', async (req, res) => {
 
     const totalCount = await Case.countDocuments(query);
 
-    // Fill missing orderIds for the table (same lookup as Action → Open chat)
+    // Fill missing orderIds for the table (eBay payload, then buyer+item lookup)
     const enriched = await Promise.all(
       cases.map(async (doc) => {
-        const c = doc.toObject();
-        if (c.orderId) return c;
-        try {
-          const resolved = await resolveInrCaseOrderId({
-            sellerId: c.seller?._id || c.seller,
-            buyerUsername: c.buyerUsername,
-            itemId: c.itemId
-          });
-          if (resolved) {
-            c.orderId = resolved;
-            Case.updateOne({ _id: c._id }, { $set: { orderId: resolved } }).catch(() => {});
-          }
-        } catch (_) {
-          // leave blank
-        }
-        return c;
+        const row = await fillMissingOrderIdOnRow(doc.toObject(), Case);
+        const withItem = await fillMissingItemIdOnRow(row, Case);
+        const withReason = fillMissingIssueReasonOnRow(withItem, Case, { mapInquiry: true });
+        return fillIssueStatusOnRow(
+          fillReasonForClosureOnRow(
+            fillItemPictureUrlOnRow(
+              fillSellerDueDateOnRow(
+                await fillMissingTrackingOnRow(withReason, Case),
+                Case
+              ),
+              Case
+            ),
+            Case
+          ),
+          Case,
+          'inquiry'
+        );
       })
     );
 
-    const enrichedWithMeta = await enrichCaseLikeRowsWithConversationMeta(enriched);
-
-    res.json({ cases: enrichedWithMeta, totalCases: enrichedWithMeta.length, totalCount });
+    const withAddress = await attachShippingAddressToRows(enriched);
+    const enrichedWithMeta = await enrichCaseLikeRowsWithConversationMeta(withAddress);
+    res.json({
+      cases: enrichedWithMeta.map((row) => withParsedTracking(row)),
+      totalCases: enrichedWithMeta.length,
+      totalCount,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+function ebayPostOrderDate(value) {
+  const raw = value?.value ?? value;
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function extractSellerDueDate(...sources) {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    const preferred = ebayPostOrderDate(source.sellerMakeItRightByDate)
+      || ebayPostOrderDate(source.inquiryDetails?.sellerMakeItRightByDate)
+      || ebayPostOrderDate(source.caseDetails?.sellerMakeItRightByDate);
+    if (preferred) return preferred;
+  }
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    const fallback = ebayPostOrderDate(source.respondByDate)
+      || ebayPostOrderDate(source.sellerResponseDue?.respondByDate)
+      || ebayPostOrderDate(source.sellerResponseDueDate);
+    if (fallback) return fallback;
+  }
+  return null;
+}
+
+function fillSellerDueDateOnRow(row, persistModel) {
+  if (!row) return row;
+  const due = extractSellerDueDate(row.rawData, row);
+  if (!due) return row;
+  const prev = row.sellerResponseDueDate ? new Date(row.sellerResponseDueDate).getTime() : 0;
+  if (prev !== due.getTime()) {
+    row.sellerResponseDueDate = due;
+    if (persistModel && row._id) {
+      persistModel.updateOne({ _id: row._id }, { $set: { sellerResponseDueDate: due } }).catch(() => {});
+    }
+  }
+  return row;
+}
+
+function findNestedValue(source, keyNames, depth = 0) {
+  if (!source || typeof source !== 'object' || depth > 8) return undefined;
+  for (const key of keyNames) {
+    if (source[key] != null) return source[key];
+  }
+  for (const value of Object.values(source)) {
+    if (!value || typeof value !== 'object') continue;
+    const found = findNestedValue(value, keyNames, depth + 1);
+    if (found != null) return found;
+  }
+  return undefined;
+}
+
+function parseShipmentTrackingDetails(source = {}) {
+  if (!source || typeof source !== 'object') return null;
+  const asDetails = (first) => {
+    if (!first || typeof first !== 'object') return null;
+    const trackingNumber = String(
+      first.trackingNumber || first.trackingNo || first.shipmentTrackingNumber || first.tracking_number || ''
+    ).trim();
+    const trackingURL = String(first.trackingURL || first.trackingUrl || first.trackingLink || '').trim();
+    const carrier = String(
+      first.carrier || first.shippingCarrier || first.carrierUsed || first.shippingCarrierCode || ''
+    ).trim();
+    const currentStatus = String(first.currentStatus || first.trackingStatus || '').trim();
+    const estimateFromDate = ebayPostOrderDate(first.estimateFromDate || first.estimatedFromDate || first.estimatedDeliveryDate);
+    if (!trackingNumber && !trackingURL && !carrier && !currentStatus && !estimateFromDate) return null;
+    return {
+      trackingURL,
+      trackingNumber,
+      carrier,
+      estimateFromDate,
+      currentStatus,
+    };
+  };
+  const direct = asDetails(source);
+  if (direct && (source.trackingNumber || source.trackingURL || source.shipmentTrackingNumber)) return direct;
+  const details = findNestedValue(source, ['shipmentTrackingDetails', 'shipmentTrackingDetail']);
+  const first = Array.isArray(details) ? details[0] : details;
+  const fromDetails = asDetails(first);
+  if (fromDetails) return fromDetails;
+  const trackingNumber = asNonEmptyId(findNestedValue(source, ['trackingNumber', 'shipmentTrackingNumber', 'trackingNo']));
+  if (!trackingNumber) return null;
+  return {
+    trackingNumber,
+    trackingURL: asNonEmptyId(findNestedValue(source, ['trackingURL', 'trackingUrl', 'trackingLink'])) || '',
+    carrier: asNonEmptyId(findNestedValue(source, ['carrier', 'shippingCarrier', 'carrierUsed', 'shippingCarrierCode'])) || '',
+    estimateFromDate: ebayPostOrderDate(findNestedValue(source, ['estimateFromDate', 'estimatedFromDate', 'estimatedDeliveryDate'])),
+    currentStatus: asNonEmptyId(findNestedValue(source, ['currentStatus', 'trackingStatus'])) || '',
+  };
+}
+
+function withParsedTracking(row = {}) {
+  const tracking = parseShipmentTrackingDetails(row.shipmentTrackingDetails)
+    || parseShipmentTrackingDetails(row.rawData)
+    || parseShipmentTrackingDetails(row);
+  if (!tracking) return row;
+  return { ...row, shipmentTrackingDetails: tracking };
+}
+
+async function lookupTrackingFromOrder(sellerId, orderId) {
+  const oid = asNonEmptyId(orderId);
+  if (!oid) return null;
+  const query = { $or: [{ orderId: oid }, { legacyOrderId: oid }] };
+  if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) query.seller = sellerId;
+  const order = await Order.findOne(query).select('trackingNumber manualTrackingNumber').lean();
+  const trackingNumber = asNonEmptyId(order?.manualTrackingNumber) || asNonEmptyId(order?.trackingNumber);
+  if (!trackingNumber) return null;
+  return {
+    trackingNumber,
+    trackingURL: '',
+    carrier: '',
+    estimateFromDate: null,
+    currentStatus: '',
+  };
+}
+
+async function fillMissingTrackingOnRow(row, persistModel) {
+  if (!row) return row;
+  let tracking = parseShipmentTrackingDetails(row.shipmentTrackingDetails)
+    || parseShipmentTrackingDetails(row.rawData)
+    || parseShipmentTrackingDetails(row);
+  if (!asNonEmptyId(tracking?.trackingNumber)) {
+    const fromOrder = await lookupTrackingFromOrder(row.seller?._id || row.seller, row.orderId);
+    if (fromOrder) {
+      tracking = {
+        trackingURL: tracking?.trackingURL || '',
+        trackingNumber: fromOrder.trackingNumber,
+        carrier: tracking?.carrier || '',
+        estimateFromDate: tracking?.estimateFromDate || null,
+        currentStatus: tracking?.currentStatus || '',
+      };
+    }
+  }
+  if (tracking) {
+    row.shipmentTrackingDetails = tracking;
+    if (persistModel && row._id && asNonEmptyId(tracking.trackingNumber)) {
+      persistModel.updateOne({ _id: row._id }, { $set: { shipmentTrackingDetails: tracking } }).catch(() => {});
+    }
+  }
+  return row;
+}
+
+const ORDER_SHIPPING_SELECT = [
+  'orderId',
+  'legacyOrderId',
+  'shippingFullName',
+  'shippingAddressLine1',
+  'shippingAddressLine2',
+  'shippingCity',
+  'shippingState',
+  'shippingPostalCode',
+  'shippingCountry',
+].join(' ');
+
+function formatOrderShippingAddress(order) {
+  if (!order) return null;
+  const fullName = String(order.shippingFullName || '').trim();
+  const line1 = String(order.shippingAddressLine1 || '').trim();
+  const line2 = String(order.shippingAddressLine2 || '').trim();
+  const city = String(order.shippingCity || '').trim();
+  const state = String(order.shippingState || '').trim();
+  const postalCode = String(order.shippingPostalCode || '').trim();
+  const country = String(order.shippingCountry || '').trim();
+  const formatted = [
+    fullName,
+    line1,
+    line2,
+    [city, state].filter(Boolean).join(', '),
+    postalCode,
+    country,
+  ].filter(Boolean).join(', ');
+  if (!formatted) return null;
+  return { fullName, line1, line2, city, state, postalCode, country, formatted };
+}
+
+async function attachShippingAddressToRows(rows) {
+  if (!Array.isArray(rows) || !rows.length) return rows;
+  const ids = [...new Set(
+    rows
+      .map((row) => asNonEmptyId(row.orderId) || asNonEmptyId(extractPostOrderOrderId(row.rawData || row)))
+      .filter(Boolean)
+  )];
+  if (!ids.length) return rows.map((row) => ({ ...row, shippingAddress: row.shippingAddress || null }));
+  const orders = await Order.find({
+    $or: [{ orderId: { $in: ids } }, { legacyOrderId: { $in: ids } }],
+  }).select(ORDER_SHIPPING_SELECT).lean();
+  const byId = new Map();
+  for (const order of orders) {
+    const address = formatOrderShippingAddress(order);
+    if (!address) continue;
+    if (order.orderId) byId.set(String(order.orderId), address);
+    if (order.legacyOrderId) byId.set(String(order.legacyOrderId), address);
+  }
+  return rows.map((row) => {
+    const oid = asNonEmptyId(row.orderId) || asNonEmptyId(extractPostOrderOrderId(row.rawData || row));
+    return { ...row, shippingAddress: (oid && byId.get(oid)) || row.shippingAddress || null };
+  });
+}
+
+async function fetchPostOrderDetail(url, headers) {
+  try {
+    const response = await axios.get(url, { headers, timeout: 30000 });
+    return response.data || null;
+  } catch (err) {
+    console.warn(`[INR API] detail GET failed ${url}:`, err.response?.status, err.response?.data || err.message);
+    return null;
+  }
+}
+
+async function refreshSellerAccessToken(seller, logLabel) {
+  const nowUTC = Date.now();
+  const fetchedAt = seller.ebayTokens?.fetchedAt ? new Date(seller.ebayTokens.fetchedAt).getTime() : 0;
+  const expiresInMs = (seller.ebayTokens?.expires_in || 0) * 1000;
+  let accessToken = seller.ebayTokens?.access_token;
+  if (fetchedAt && (nowUTC - fetchedAt > expiresInMs - 2 * 60 * 1000)) {
+    console.log(`[${logLabel}] Refreshing token for seller ${seller.user?.username || seller._id}`);
+    const refreshRes = await axios.post(
+      'https://api.ebay.com/identity/v1/oauth2/token',
+      qs.stringify(buildRefreshTokenParams(seller)),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: 'Basic ' + Buffer.from(`${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`).toString('base64'),
+        },
+      }
+    );
+    accessToken = refreshRes.data.access_token;
+    seller.ebayTokens.access_token = accessToken;
+    seller.ebayTokens.expires_in = refreshRes.data.expires_in;
+    seller.ebayTokens.fetchedAt = new Date(nowUTC);
+    await seller.save();
+  }
+  return accessToken;
+}
+
+function postOrderJsonHeaders(accessToken, marketplaceId = 'EBAY_US') {
+  return {
+    Authorization: `IAF ${accessToken}`,
+    Accept: 'application/json',
+    'X-EBAY-C-MARKETPLACE-ID': marketplaceId || 'EBAY_US',
+  };
+}
+
+function postOrderPostHeaders(accessToken, marketplaceId = 'EBAY_US') {
+  return {
+    ...postOrderJsonHeaders(accessToken, marketplaceId),
+    'Content-Type': 'application/json',
+  };
+}
+
+function extractPostOrderErrorFromData(data) {
+  if (!data) return '';
+  if (typeof data === 'string') return data;
+  const errors = data.errorMessage?.error || data.errors;
+  if (Array.isArray(errors) && errors.length) {
+    return errors.map((e) => e.message || e.longMessage || String(e.errorId || '')).filter(Boolean).join('; ');
+  }
+  return data.error || data.message || '';
+}
+
+/**
+ * Fetch Post-Order Inquiry search + Case Management search (last 30 days) for all connected sellers.
+ * Docs: https://developer.ebay.com/devzone/post-order/index.html#CallIndex
+ *   GET /post-order/v2/inquiry/search
+ *   GET /post-order/v2/casemanagement/search
+ */
+router.post('/fetch-inr-api', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const sellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+      .populate('user', 'username');
+
+    if (sellers.length === 0) {
+      return res.json({
+        message: 'No sellers with eBay tokens found',
+        totalNewInquiries: 0,
+        totalUpdatedInquiries: 0,
+        totalNewCases: 0,
+        totalUpdatedCases: 0,
+      });
+    }
+
+    const fromIso = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const toIso = new Date().toISOString();
+    let totalNewInquiries = 0;
+    let totalUpdatedInquiries = 0;
+    let totalNewCases = 0;
+    let totalUpdatedCases = 0;
+    const errors = [];
+
+    const results = await Promise.allSettled(
+      sellers.map(async (seller) => {
+        const sellerName = seller.user?.username || 'Unknown Seller';
+        const accessToken = await refreshSellerAccessToken(seller, 'INR API');
+        const marketplaceId = seller.ebayMarketplaces?.[0] || 'EBAY_US';
+        const headers = postOrderJsonHeaders(accessToken, marketplaceId);
+
+        const inquiryRes = await axios.get('https://api.ebay.com/post-order/v2/inquiry/search', {
+          headers,
+          params: {
+            creation_date_range_from: fromIso,
+            creation_date_range_to: toIso,
+            limit: 200,
+          },
+          timeout: 60000,
+        });
+        const inquiries = inquiryRes.data?.members || [];
+
+        let newInquiries = 0;
+        let updatedInquiries = 0;
+        for (const row of inquiries) {
+          const inquiryId = String(row.inquiryId || '').trim();
+          if (!inquiryId) continue;
+          const inquiryType = row.inquiryType || 'INR';
+          let caseType = 'INR';
+          if (inquiryType === 'SNAD' || inquiryType === 'SIGNIFICANTLY_NOT_AS_DESCRIBED') caseType = 'SNAD';
+          else if (inquiryType !== 'INR' && inquiryType !== 'ITEM_NOT_RECEIVED') caseType = 'OTHER';
+
+          const payload = {
+            seller: seller._id,
+            caseId: inquiryId,
+            caseType,
+            orderId: row.orderId || row.orderNumber || undefined,
+            buyerUsername: row.buyer || row.buyerLoginName,
+            status: row.inquiryStatusEnum || row.state || row.status || 'OPEN',
+            creationDate: ebayPostOrderDate(row.creationDate),
+            sellerResponseDueDate: ebayPostOrderDate(row.respondByDate)
+              || ebayPostOrderDate(row.sellerResponseDue?.respondByDate),
+            escalationDate: ebayPostOrderDate(row.escalationDate),
+            closedDate: ebayPostOrderDate(row.closedDate),
+            lastModifiedDate: ebayPostOrderDate(row.lastModifiedDate),
+            itemId: row.itemId,
+            itemTitle: row.itemTitle,
+            marketplaceId,
+            claimAmount: {
+              value: String(row.claimAmount?.value || 0),
+              currency: row.claimAmount?.currency || 'USD',
+            },
+            resolution: typeof row.resolution === 'string' ? row.resolution : null,
+            sellerResponse: row.sellerResponse || null,
+            shipmentTrackingDetails: parseShipmentTrackingDetails(row),
+            rawData: row,
+          };
+
+          const inquiryDetail = await fetchPostOrderDetail(
+            `https://api.ebay.com/post-order/v2/inquiry/${encodeURIComponent(inquiryId)}`,
+            headers
+          );
+          const inquiryTracking = parseShipmentTrackingDetails(inquiryDetail || {})
+            || payload.shipmentTrackingDetails;
+          if (inquiryTracking) payload.shipmentTrackingDetails = inquiryTracking;
+          if (inquiryDetail) {
+            payload.rawData = { ...row, ...inquiryDetail };
+            payload.status = extractIssueStatus(inquiryDetail, 'inquiry')
+              || extractIssueStatus(payload.rawData, 'inquiry')
+              || payload.status;
+            if (!payload.itemId) {
+              payload.itemId = asNonEmptyId(inquiryDetail.itemId)
+                || asNonEmptyId(findNestedValue(inquiryDetail, ['itemId']));
+            }
+            if (!payload.buyerUsername) {
+              payload.buyerUsername = asNonEmptyId(inquiryDetail.buyer)
+                || asNonEmptyId(inquiryDetail.buyerLoginName);
+            }
+          }
+          payload.sellerResponseDueDate = extractSellerDueDate(payload.rawData, inquiryDetail, row)
+            || payload.sellerResponseDueDate;
+          payload.itemPictureUrl = extractItemPictureUrl(payload.rawData)
+            || extractItemPictureUrl(inquiryDetail)
+            || extractItemPictureUrl(row)
+            || '';
+          payload.caseType = mapInquiryCaseType(
+            extractIssueReason(payload.rawData) || row.inquiryType || payload.caseType
+          );
+          payload.reasonForClosure = extractReasonForClosure(payload.rawData)
+            || extractReasonForClosure(inquiryDetail)
+            || extractReasonForClosure(row)
+            || '';
+          if (payload.reasonForClosure) payload.resolution = payload.reasonForClosure;
+          payload.orderId = await resolveDisplayOrderId({
+            sellerId: seller._id,
+            buyerUsername: payload.buyerUsername,
+            itemId: payload.itemId,
+            sources: [payload.rawData, inquiryDetail, row],
+            existingOrderId: payload.orderId,
+          }) || undefined;
+          if (!payload.itemId) {
+            payload.itemId = extractPostOrderItemId(payload.rawData)
+              || await lookupItemIdFromOrder(seller._id, payload.orderId)
+              || undefined;
+          }
+          if (!asNonEmptyId(payload.shipmentTrackingDetails?.trackingNumber)) {
+            const parsed = parseShipmentTrackingDetails(payload.rawData);
+            payload.shipmentTrackingDetails = parsed
+              || await lookupTrackingFromOrder(seller._id, payload.orderId)
+              || payload.shipmentTrackingDetails;
+          }
+
+          const existing = await Case.findOne({ caseId: inquiryId });
+          if (existing) {
+            if (!payload.orderId && existing.orderId) payload.orderId = existing.orderId;
+            existing.set(payload);
+            await existing.save();
+            updatedInquiries += 1;
+          } else {
+            await Case.create(payload);
+            newInquiries += 1;
+          }
+        }
+
+        const caseRes = await axios.get('https://api.ebay.com/post-order/v2/casemanagement/search', {
+          headers,
+          params: {
+            case_creation_date_range_from: fromIso,
+            case_creation_date_range_to: toIso,
+            limit: 200,
+          },
+          timeout: 60000,
+        });
+        const cases = caseRes.data?.members || [];
+
+        let newCases = 0;
+        let updatedCases = 0;
+        for (const row of cases) {
+          const caseId = String(row.caseId || '').trim();
+          if (!caseId) continue;
+          const payload = {
+            seller: seller._id,
+            caseId,
+            caseType: row.caseTypeEnum || row.caseType || '',
+            status: row.caseStatusEnum || row.status || 'OPEN',
+            orderId: row.orderId || row.legacyOrderId || '',
+            buyerUsername: row.buyer || row.buyerLoginName || '',
+            itemId: row.itemId || '',
+            itemTitle: row.itemTitle || '',
+            marketplaceId,
+            initiator: row.initiator || row.escalateReason || '',
+            escalationReason: row.escalationReason || row.escalateReason || '',
+            claimAmount: {
+              value: String(row.claimAmount?.value || 0),
+              currency: row.claimAmount?.currency || 'USD',
+            },
+            creationDate: ebayPostOrderDate(row.creationDate),
+            sellerResponseDueDate: ebayPostOrderDate(row.respondByDate)
+              || ebayPostOrderDate(row.sellerResponseDue?.respondByDate),
+            lastModifiedDate: ebayPostOrderDate(row.lastModifiedDate),
+            closedDate: ebayPostOrderDate(row.closedDate),
+            shipmentTrackingDetails: parseShipmentTrackingDetails(row),
+            rawData: row,
+          };
+          const caseDetail = await fetchPostOrderDetail(
+            `https://api.ebay.com/post-order/v2/casemanagement/${encodeURIComponent(caseId)}`,
+            headers
+          );
+          const caseTracking = parseShipmentTrackingDetails(caseDetail || {})
+            || payload.shipmentTrackingDetails;
+          if (caseTracking) payload.shipmentTrackingDetails = caseTracking;
+          if (caseDetail) {
+            payload.rawData = { ...row, ...caseDetail };
+            payload.status = extractIssueStatus(caseDetail, 'case')
+              || extractIssueStatus(payload.rawData, 'case')
+              || payload.status;
+            if (!payload.itemId) {
+              payload.itemId = asNonEmptyId(caseDetail.itemId)
+                || asNonEmptyId(findNestedValue(caseDetail, ['itemId']));
+            }
+            if (!payload.buyerUsername) {
+              payload.buyerUsername = asNonEmptyId(caseDetail.buyer)
+                || asNonEmptyId(caseDetail.buyerLoginName);
+            }
+          }
+          payload.sellerResponseDueDate = extractSellerDueDate(payload.rawData, caseDetail, row)
+            || payload.sellerResponseDueDate;
+          payload.itemPictureUrl = extractItemPictureUrl(payload.rawData)
+            || extractItemPictureUrl(caseDetail)
+            || extractItemPictureUrl(row)
+            || '';
+          payload.caseType = extractIssueReason(payload.rawData) || payload.caseType || '';
+          payload.sellerOutcome = extractSellerOutcome(payload.rawData)
+            || extractSellerOutcome(caseDetail)
+            || extractSellerOutcome(row)
+            || '';
+          payload.reasonForClosure = extractReasonForClosure(payload.rawData)
+            || extractReasonForClosure(caseDetail)
+            || extractReasonForClosure(row)
+            || payload.sellerOutcome
+            || '';
+          payload.inquiryId = asNonEmptyId(caseDetail?.inquiryId)
+            || asNonEmptyId(row.inquiryId)
+            || asNonEmptyId(findNestedValue(payload.rawData, ['inquiryId']))
+            || '';
+          payload.orderId = await resolveDisplayOrderId({
+            sellerId: seller._id,
+            buyerUsername: payload.buyerUsername,
+            itemId: payload.itemId,
+            sources: [payload.rawData, caseDetail, row],
+            existingOrderId: payload.orderId,
+          }) || '';
+          if (!payload.itemId) {
+            payload.itemId = extractPostOrderItemId(payload.rawData)
+              || await lookupItemIdFromOrder(seller._id, payload.orderId)
+              || '';
+          }
+          if (!asNonEmptyId(payload.shipmentTrackingDetails?.trackingNumber)) {
+            const parsed = parseShipmentTrackingDetails(payload.rawData);
+            payload.shipmentTrackingDetails = parsed
+              || await lookupTrackingFromOrder(seller._id, payload.orderId)
+              || payload.shipmentTrackingDetails;
+          }
+          const existing = await CaseManagement.findOne({ caseId });
+          if (existing) {
+            if (!payload.orderId && existing.orderId) payload.orderId = existing.orderId;
+            existing.set(payload);
+            await existing.save();
+            updatedCases += 1;
+          } else {
+            await CaseManagement.create(payload);
+            newCases += 1;
+          }
+        }
+
+        return {
+          sellerName,
+          inquiries: inquiries.length,
+          newInquiries,
+          updatedInquiries,
+          cases: cases.length,
+          newCases,
+          updatedCases,
+        };
+      })
+    );
+
+    const successResults = [];
+    results.forEach((result) => {
+      if (result.status === 'fulfilled') {
+        successResults.push(result.value);
+        totalNewInquiries += result.value.newInquiries;
+        totalUpdatedInquiries += result.value.updatedInquiries;
+        totalNewCases += result.value.newCases;
+        totalUpdatedCases += result.value.updatedCases;
+      } else {
+        errors.push(result.reason?.message || String(result.reason));
+      }
+    });
+
+    res.json({
+      message: `Fetched Inquiry + Case Management for ${successResults.length} sellers`,
+      totalNewInquiries,
+      totalUpdatedInquiries,
+      totalNewCases,
+      totalUpdatedCases,
+      results: successResults,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (err) {
+    console.error('[INR API] fetch error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/stored-case-management', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const { sellerId, status, caseType, marketplace, limit = 200 } = req.query;
+    const query = {};
+    if (sellerId) query.seller = sellerId;
+    if (status) query.status = status;
+    if (caseType) query.caseType = caseType;
+    if (marketplace) {
+      const sellerIdsForMarket = await Seller.find({ ebayMarketplaces: marketplace }).distinct('_id');
+      query.$or = [
+        { marketplaceId: marketplace },
+        { seller: { $in: sellerIdsForMarket } },
+      ];
+    }
+
+    const rows = await CaseManagement.find(query)
+      .populate({
+        path: 'seller',
+        select: 'user ebayMarketplaces',
+        populate: { path: 'user', select: 'username' },
+      })
+      .sort({ creationDate: -1 })
+      .limit(Math.min(500, Math.max(1, parseInt(limit, 10) || 200)))
+      .lean();
+
+    const withOrderIds = await Promise.all(
+      rows.map(async (row) => {
+        const withOrder = await fillMissingOrderIdOnRow(row, CaseManagement);
+        const withItem = await fillMissingItemIdOnRow(withOrder, CaseManagement);
+        const withReason = fillMissingIssueReasonOnRow(withItem, CaseManagement);
+        const withTracking = await fillMissingTrackingOnRow(withReason, CaseManagement);
+        return fillIssueStatusOnRow(
+          fillReasonForClosureOnRow(
+            fillItemPictureUrlOnRow(
+              fillSellerDueDateOnRow(
+                fillSellerOutcomeOnRow(withTracking, CaseManagement),
+                CaseManagement
+              ),
+              CaseManagement
+            ),
+            CaseManagement
+          ),
+          CaseManagement,
+          'case'
+        );
+      })
+    );
+
+    const withAddress = await attachShippingAddressToRows(withOrderIds);
+    res.json({
+      cases: withAddress.map((row) => withParsedTracking(row)),
+      totalCases: withAddress.length,
+      totalCount: await CaseManagement.countDocuments(query),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/enrich-inr-api-tracking', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const source = String(req.body?.source || req.query?.source || 'all').toLowerCase();
+    const limit = Math.min(150, Math.max(1, parseInt(req.body?.limit || req.query?.limit, 10) || 80));
+    const missingTracking = {
+      $or: [
+        { shipmentTrackingDetails: { $exists: false } },
+        { shipmentTrackingDetails: null },
+        { 'shipmentTrackingDetails.trackingNumber': { $in: [null, ''] } },
+      ],
+    };
+
+    let inquiryUpdated = 0;
+    let inquiryFailed = 0;
+    let caseUpdated = 0;
+    let caseFailed = 0;
+
+    if (source === 'all' || source === 'inquiry') {
+      const docs = await Case.find(missingTracking)
+        .sort({ creationDate: -1 })
+        .limit(limit)
+        .populate('seller');
+      for (const doc of docs) {
+        const fromRaw = parseShipmentTrackingDetails(doc.rawData || {});
+        if (fromRaw) {
+          doc.shipmentTrackingDetails = fromRaw;
+          await doc.save();
+          inquiryUpdated += 1;
+          continue;
+        }
+        const fromOrder = await lookupTrackingFromOrder(doc.seller?._id || doc.seller, doc.orderId);
+        if (fromOrder) {
+          doc.shipmentTrackingDetails = fromOrder;
+          await doc.save();
+          inquiryUpdated += 1;
+          continue;
+        }
+        if (!doc.seller?.ebayTokens?.access_token || !doc.caseId) {
+          inquiryFailed += 1;
+          continue;
+        }
+        try {
+          const token = await refreshSellerAccessToken(doc.seller, 'INR API enrich inquiry');
+          const marketplaceId = doc.seller.ebayMarketplaces?.[0] || 'EBAY_US';
+          const detail = await fetchPostOrderDetail(
+            `https://api.ebay.com/post-order/v2/inquiry/${encodeURIComponent(doc.caseId)}`,
+            postOrderJsonHeaders(token, marketplaceId)
+          );
+          const tracking = parseShipmentTrackingDetails(detail || {});
+          if (tracking) {
+            doc.shipmentTrackingDetails = tracking;
+            if (detail) doc.rawData = { ...(doc.rawData || {}), ...detail };
+            await doc.save();
+            inquiryUpdated += 1;
+          } else {
+            inquiryFailed += 1;
+          }
+        } catch {
+          inquiryFailed += 1;
+        }
+      }
+    }
+
+    if (source === 'all' || source === 'case') {
+      const docs = await CaseManagement.find(missingTracking)
+        .sort({ creationDate: -1 })
+        .limit(limit)
+        .populate('seller');
+      for (const doc of docs) {
+        const fromRaw = parseShipmentTrackingDetails(doc.rawData || {});
+        if (fromRaw) {
+          doc.shipmentTrackingDetails = fromRaw;
+          await doc.save();
+          caseUpdated += 1;
+          continue;
+        }
+        const fromOrder = await lookupTrackingFromOrder(doc.seller?._id || doc.seller, doc.orderId);
+        if (fromOrder) {
+          doc.shipmentTrackingDetails = fromOrder;
+          await doc.save();
+          caseUpdated += 1;
+          continue;
+        }
+        if (!doc.seller?.ebayTokens?.access_token || !doc.caseId) {
+          caseFailed += 1;
+          continue;
+        }
+        try {
+          const token = await refreshSellerAccessToken(doc.seller, 'INR API enrich case');
+          const marketplaceId = doc.seller.ebayMarketplaces?.[0] || 'EBAY_US';
+          const detail = await fetchPostOrderDetail(
+            `https://api.ebay.com/post-order/v2/casemanagement/${encodeURIComponent(doc.caseId)}`,
+            postOrderJsonHeaders(token, marketplaceId)
+          );
+          const tracking = parseShipmentTrackingDetails(detail || {});
+          if (tracking) {
+            doc.shipmentTrackingDetails = tracking;
+            if (detail) doc.rawData = { ...(doc.rawData || {}), ...detail };
+            await doc.save();
+            caseUpdated += 1;
+          } else {
+            caseFailed += 1;
+          }
+        } catch {
+          caseFailed += 1;
+        }
+      }
+    }
+
+    res.json({
+      message: 'Tracking enrich complete',
+      inquiryUpdated,
+      inquiryFailed,
+      caseUpdated,
+      caseFailed,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/inquiry/:inquiryId', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const inquiryId = String(req.params.inquiryId || '').trim();
+    const stored = await Case.findOne({ caseId: inquiryId }).populate('seller');
+    if (!stored?.seller) return res.status(404).json({ error: 'Inquiry not found in store' });
+    const accessToken = await refreshSellerAccessToken(stored.seller, 'INR API inquiry');
+    const marketplaceId = stored.seller.ebayMarketplaces?.[0] || 'EBAY_US';
+    const response = await axios.get(
+      `https://api.ebay.com/post-order/v2/inquiry/${encodeURIComponent(inquiryId)}`,
+      { headers: postOrderJsonHeaders(accessToken, marketplaceId), timeout: 45000 }
+    );
+    const tracking = parseShipmentTrackingDetails(response.data);
+    stored.rawData = { ...(stored.rawData || {}), ...response.data };
+    if (tracking) stored.shipmentTrackingDetails = tracking;
+    const liveStatus = extractIssueStatus(response.data, 'inquiry') || extractIssueStatus(stored.rawData, 'inquiry');
+    if (liveStatus) stored.status = liveStatus;
+    const closure = extractReasonForClosure(response.data) || extractReasonForClosure(stored.rawData);
+    if (closure) {
+      stored.reasonForClosure = closure;
+      stored.resolution = closure;
+    }
+    await stored.save();
+    res.json(response.data);
+  } catch (err) {
+    const ebayError = err.response?.data?.errorMessage || err.response?.data || err.message;
+    res.status(err.response?.status || 500).json({ error: 'Failed to get inquiry', details: ebayError });
+  }
+});
+
+async function loadInquiryForAction(inquiryId) {
+  const stored = await Case.findOne({ caseId: inquiryId }).populate('seller');
+  if (!stored?.seller) {
+    const err = new Error('Inquiry not found in store');
+    err.status = 404;
+    throw err;
+  }
+  return stored;
+}
+
+async function postInquiryEbayAction(stored, pathSuffix, body) {
+  const accessToken = await refreshSellerAccessToken(stored.seller, 'INR API inquiry action');
+  const marketplaceId = stored.marketplaceId || stored.seller.ebayMarketplaces?.[0] || 'EBAY_US';
+  const url = `https://api.ebay.com/post-order/v2/inquiry/${encodeURIComponent(stored.caseId)}${pathSuffix}`;
+  const res = await axios.post(url, body || {}, {
+    headers: postOrderPostHeaders(accessToken, marketplaceId),
+    timeout: 45000,
+    validateStatus: () => true,
+  });
+  if (res.status >= 400) {
+    const err = new Error(extractPostOrderErrorFromData(res.data) || `eBay ${res.status}`);
+    err.status = res.status;
+    err.ebay = res.data;
+    throw err;
+  }
+  return res.data;
+}
+
+function inquiryShipmentDateTime(raw) {
+  if (raw) {
+    const shipped = new Date(raw);
+    if (!Number.isNaN(shipped.getTime())) return { value: shipped.toISOString() };
+  }
+  return { value: new Date().toISOString() };
+}
+
+function buildInquiryShipmentInfoBody(reqBody = {}) {
+  const trackingNumber = String(reqBody.trackingNumber || '').trim();
+  const shippingCarrierName = String(
+    reqBody.shippingCarrierName
+    || reqBody.shippingCarrierUsed
+    || reqBody.carrier
+    || reqBody.carrierName
+    || ''
+  ).trim().toUpperCase().replace(/\s+/g, '_');
+  const comments = String(reqBody.comments || reqBody.sellerComments || '').trim();
+  const body = {
+    trackingNumber,
+    shippingCarrierName,
+    shippingDate: inquiryShipmentDateTime(reqBody.shippedDate || reqBody.shippingDate),
+    shippedWithTracking: Boolean(trackingNumber),
+  };
+  if (comments) body.sellerComments = { content: comments };
+  return body;
+}
+
+async function refreshStoredInquiryFromEbay(stored) {
+  const accessToken = await refreshSellerAccessToken(stored.seller, 'INR API inquiry refresh');
+  const marketplaceId = stored.marketplaceId || stored.seller.ebayMarketplaces?.[0] || 'EBAY_US';
+  const response = await axios.get(
+    `https://api.ebay.com/post-order/v2/inquiry/${encodeURIComponent(stored.caseId)}`,
+    { headers: postOrderJsonHeaders(accessToken, marketplaceId), timeout: 45000 }
+  );
+  const detail = response.data || {};
+  const tracking = parseShipmentTrackingDetails(detail);
+  if (tracking) stored.shipmentTrackingDetails = tracking;
+  stored.status = detail.inquiryStatusEnum || detail.state || stored.status;
+  stored.rawData = { ...(stored.rawData || {}), ...detail };
+  const due = extractSellerDueDate(stored.rawData, detail);
+  if (due) stored.sellerResponseDueDate = due;
+  const closure = extractReasonForClosure(detail) || extractReasonForClosure(stored.rawData);
+  if (closure) {
+    stored.reasonForClosure = closure;
+    stored.resolution = closure;
+  }
+  await stored.save();
+  return detail;
+}
+
+/**
+ * Provide shipment info on an INR inquiry.
+ * POST https://api.ebay.com/post-order/v2/inquiry/{inquiryId}/provide_shipment_info
+ */
+router.post('/inquiry/:inquiryId/provide-shipment-info', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const inquiryId = String(req.params.inquiryId || '').trim();
+    if (!inquiryId) return res.status(400).json({ error: 'inquiryId is required' });
+    const body = buildInquiryShipmentInfoBody(req.body);
+    if (!body.trackingNumber) return res.status(400).json({ error: 'trackingNumber is required' });
+    if (!body.shippingCarrierName) return res.status(400).json({ error: 'shippingCarrierName is required' });
+
+    const stored = await loadInquiryForAction(inquiryId);
+    await postInquiryEbayAction(stored, '/provide_shipment_info', body);
+    let detail = null;
+    try {
+      detail = await refreshStoredInquiryFromEbay(stored);
+    } catch (refreshErr) {
+      console.warn('[INR API] provide shipment info refresh failed:', refreshErr.response?.data || refreshErr.message);
+    }
+    res.json({
+      message: `Provided shipment info for inquiry ${inquiryId}`,
+      inquiry: detail,
+    });
+  } catch (err) {
+    console.error('[INR API] provide shipment info:', err.status || err.response?.status, err.ebay || err.response?.data || err.message);
+    res.status(err.status || err.response?.status || 500).json({
+      error: err.message || 'Failed to provide shipment info',
+      details: err.ebay || err.response?.data,
+    });
+  }
+});
+
+/**
+ * Escalate an INR inquiry into a case.
+ * POST https://api.ebay.com/post-order/v2/inquiry/{inquiryId}/escalate
+ */
+router.post('/inquiry/:inquiryId/escalate', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const inquiryId = String(req.params.inquiryId || '').trim();
+    if (!inquiryId) return res.status(400).json({ error: 'inquiryId is required' });
+    const comments = String(req.body?.comments || '').trim();
+    if (!comments) return res.status(400).json({ error: 'comments are required' });
+    const escalateInquiryReason = String(
+      req.body?.escalateInquiryReason || req.body?.reason || 'OTHER'
+    ).trim() || 'OTHER';
+
+    const stored = await loadInquiryForAction(inquiryId);
+    await postInquiryEbayAction(stored, '/escalate', {
+      escalateInquiryReason,
+      comments: { content: comments },
+    });
+    const detail = await refreshStoredInquiryFromEbay(stored);
+    res.json({
+      message: `Escalated inquiry ${inquiryId}`,
+      inquiry: detail,
+    });
+  } catch (err) {
+    console.error('[INR API] escalate inquiry:', err.ebay || err.message);
+    res.status(err.status || err.response?.status || 500).json({
+      error: err.message || 'Failed to escalate inquiry',
+      details: err.ebay || err.response?.data,
+    });
+  }
+});
+
+router.get('/casemanagement/:caseId', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const caseId = String(req.params.caseId || '').trim();
+    const stored = await CaseManagement.findOne({ caseId }).populate('seller');
+    if (!stored?.seller) return res.status(404).json({ error: 'Case not found in store' });
+    const accessToken = await refreshSellerAccessToken(stored.seller, 'INR API case');
+    const marketplaceId = stored.seller.ebayMarketplaces?.[0] || 'EBAY_US';
+    const response = await axios.get(
+      `https://api.ebay.com/post-order/v2/casemanagement/${encodeURIComponent(caseId)}`,
+      { headers: postOrderJsonHeaders(accessToken, marketplaceId), timeout: 45000 }
+    );
+    const tracking = parseShipmentTrackingDetails(response.data);
+    const sellerOutcome = extractSellerOutcome(response.data) || extractSellerOutcome(stored.rawData);
+    stored.rawData = { ...(stored.rawData || {}), ...response.data };
+    if (tracking) stored.shipmentTrackingDetails = tracking;
+    if (sellerOutcome) stored.sellerOutcome = sellerOutcome;
+    const liveStatus = extractIssueStatus(response.data, 'case') || extractIssueStatus(stored.rawData, 'case');
+    if (liveStatus) stored.status = liveStatus;
+    const closure = extractReasonForClosure(response.data)
+      || extractReasonForClosure(stored.rawData)
+      || sellerOutcome;
+    if (closure) stored.reasonForClosure = closure;
+    const inquiryId = asNonEmptyId(response.data?.inquiryId)
+      || asNonEmptyId(stored.rawData?.inquiryId)
+      || asNonEmptyId(findNestedValue(stored.rawData, ['inquiryId']));
+    if (inquiryId) stored.inquiryId = inquiryId;
+    const due = extractSellerDueDate(stored.rawData, response.data);
+    if (due) stored.sellerResponseDueDate = due;
+    await stored.save();
+    res.json(response.data);
+  } catch (err) {
+    const ebayError = err.response?.data?.errorMessage || err.response?.data || err.message;
+    res.status(err.response?.status || 500).json({ error: 'Failed to get case', details: ebayError });
   }
 });
 
@@ -11318,59 +12649,112 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
           let updateDetails = [];
 
           for (const ebayDispute of disputes) {
+            const orderId = await resolveDisplayOrderId({
+              sellerId: seller._id,
+              buyerUsername: ebayDispute.buyerUsername,
+              itemId: ebayDispute.lineItems?.[0]?.itemId || ebayDispute.lineItems?.[0]?.legacyItemId,
+              sources: [ebayDispute],
+              existingOrderId: ebayDispute.orderId,
+            }) || ebayDispute.orderId;
+            const itemId = extractPostOrderItemId(ebayDispute)
+              || await lookupItemIdFromOrder(seller._id, orderId);
+            const existing = await PaymentDispute.findOne({ paymentDisputeId: ebayDispute.paymentDisputeId });
+            const marketplaceId = seller.ebayMarketplaces?.[0] || 'EBAY_US';
+            let detail = null;
+            try {
+              const detailRes = await axios.get(
+                `https://apiz.ebay.com/sell/fulfillment/v1/payment_dispute/${encodeURIComponent(ebayDispute.paymentDisputeId)}`,
+                {
+                  headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    Accept: 'application/json',
+                    'Content-Type': 'application/json',
+                    'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+                  },
+                  timeout: 30000,
+                }
+              );
+              detail = detailRes.data || null;
+            } catch (detailErr) {
+              console.warn(
+                `[Fetch Payment Disputes] detail GET failed ${ebayDispute.paymentDisputeId}:`,
+                detailErr.response?.status || detailErr.message
+              );
+            }
+            const merged = { ...(existing?.rawData || {}), ...ebayDispute, ...(detail || {}) };
+            const resolutionObject = [detail?.resolution, existing?.rawData?.resolution, ebayDispute?.resolution]
+              .find((value) => value && typeof value === 'object' && !Array.isArray(value));
+            if (resolutionObject) merged.resolution = resolutionObject;
+            const reasonForClosure = extractReasonForClosure(merged)
+              || extractReasonForClosure(detail)
+              || extractReasonForClosure(existing)
+              || '';
+            const protectionStatus = extractProtectionStatus(merged)
+              || extractProtectionStatus(resolutionObject)
+              || extractProtectionStatus(detail)
+              || extractProtectionStatus(existing)
+              || '';
             const disputeData = {
               seller: seller._id,
               paymentDisputeId: ebayDispute.paymentDisputeId,
-              orderId: ebayDispute.orderId,
-              buyerUsername: ebayDispute.buyerUsername,
+              orderId,
+              itemId: itemId || undefined,
+              buyerUsername: merged.buyerUsername || ebayDispute.buyerUsername,
 
               // Status & Reason
-              paymentDisputeStatus: ebayDispute.paymentDisputeStatus,
-              reason: ebayDispute.reason,
+              paymentDisputeStatus: detail?.paymentDisputeStatus
+                || merged.paymentDisputeStatus
+                || ebayDispute.paymentDisputeStatus,
+              reason: merged.reason || ebayDispute.reason,
 
               // Dates
-              openDate: ebayDispute.openDate ? new Date(ebayDispute.openDate) : null,
-              respondByDate: ebayDispute.respondByDate ? new Date(ebayDispute.respondByDate) : null,
-              closedDate: ebayDispute.closedDate ? new Date(ebayDispute.closedDate) : null,
+              openDate: merged.openDate ? new Date(merged.openDate) : (ebayDispute.openDate ? new Date(ebayDispute.openDate) : null),
+              respondByDate: merged.respondByDate ? new Date(merged.respondByDate) : (ebayDispute.respondByDate ? new Date(ebayDispute.respondByDate) : null),
+              closedDate: merged.closedDate ? new Date(merged.closedDate) : (ebayDispute.closedDate ? new Date(ebayDispute.closedDate) : null),
 
               // Amounts
               amount: {
-                value: String(ebayDispute.amount?.value || 0),
-                currency: ebayDispute.amount?.currency || 'USD'
+                value: String(merged.amount?.value || ebayDispute.amount?.value || 0),
+                currency: merged.amount?.currency || ebayDispute.amount?.currency || 'USD'
               },
 
               // Resolution
-              sellerProtectionDecision: ebayDispute.sellerResponse?.sellerProtectionDecision || null,
-              resolution: ebayDispute.resolution?.resolutionType || null,
+              sellerProtectionDecision: merged.sellerResponse?.sellerProtectionDecision
+                || ebayDispute.sellerResponse?.sellerProtectionDecision
+                || null,
+              resolution: reasonForClosure
+                || (typeof merged.resolution === 'string' ? merged.resolution : '')
+                || existing?.resolution
+                || null,
+              reasonForClosure: reasonForClosure || null,
+              protectionStatus: protectionStatus || null,
 
               // Evidence
-              evidenceDeadline: ebayDispute.evidenceDeadline ? new Date(ebayDispute.evidenceDeadline) : null,
+              evidenceDeadline: merged.evidenceDeadline ? new Date(merged.evidenceDeadline) : (ebayDispute.evidenceDeadline ? new Date(ebayDispute.evidenceDeadline) : null),
 
-              rawData: ebayDispute
+              shipmentTrackingDetails: parseShipmentTrackingDetails(merged)
+                || parseShipmentTrackingDetails(ebayDispute)
+                || await lookupTrackingFromOrder(seller._id, orderId)
+                || undefined,
+
+              rawData: merged,
             };
 
-            const existing = await PaymentDispute.findOne({ paymentDisputeId: ebayDispute.paymentDisputeId });
-
             if (existing) {
-              // Compare for changes
+              if (!disputeData.orderId && existing.orderId) disputeData.orderId = existing.orderId;
               const statusChanged = existing.paymentDisputeStatus !== disputeData.paymentDisputeStatus;
-              const dueDateChanged = (existing.respondByDate?.getTime() || 0) !==
-                (disputeData.respondByDate?.getTime() || 0);
-
-              if (statusChanged || dueDateChanged) {
-                console.log(`[Update] Dispute ${ebayDispute.paymentDisputeId}: Status ${existing.paymentDisputeStatus} -> ${disputeData.paymentDisputeStatus}`);
-                existing.set(disputeData);
-                await existing.save();
-                updatedDisputes++;
-
-                updateDetails.push({
-                  paymentDisputeId: ebayDispute.paymentDisputeId,
-                  orderId: disputeData.orderId,
-                  changes: {
-                    ...(statusChanged && { status: { from: existing.paymentDisputeStatus, to: disputeData.paymentDisputeStatus } })
-                  }
-                });
-              }
+              const closureChanged = (existing.reasonForClosure || '') !== (reasonForClosure || '');
+              existing.set(disputeData);
+              await existing.save();
+              updatedDisputes++;
+              updateDetails.push({
+                paymentDisputeId: ebayDispute.paymentDisputeId,
+                orderId: disputeData.orderId,
+                changes: {
+                  ...(statusChanged && { status: { from: existing.paymentDisputeStatus, to: disputeData.paymentDisputeStatus } }),
+                  ...(closureChanged && { reasonForClosure: { from: existing.reasonForClosure, to: reasonForClosure } }),
+                }
+              });
             } else {
               await PaymentDispute.create(disputeData);
               newDisputes++;
@@ -11419,18 +12803,29 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
 
 // Get stored Payment Disputes from database
 router.get('/stored-payment-disputes', async (req, res) => {
-  const { sellerId, status, reason, limit = 200 } = req.query;
+  const { sellerId, status, reason, marketplace, limit = 200 } = req.query;
 
   try {
     let query = {};
     if (sellerId) query.seller = sellerId;
     if (status) query.paymentDisputeStatus = status;
     if (reason) query.reason = reason;
+    if (marketplace) {
+      const sellerIdsForMarket = await Seller.find({ ebayMarketplaces: marketplace }).distinct('_id');
+      if (sellerId) {
+        const allowed = sellerIdsForMarket.some((id) => String(id) === String(sellerId));
+        if (!allowed) {
+          return res.json({ disputes: [], totalDisputes: 0, totalCount: 0 });
+        }
+      } else {
+        query.seller = { $in: sellerIdsForMarket };
+      }
+    }
 
     const disputes = await PaymentDispute.find(query)
       .populate({
         path: 'seller',
-        select: 'user',
+        select: 'user ebayMarketplaces',
         populate: {
           path: 'user',
           select: 'username'
@@ -11440,8 +12835,22 @@ router.get('/stored-payment-disputes', async (req, res) => {
       .limit(parseInt(limit));
 
     const totalCount = await PaymentDispute.countDocuments(query);
+    const rows = await Promise.all(
+      disputes.map(async (doc) => {
+        const row = await fillMissingOrderIdOnRow(doc.toObject(), PaymentDispute);
+        const withItem = await fillMissingItemIdOnRow(row, PaymentDispute);
+        const withReason = fillMissingIssueReasonOnRow(withItem, PaymentDispute);
+        const withTracking = await fillMissingTrackingOnRow(withReason, PaymentDispute);
+        return fillIssueStatusOnRow(
+          fillReasonForClosureOnRow(withTracking, PaymentDispute),
+          PaymentDispute,
+          'dispute'
+        );
+      })
+    );
 
-    res.json({ disputes, totalDisputes: disputes.length, totalCount });
+    const withAddress = await attachShippingAddressToRows(rows);
+    res.json({ disputes: withAddress.map((row) => withParsedTracking(row)), totalDisputes: withAddress.length, totalCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -11473,6 +12882,57 @@ router.patch('/disputes/:disputeId/note', requireAuth, async (req, res) => {
     res.json({ dispute });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/payment-dispute/:paymentDisputeId', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const paymentDisputeId = String(req.params.paymentDisputeId || '').trim();
+    const stored = await PaymentDispute.findOne({ paymentDisputeId }).populate('seller');
+    if (!stored) return res.status(404).json({ error: 'Payment dispute not found in store' });
+    if (!stored.seller?.ebayTokens?.access_token) {
+      return res.json(stored.rawData || stored.toObject());
+    }
+    try {
+      const accessToken = await refreshSellerAccessToken(stored.seller, 'INR API payment dispute');
+      const marketplaceId = stored.seller.ebayMarketplaces?.[0] || 'EBAY_US';
+      const response = await axios.get(
+        `https://apiz.ebay.com/sell/fulfillment/v1/payment_dispute/${encodeURIComponent(paymentDisputeId)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+          },
+          timeout: 45000,
+        }
+      );
+      stored.rawData = { ...(stored.rawData || {}), ...response.data };
+      if (response.data?.resolution && typeof response.data.resolution === 'object') {
+        stored.rawData.resolution = response.data.resolution;
+      }
+      const liveStatus = response.data?.paymentDisputeStatus;
+      if (liveStatus) stored.paymentDisputeStatus = liveStatus;
+      const closure = extractReasonForClosure(response.data) || extractReasonForClosure(stored.rawData);
+      if (closure) {
+        stored.reasonForClosure = closure;
+        stored.resolution = closure;
+      }
+      const protectionStatus = extractProtectionStatus(response.data)
+        || extractProtectionStatus(stored.rawData)
+        || scalarReasonForClosure(response.data?.resolution?.protectionStatus);
+      if (protectionStatus) stored.protectionStatus = protectionStatus;
+      stored.markModified('rawData');
+      await stored.save();
+      return res.json(response.data);
+    } catch (liveErr) {
+      if (stored.rawData) return res.json(stored.rawData);
+      throw liveErr;
+    }
+  } catch (err) {
+    const ebayError = err.response?.data?.errors || err.response?.data || err.message;
+    res.status(err.response?.status || 500).json({ error: 'Failed to get payment dispute', details: ebayError });
   }
 });
 

@@ -297,10 +297,41 @@ router.get('/eligible-offers', requireAuth, offerPageAccess, async (req, res) =>
 
 router.post('/eligible-offers/send', requireAuth, offerPageAccess, async (req, res) => {
   try {
-    const { sellerId, listingId, price, currency, quantity, message, allowCounter = true } = req.body;
+    const {
+      sellerId,
+      listingId,
+      price,
+      currency,
+      quantity,
+      message,
+      allowCounter = true,
+      discountPercentage,
+      offerDurationDays,
+    } = req.body;
 
-    if (!sellerId || !listingId || price == null || price === '') {
-      return res.status(400).json({ error: 'Missing required fields: sellerId, listingId, price' });
+    if (!sellerId || !listingId) {
+      return res.status(400).json({ error: 'Missing required fields: sellerId, listingId' });
+    }
+
+    const percentRaw = discountPercentage != null && discountPercentage !== ''
+      ? parseFloat(discountPercentage)
+      : null;
+    const hasPercent = Number.isFinite(percentRaw) && percentRaw > 0;
+    const priceRaw = price != null && price !== '' ? parseFloat(price) : null;
+    const hasPrice = Number.isFinite(priceRaw) && priceRaw > 0;
+
+    if (!hasPercent && !hasPrice) {
+      return res.status(400).json({
+        error: 'Provide a percent off (min 5) or an offer price',
+      });
+    }
+    if (hasPercent && hasPrice) {
+      return res.status(400).json({
+        error: 'Send either discountPercentage or price, not both',
+      });
+    }
+    if (hasPercent && (percentRaw < 5 || percentRaw > 99)) {
+      return res.status(400).json({ error: 'Percent off must be between 5 and 99' });
     }
 
     const seller = await Seller.findById(sellerId);
@@ -309,17 +340,32 @@ router.post('/eligible-offers/send', requireAuth, offerPageAccess, async (req, r
     const token = await ensureValidToken(seller);
     const marketplaceId = seller.ebayMarketplaces?.[0] ?? 'EBAY_US';
 
-    await axios.post(
+    const offeredItem = {
+      listingId: String(listingId),
+      quantity: parseInt(quantity, 10) || 1,
+    };
+    if (hasPercent) {
+      offeredItem.discountPercentage = String(Math.round(percentRaw * 100) / 100);
+    } else {
+      offeredItem.price = {
+        currency: currency || 'USD',
+        value: priceRaw.toFixed(2),
+      };
+    }
+
+    const durationDays = parseInt(offerDurationDays, 10);
+    const payload = {
+      allowCounterOffer: Boolean(allowCounter),
+      message: typeof message === 'string' && message.trim() ? message.trim() : undefined,
+      offeredItems: [offeredItem],
+    };
+    if (Number.isFinite(durationDays) && durationDays > 0) {
+      payload.offerDuration = { unit: 'DAY', value: durationDays };
+    }
+
+    const response = await axios.post(
       'https://api.ebay.com/sell/negotiation/v1/send_offer_to_interested_buyers',
-      {
-        allowCounterOffer: Boolean(allowCounter),
-        message: message || undefined,
-        offeredItems: [{
-          listingId,
-          price: { currency: currency || 'USD', value: parseFloat(price).toFixed(2) },
-          quantity: parseInt(quantity, 10) || 1,
-        }],
-      },
+      payload,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -330,9 +376,14 @@ router.post('/eligible-offers/send', requireAuth, offerPageAccess, async (req, r
       }
     );
 
-    return res.json({ success: true, message: 'Offer sent to interested buyers' });
+    return res.json({
+      success: true,
+      message: 'Offer sent to interested buyers',
+      offers: response.data?.offers || response.data,
+    });
   } catch (err) {
-    const ebayError = err.response?.data?.errors?.[0]?.message ?? err.message;
+    const errors = err.response?.data?.errors;
+    const ebayError = errors?.[0]?.longMessage || errors?.[0]?.message || err.message;
     console.error('[BestOffers] send_offer_to_interested_buyers error:', err.response?.data ?? err.message);
     return res.status(err.response?.status ?? 500).json({ error: 'Failed to send offer', details: ebayError });
   }

@@ -66,8 +66,8 @@ export const CRON_JOB_DEFINITIONS = [
   {
     jobKey: 'fetchCancellations',
     label: 'Fetch cancellations',
-    description: 'Sync eBay Post-Order cancellation/search (last 30 days) into Cancellation Search for all connected sellers.',
-    cronExpr: '*/15 * * * *',
+    description: 'Sync eBay Post-Order cancellation/search (last 30 days) into Cancellation Search for all connected sellers. Throttled hourly to reduce Render egress.',
+    cronExpr: '0 * * * *',
     timezone: 'Asia/Kolkata',
     enabled: true,
   },
@@ -82,8 +82,8 @@ export const CRON_JOB_DEFINITIONS = [
   {
     jobKey: 'policyMessages',
     label: 'Order policy messages',
-    description: 'Send buyer policy messages for eligible eBay orders (~20 min after order). When disabled, automatic sends after order polls are also skipped.',
-    cronExpr: '*/5 * * * *',
+    description: 'Send buyer policy messages for eligible eBay orders (~20 min after order). When disabled, automatic sends after order polls are also skipped. Throttled to every 15m to reduce Render egress.',
+    cronExpr: '*/15 * * * *',
     timezone: 'Asia/Kolkata',
     enabled: true,
   },
@@ -130,8 +130,8 @@ export const CRON_JOB_DEFINITIONS = [
   {
     jobKey: 'buyerMessagesAutoSync',
     label: 'Buyer Messages auto-sync',
-    description: 'Same as Check New on Buyer Messages: pull latest eBay conversations for all connected sellers into Mongo (Commerce summary + background Trading crawl). Replaces the old per-browser Auto-sync timer. When disabled, only Sync Today+ / Check New buttons fetch from eBay.',
-    cronExpr: '*/5 * * * *',
+    description: 'Same as Check New on Buyer Messages: pull latest eBay conversations for all connected sellers into Mongo (Commerce summary + background Trading crawl). Replaces the old per-browser Auto-sync timer. When disabled, only Sync Today+ / Check New buttons fetch from eBay. Throttled to every 30m to reduce Render egress.',
+    cronExpr: '*/30 * * * *',
     timezone: 'America/Los_Angeles',
     enabled: true,
   },
@@ -171,6 +171,34 @@ export async function ensureCronConfigDefaults() {
       },
     }
   );
+
+  // Force bandwidth-throttled schedules onto existing CronJobConfig rows ($setOnInsert alone would leave old */5 and */15).
+  const bandwidthThrottleSets = [
+    {
+      jobKey: 'buyerMessagesAutoSync',
+      cronExpr: '*/30 * * * *',
+      description:
+        'Same as Check New on Buyer Messages: pull latest eBay conversations for all connected sellers into Mongo (Commerce summary + background Trading crawl). Replaces the old per-browser Auto-sync timer. When disabled, only Sync Today+ / Check New buttons fetch from eBay. Throttled to every 30m to reduce Render egress.',
+    },
+    {
+      jobKey: 'fetchCancellations',
+      cronExpr: '0 * * * *',
+      description:
+        'Sync eBay Post-Order cancellation/search (last 30 days) into Cancellation Search for all connected sellers. Throttled hourly to reduce Render egress.',
+    },
+    {
+      jobKey: 'policyMessages',
+      cronExpr: '*/15 * * * *',
+      description:
+        'Send buyer policy messages for eligible eBay orders (~20 min after order). When disabled, automatic sends after order polls are also skipped. Throttled to every 15m to reduce Render egress.',
+    },
+  ];
+  for (const row of bandwidthThrottleSets) {
+    await CronJobConfig.updateOne(
+      { jobKey: row.jobKey },
+      { $set: { cronExpr: row.cronExpr, description: row.description } }
+    );
+  }
 }
 
 async function runDailyTimerAutoStop() {
