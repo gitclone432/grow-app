@@ -18659,6 +18659,24 @@ router.patch('/conversation-management/:id/pick-up', requireAuth, async (req, re
   }
 });
 
+// --- PATCH NOTES ---
+router.patch('/conversation-management/:id/notes', requireAuth, async (req, res) => {
+  const { notes } = req.body;
+  try {
+    const meta = await ConversationMeta.findByIdAndUpdate(
+      req.params.id,
+      { notes: notes || '' },
+      { new: true }
+    );
+    if (!meta) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    res.json({ success: true, meta });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- CHAT AGENTS CRUD (for "Picked Up By" dropdown) ---
 router.get('/chat-agents', requireAuth, async (req, res) => {
   try {
