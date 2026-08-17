@@ -63,6 +63,104 @@ const headerSx = {
   zIndex: 1,
 };
 
+// --- NOTES CELL COMPONENT (Inline Editable) ---
+const NotesCell = React.memo(function NotesCell({ row, onSave, onNotify }) {
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [tempValue, setTempValue] = React.useState(row.internalNotes || '');
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isEditing) {
+      setTempValue(row.internalNotes || '');
+    }
+  }, [row.internalNotes, isEditing]);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await onSave(row.returnId, tempValue);
+      setIsEditing(false);
+      onNotify('success', 'Note saved successfully');
+    } catch (e) {
+      onNotify('error', 'Failed to save note');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setTempValue(row.internalNotes || '');
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <Box
+        onClick={(e) => e.stopPropagation()}
+        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 200 }}
+      >
+        <TextField
+          fullWidth
+          multiline
+          minRows={2}
+          size="small"
+          value={tempValue}
+          onChange={(e) => setTempValue(e.target.value)}
+          placeholder="Enter note..."
+          autoFocus
+        />
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="contained"
+            size="small"
+            onClick={handleSave}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5 }}
+          >
+            {isSaving ? 'Saving...' : 'Save'}
+          </Button>
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={handleCancel}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5 }}
+          >
+            Cancel
+          </Button>
+        </Stack>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      onClick={(e) => {
+        e.stopPropagation();
+        setIsEditing(true);
+      }}
+      sx={{
+        cursor: 'pointer',
+        minHeight: 30,
+        minWidth: 150,
+        display: 'flex',
+        alignItems: 'center',
+        '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1, px: 1 }
+      }}
+    >
+      {row.internalNotes ? (
+        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
+          {row.internalNotes}
+        </Typography>
+      ) : (
+        <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+          + Add Note
+        </Typography>
+      )}
+    </Box>
+  );
+});
+
 export default function ReturnPostOrderPage({
   dateFilter: dateFilterProp,
   hideDateFilter = false,
@@ -289,6 +387,15 @@ export default function ReturnPostOrderPage({
       });
     }
   }
+
+  async function handleNotesSave(returnId, notesText) {
+    await api.patch(`/ebay/returns/${returnId}/notes`, { notes: notesText });
+    setRows(prev => prev.map(r => r.returnId === returnId ? { ...r, internalNotes: notesText } : r));
+  }
+
+  const handleNotify = (severity, message) => {
+    setSnackbar({ open: true, message, severity });
+  };
 
   const handleCopy = (text) => {
     if (!text || text === '-') return;
@@ -1026,20 +1133,8 @@ export default function ReturnPostOrderPage({
                       </TableCell>
                     )}
                     {visibleColumns.includes('notes') && (
-                      <TableCell sx={{ maxWidth: 280, whiteSpace: 'normal' }}>
-                        <Typography
-                          variant="body2"
-                          fontSize="0.75rem"
-                          sx={{
-                            display: '-webkit-box',
-                            WebkitLineClamp: 3,
-                            WebkitBoxOrient: 'vertical',
-                            overflow: 'hidden',
-                          }}
-                          title={row.notes || row.buyerComments || ''}
-                        >
-                          {row.notes || row.buyerComments || '-'}
-                        </Typography>
+                      <TableCell sx={{ maxWidth: 280 }}>
+                        <NotesCell row={row} onSave={handleNotesSave} onNotify={handleNotify} />
                       </TableCell>
                     )}
                     {visibleColumns.includes('refund') && (

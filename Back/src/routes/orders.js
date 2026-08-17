@@ -5,6 +5,7 @@ import Order from '../models/Order.js';
 import Seller from '../models/Seller.js';
 import Return from '../models/Return.js';
 import Case from '../models/Case.js';
+import Cancellation from '../models/Cancellation.js';
 import PaymentDispute from '../models/PaymentDispute.js';
 import Message from '../models/Message.js';
 import MarketMetric from '../models/MarketMetric.js';
@@ -2099,10 +2100,16 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       const cardsById = new Map();
 
       const returnOrderIds = new Set();
+      console.log(`[BOARD-GET] ===== LOADING RETURNS FOR BOARD =====`);
+      console.log(`[BOARD-GET] Total returns fetched: ${returnRequests.length}`);
+      
       returnRequests.forEach((ret) => {
         if (ret.orderId) returnOrderIds.add(ret.orderId);
         const order = orderByOrderId.get(ret.orderId);
-        const card = makeOrderCard(order, ret, 'case_opened', 'return_request');
+        // Use the Return's complianceBoardStatus if it exists, otherwise default to 'case_opened'
+        const status = ret.complianceBoardStatus || 'case_opened';
+        console.log(`[BOARD-GET] Return ${ret.returnId || ret._id.toString().substring(0,8)}: status='${status}' (db_stored='${ret.complianceBoardStatus}'), orderId=${ret.orderId}`);
+        const card = makeOrderCard(order, ret, status, 'return_request');
         returnRequestCards.push(card);
       });
 
@@ -2899,14 +2906,20 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
     const { orderId } = req.params;
     const { complianceBoardStatus, complianceBoardCategory, complianceBoardSource, clearCategory } = req.body;
 
+    console.log(`\n[PATCH-COMPLIANCE] ===== START COMPLIANCE STATUS UPDATE =====`);
+    console.log(`[PATCH-COMPLIANCE] orderId: ${orderId}`);
+    console.log(`[PATCH-COMPLIANCE] complianceBoardStatus: ${complianceBoardStatus}`);
+    console.log(`[PATCH-COMPLIANCE] complianceBoardCategory: ${complianceBoardCategory}`);
+
     if (!complianceBoardStatus) {
+      console.error(`[PATCH-COMPLIANCE] ERROR: complianceBoardStatus is required`);
       return res.status(400).json({ error: 'complianceBoardStatus is required' });
     }
 
     const validStatuses = [
       'todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation',
       // Return/Refund statuses
-      'case_opened', 'case_not_opened', 'provide_return_label', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement',
+      'case_opened', 'case_not_opened', 'provide_return_label', 'return_follow_up', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement',
       // Cancellation statuses
       'cancellation_request', 'accepted', 'declined',
       // INR statuses
@@ -2914,114 +2927,171 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'
     ];
     if (!validStatuses.includes(complianceBoardStatus)) {
+      console.error(`[PATCH-COMPLIANCE] ERROR: Invalid status: ${complianceBoardStatus}`);
       return res.status(400).json({ error: 'Invalid status' });
     }
 
-    // Build update query - always update status, add category to array if provided
-    const updateOps = { $set: { complianceBoardStatus } };
+    // Check if this is a Return document (ID starts with 'return:')
+    if (String(orderId).startsWith('return:')) {
+      console.log(`[PATCH-COMPLIANCE] [DETECTED] 'return:' prefix format`);
+      const Return = mongoose.model('Return');
+      
+      // Extract returnId from 'return:returnId' format
+      const returnId = String(orderId).replace(/^return:/, '');
+      console.log(`[PATCH-COMPLIANCE] [EXTRACTED] returnId: ${returnId}`);
+      
+      // Try to match both MongoDB _id and eBay returnId
+      const query = mongoose.Types.ObjectId.isValid(returnId)
+        ? { $or: [{ _id: returnId }, { returnId: returnId }] }
+        : { returnId: returnId };
+      
+      console.log(`[PATCH-COMPLIANCE] [QUERY] Return query:`, JSON.stringify(query));
+      
+      const returnDoc = await Return.findOneAndUpdate(
+        query,
+        { $set: { complianceBoardStatus } },
+        { new: true }
+      );
+
+      if (!returnDoc) {
+        console.warn(`[PATCH-COMPLIANCE] [ERROR] Return not found with ID: ${returnId}`);
+        return res.status(404).json({ error: 'Return not found' });
+      }
+
+      console.log(`[PATCH-COMPLIANCE] [SUCCESS] Updated Return, new complianceBoardStatus: ${returnDoc.complianceBoardStatus}`);
+      console.log(`[PATCH-COMPLIANCE] [VERIFY] returnId: ${returnDoc.returnId}, _id: ${returnDoc._id}`);
+      return res.json({ success: true, return: returnDoc });
+    }
+
+    // Check if this is a Cancellation document (ID starts with 'cancelled:')
+    if (String(orderId).startsWith('cancelled:')) {
+      console.log(`[PATCH-COMPLIANCE] [DETECTED] 'cancelled:' prefix format`);
+      
+      // Extract cancelId from 'cancelled:cancelId' format
+      const cancelId = String(orderId).replace(/^cancelled:/, '');
+      console.log(`[PATCH-COMPLIANCE] [EXTRACTED] cancelId: ${cancelId}`);
+      
+      // Try to match both MongoDB _id and eBay cancelId
+      const query = mongoose.Types.ObjectId.isValid(cancelId)
+        ? { $or: [{ _id: cancelId }, { cancelId: cancelId }] }
+        : { cancelId: cancelId };
+      
+      console.log(`[PATCH-COMPLIANCE] [QUERY] Cancellation query:`, JSON.stringify(query));
+      
+      const cancellationDoc = await Cancellation.findOneAndUpdate(
+        query,
+        { $set: { complianceBoardStatus } },
+        { new: true }
+      );
+
+      if (!cancellationDoc) {
+        console.warn(`[PATCH-COMPLIANCE] [ERROR] Cancellation not found with ID: ${cancelId}`);
+        return res.status(404).json({ error: 'Cancellation not found' });
+      }
+
+      console.log(`[PATCH-COMPLIANCE] [SUCCESS] Updated Cancellation, new complianceBoardStatus: ${cancellationDoc.complianceBoardStatus}`);
+      console.log(`[PATCH-COMPLIANCE] [VERIFY] cancelId: ${cancellationDoc.cancelId}, _id: ${cancellationDoc._id}`);
+      return res.json({ success: true, cancellation: cancellationDoc });
+    }
+
+    // Check if this is an INR document (ID starts with 'inr:')
+    if (String(orderId).startsWith('inr:')) {
+      console.log(`[PATCH-COMPLIANCE] [DETECTED] 'inr:' prefix format`);
+      
+      // Extract inrId from 'inr:inrId' format
+      const inrId = String(orderId).replace(/^inr:/, '');
+      console.log(`[PATCH-COMPLIANCE] [EXTRACTED] inrId: ${inrId}`);
+      
+      // Try to match both MongoDB _id and case ID
+      const query = mongoose.Types.ObjectId.isValid(inrId)
+        ? { $or: [{ _id: inrId }, { caseId: inrId }] }
+        : { caseId: inrId };
+      
+      console.log(`[PATCH-COMPLIANCE] [QUERY] INR query:`, JSON.stringify(query));
+      
+      const inrDoc = await Case.findOneAndUpdate(
+        query,
+        { $set: { complianceBoardStatus } },
+        { new: true }
+      );
+
+      if (!inrDoc) {
+        console.warn(`[PATCH-COMPLIANCE] [ERROR] INR case not found with ID: ${inrId}`);
+        return res.status(404).json({ error: 'INR case not found' });
+      }
+
+      console.log(`[PATCH-COMPLIANCE] [SUCCESS] Updated INR case, new complianceBoardStatus: ${inrDoc.complianceBoardStatus}`);
+      console.log(`[PATCH-COMPLIANCE] [VERIFY] caseId: ${inrDoc.caseId}, _id: ${inrDoc._id}`);
+      return res.json({ success: true, inrCase: inrDoc });
+    }
+
+    // PRIORITY: Try Return FIRST (before Order) because for compliance board, Returns need special handling
+    console.log(`[PATCH-COMPLIANCE] [PRIORITY] Checking Return collection FIRST (before Order)`);
     
-    if (clearCategory) {
-      // Remove all categories and source - moving back to All Messages
-      updateOps.$set.complianceBoardCategories = [];
-      updateOps.$set.complianceBoardSource = null;
-      updateOps.$unset = { complianceBoardCategory: '' };
-    } else if (complianceBoardCategory) {
-      // Use $addToSet to avoid duplicate categories in array
-      updateOps.$addToSet = { complianceBoardCategories: complianceBoardCategory };
+    const Return = mongoose.model('Return');
+    
+    // For Returns, the orderId might be:
+    // 1. The eBay returnId (e.g., 5326877216)
+    // 2. The MongoDB _id of the Return document
+    // Try both to be safe
+    const returnQuery = mongoose.Types.ObjectId.isValid(orderId)
+      ? { $or: [{ _id: orderId }, { returnId: orderId }] }
+      : { returnId: orderId };
+    
+    console.log(`[PATCH-COMPLIANCE] [QUERY] Searching Return by returnId='${orderId}'`);
+    
+    let returnDoc = await Return.findOneAndUpdate(
+      returnQuery,
+      { $set: { complianceBoardStatus } },
+      { new: true }
+    );
+
+    if (returnDoc) {
+      console.log(`[PATCH-COMPLIANCE] [SUCCESS] Found and updated as Return`);
+      console.log(`[PATCH-COMPLIANCE] [VERIFY] returnId: ${returnDoc.returnId}, _id: ${returnDoc._id}, status: ${returnDoc.complianceBoardStatus}`);
       
-      // Set the source - required for filtering on other boards
-      if (complianceBoardSource) {
-        if (complianceBoardSource !== 'order_communication') {
-          return res.status(400).json({ error: 'Invalid complianceBoardSource' });
+      // IMPORTANT: Also update the associated Order document so both are in sync
+      if (returnDoc.orderId) {
+        console.log(`[PATCH-COMPLIANCE] [SYNC] Updating associated Order: ${returnDoc.orderId}`);
+        const orderUpdate = await Order.findOneAndUpdate(
+          { orderId: returnDoc.orderId },
+          { $set: { complianceBoardStatus } },
+          { new: true }
+        );
+        if (orderUpdate) {
+          console.log(`[PATCH-COMPLIANCE] [SYNC-SUCCESS] Updated Order ${returnDoc.orderId} to status ${complianceBoardStatus}`);
+        } else {
+          console.log(`[PATCH-COMPLIANCE] [SYNC-WARN] Order ${returnDoc.orderId} not found for sync update`);
         }
-        updateOps.$set.complianceBoardSource = complianceBoardSource;
       }
       
-      // Unset old single-value format
-      updateOps.$unset = { complianceBoardCategory: '' };
+      return res.json({ success: true, return: returnDoc });
     }
 
-    const orderFulfillmentTimedFields = {
-      out_of_stock: 'outOfStockAssignedAt',
-      cancellation: 'cancellationAssignedAt',
-      address_issue: 'addressIssueAssignedAt'
-    };
-    Object.entries(orderFulfillmentTimedFields).forEach(([status, field]) => {
-      if (complianceBoardCategory === 'order_fulfillment' && complianceBoardStatus === status) {
-        updateOps.$set[field] = new Date();
-      } else if (complianceBoardCategory === 'order_fulfillment') {
-        updateOps.$set[field] = null;
-      }
-    });
+    console.log(`[PATCH-COMPLIANCE] [FALLBACK] Return not found with returnId='${orderId}', falling back to Order...`);
 
-    const isReturnCaseNotOpenedFromOrderCommunication = (
-      complianceBoardCategory === 'return_refund' &&
-      complianceBoardStatus === 'case_not_opened' &&
-      complianceBoardSource === 'order_communication'
-    );
-
-    if (isReturnCaseNotOpenedFromOrderCommunication) {
-      updateOps.$set.returnCaseNotOpenedAssignedAt = new Date();
-    } else if (complianceBoardCategory === 'return_refund' && complianceBoardStatus !== 'case_not_opened') {
-      updateOps.$set.returnCaseNotOpenedAssignedAt = null;
-    }
-
-    if (complianceBoardCategory === 'return_refund' && complianceBoardStatus === 'item_delivered') {
-      updateOps.$set.returnItemDeliveredAssignedAt = new Date();
-    } else if (complianceBoardCategory === 'return_refund') {
-      updateOps.$set.returnItemDeliveredAssignedAt = null;
-    }
-
-    const orderQuery = mongoose.Types.ObjectId.isValid(orderId)
-      ? { _id: orderId }
-      : { orderId };
-
-    console.log(`[COMPLIANCE-STATUS] Updating order with query:`, JSON.stringify(orderQuery), `Status:`, complianceBoardStatus, `Category:`, complianceBoardCategory);
-
+    // Fallback: Try to find as Order
     const order = await Order.findOneAndUpdate(
-      orderQuery,
-      updateOps,
-      { new: true, select: 'orderId complianceBoardStatus complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt' }
+      { $or: [{ _id: orderId }, { orderId: orderId }] },
+      {
+        $set: { complianceBoardStatus },
+        ...(complianceBoardCategory && { complianceBoardCategory }),
+      },
+      { new: true }
     );
 
-    if (!order) {
-      console.warn(`[COMPLIANCE-STATUS] Order not found with query:`, JSON.stringify(orderQuery));
-      return res.status(404).json({ error: 'Order not found' });
+    if (order) {
+      console.log(`[PATCH-COMPLIANCE] [SUCCESS] Found and updated as Order, new status: ${order.complianceBoardStatus}`);
+      return res.json({ success: true, order });
     }
 
-    console.log(`[COMPLIANCE-STATUS] Successfully updated order ${order.orderId} to status ${order.complianceBoardStatus}`);
-
-    // Log the activity - fetch user details first
-    try {
-      const user = await User.findById(req.user?.userId).select('username email role').lean();
-      if (user) {
-        await OrderActivityLog.create({
-          orderId: order.orderId,
-          orderObjectId: order._id,
-          action: 'board_moved',
-          board: req.body.complianceBoardCategory || 'order_fulfillment',
-          fromStatus: req.body.previousStatus || null,
-          toStatus: req.body.complianceBoardStatus,
-          category: req.body.complianceBoardCategory,
-          changedBy: {
-            userId: req.user?.userId,
-            username: user.username,
-            email: user.email,
-            isAdmin: req.user?.role === 'superadmin' || req.user?.role?.includes('admin'),
-          },
-          details: `Moved to ${req.body.complianceBoardStatus} by ${user.username}`,
-          timestamp: new Date(),
-        });
-      }
-    } catch (logError) {
-      console.warn('Failed to log activity:', logError);
-      // Don't fail the main request if logging fails
-    }
-
-    res.json(order);
-  } catch (error) {
-    console.error('Error updating compliance board status:', error);
-    res.status(500).json({ error: error.message || 'Failed to update compliance board status' });
+    // Not found as Return or Order
+    console.warn(`[PATCH-COMPLIANCE] [FATAL] Not found as Return or Order: ${orderId}`);
+    return res.status(404).json({ error: 'Order or Return not found' });
+  } catch (err) {
+    console.error('[PATCH-COMPLIANCE] [EXCEPTION]:', err.message);
+    console.error('[PATCH-COMPLIANCE] [STACK]:', err.stack);
+    res.status(500).json({ error: err.message });
   }
 });
 

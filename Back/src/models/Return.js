@@ -95,6 +95,12 @@ const ReturnSchema = new mongoose.Schema(
     // Manual logs field for internal notes
     logs: { type: String, default: '' },
 
+    // Internal team notes (separate from buyer comments)
+    internalNotes: { type: String, default: '' },
+
+    // Compliance board status for kanban board
+    complianceBoardStatus: { type: String, default: 'case_opened' },
+
     // Manual SNAD override — counts this return in the BBE calculation even if the reason code is not SNAD
     markedAsSNAD: { type: Boolean, default: false }
   },

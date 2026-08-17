@@ -42,6 +42,12 @@ const CancellationSchema = new mongoose.Schema(
       default: 'open'
     }, // Manual status for worksheet tracking
 
+    complianceBoardStatus: {
+      type: String,
+      enum: ['cancellation_request', 'accepted', 'declined'],
+      default: 'cancellation_request'
+    }, // Status for compliance board kanban view
+
     dateSold: Date, // Date the order was sold (from related Order.creationDate or Order.dateSold)
     remark: String, // Cancellation-specific remark/note
 

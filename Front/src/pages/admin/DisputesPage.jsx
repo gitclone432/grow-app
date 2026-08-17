@@ -795,11 +795,11 @@ export default function DisputesPage({ initialTab = 0 }) {
               label="Return API"
               iconPosition="start"
             />
-            <Tab
+            {/* <Tab
               icon={<AssignmentReturnIcon sx={{ fontSize: 16 }} />}
               label="Return Search"
               iconPosition="start"
-            />
+            /> */}
             <Tab
               icon={<CancelIcon sx={{ fontSize: 16 }} />}
               label="Cancelled Status"
@@ -1411,10 +1411,10 @@ export default function DisputesPage({ initialTab = 0 }) {
         <ReturnPostOrderPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
-      {/* Return Search Tab (ops / worksheet) */}
-      <TabPanel value={tabValue} index={3}>
+      {/* Return Search Tab (ops / worksheet) - TEMPORARILY DISABLED */}
+      {/* <TabPanel value={tabValue} index={3}>
         <ReturnRequestedPage dateFilter={dateFilter} hideDateFilter embedded />
-      </TabPanel>
+      </TabPanel> */}
 
       {/* Cancelled Status Tab */}
       <TabPanel value={tabValue} index={4}>

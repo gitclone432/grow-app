@@ -12,6 +12,12 @@ const CaseSchema = new mongoose.Schema({
     enum: ['open', 'attended', 'resolved'],
     default: 'open'
   }, // Manual status for worksheet tracking
+
+  complianceBoardStatus: {
+    type: String,
+    enum: ['inr_case_opened', 'inr_follow_up', 'inr_tracking_id_upload', 'inr_case_open_ebay_step_in', 'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'],
+    default: 'inr_case_opened'
+  }, // Status for compliance board kanban view
   
   // Dates
   creationDate: Date,
