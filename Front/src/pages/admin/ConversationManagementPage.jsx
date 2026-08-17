@@ -49,6 +49,104 @@ const filterFieldSx = {
   }
 };
 
+// --- NOTES CELL COMPONENT (Inline Editable) ---
+const NotesCell = React.memo(function NotesCell({ item, onSave }) {
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [tempValue, setTempValue] = React.useState(item.notes || '');
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isEditing) {
+      setTempValue(item.notes || '');
+    }
+  }, [item.notes, isEditing]);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await onSave(item._id, tempValue);
+      setIsEditing(false);
+    } catch (e) {
+      console.error('Failed to save note', e);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setTempValue(item.notes || '');
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <Box
+        onClick={(e) => e.stopPropagation()}
+        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 200 }}
+      >
+        <TextField
+          fullWidth
+          multiline
+          minRows={2}
+          size="small"
+          value={tempValue}
+          onChange={(e) => setTempValue(e.target.value)}
+          placeholder="Enter note..."
+          autoFocus
+          variant="outlined"
+        />
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="contained"
+            size="small"
+            onClick={handleSave}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5, bgcolor: '#1976d2' }}
+          >
+            {isSaving ? 'Saving...' : 'Save'}
+          </Button>
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={handleCancel}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5 }}
+          >
+            Cancel
+          </Button>
+        </Stack>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      onClick={(e) => {
+        e.stopPropagation();
+        setIsEditing(true);
+      }}
+      sx={{
+        cursor: 'pointer',
+        minHeight: 30,
+        minWidth: 150,
+        display: 'flex',
+        alignItems: 'center',
+        '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1, px: 1 }
+      }}
+    >
+      {item.notes ? (
+        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
+          {item.notes}
+        </Typography>
+      ) : (
+        <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+          + Add Note
+        </Typography>
+      )}
+    </Box>
+  );
+});
+
 // --- RESOLUTION MODAL COMPONENT (Unchanged logic, kept for completeness) ---
 function ResolutionDialog({ open, onClose, metaItem, onSave, chatAgents = [] }) {
   const theme = useTheme();
@@ -958,6 +1056,7 @@ export default function ConversationManagementPage() {
   const [editingAgent, setEditingAgent] = useState(null); // { _id, name }
   const [editAgentName, setEditAgentName] = useState('');
   const [agentSaving, setAgentSaving] = useState(false);
+
   const rowsPerPage = 25;
 
   const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -1025,6 +1124,7 @@ export default function ConversationManagementPage() {
     { id: 'amazonAccount', label: 'Amazon Account' },
     { id: 'azOrderId', label: 'AZ Order ID' },
     { id: 'pickedUpBy', label: 'Picked Up By' },
+    { id: 'notes', label: 'Notes' },
     { id: 'action', label: 'Action' },
   ];
   const [visibleColumns, setVisibleColumns] = useState(ALL_COLUMNS.map(c => c.id));
@@ -1219,6 +1319,10 @@ export default function ConversationManagementPage() {
         pickedUpBy: {
           label: 'Picked Up By',
           value: (item) => item.pickedUpBy || ''
+        },
+        notes: {
+          label: 'Notes',
+          value: (item) => item.notes || ''
         }
       };
 
@@ -1308,6 +1412,11 @@ export default function ConversationManagementPage() {
     } catch (e) {
       console.error('Failed to update pickedUpBy', e);
     }
+  }
+
+  async function handleNotesSave(itemId, notesText) {
+    await api.patch(`/ebay/conversation-management/${itemId}/notes`, { notes: notesText });
+    setItems(prev => prev.map(i => i._id === itemId ? { ...i, notes: notesText } : i));
   }
 
   return (
@@ -1628,6 +1737,7 @@ export default function ConversationManagementPage() {
                   {visibleColumns.includes('amazonAccount') && <TableCell sx={tableHeaderCellSx}>Amazon Acct</TableCell>}
                   {visibleColumns.includes('azOrderId') && <TableCell sx={tableHeaderCellSx}>AZ Order</TableCell>}
                   {visibleColumns.includes('pickedUpBy') && <TableCell sx={tableHeaderCellSx}>Picked Up By</TableCell>}
+                  {visibleColumns.includes('notes') && <TableCell sx={tableHeaderCellSx}>Notes</TableCell>}
                   {visibleColumns.includes('action') && <TableCell align="center" sx={tableHeaderCellSx}>Action</TableCell>}
                 </TableRow>
               </TableHead>
@@ -1765,6 +1875,11 @@ export default function ConversationManagementPage() {
                               ))}
                             </Select>
                           </FormControl>
+                        </TableCell>
+                      )}
+                      {visibleColumns.includes('notes') && (
+                        <TableCell sx={tableBodyCellSx}>
+                          <NotesCell item={item} onSave={handleNotesSave} />
                         </TableCell>
                       )}
                       {visibleColumns.includes('action') && (
