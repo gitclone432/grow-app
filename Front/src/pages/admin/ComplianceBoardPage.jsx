@@ -254,9 +254,20 @@ const ALERT_REQUEST_TIMEOUT_MS = 12000;
 
 const ensureArray = (value) => (Array.isArray(value) ? value : []);
 
-const toDraggableId = (prefix, item, fallback = '') => (
-  String(item?._id || item?.orderObjectId || item?.orderId || item?.caseId || item?.returnId || fallback || `${prefix}-${Date.now()}`)
-);
+const toDraggableId = (prefix, item, fallback = '') => {
+  // For special case types (return, cancelled, inr), prepend the prefix to the ID
+  if (prefix === 'return' && (item?.returnId || fallback)) {
+    return `return:${item?.returnId || fallback}`;
+  }
+  if (prefix === 'cancellation' && (item?.cancelId || fallback)) {
+    return `cancelled:${item?.cancelId || fallback}`;
+  }
+  if (prefix === 'inr' && (item?.caseId || fallback)) {
+    return `inr:${item?.caseId || fallback}`;
+  }
+  // For regular orders and other types, return the ID as-is
+  return String(item?._id || item?.orderObjectId || item?.orderId || item?.caseId || item?.returnId || fallback || `${prefix}-${Date.now()}`);
+};
 
 const formatDateSoldPT = (dateValue) => {
   if (!dateValue) return '';
@@ -675,6 +686,7 @@ function ComplianceBoardPage() {
         limit: INITIAL_LOAD_LIMIT,
       };
       
+      // Date filter is based on INR Case's creationDate (when case was created), NOT Order's transaction date
       if (dateFilter.mode === 'single' && dateFilter.single) {
         params.dateFrom = dateFilter.single;
         // Set dateTo to today's date to show all cases from selected date to present
@@ -725,6 +737,7 @@ function ComplianceBoardPage() {
         limit: 200,
       };
       
+      // Date filter is based on Return's creationDate (when return was initiated), NOT Order's transaction date
       if (dateFilter.mode === 'single' && dateFilter.single) {
         // For single date: set startDate to that date and endDate to today
         // This shows cases from the selected date onwards
@@ -752,7 +765,7 @@ function ComplianceBoardPage() {
         caseOrderId: returnItem.orderId,
         orderId: returnItem.orderId || returnItem.itemId, // Display actual order ID
         returnId: returnItem.returnId, // Store returnId separately for return reference
-        dateSold: returnItem.dateSold, // Use backend's dateSold (return's creationDate)
+        dateSold: returnItem.returnCreatedDate || returnItem.creationDate, // Use Return's creation date, not Order's dateSold
         buyer: {
           username: returnItem.buyerUsername,
           buyerRegistrationAddress: { fullName: returnItem.buyerName }
@@ -769,7 +782,7 @@ function ComplianceBoardPage() {
           returnId: returnItem.returnId,
           returnStatus: returnItem.returnStatus,
           returnReason: returnItem.returnReason,
-          createdDate: returnItem.creationDate,
+          createdDate: returnItem.returnCreatedDate || returnItem.creationDate,
           responseDate: returnItem.responseDate,
         },
         sourceType: 'return-case' // Mark as return case for display
@@ -786,6 +799,7 @@ function ComplianceBoardPage() {
         limit: 200,
       };
       
+      // Date filter is based on Cancellation's cancelRequestDate (when cancellation was requested), NOT Order's transaction date
       if (dateFilter.mode === 'single' && dateFilter.single) {
         // For single date: set startDate to that date and endDate to today
         // This shows cases from the selected date onwards
@@ -1180,7 +1194,7 @@ function ComplianceBoardPage() {
         }
         
         // Deduplicate inrCasesForBoard by orderId
-        // Keep the one with inr_case_opened status if multiple exist for same orderId, otherwise keep first
+        // Keep only one INR case per order, preferring the one with inr_case_opened status or most recent
         const inrByOrderId = new Map();
         inrCasesForBoard.forEach((caseItem) => {
           const orderId = String(caseItem.orderId || caseItem.caseOrderId || '').toLowerCase();
@@ -1191,10 +1205,16 @@ function ComplianceBoardPage() {
           
           // Keep this case if:
           // - No existing entry, OR
-          // - This one has inr_case_opened status and existing doesn't
-          if (!existing || 
-              (status === COLUMN_STATUS.INR_CASE_OPENED && existing.status !== COLUMN_STATUS.INR_CASE_OPENED)) {
-            inrByOrderId.set(orderId, { caseItem, status });
+          // - This one has inr_case_opened status and existing doesn't, OR
+          // - This one is more recent (newer creationDate)
+          if (!existing) {
+            inrByOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
+          } else if (status === COLUMN_STATUS.INR_CASE_OPENED && existing.status !== COLUMN_STATUS.INR_CASE_OPENED) {
+            // Prefer inr_case_opened status
+            inrByOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
+          } else if (new Date(caseItem.creationDate) > new Date(existing.creationDate)) {
+            // Keep the more recent one
+            inrByOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
           }
         });
         
@@ -1248,21 +1268,28 @@ function ComplianceBoardPage() {
         }
         
         // Deduplicate cancellationCasesForBoard by cancelId
-        // Keep the one with cancellation_request status if multiple exist for same cancelId, otherwise keep first
+        // Deduplicate cancellationCasesForBoard by orderId (not cancelId)
+        // Keep only one cancellation per order, preferring the one with cancellation_request status or most recent
         const cancellationByOrderId = new Map();
         cancellationCasesForBoard.forEach((caseItem) => {
-          const caseId = String(caseItem.cancelId || '').toLowerCase();
-          if (!caseId) return;
+          const orderId = String(caseItem.orderId || caseItem.legacyOrderId || '').toLowerCase();
+          if (!orderId) return;
           
           const status = caseItem.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
-          const existing = cancellationByOrderId.get(caseId);
+          const existing = cancellationByOrderId.get(orderId);
           
           // Keep this case if:
           // - No existing entry, OR
-          // - This one has cancellation_request status and existing doesn't
-          if (!existing || 
-              (status === COLUMN_STATUS.CANCELLATION_REQUEST && existing.status !== COLUMN_STATUS.CANCELLATION_REQUEST)) {
-            cancellationByOrderId.set(caseId, { caseItem, status });
+          // - This one has cancellation_request status and existing doesn't, OR
+          // - This one is more recent (newer cancelRequestDate)
+          if (!existing) {
+            cancellationByOrderId.set(orderId, { caseItem, status, cancelRequestDate: caseItem.cancelRequestDate });
+          } else if (status === COLUMN_STATUS.CANCELLATION_REQUEST && existing.status !== COLUMN_STATUS.CANCELLATION_REQUEST) {
+            // Prefer cancellation_request status
+            cancellationByOrderId.set(orderId, { caseItem, status, cancelRequestDate: caseItem.cancelRequestDate });
+          } else if (new Date(caseItem.cancelRequestDate) > new Date(existing.cancelRequestDate)) {
+            // Keep the more recent one
+            cancellationByOrderId.set(orderId, { caseItem, status, cancelRequestDate: caseItem.cancelRequestDate });
           }
         });
         
@@ -1380,21 +1407,28 @@ function ComplianceBoardPage() {
           });
         }
         
-        // Deduplicate storedReturnCasesForBoard by returnId
+        // Deduplicate storedReturnCasesForBoard by orderId (not returnId)
+        // Keep only one return per order, preferring the one with case_opened status or most recent
         const returnByOrderId = new Map();
         storedReturnCasesForBoard.forEach((returnItem) => {
-          const returnId = String(returnItem.returnId || '').toLowerCase();
-          if (!returnId) return;
+          const orderId = String(returnItem.orderId || returnItem.itemId || '').toLowerCase();
+          if (!orderId) return;
           
           const status = returnItem.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED;
-          const existing = returnByOrderId.get(returnId);
+          const existing = returnByOrderId.get(orderId);
           
           // Keep this case if:
           // - No existing entry, OR
-          // - This one has case_opened status and existing doesn't
-          if (!existing || 
-              (status === COLUMN_STATUS.CASE_OPENED && existing.status !== COLUMN_STATUS.CASE_OPENED)) {
-            returnByOrderId.set(returnId, { returnItem, status });
+          // - This one has case_opened status and existing doesn't, OR
+          // - This one is more recent (newer creationDate)
+          if (!existing) {
+            returnByOrderId.set(orderId, { returnItem, status, creationDate: returnItem.returnCreatedDate || returnItem.creationDate });
+          } else if (status === COLUMN_STATUS.CASE_OPENED && existing.status !== COLUMN_STATUS.CASE_OPENED) {
+            // Prefer case_opened status
+            returnByOrderId.set(orderId, { returnItem, status, creationDate: returnItem.returnCreatedDate || returnItem.creationDate });
+          } else if (new Date(returnItem.returnCreatedDate || returnItem.creationDate) > new Date(existing.creationDate)) {
+            // Keep the more recent one
+            returnByOrderId.set(orderId, { returnItem, status, creationDate: returnItem.returnCreatedDate || returnItem.creationDate });
           }
         });
         
@@ -1423,47 +1457,92 @@ function ComplianceBoardPage() {
         // Note: Cases are already grouped by status above
       }
       
+      // Track all orderIds that have been added from special case sources
+      // This prevents duplicate cards for the same orderId in return/refund, cancellation, and inr boards
+      let caseSourceOrderIds = new Set();
+      
       if (selectedCategory === 'return_refund') {
-        // Case Opened: Only Return Request items (from Return Search / Issues & Resolutions)
-        grouped[COLUMN_STATUS.CASE_OPENED] = boardOrders.filter((order) => 
-          order.returnBoardSource === 'return_request'
+        // Store orderIds from deduplicated return cases to prevent duplicates from boardOrders
+        caseSourceOrderIds = new Set(
+          Object.values(grouped)
+            .flat()
+            .filter(order => order.returnBoardSource === 'return_request')
+            .map(r => String(r.orderId || r.itemId || '').toLowerCase())
+            .filter(Boolean)
         );
+        
+        // Case Opened: Merge Return cases with conversation-based items
+        // Keep existing Return items, add only return_request items that actually have case_opened status
+        // AND are not already from deduplicated return cases
+        grouped[COLUMN_STATUS.CASE_OPENED] = [
+          ...(grouped[COLUMN_STATUS.CASE_OPENED] || []),
+          ...boardOrders.filter((order) => 
+            order.returnBoardSource === 'return_request' &&
+            (order.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED) === COLUMN_STATUS.CASE_OPENED &&
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
+          )
+        ];
         
         // Case Not Opened: Only Conversation items (from Order Communication assigned to Return/Refund/Replace)
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = boardOrders.filter((order) => 
-          order.returnBoardSource === 'conversation' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED
-        );
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = [
+          ...(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []),
+          ...boardOrders.filter((order) => 
+            order.returnBoardSource === 'conversation' &&
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED
+          )
+        ];
         
         // Other return statuses (Follow Up, Provide Return Label, etc.) from Order Communication
-        grouped[COLUMN_STATUS.RETURN_FOLLOW_UP] = boardOrders.filter((order) =>
-          order.returnBoardSource === 'conversation' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.RETURN_FOLLOW_UP
-        );
-        grouped[COLUMN_STATUS.PROVIDE_RETURN_LABEL] = boardOrders.filter((order) =>
-          order.returnBoardSource === 'conversation' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PROVIDE_RETURN_LABEL
-        );
-        grouped[COLUMN_STATUS.BUYER_DROP_OFF] = boardOrders.filter((order) =>
-          order.returnBoardSource === 'conversation' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.BUYER_DROP_OFF
-        );
-        grouped[COLUMN_STATUS.ITEM_DELIVERED] = boardOrders.filter((order) =>
-          order.returnBoardSource === 'conversation' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.ITEM_DELIVERED
-        );
-        grouped[COLUMN_STATUS.PARTIAL_REFUND] = boardOrders.filter((order) =>
-          order.returnBoardSource === 'conversation' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PARTIAL_REFUND
-        );
-        grouped[COLUMN_STATUS.FULL_REFUND] = boardOrders.filter((order) =>
-          order.returnBoardSource === 'conversation' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.FULL_REFUND
-        );
-        grouped[COLUMN_STATUS.REPLACEMENT] = boardOrders.filter((order) =>
-          order.returnBoardSource === 'conversation' &&
-          (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.REPLACEMENT
-        );
+        // IMPORTANT: Merge with existing Return items, don't replace them!
+        grouped[COLUMN_STATUS.RETURN_FOLLOW_UP] = [
+          ...(grouped[COLUMN_STATUS.RETURN_FOLLOW_UP] || []),
+          ...boardOrders.filter((order) =>
+            order.returnBoardSource === 'conversation' &&
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.RETURN_FOLLOW_UP
+          )
+        ];
+        grouped[COLUMN_STATUS.PROVIDE_RETURN_LABEL] = [
+          ...(grouped[COLUMN_STATUS.PROVIDE_RETURN_LABEL] || []),
+          ...boardOrders.filter((order) =>
+            order.returnBoardSource === 'conversation' &&
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PROVIDE_RETURN_LABEL
+          )
+        ];
+        grouped[COLUMN_STATUS.BUYER_DROP_OFF] = [
+          ...(grouped[COLUMN_STATUS.BUYER_DROP_OFF] || []),
+          ...boardOrders.filter((order) =>
+            order.returnBoardSource === 'conversation' &&
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.BUYER_DROP_OFF
+          )
+        ];
+        grouped[COLUMN_STATUS.ITEM_DELIVERED] = [
+          ...(grouped[COLUMN_STATUS.ITEM_DELIVERED] || []),
+          ...boardOrders.filter((order) =>
+            order.returnBoardSource === 'conversation' &&
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.ITEM_DELIVERED
+          )
+        ];
+        grouped[COLUMN_STATUS.PARTIAL_REFUND] = [
+          ...(grouped[COLUMN_STATUS.PARTIAL_REFUND] || []),
+          ...boardOrders.filter((order) =>
+            order.returnBoardSource === 'conversation' &&
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PARTIAL_REFUND
+          )
+        ];
+        grouped[COLUMN_STATUS.FULL_REFUND] = [
+          ...(grouped[COLUMN_STATUS.FULL_REFUND] || []),
+          ...boardOrders.filter((order) =>
+            order.returnBoardSource === 'conversation' &&
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.FULL_REFUND
+          )
+        ];
+        grouped[COLUMN_STATUS.REPLACEMENT] = [
+          ...(grouped[COLUMN_STATUS.REPLACEMENT] || []),
+          ...boardOrders.filter((order) =>
+            order.returnBoardSource === 'conversation' &&
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.REPLACEMENT
+          )
+        ];
       }
       
       // Log column counts
@@ -2832,15 +2911,9 @@ function ComplianceBoardPage() {
       console.log(`[APPLY-ORDER] Processing ${moves.length} order move(s):`);
       await Promise.all(moves.map((order, idx) => {
         const idStr = String(order._id || '');
-        // Handle different order source types
-        let targetId;
-        if (idStr.startsWith('return:') || idStr.startsWith('cancelled:') || idStr.startsWith('inr:')) {
-          // For special sources, use orderObjectId (original MongoDB _id) or fall back to orderId
-          targetId = order.orderObjectId || order.orderId || order._id;
-        } else {
-          // For regular orders, use orderObjectId if available, else _id
-          targetId = order.orderObjectId || order._id;
-        }
+        // For special case types (return, cancelled, inr), send full ID with prefix
+        // Backend checks the prefix to determine document type
+        let targetId = idStr;
         
         console.log(`[APPLY-ORDER] Order ${idx + 1}:`, {
           orderId: order.orderId,
@@ -2848,7 +2921,10 @@ function ComplianceBoardPage() {
           orderObjectId: order.orderObjectId,
           targetId: targetId,
           fromStatus: order.complianceBoardStatus,
-          toStatus: status
+          toStatus: status,
+          isReturn: idStr.startsWith('return:'),
+          isCancellation: idStr.startsWith('cancelled:'),
+          isINR: idStr.startsWith('inr:')
         });
 
         const patchData = {

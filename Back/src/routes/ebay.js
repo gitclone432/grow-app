@@ -8921,7 +8921,7 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
               responseDate: ebayReturn.sellerResponseDue?.respondByDate?.value ? new Date(ebayReturn.sellerResponseDue.respondByDate.value) : null,
               rmaNumber: ebayReturn.RMANumber,
               buyerComments: creationInfo.comments?.content,
-              notes: creationInfo.comments?.content || null,
+              notes: '', // Internal notes only - NOT buyer comments
               rawData: ebayReturn
             };
 
@@ -8953,9 +8953,24 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
                 if (responseDateChanged) console.log(`   - RespDate: ${existing.responseDate} -> ${returnData.responseDate}`);
                 if (creationDateChanged) console.log(`   - CreateDate: ${existing.creationDate} -> ${returnData.creationDate}`);
 
+                // PRESERVE compliance board status when updating from eBay fetch
+                const savedComplianceBoardStatus = existing.complianceBoardStatus;
+                const savedInternalNotes = existing.internalNotes;
+                
+                console.log(`[FETCH-RETURN] [PRESERVE] Return ${ebayReturn.returnId}: saving status='${savedComplianceBoardStatus}' before .set()`);
+                
                 // Use .set() to update fields
                 existing.set(returnData);
+                
+                // Restore preserved fields after set()
+                existing.complianceBoardStatus = savedComplianceBoardStatus;
+                existing.internalNotes = savedInternalNotes;
+                
+                console.log(`[FETCH-RETURN] [RESTORE] Return ${ebayReturn.returnId}: restored status='${existing.complianceBoardStatus}' after .set()`);
+                
                 await existing.save();
+                
+                console.log(`[FETCH-RETURN] [SAVED] Return ${ebayReturn.returnId}: status='${existing.complianceBoardStatus}' has been persisted to DB`);
                 updatedReturns++;
 
                 // Track update details for frontend snackbar
@@ -8973,7 +8988,8 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
                 existing.returnReason = returnData.returnReason;
                 existing.reasonType = returnData.reasonType;
                 existing.returnCloseReason = returnData.returnCloseReason;
-                existing.notes = returnData.notes;
+                // Do NOT update notes field - preserve internal notes
+                // existing.notes is kept as-is
                 existing.buyerComments = returnData.buyerComments;
                 existing.sellerAvailableOptions = returnData.sellerAvailableOptions;
                 existing.rawData = returnData.rawData;
@@ -10680,6 +10696,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
     if (state) query.cancelState = state;
 
     // Date range filter on cancelRequestDate using PT timezone-aware parsing
+    // IMPORTANT: Filter by Cancellation's cancelRequestDate (when cancellation was requested), NOT Order's transaction date
     if (startDate || endDate) {
       query.cancelRequestDate = {};
       if (startDate) query.cancelRequestDate.$gte = getPTDayBoundsUTC(startDate).start;
@@ -10783,6 +10800,7 @@ router.get('/stored-returns', async (req, res) => {
     }
 
     // Date range filter on creationDate using PT timezone-aware parsing
+    // IMPORTANT: Filter by Return's creationDate (when return was initiated), NOT Order's transaction date
     if (startDate || endDate) {
       query.creationDate = {};
       if (startDate) query.creationDate.$gte = getPTDayBoundsUTC(startDate).start;
@@ -11497,7 +11515,7 @@ router.get('/stored-inr-cases', async (req, res) => {
     // Minimum date for compliance boards: July 19, 2026
     const COMPLIANCE_BOARD_MIN_DATE = new Date('2026-07-19T00:00:00Z');
 
-    // Build date filter
+    // Build date filter on Case's creationDate (when INR was created), NOT Order's transaction date
     let dateQuery = { $gte: COMPLIANCE_BOARD_MIN_DATE };
     
     if (dateFrom) {
@@ -21669,6 +21687,28 @@ router.patch('/returns/:returnId/logs', requireAuth, async (req, res) => {
     res.json({ success: true, return: returnDoc });
   } catch (err) {
     console.error('Error updating return logs:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/returns/:returnId/notes', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const { notes } = req.body;
+
+    const returnDoc = await Return.findOneAndUpdate(
+      { returnId },
+      { internalNotes: notes || '' },
+      { new: true }
+    );
+
+    if (!returnDoc) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    res.json({ success: true, return: returnDoc });
+  } catch (err) {
+    console.error('Error updating return notes:', err);
     res.status(500).json({ error: err.message });
   }
 });
