@@ -9,6 +9,4 @@ const invoiceCategorySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-invoiceCategorySchema.index({ name: 1 });
-
 export default mongoose.model('InvoiceCategory', invoiceCategorySchema);

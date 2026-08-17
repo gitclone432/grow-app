@@ -5,7 +5,7 @@ const schema = new mongoose.Schema(
   {
     _id: { type: String, required: true },
     payload: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
-    expiresAt: { type: Date, required: true, index: true },
+    expiresAt: { type: Date, required: true },
     updatedAt: { type: Date, default: Date.now },
   },
   { collection: 'marketing_view_cache', versionKey: false }
