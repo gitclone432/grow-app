@@ -10621,12 +10621,13 @@ router.post('/cancellations/:cancelId/reject', requireAuth, requirePageAccess('D
 /**
  * Save or update cancellation remark using Order.allOrdersUsdRemark (single source of truth)
  * PATCH /ebay/cancellations/:cancelId/remark
- * Body: { remark, message?, attachments? }
+ * Body: { remark }
+ * Note: Message sending is handled by frontend via POST /ebay/send-message
  */
 router.patch('/cancellations/:cancelId/remark', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
     const cancelId = String(req.params.cancelId || '').trim();
-    const { remark, message, attachments } = req.body || {};
+    const { remark } = req.body || {};
 
     if (!cancelId) {
       return res.status(400).json({ error: 'cancelId is required' });
@@ -10652,29 +10653,6 @@ router.patch('/cancellations/:cancelId/remark', requireAuth, requirePageAccess('
         order.allOrdersUsdRemark = remark == null ? '' : String(remark);
         await order.save();
         savedRemark = order.allOrdersUsdRemark;
-      }
-    }
-
-    // Send message if provided
-    if (message && message.trim() && cancellation.seller) {
-      try {
-        // Store message in internal messages system
-        const InternalMessage = mongoose.model('InternalMessage');
-        const newMessage = new InternalMessage({
-          seller: cancellation.seller._id,
-          orderId: cancellation.orderId || cancellation.legacyOrderId,
-          buyerUsername: cancellation.buyerLoginName || cancellation.buyerUsername,
-          subject: `Cancellation Update: ${cancellation.cancelId}`,
-          body: message,
-          messageType: 'outbound',
-          category: 'Cancellation',
-          attachments: attachments || [],
-          timestamp: new Date()
-        });
-        await newMessage.save();
-      } catch (msgErr) {
-        console.error('[Cancellation Message Save] Warning - message not saved:', msgErr.message);
-        // Don't fail the remark update if message save fails
       }
     }
 

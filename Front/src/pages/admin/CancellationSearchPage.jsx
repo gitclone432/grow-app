@@ -610,16 +610,26 @@ export default function CancellationSearchPage({
         )
       );
 
-      // Send message separately if requested
-      if (sendMessage && messageBody && cancellation.cancelId) {
+      // Send message separately if requested - using the same endpoint as FulfillmentDashboard
+      if (sendMessage && messageBody && cancellation.orderId) {
         try {
-          await api.patch(`/ebay/cancellations/${cancellation.cancelId}/remark`, {
-            remark: remarkValue,
-            message: messageBody,
-            attachments: remarkAttachments
+          const mediaUrls = remarkAttachments.map((a) => a.url);
+          await api.post('/ebay/send-message', {
+            orderId: cancellation.orderId || cancellation.legacyOrderId,
+            buyerUsername: cancellation.buyerUsername || cancellation.buyerLoginName,
+            itemId: cancellation.itemId,
+            sellerId: cancellation.seller?._id,
+            body: messageBody,
+            mediaUrls: mediaUrls.length > 0 ? mediaUrls : []
           });
         } catch (msgErr) {
           console.error('Message send failed (remark still saved):', msgErr);
+          setSnackbar({
+            open: true,
+            severity: 'warning',
+            message: 'Remark saved but message failed to send'
+          });
+          return;
         }
       }
 
