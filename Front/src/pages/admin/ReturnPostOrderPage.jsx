@@ -48,9 +48,11 @@ import EscalatorWarningIcon from '@mui/icons-material/EscalatorWarning';
 import SendIcon from '@mui/icons-material/Send';
 import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
+import ChatIcon from '@mui/icons-material/Chat';
 import api from '../../lib/api';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ColumnSelector from '../../components/ColumnSelector';
+import ChatModal from '../../components/ChatModal';
 import { yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 import { sortSellersByName } from '../../lib/sellersSort.js';
 
@@ -236,6 +238,7 @@ export default function ReturnPostOrderPage({
     { id: 'action', label: 'Action' },
   ];
   const [visibleColumns, setVisibleColumns] = useState(ALL_COLUMNS.map((c) => c.id));
+  const [selectedReturn, setSelectedReturn] = useState(null);
 
   const internalDateFilter = useMemo(
     () => ({ mode: 'all', single: '', from: '', to: '' }),
@@ -1258,6 +1261,11 @@ export default function ReturnPostOrderPage({
                               </IconButton>
                             </span>
                           </Tooltip>
+                          <Tooltip title="Open chat / manage">
+                            <IconButton size="small" onClick={() => setSelectedReturn(row)} sx={{ p: 0.4 }}>
+                              <ChatIcon sx={{ fontSize: 18 }} />
+                            </IconButton>
+                          </Tooltip>
                         </Stack>
                       </TableCell>
                     )}
@@ -1877,6 +1885,24 @@ export default function ReturnPostOrderPage({
           </Button>
         </DialogActions>
       </Dialog>
+
+      {selectedReturn && (
+        <ChatModal
+          open={Boolean(selectedReturn)}
+          onClose={() => setSelectedReturn(null)}
+          orderId={selectedReturn.orderId}
+          buyerUsername={selectedReturn.buyerUsername}
+          itemId={selectedReturn.itemId}
+          itemTitle={selectedReturn.itemTitle || ''}
+          sellerId={selectedReturn.seller?._id || selectedReturn.seller || null}
+          sellerName={selectedReturn.seller?.user?.username || ''}
+          title="Manage Return"
+          category="Return"
+          caseStatus={selectedReturn.returnStatus || 'Open'}
+          entityId={selectedReturn.returnId || selectedReturn._id}
+          entityType="return"
+        />
+      )}
 
       <Snackbar
         open={snackbar.open}

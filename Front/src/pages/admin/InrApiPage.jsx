@@ -37,6 +37,7 @@ import ClearIcon from '@mui/icons-material/Clear';
 import SearchIcon from '@mui/icons-material/Search';
 import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
+import ChatIcon from '@mui/icons-material/Chat';
 import api from '../../lib/api';
 import {
   tableBodyCellSx,
@@ -47,6 +48,7 @@ import {
   yellowOutlinedButtonSx,
 } from '../../theme/tableStyles.js';
 import { sortSellersByName } from '../../lib/sellersSort.js';
+import ChatModal from '../../components/ChatModal';
 
 const headerSx = {
   ...tableHeaderCellSx,
@@ -1266,6 +1268,9 @@ function DetailField({ label, value, copy, chipColor }) {
 }
 
 function IssueDetailView({ data, row }) {
+  const [orderData, setOrderData] = useState(null);
+  const [loadingOrderData, setLoadingOrderData] = useState(false);
+
   if (!data || typeof data !== 'object') {
     return <Alert severity="info">No details available.</Alert>;
   }
@@ -1294,6 +1299,39 @@ function IssueDetailView({ data, row }) {
   const choices = Array.isArray(data.availableChoices) ? data.availableChoices : [];
   const lineItems = Array.isArray(data.lineItems) ? data.lineItems : [];
   const history = detailHistory(data).slice(-10).reverse();
+
+  // Fetch order details based on orderId
+  useEffect(() => {
+    if (!orderId) {
+      setOrderData(null);
+      return;
+    }
+
+    let mounted = true;
+    setLoadingOrderData(true);
+    
+    api.get(`/ebay/order/${orderId}`)
+      .then(({ data: fetchedOrder }) => {
+        if (mounted) {
+          setOrderData(fetchedOrder);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setOrderData(null);
+        }
+      })
+      .finally(() => {
+        if (mounted) {
+          setLoadingOrderData(false);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [orderId]);
+
   const fields = [
     { label: 'Status', value: statusShort(status), chipColor: statusColor(status) },
     { label: 'Reason', value: reasonShort(reason) || reason },
@@ -1352,16 +1390,28 @@ function IssueDetailView({ data, row }) {
         </>
       ) : null}
 
-      {tracking.trackingNumber || tracking.carrier ? (
+      {tracking.trackingNumber || tracking.carrier || orderData ? (
         <>
           <Divider />
           <Box>
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>Shipment</Typography>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>Shipment & Fulfillment</Typography>
             <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 1.25 }}>
               <DetailField label="Tracking" value={tracking.trackingNumber} copy />
               <DetailField label="Carrier" value={tracking.carrier} />
               <DetailField label="Status" value={tracking.currentStatus} />
               <DetailField label="Shipped" value={tracking.shippedDate ? formatDate(tracking.shippedDate) : ''} />
+              {loadingOrderData ? (
+                <DetailField label="Order Details" value={<CircularProgress size={16} />} />
+              ) : orderData ? (
+                <>
+                  <DetailField label="Amazon Account" value={orderData.amazonAccount || '-'} />
+                  <DetailField label="Amazon ID" value={orderData.azOrderId || orderData.amazonOrderId || '-'} copy />
+                  <DetailField 
+                    label="Remarks" 
+                    value={orderData.remark || '-'} 
+                  />
+                </>
+              ) : null}
             </Box>
             {tracking.trackingNumber ? (
               <Button
@@ -1472,6 +1522,7 @@ export default function InrApiPage({
   const [escalateDialog, setEscalateDialog] = useState({
     open: false, row: null, reason: 'OTHER', comments: '',
   });
+  const [selectedCase, setSelectedCase] = useState(null);
 
   const rows = useMemo(() => {
     const combined = [
@@ -2230,6 +2281,11 @@ export default function InrApiPage({
                           </Tooltip>
                         </>
                       ) : null}
+                      <Tooltip title="Open chat / manage">
+                        <IconButton size="small" onClick={() => setSelectedCase(row)} sx={{ p: 0.4 }}>
+                          <ChatIcon sx={{ fontSize: 18 }} />
+                        </IconButton>
+                      </Tooltip>
                     </Stack>
                   </TableCell>
                 </TableRow>
@@ -2462,6 +2518,24 @@ export default function InrApiPage({
           <Button onClick={() => setDetail((d) => ({ ...d, open: false }))}>Close</Button>
         </DialogActions>
       </Dialog>
+
+      {selectedCase && (
+        <ChatModal
+          open={Boolean(selectedCase)}
+          onClose={() => setSelectedCase(null)}
+          orderId={rowOrderId(selectedCase)}
+          buyerUsername={selectedCase.buyerUsername}
+          itemId={rowItemId(selectedCase)}
+          itemTitle={selectedCase.itemTitle || ''}
+          sellerId={selectedCase.seller?._id || selectedCase.seller || null}
+          sellerName={sellerName(selectedCase)}
+          title={`Manage ${selectedCase.source === 'dispute' ? 'Payment Dispute' : selectedCase.source === 'inquiry' ? 'Inquiry' : 'Case'}`}
+          category={selectedCase.source === 'dispute' ? 'Payment Dispute' : 'INR'}
+          caseStatus={rowStatus(selectedCase)}
+          entityId={selectedCase.caseId || selectedCase.paymentDisputeId}
+          entityType="inr"
+        />
+      )}
 
       <Snackbar
         open={snackbar.open}
