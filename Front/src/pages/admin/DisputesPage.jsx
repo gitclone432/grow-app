@@ -1417,22 +1417,22 @@ export default function DisputesPage({ initialTab = 0 }) {
       </TabPanel> */}
 
       {/* Cancelled Status Tab */}
-      <TabPanel value={tabValue} index={4}>
+      <TabPanel value={tabValue} index={3}>
         <CancelledStatusPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
       {/* Cancellation Search (Post-Order API) Tab */}
-      <TabPanel value={tabValue} index={5}>
+      <TabPanel value={tabValue} index={4}>
         <CancellationSearchPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
       {/* Worksheet Tab */}
-      <TabPanel value={tabValue} index={6}>
+      <TabPanel value={tabValue} index={5}>
         <WorksheetPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
       {/* INR API Tab (Post-Order inquiry + casemanagement) */}
-      <TabPanel value={tabValue} index={7}>
+      <TabPanel value={tabValue} index={6}>
         <InrApiPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
