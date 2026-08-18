@@ -1994,16 +1994,33 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       const [returnRequests, returnConversations, assignedOrders] = await Promise.all([
         Return.find(returnQuery)
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
-          .sort({ creationDate: -1 })
+          .sort({ updatedAt: -1, creationDate: -1 })
+          .limit(1000) // Limit to most recent 1000 Returns to avoid memory issues
           .lean(),
         ConversationMeta.find(conversationQuery)
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
           .sort({ updatedAt: -1 })
           .lean(),
         Order.find({
-          $or: [
-            { complianceBoardCategories: category },
-            { complianceBoardCategory: category }
+          $and: [
+            {
+              $or: [
+                { complianceBoardCategories: category },
+                { complianceBoardCategory: category }
+              ]
+            },
+            // For specialized boards (return_refund, cancellation, inr), don't exclude by other categories
+            // An order can be in multiple categories legitimately
+            // Only for order_fulfillment, exclude orders in specialized categories
+            ...(category === 'order_fulfillment' ? [
+              {
+                $and: [
+                  { complianceBoardCategories: { $ne: 'return_refund' } },
+                  { complianceBoardCategories: { $ne: 'cancellation' } },
+                  { complianceBoardCategories: { $ne: 'inr' } }
+                ]
+              }
+            ] : [])
           ],
           ...dateFilter
         })
@@ -2012,6 +2029,19 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           .sort({ dateSold: -1 })
           .lean()
       ]);
+      
+      // Log assigned orders fetch for diagnostics
+      console.log(`[BOARD-GET] Fetched ${returnRequests.length} Return documents`);
+      console.log(`[BOARD-GET] Fetched ${assignedOrders.length} assignedOrders with category='${category}'`);
+      if (assignedOrders.length > 0) {
+        const samples = assignedOrders.slice(0, 3).map(o => ({
+          orderId: o.orderId,
+          status: o.complianceBoardStatus,
+          categories: o.complianceBoardCategories,
+          category: o.complianceBoardCategory
+        }));
+        console.log(`[BOARD-GET] Sample assignedOrders:`, samples);
+      }
 
       const sourceOrderIds = [
         ...returnRequests.map((ret) => ret.orderId),
@@ -2103,7 +2133,32 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       console.log(`[BOARD-GET] ===== LOADING RETURNS FOR BOARD =====`);
       console.log(`[BOARD-GET] Total returns fetched: ${returnRequests.length}`);
       
+      // Deduplicate returns by orderId, keeping only the most recent one for each
+      const deduplicatedReturns = new Map();
+      const returnStatusMap = {}; // Map of orderId -> Return's complianceBoardStatus
+      
       returnRequests.forEach((ret) => {
+        const key = ret.orderId;
+        if (!key) return; // Skip if no orderId
+        
+        const existing = deduplicatedReturns.get(key);
+        // Keep the newest Return by creationDate, or if creationDate is equal, by updatedAt
+        const existingTime = existing 
+          ? new Date(existing.updatedAt || existing.creationDate || 0).getTime()
+          : 0;
+        const currentTime = new Date(ret.updatedAt || ret.creationDate || 0).getTime();
+        
+        if (!existing || currentTime > existingTime) {
+          deduplicatedReturns.set(key, ret);
+          returnStatusMap[key] = ret.complianceBoardStatus || 'case_opened';
+          console.log(`[BOARD-GET] [DEDUP] For orderId ${key}: keeping Return with status='${ret.complianceBoardStatus}' (updated: ${ret.updatedAt || ret.creationDate})`);
+        }
+      });
+      
+      const uniqueReturnRequests = Array.from(deduplicatedReturns.values());
+      console.log(`[BOARD-GET] After deduplication: ${uniqueReturnRequests.length} unique returns (was ${returnRequests.length})`);
+      
+      uniqueReturnRequests.forEach((ret) => {
         if (ret.orderId) returnOrderIds.add(ret.orderId);
         const order = orderByOrderId.get(ret.orderId);
         // Use the Return's complianceBoardStatus if it exists, otherwise default to 'case_opened'
@@ -2118,6 +2173,8 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
 
         const status = order.complianceBoardStatus || 'case_not_opened';
         if (status === 'case_opened') return;
+
+        returnOrderIds.add(order.orderId); // Track this orderId to prevent duplicates in returnConversations
 
         cardsById.set(String(order._id), {
           ...order,
@@ -2145,6 +2202,38 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         ...returnRequestCards,
         ...Array.from(cardsById.values())
       ]);
+      
+      // Final deduplication by orderId to prevent showing same order twice
+      // Keep the one with the most recent updatedAt/dateSold, prioritizing return_request source
+      const orderDedupeMap = new Map();
+      returnBoardOrders.forEach((order) => {
+        const key = order.orderId || order.caseOrderId;
+        if (!key) return;
+        
+        const existing = orderDedupeMap.get(key);
+        if (!existing) {
+          orderDedupeMap.set(key, order);
+          return;
+        }
+        
+        // Prioritize return_request over conversation
+        if (order.returnBoardSource === 'return_request' && existing.returnBoardSource !== 'return_request') {
+          orderDedupeMap.set(key, order);
+          console.log(`[BOARD-GET] [FINAL-DEDUP] For orderId ${key}: replacing conversation source with return_request`);
+          return;
+        }
+        
+        // If same source type, keep the more recent one
+        const existingTime = new Date(existing.updatedAt || existing.dateSold || 0).getTime();
+        const currentTime = new Date(order.updatedAt || order.dateSold || 0).getTime();
+        if (currentTime > existingTime) {
+          orderDedupeMap.set(key, order);
+          console.log(`[BOARD-GET] [FINAL-DEDUP] For orderId ${key}: replacing with more recent order (${new Date(currentTime)} > ${new Date(existingTime)})`);
+        }
+      });
+      
+      returnBoardOrders = Array.from(orderDedupeMap.values());
+      
       if (dateFilter.dateSold) {
         returnBoardOrders = returnBoardOrders.filter((order) => {
           if (order.returnBoardSource === 'return_request') return true;
@@ -2268,11 +2357,35 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       // INR, Cancellation, Return/Refund: ONLY show orders with that specific category
       // Don't include unassigned orders - they should stay in Order Communication
       query = {
-        $or: [
-          // Has this category (new format)
-          { complianceBoardCategories: category },
-          // Has this category (old format)
-          { complianceBoardCategory: category }
+        $and: [
+          {
+            $or: [
+              // Has this category (new format)
+              { complianceBoardCategories: category },
+              // Has this category (old format)
+              { complianceBoardCategory: category }
+            ]
+          },
+          // Exclude orders that belong to other specialized categories
+          {
+            $and: [
+              // If looking for return_refund, exclude cancellation and inr
+              ...(category === 'return_refund' ? [
+                { complianceBoardCategories: { $ne: 'cancellation' } },
+                { complianceBoardCategories: { $ne: 'inr' } }
+              ] : []),
+              // If looking for cancellation, exclude return_refund and inr
+              ...(category === 'cancellation' ? [
+                { complianceBoardCategories: { $ne: 'return_refund' } },
+                { complianceBoardCategories: { $ne: 'inr' } }
+              ] : []),
+              // If looking for inr, exclude return_refund and cancellation
+              ...(category === 'inr' ? [
+                { complianceBoardCategories: { $ne: 'return_refund' } },
+                { complianceBoardCategories: { $ne: 'cancellation' } }
+              ] : [])
+            ]
+          }
         ],
         ...dateFilter
       };
@@ -2947,19 +3060,45 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       
       console.log(`[PATCH-COMPLIANCE] [QUERY] Return query:`, JSON.stringify(query));
       
-      const returnDoc = await Return.findOneAndUpdate(
+      let returnDoc = await Return.findOneAndUpdate(
         query,
         { $set: { complianceBoardStatus } },
         { new: true }
       );
 
+      // If not found by returnId/ObjectId, try searching by orderId from the prefix
       if (!returnDoc) {
-        console.warn(`[PATCH-COMPLIANCE] [ERROR] Return not found with ID: ${returnId}`);
-        return res.status(404).json({ error: 'Return not found' });
+        console.warn(`[PATCH-COMPLIANCE] [FALLBACK] Return not found by returnId: ${returnId}, trying by other methods...`);
+        
+        // Try to find any Return with this returnId to verify it exists
+        const existingReturn = await Return.findOne({ returnId: returnId }).lean();
+        if (existingReturn) {
+          console.log(`[PATCH-COMPLIANCE] [FOUND] Return exists but update failed: ${returnId}, _id: ${existingReturn._id}`);
+        } else {
+          console.warn(`[PATCH-COMPLIANCE] [NOT-FOUND] Return does not exist with returnId: ${returnId}`);
+          
+          // List all Returns to help debug
+          const returnCount = await Return.countDocuments({});
+          const sampleReturns = await Return.find({}).select('returnId orderId creationDate').limit(3).lean();
+          console.warn(`[PATCH-COMPLIANCE] [DEBUG] Total Returns in DB: ${returnCount}`);
+          console.warn(`[PATCH-COMPLIANCE] [DEBUG] Sample Returns:`, sampleReturns.map(r => ({ 
+            returnId: r.returnId, 
+            orderId: r.orderId, 
+            createdDate: r.creationDate 
+          })));
+        }
+        
+        return res.status(404).json({ 
+          error: 'Return not found', 
+          details: {
+            searchedReturnId: returnId,
+            searchFormat: 'return:...'
+          }
+        });
       }
 
       console.log(`[PATCH-COMPLIANCE] [SUCCESS] Updated Return, new complianceBoardStatus: ${returnDoc.complianceBoardStatus}`);
-      console.log(`[PATCH-COMPLIANCE] [VERIFY] returnId: ${returnDoc.returnId}, _id: ${returnDoc._id}`);
+      console.log(`[PATCH-COMPLIANCE] [VERIFY] returnId: ${returnDoc.returnId}, _id: ${returnDoc._id}, orderId: ${returnDoc.orderId}`);
       return res.json({ success: true, return: returnDoc });
     }
 
@@ -2990,7 +3129,23 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       }
 
       console.log(`[PATCH-COMPLIANCE] [SUCCESS] Updated Cancellation, new complianceBoardStatus: ${cancellationDoc.complianceBoardStatus}`);
-      console.log(`[PATCH-COMPLIANCE] [VERIFY] cancelId: ${cancellationDoc.cancelId}, _id: ${cancellationDoc._id}`);
+      console.log(`[PATCH-COMPLIANCE] [VERIFY] cancelId: ${cancellationDoc.cancelId}, _id: ${cancellationDoc._id}, orderId: ${cancellationDoc.orderId}`);
+      
+      // Also sync to associated Order if it has the cancellation category
+      if (cancellationDoc.orderId) {
+        console.log(`[PATCH-COMPLIANCE] [SYNC] Updating associated Order: ${cancellationDoc.orderId}`);
+        const orderUpdate = await Order.findOneAndUpdate(
+          { orderId: cancellationDoc.orderId },
+          { $set: { complianceBoardStatus } },
+          { new: true }
+        );
+        if (orderUpdate) {
+          console.log(`[PATCH-COMPLIANCE] [SYNC-SUCCESS] Updated Order ${cancellationDoc.orderId} to status ${complianceBoardStatus}`);
+        } else {
+          console.log(`[PATCH-COMPLIANCE] [SYNC-WARN] Order ${cancellationDoc.orderId} not found for sync update`);
+        }
+      }
+      
       return res.json({ success: true, cancellation: cancellationDoc });
     }
 
@@ -3021,7 +3176,23 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       }
 
       console.log(`[PATCH-COMPLIANCE] [SUCCESS] Updated INR case, new complianceBoardStatus: ${inrDoc.complianceBoardStatus}`);
-      console.log(`[PATCH-COMPLIANCE] [VERIFY] caseId: ${inrDoc.caseId}, _id: ${inrDoc._id}`);
+      console.log(`[PATCH-COMPLIANCE] [VERIFY] caseId: ${inrDoc.caseId}, _id: ${inrDoc._id}, orderId: ${inrDoc.orderId}`);
+      
+      // Also sync to associated Order if it has the inr category
+      if (inrDoc.orderId) {
+        console.log(`[PATCH-COMPLIANCE] [SYNC] Updating associated Order: ${inrDoc.orderId}`);
+        const orderUpdate = await Order.findOneAndUpdate(
+          { orderId: inrDoc.orderId },
+          { $set: { complianceBoardStatus } },
+          { new: true }
+        );
+        if (orderUpdate) {
+          console.log(`[PATCH-COMPLIANCE] [SYNC-SUCCESS] Updated Order ${inrDoc.orderId} to status ${complianceBoardStatus}`);
+        } else {
+          console.log(`[PATCH-COMPLIANCE] [SYNC-WARN] Order ${inrDoc.orderId} not found for sync update`);
+        }
+      }
+      
       return res.json({ success: true, inrCase: inrDoc });
     }
 
@@ -3082,6 +3253,33 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
 
     if (order) {
       console.log(`[PATCH-COMPLIANCE] [SUCCESS] Found and updated as Order, new status: ${order.complianceBoardStatus}`);
+      console.log(`[PATCH-COMPLIANCE] [VERIFY-ORDER] orderId: ${order.orderId}, _id: ${order._id}, complianceBoardStatus: ${order.complianceBoardStatus}, complianceBoardCategory: ${order.complianceBoardCategory}, complianceBoardCategories: ${JSON.stringify(order.complianceBoardCategories)}`);
+      
+      // IMPORTANT: Also try to sync to Return document by orderId
+      // This handles the case where there's both an Order and Return for the same orderId
+      if (order.orderId) {
+        console.log(`[PATCH-COMPLIANCE] [SYNC-FROM-ORDER] Attempting to sync status to Return documents with orderId: ${order.orderId}`);
+        
+        try {
+          // Find Return documents by orderId and update them too
+          const returnSyncResult = await Return.updateMany(
+            { orderId: order.orderId },
+            { $set: { complianceBoardStatus } }
+          );
+          
+          if (returnSyncResult.modifiedCount > 0) {
+            console.log(`[PATCH-COMPLIANCE] [SYNC-SUCCESS] Synced status to ${returnSyncResult.modifiedCount} Return document(s) with orderId: ${order.orderId}`);
+          } else if (returnSyncResult.matchedCount > 0) {
+            console.log(`[PATCH-COMPLIANCE] [SYNC-NO-CHANGE] Found ${returnSyncResult.matchedCount} Return(s) but no update needed (already has status: ${complianceBoardStatus})`);
+          } else {
+            console.log(`[PATCH-COMPLIANCE] [SYNC-NOT-FOUND] No Return documents found with orderId: ${order.orderId}`);
+          }
+        } catch (syncErr) {
+          console.warn(`[PATCH-COMPLIANCE] [SYNC-ERROR] Failed to sync Return: ${syncErr.message}`);
+          // Don't throw - the Order was updated successfully, which is the main goal
+        }
+      }
+      
       return res.json({ success: true, order });
     }
 

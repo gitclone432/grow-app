@@ -1445,10 +1445,16 @@ function ComplianceBoardPage() {
         });
         
         // Group deduplicated return cases by their complianceBoardStatus
-        dedupReturnCases.forEach((returnItem) => {
+        console.log(`[BOARD-GROUP] Processing ${dedupReturnCases.length} deduplicated return cases for grouping`);
+        dedupReturnCases.forEach((returnItem, idx) => {
           const status = returnItem.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED;
           if (grouped[status]) {
             grouped[status].push(returnItem);
+            
+            // Log first few returns to show what status they're getting
+            if (idx < 3) {
+              console.log(`[BOARD-GROUP] Return ${idx + 1}: returnId=${returnItem.returnId}, orderId=${returnItem.orderId}, status=${status}, _id=${returnItem._id}`);
+            }
           }
         });
         
@@ -1462,22 +1468,22 @@ function ComplianceBoardPage() {
       let caseSourceOrderIds = new Set();
       
       if (selectedCategory === 'return_refund') {
-        // Store orderIds from deduplicated return cases to prevent duplicates from boardOrders
+        // Store ALL orderIds from all columns to prevent duplicates from boardOrders
+        // This includes return cases and any other items already in grouped
+        // Don't filter by source - track everything to prevent any duplicates!
         caseSourceOrderIds = new Set(
           Object.values(grouped)
             .flat()
-            .filter(order => order.returnBoardSource === 'return_request')
             .map(r => String(r.orderId || r.itemId || '').toLowerCase())
             .filter(Boolean)
         );
         
         // Case Opened: Merge Return cases with conversation-based items
-        // Keep existing Return items, add only return_request items that actually have case_opened status
-        // AND are not already from deduplicated return cases
+        // Keep existing Return items, add only conversation items that don't duplicate existing orderIds
         grouped[COLUMN_STATUS.CASE_OPENED] = [
           ...(grouped[COLUMN_STATUS.CASE_OPENED] || []),
           ...boardOrders.filter((order) => 
-            order.returnBoardSource === 'return_request' &&
+            order.returnBoardSource === 'conversation' &&
             (order.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED) === COLUMN_STATUS.CASE_OPENED &&
             !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
           )
@@ -1488,59 +1494,67 @@ function ComplianceBoardPage() {
           ...(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []),
           ...boardOrders.filter((order) => 
             order.returnBoardSource === 'conversation' &&
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED &&
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
           )
         ];
         
         // Other return statuses (Follow Up, Provide Return Label, etc.) from Order Communication
-        // IMPORTANT: Merge with existing Return items, don't replace them!
+        // IMPORTANT: Only add boardOrders that are not already in caseSourceOrderIds!
         grouped[COLUMN_STATUS.RETURN_FOLLOW_UP] = [
           ...(grouped[COLUMN_STATUS.RETURN_FOLLOW_UP] || []),
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.RETURN_FOLLOW_UP
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.RETURN_FOLLOW_UP &&
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
           )
         ];
         grouped[COLUMN_STATUS.PROVIDE_RETURN_LABEL] = [
           ...(grouped[COLUMN_STATUS.PROVIDE_RETURN_LABEL] || []),
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PROVIDE_RETURN_LABEL
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PROVIDE_RETURN_LABEL &&
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
           )
         ];
         grouped[COLUMN_STATUS.BUYER_DROP_OFF] = [
           ...(grouped[COLUMN_STATUS.BUYER_DROP_OFF] || []),
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.BUYER_DROP_OFF
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.BUYER_DROP_OFF &&
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
           )
         ];
         grouped[COLUMN_STATUS.ITEM_DELIVERED] = [
           ...(grouped[COLUMN_STATUS.ITEM_DELIVERED] || []),
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.ITEM_DELIVERED
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.ITEM_DELIVERED &&
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
           )
         ];
         grouped[COLUMN_STATUS.PARTIAL_REFUND] = [
           ...(grouped[COLUMN_STATUS.PARTIAL_REFUND] || []),
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PARTIAL_REFUND
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PARTIAL_REFUND &&
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
           )
         ];
         grouped[COLUMN_STATUS.FULL_REFUND] = [
           ...(grouped[COLUMN_STATUS.FULL_REFUND] || []),
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.FULL_REFUND
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.FULL_REFUND &&
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
           )
         ];
         grouped[COLUMN_STATUS.REPLACEMENT] = [
           ...(grouped[COLUMN_STATUS.REPLACEMENT] || []),
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.REPLACEMENT
+            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.REPLACEMENT &&
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
           )
         ];
       }
@@ -2909,6 +2923,8 @@ function ComplianceBoardPage() {
     setApplyingColumns((prev) => ({ ...prev, [`order:${status}`]: true }));
     try {
       console.log(`[APPLY-ORDER] Processing ${moves.length} order move(s):`);
+      console.log(`[APPLY-ORDER] Full pending moves object:`, pendingOrderMoves[status]);
+      
       await Promise.all(moves.map((order, idx) => {
         const idStr = String(order._id || '');
         // For special case types (return, cancelled, inr), send full ID with prefix
@@ -2924,7 +2940,9 @@ function ComplianceBoardPage() {
           toStatus: status,
           isReturn: idStr.startsWith('return:'),
           isCancellation: idStr.startsWith('cancelled:'),
-          isINR: idStr.startsWith('inr:')
+          isINR: idStr.startsWith('inr:'),
+          hasReturnInfo: !!order.returnInfo,
+          returnBoardSource: order.returnBoardSource
         });
 
         const patchData = {
@@ -2939,7 +2957,11 @@ function ComplianceBoardPage() {
             return res;
           })
           .catch(err => {
-            console.error(`[APPLY-ORDER] PATCH failed for order ${order.orderId}:`, err.response?.status, err.response?.data || err.message);
+            console.error(`[APPLY-ORDER] PATCH failed for order ${order.orderId}:`, {
+              status: err.response?.status,
+              data: err.response?.data,
+              message: err.message
+            });
             throw err;
           });
       }));

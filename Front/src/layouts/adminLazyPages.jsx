@@ -98,6 +98,7 @@ export const EtsyDashboardPage = lazy(() => import('../pages/admin/etsy/EtsyDash
 export const EtsyProductsPage = lazy(() => import('../pages/admin/etsy/EtsyProductsPage.jsx'));
 export const EtsyOrderFulfilmentPage = lazy(() => import('../pages/admin/etsy/EtsyOrderFulfilmentPage.jsx'));
 export const EtsyOrderAnalyticsPage = lazy(() => import('../pages/admin/etsy/EtsyOrderAnalyticsPage.jsx'));
+export const EtsyDailyOrdersPage = lazy(() => import('../pages/admin/etsy/EtsyDailyOrdersPage.jsx'));
 export const EtsyProfitSheetPage = lazy(() => import('../pages/admin/etsy/EtsyProfitSheetPage.jsx'));
 export const AmazonPiSourceColumnsPage = lazy(() => import('../pages/admin/AmazonPiSourceColumnsPage.jsx'));
 export const AffiliateOrdersPage = lazy(() => import('../pages/admin/AffiliateOrdersPage.jsx'));

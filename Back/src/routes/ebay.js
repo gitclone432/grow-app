@@ -3416,12 +3416,36 @@ router.get('/stored-orders', async (req, res) => {
     // Remark Filter
     if (remark && remark !== '') {
       if (remark === '__NO_REMARK__') {
-        // Filter for orders with no remark (empty, null, or doesn't exist)
-        query.$or = [
-          { remark: { $exists: false } },
-          { remark: null },
-          { remark: '' }
-        ];
+        // Filter for orders with no remark AND no manual tracking
+        // Only show orders that have neither a remark nor manual tracking data
+        const noRemarkCondition = {
+          $or: [
+            { remark: { $exists: false } },
+            { remark: null },
+            { remark: '' }
+          ]
+        };
+        const noManualTrackingCondition = {
+          $or: [
+            { manualTrackingNumber: { $exists: false } },
+            { manualTrackingNumber: null },
+            { manualTrackingNumber: '' }
+          ]
+        };
+
+        if (query.$and) {
+          query.$and.push(noRemarkCondition);
+          query.$and.push(noManualTrackingCondition);
+        } else if (query.$or) {
+          // If there's already an $or clause, wrap it in $and with the new conditions
+          if (!query.$and) query.$and = [];
+          query.$and.push({ $or: query.$or });
+          delete query.$or;
+          query.$and.push(noRemarkCondition);
+          query.$and.push(noManualTrackingCondition);
+        } else {
+          query.$and = [noRemarkCondition, noManualTrackingCondition];
+        }
       } else {
         query.remark = remark;
       }

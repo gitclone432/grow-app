@@ -1129,10 +1129,10 @@ export default function OrderDetailsModal({ open, onClose, orderId, fulfillmentF
                     <Chip label={order.worksheetStatus} size="small" sx={{ height: 22, fontSize: '0.7rem' }} />
                   )}
                 </Stack>
-                {(order.amazonAccount || order.amazonOrderId) && (
+                {(order.amazonAccount || order.azOrderId || order.amazonOrderId) && (
                   <>
                     <DetailCell label="Amazon Acct" value={order.amazonAccount} />
-                    <DetailCell label="Amazon ID" value={order.amazonOrderId} copyable onCopy={handleCopy} />
+                    <DetailCell label="Amazon ID" value={order.azOrderId || order.amazonOrderId} copyable onCopy={handleCopy} />
                   </>
                 )}
               </Section>

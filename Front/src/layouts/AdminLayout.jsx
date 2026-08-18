@@ -162,6 +162,7 @@ import {
   EtsyProductsPage,
   EtsyOrderFulfilmentPage,
   EtsyOrderAnalyticsPage,
+  EtsyDailyOrdersPage,
   EtsyProfitSheetPage,
   AmazonPiSourceColumnsPage,
   AffiliateOrdersPage,
@@ -416,6 +417,7 @@ const COMPONENT_MAP = {
   'EtsyProducts': EtsyProductsPage,
   'EtsyOrderFulfilment': EtsyOrderFulfilmentPage,
   'EtsyOrderAnalytics': EtsyOrderAnalyticsPage,
+  'EtsyDailyOrders': EtsyDailyOrdersPage,
   'EtsyProfitSheet': EtsyProfitSheetPage,
   'EtsyDashboard': EtsyDashboardPage,
 };
