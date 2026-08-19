@@ -2194,8 +2194,22 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       returnConversations.forEach((meta) => {
         if (meta.orderId && returnOrderIds.has(meta.orderId)) return;
         const order = meta.orderId ? orderByOrderId.get(meta.orderId) : orderByItemId.get(meta.itemId);
+        
+        // Determine the status to use: prioritize Order's complianceBoardStatus if it's set to an action status
+        // Otherwise, use 'case_opened' or 'case_not_opened' based on the ConversationMeta's caseStatus
+        let status = 'case_not_opened';
+        const actionStatuses = ['provide_return_label', 'return_follow_up', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement'];
+        if (order?.complianceBoardStatus && actionStatuses.includes(order.complianceBoardStatus)) {
+          // Order has been moved to an action status, use that
+          status = order.complianceBoardStatus;
+          console.log(`[BOARD-GET] [CONVERSATION-STATUS] For orderId ${order.orderId}: using Order status '${status}' instead of 'case_not_opened'`);
+        } else if (meta.caseStatus === 'Case Opened') {
+          // ConversationMeta indicates case is opened
+          status = 'case_opened';
+        }
+        
         const key = order?._id ? `order:${order._id}:conversation:${meta._id}` : `conversation:${meta._id}`;
-        cardsById.set(key, makeOrderCard(order, meta, 'case_not_opened', 'conversation'));
+        cardsById.set(key, makeOrderCard(order, meta, status, 'conversation'));
       });
 
       let returnBoardOrders = await enrichOrdersWithConversationMeta([
@@ -3042,6 +3056,71 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
     if (!validStatuses.includes(complianceBoardStatus)) {
       console.error(`[PATCH-COMPLIANCE] ERROR: Invalid status: ${complianceBoardStatus}`);
       return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    // Check if this is a Conversation document (ID starts with 'conversation:')
+    if (String(orderId).startsWith('conversation:')) {
+      console.log(`[PATCH-COMPLIANCE] [DETECTED] 'conversation:' prefix format`);
+      
+      // Extract metaId from 'conversation:metaId' format
+      const metaId = String(orderId).replace(/^conversation:/, '');
+      console.log(`[PATCH-COMPLIANCE] [EXTRACTED] metaId: ${metaId}`);
+      
+      // Try to match MongoDB _id
+      if (!mongoose.Types.ObjectId.isValid(metaId)) {
+        console.error(`[PATCH-COMPLIANCE] ERROR: Invalid conversation meta ID format: ${metaId}`);
+        return res.status(400).json({ error: 'Invalid conversation meta ID format' });
+      }
+      
+      // Find the ConversationMeta document to get the orderId
+      const ConversationMeta = mongoose.model('ConversationMeta');
+      const conversationDoc = await ConversationMeta.findById(metaId);
+
+      if (!conversationDoc) {
+        console.warn(`[PATCH-COMPLIANCE] [ERROR] ConversationMeta not found with ID: ${metaId}`);
+        return res.status(404).json({ error: 'Conversation not found' });
+      }
+
+      console.log(`[PATCH-COMPLIANCE] [FOUND-CONVERSATION] metaId: ${conversationDoc._id}, orderId: ${conversationDoc.orderId}, current caseStatus: ${conversationDoc.caseStatus}`);
+
+      // Update the associated Order by orderId with the new complianceBoardStatus
+      if (conversationDoc.orderId) {
+        console.log(`[PATCH-COMPLIANCE] [UPDATING-ORDER] Updating Order: ${conversationDoc.orderId} with status: ${complianceBoardStatus}`);
+        const orderUpdate = await Order.findOneAndUpdate(
+          { orderId: conversationDoc.orderId },
+          { 
+            $set: { complianceBoardStatus },
+            // Also ensure this order is categorized as return_refund
+            $addToSet: { complianceBoardCategories: 'return_refund' }
+          },
+          { new: true }
+        );
+        
+        if (orderUpdate) {
+          console.log(`[PATCH-COMPLIANCE] [SUCCESS] Updated Order ${conversationDoc.orderId} to status ${complianceBoardStatus}`);
+          
+          // Update ConversationMeta caseStatus to 'Case Opened' if moving to any action status
+          // Statuses like provide_return_label, buyer_drop_off, etc. indicate case is being worked on
+          const actionStatuses = ['provide_return_label', 'return_follow_up', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement'];
+          if (actionStatuses.includes(complianceBoardStatus)) {
+            const conversationUpdate = await ConversationMeta.findByIdAndUpdate(
+              metaId,
+              { $set: { caseStatus: 'Case Opened' } },
+              { new: true }
+            );
+            console.log(`[PATCH-COMPLIANCE] [SYNC-CONVERSATION] Updated ConversationMeta caseStatus to 'Case Opened' for action status: ${complianceBoardStatus}`);
+          }
+          
+          return res.json({ success: true, order: orderUpdate });
+        } else {
+          console.error(`[PATCH-COMPLIANCE] [WARN] Order not found with orderId: ${conversationDoc.orderId}`);
+          // Still return success for the conversation, as the Order might not exist yet
+          return res.json({ success: true, conversation: conversationDoc, message: 'Conversation updated but Order not found' });
+        }
+      } else {
+        console.error(`[PATCH-COMPLIANCE] [ERROR] ConversationMeta has no orderId, cannot update Order`);
+        return res.status(400).json({ error: 'Conversation has no associated order' });
+      }
     }
 
     // Check if this is a Return document (ID starts with 'return:')

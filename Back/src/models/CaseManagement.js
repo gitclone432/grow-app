@@ -32,6 +32,7 @@ const CaseManagementSchema = new mongoose.Schema({
     currentStatus: String,
   },
   rawData: Object,
+  notes: { type: String, default: '' },
 }, { timestamps: true });
 
 CaseManagementSchema.index({ seller: 1, status: 1 });

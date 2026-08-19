@@ -55,6 +55,9 @@ const CaseSchema = new mongoose.Schema({
   // Raw eBay data for reference
   rawData: Object,
   
+  // Internal notes
+  notes: { type: String, default: '' },
+  
   // Manual logs field for internal notes
   logs: { type: String, default: '' }
 }, { timestamps: true });
