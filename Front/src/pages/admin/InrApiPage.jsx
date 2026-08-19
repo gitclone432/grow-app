@@ -79,6 +79,95 @@ const actionCellSx = {
   pr: 0.75,
 };
 
+/**
+ * NotesCell component for editable notes in INR page
+ */
+const NotesCell = React.memo(function NotesCell({ row, onSave, onNotify }) {
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [tempValue, setTempValue] = React.useState(row.notes || '');
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isEditing) {
+      setTempValue(row.notes || '');
+    }
+  }, [row.notes, isEditing]);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await onSave(row.caseId || row._id, tempValue);
+      setIsEditing(false);
+      onNotify('success', 'Note saved successfully');
+    } catch (e) {
+      onNotify('error', 'Failed to save note');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setTempValue(row.notes || '');
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <Box
+        onClick={(e) => e.stopPropagation()}
+        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 150 }}
+      >
+        <TextField
+          fullWidth
+          multiline
+          minRows={2}
+          size="small"
+          value={tempValue}
+          onChange={(e) => setTempValue(e.target.value)}
+          placeholder="Add internal notes..."
+          autoFocus
+        />
+        <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+          <Button size="small" onClick={handleCancel} disabled={isSaving}>
+            Cancel
+          </Button>
+          <Button size="small" variant="contained" onClick={handleSave} disabled={isSaving}>
+            {isSaving ? 'Saving...' : 'Save'}
+          </Button>
+        </Stack>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      onClick={() => setIsEditing(true)}
+      sx={{
+        cursor: 'pointer',
+        py: 0.5,
+        px: 1,
+        borderRadius: 0.5,
+        bgcolor: tempValue ? 'grey.100' : 'transparent',
+        '&:hover': { bgcolor: 'grey.200' },
+        minHeight: 24,
+        display: 'flex',
+        alignItems: 'center',
+        fontSize: '0.75rem',
+      }}
+    >
+      {tempValue ? (
+        <Typography variant="caption" sx={{ fontSize: '0.75rem' }}>
+          {tempValue.substring(0, 100)}{tempValue.length > 100 ? '...' : ''}
+        </Typography>
+      ) : (
+        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.75rem', fontStyle: 'italic' }}>
+          Click to add notes
+        </Typography>
+      )}
+    </Box>
+  );
+});
+
 const SORT_COLUMNS = [
   { id: 'seller', label: 'Seller' },
   { id: 'created', label: 'Created (PT)' },
@@ -92,6 +181,7 @@ const SORT_COLUMNS = [
   { id: 'outcome', label: 'Outcome' },
   { id: 'shippingAddress', label: 'Ship to' },
   { id: 'trackingNumber', label: 'Shipment' },
+  { id: 'notes', label: 'Notes' },
 ];
 
 const NUMERIC_SORT_COLUMNS = new Set(['claim', 'created', 'responseDue', 'estimateFrom']);
@@ -1760,6 +1850,43 @@ export default function InrApiPage({
     setEscalateDialog({ open: true, row, reason: 'OTHER', comments: '' });
   }
 
+  async function saveInquiryNotes(caseId, notes) {
+    try {
+      // Determine which endpoint to use based on the source
+      const row = rows.find((r) => r.caseId === caseId);
+      if (!row) throw new Error('Row not found');
+
+      let endpoint = '';
+      if (row.source === 'inquiry') {
+        endpoint = `/ebay/inquiry/${encodeURIComponent(caseId)}/notes`;
+      } else if (row.source === 'case') {
+        endpoint = `/ebay/case-management/${encodeURIComponent(caseId)}/notes`;
+      } else if (row.source === 'dispute') {
+        endpoint = `/ebay/payment-dispute/${encodeURIComponent(caseId)}/notes`;
+      }
+
+      await api.patch(endpoint, { notes });
+
+      // Update local state
+      const sameRow = (r) => String(r.caseId || r.paymentDisputeId) === String(caseId);
+      if (row.source === 'inquiry') {
+        setInquiries((prev) => prev.map((r) => (sameRow(r) ? { ...r, notes } : r)));
+      } else if (row.source === 'case') {
+        setCases((prev) => prev.map((r) => (sameRow(r) ? { ...r, notes } : r)));
+      } else {
+        setDisputes((prev) => prev.map((r) => (
+          String(r.paymentDisputeId) === String(caseId) ? { ...r, notes } : r
+        )));
+      }
+    } catch (e) {
+      throw new Error(e.response?.data?.error || e.message || 'Failed to save notes');
+    }
+  }
+
+  const handleNotify = (severity, message) => {
+    setSnackbar({ open: true, message, severity });
+  };
+
   async function submitShipmentInfo() {
     const row = shipDialog.row;
     const inquiryId = row?.caseId;
@@ -2220,6 +2347,13 @@ export default function InrApiPage({
                         </Button>
                       </Stack>
                     ) : '—'}
+                  </TableCell>
+                  <TableCell sx={{ ...denseCellSx, whiteSpace: 'normal', minWidth: 150 }}>
+                    <NotesCell
+                      row={row}
+                      onSave={saveInquiryNotes}
+                      onNotify={handleNotify}
+                    />
                   </TableCell>
                   <TableCell sx={actionCellSx} align="right">
                     <Stack direction="row" spacing={0} justifyContent="flex-end" sx={{ flexWrap: 'nowrap' }}>

@@ -47,6 +47,7 @@ export default function ChatModal({
   entityId = null,
   entityType = null,
   showManageCase = true,
+  onMessageSent = null,
 }) {
   const theme = useTheme();
   const isMobileChat = useMediaQuery(theme.breakpoints.down('sm'));
@@ -517,6 +518,33 @@ export default function ChatModal({
       setMessages((prev) => [...prev, data.message]);
       setNewMessage('');
       setAttachments([]);
+
+      // AUTO-MARK AS READ: Since the seller just replied to the buyer, automatically mark the conversation as read
+      // This prevents confusion and avoids the need to manually click "Mark Read" after replying
+      try {
+        const payload = {
+          orderId: resolvedOrderId || orderId,
+          buyerUsername,
+          itemId
+        };
+
+        await api.post('/ebay/chat/mark-read', payload);
+
+        console.log('[AUTO-MARK-READ-CHATMODAL] Conversation marked as read after seller reply:', payload);
+
+        // Notify parent component that message was sent and marked as read
+        // This allows ComplianceBoardPage to refresh its state
+        if (onMessageSent) {
+          onMessageSent({
+            orderId: resolvedOrderId || orderId,
+            buyerUsername,
+            itemId
+          });
+        }
+      } catch (autoMarkErr) {
+        // Log but don't fail the send if auto-mark-read fails
+        console.warn('[AUTO-MARK-READ-CHATMODAL] Failed to auto-mark as read:', autoMarkErr.message);
+      }
     } catch (e) {
       alert('Failed to send: ' + (e.response?.data?.error || e.message));
     } finally {

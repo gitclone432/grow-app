@@ -38,6 +38,7 @@ import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import HighlightOffIcon from '@mui/icons-material/HighlightOff';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import SendIcon from '@mui/icons-material/Send';
+import VisibilityIcon from '@mui/icons-material/Visibility';
 import api from '../../lib/api';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ChatModal from '../../components/ChatModal';
@@ -248,6 +249,8 @@ export default function CancellationSearchPage({
   const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
   const [editableRemarkMessage, setEditableRemarkMessage] = useState('');
   const [remarkAttachments, setRemarkAttachments] = useState([]);
+  const [detailsModalOpen, setDetailsModalOpen] = useState(false);
+  const [selectedDetailsRow, setSelectedDetailsRow] = useState(null);
   const fileInputRefRemark = useRef(null);
   const limit = 25;
 
@@ -1135,6 +1138,17 @@ export default function CancellationSearchPage({
                     {visibleColumns.includes('action') && (
                       <TableCell align="center">
                         <Stack direction="row" spacing={0.5} justifyContent="center" alignItems="center">
+                          <Tooltip title="View details">
+                            <IconButton 
+                              size="small" 
+                              onClick={() => {
+                                setSelectedDetailsRow(row);
+                                setDetailsModalOpen(true);
+                              }}
+                            >
+                              <VisibilityIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
                           {canSellerRespond(row) && (
                             <>
                               <Tooltip title="POST /cancellation/{cancelId}/approve">
@@ -1368,6 +1382,78 @@ export default function CancellationSearchPage({
             disabled={Boolean(actionBusyId)}
           >
             {actionBusyId ? 'Rejecting...' : 'Reject'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={detailsModalOpen}
+        onClose={() => setDetailsModalOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>
+          Order Details - {selectedDetailsRow?.cancelId}
+        </DialogTitle>
+        <DialogContent sx={{ py: 2 }}>
+          {selectedDetailsRow && (
+            <Stack spacing={2}>
+              <Box>
+                <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.75rem', mb: 0.5 }}>
+                  Order ID
+                </Typography>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                    {selectedDetailsRow.orderId || selectedDetailsRow.legacyOrderId || '-'}
+                  </Typography>
+                  <IconButton
+                    size="small"
+                    onClick={() => {
+                      navigator.clipboard.writeText(selectedDetailsRow.orderId || selectedDetailsRow.legacyOrderId || '');
+                      setSnackbar({ open: true, severity: 'success', message: 'Copied to clipboard' });
+                    }}
+                  >
+                    <ContentCopyIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Stack>
+              </Box>
+
+              <Box>
+                <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.75rem', mb: 0.5 }}>
+                  Amazon Account
+                </Typography>
+                <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                  {selectedDetailsRow.amazonAccount || '-'}
+                </Typography>
+              </Box>
+
+              <Box>
+                <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.75rem', mb: 0.5 }}>
+                  Amazon Order ID
+                </Typography>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                    {selectedDetailsRow.amazonOrderId || '-'}
+                  </Typography>
+                  {selectedDetailsRow.amazonOrderId && (
+                    <IconButton
+                      size="small"
+                      onClick={() => {
+                        navigator.clipboard.writeText(selectedDetailsRow.amazonOrderId || '');
+                        setSnackbar({ open: true, severity: 'success', message: 'Copied to clipboard' });
+                      }}
+                    >
+                      <ContentCopyIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  )}
+                </Stack>
+              </Box>
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDetailsModalOpen(false)} color="primary">
+            Close
           </Button>
         </DialogActions>
       </Dialog>

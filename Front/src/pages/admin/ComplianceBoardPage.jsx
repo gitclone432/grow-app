@@ -681,50 +681,88 @@ function ComplianceBoardPage() {
 
   const fetchINRCasesForBoard = async () => {
     try {
-      const params = {
+      const inquiryParams = {
+        page: 1,
+        limit: INITIAL_LOAD_LIMIT,
+      };
+      
+      const disputeParams = {
         page: 1,
         limit: INITIAL_LOAD_LIMIT,
       };
       
       // Date filter is based on INR Case's creationDate (when case was created), NOT Order's transaction date
       if (dateFilter.mode === 'single' && dateFilter.single) {
-        params.dateFrom = dateFilter.single;
-        // Set dateTo to today's date to show all cases from selected date to present
-        const today = new Date();
-        params.dateTo = today.toISOString().split('T')[0]; // YYYY-MM-DD format
+        inquiryParams.dateFrom = dateFilter.single;
+        inquiryParams.dateTo = new Date().toISOString().split('T')[0];
+        disputeParams.dateFrom = dateFilter.single;
+        disputeParams.dateTo = new Date().toISOString().split('T')[0];
       } else if (dateFilter.mode === 'range') {
-        if (dateFilter.from) params.dateFrom = dateFilter.from;
-        if (dateFilter.to) params.dateTo = dateFilter.to;
+        if (dateFilter.from) {
+          inquiryParams.dateFrom = dateFilter.from;
+          disputeParams.dateFrom = dateFilter.from;
+        }
+        if (dateFilter.to) {
+          inquiryParams.dateTo = dateFilter.to;
+          disputeParams.dateTo = dateFilter.to;
+        }
       }
 
-      const response = await api.get('/ebay/stored-inr-cases', {
-        params,
-        timeout: BOARD_REQUEST_TIMEOUT_MS,
-      });
-      const cases = ensureArray(response.data?.cases);
+      // Fetch all three INR data sources in parallel
+      const [inrResponse, casesResponse, disputesResponse] = await Promise.all([
+        api.get('/ebay/stored-inr-cases', {
+          params: inquiryParams,
+          timeout: BOARD_REQUEST_TIMEOUT_MS,
+        }),
+        api.get('/ebay/stored-case-management', {
+          params: inquiryParams,
+          timeout: BOARD_REQUEST_TIMEOUT_MS,
+        }),
+        api.get('/ebay/stored-payment-disputes', {
+          params: disputeParams,
+          timeout: BOARD_REQUEST_TIMEOUT_MS,
+        }),
+      ]);
+
+      const inquiries = ensureArray(inrResponse.data?.cases || inrResponse.data?.inquiries);
+      const cases = ensureArray(casesResponse.data?.cases || casesResponse.data?.data);
+      const disputes = ensureArray(disputesResponse.data?.disputes || disputesResponse.data?.cases || disputesResponse.data?.data);
       
-      // Transform INR cases to board format with proper field mapping for card display
-      return cases.map(caseItem => ({
-        ...caseItem,
-        orderObjectId: caseItem._id, // Store original _id for API calls if case has one
-        _id: toDraggableId('inr', caseItem, caseItem.caseId),
-        originalOrderId: caseItem.orderId,
-        caseOrderId: caseItem.orderId,
-        orderId: caseItem.caseId, // Map caseId to orderId for card display
-        dateSold: caseItem.creationDate || caseItem.createdDate || caseItem.created, // Map created date
+      // Transform and merge all INR data sources
+      const transformINRItem = (item, source) => ({
+        ...item,
+        orderObjectId: item._id,
+        _id: toDraggableId('inr', item, item.caseId || item.caseItemId || item.itemId),
+        originalOrderId: item.orderId,
+        caseOrderId: item.orderId,
+        orderId: item.caseId || item.caseItemId || item.orderId,
+        dateSold: item.creationDate || item.createdDate || item.created,
         buyer: {
-          username: caseItem.buyerUsername,
-          buyerRegistrationAddress: { fullName: caseItem.buyerName }
+          username: item.buyerUsername,
+          buyerRegistrationAddress: { fullName: item.buyerName }
         },
-        // Use persisted complianceBoardStatus if set, otherwise default to INR_CASE_OPENED
-        complianceBoardStatus: caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED,
-        complianceBoardCategories: Array.isArray(caseItem.complianceBoardCategories)
-          ? caseItem.complianceBoardCategories
-          : (caseItem.complianceBoardCategory ? [caseItem.complianceBoardCategory] : ['inr']),
-        complianceBoardCategory: caseItem.complianceBoardCategory || 'inr',
-        status: caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED,
-        sourceType: 'inr-case' // Mark as INR case for display
-      }));
+        complianceBoardStatus: item.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED,
+        complianceBoardCategories: Array.isArray(item.complianceBoardCategories)
+          ? item.complianceBoardCategories
+          : (item.complianceBoardCategory ? [item.complianceBoardCategory] : ['inr']),
+        complianceBoardCategory: item.complianceBoardCategory || 'inr',
+        status: item.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED,
+        sourceType: source,
+        // Include enriched fields from fulfillment dashboard for display in card
+        amazonAccount: item.amazonAccount,
+        azOrderId: item.azOrderId || item.amazonOrderId,
+        amazonOrderId: item.amazonOrderId,
+        remark: item.remark,
+        fulfillmentNotes: item.fulfillmentNotes,
+      });
+
+      const allItems = [
+        ...inquiries.map(item => transformINRItem(item, 'inr-inquiry')),
+        ...cases.map(item => transformINRItem(item, 'inr-case')),
+        ...disputes.map(item => transformINRItem(item, 'inr-dispute')),
+      ];
+
+      return allItems;
     } catch (err) {
       console.warn('Failed to fetch INR cases for board:', err);
       return [];
@@ -1127,10 +1165,27 @@ function ComplianceBoardPage() {
         [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]: [],
       };
       
-      const boardOrders = ensureArray(response.data?.orders).map((order, index) => ({
-        ...order,
-        _id: toDraggableId('order', order, `${selectedCategory}-${index}`),
-      }));
+      const boardOrders = ensureArray(response.data?.orders).map((order, index) => {
+        // For return board items, ensure stable unique ID based on source type
+        let draggableId;
+        if (selectedCategory === 'return_refund') {
+          if (order.returnBoardSource === 'return_request' && order.returnInfo?.returnId) {
+            draggableId = `return:${order.returnInfo.returnId}`;
+          } else if (order._id) {
+            // Use existing _id from response (should be stable)
+            draggableId = String(order._id);
+          } else {
+            // Fallback for items without _id
+            draggableId = `${selectedCategory}-${order.orderId || order.itemId || index}`;
+          }
+        } else {
+          draggableId = toDraggableId('order', order, `${selectedCategory}-${index}`);
+        }
+        return {
+          ...order,
+          _id: draggableId,
+        };
+      });
 
       // Log orders if searching for specific order ID
       if (searchOrderId.trim()) {
@@ -1489,15 +1544,31 @@ function ComplianceBoardPage() {
           )
         ];
         
-        // Case Not Opened: Only Conversation items (from Order Communication assigned to Return/Refund/Replace)
+        // Case Not Opened: Conversation items that either explicitly have CASE_NOT_OPENED status OR have no status set
+        // Items without complianceBoardStatus should default to CASE_NOT_OPENED, not TODO
+        const caseNotOpenedItems = boardOrders.filter((order) => 
+          order.returnBoardSource === 'conversation' &&
+          (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED || 
+           order.complianceBoardStatus === undefined || 
+           order.complianceBoardStatus === null ||
+           order.complianceBoardStatus === COLUMN_STATUS.TODO) &&
+          !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
+        );
+        
         grouped[COLUMN_STATUS.CASE_NOT_OPENED] = [
           ...(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []),
-          ...boardOrders.filter((order) => 
-            order.returnBoardSource === 'conversation' &&
-            (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.CASE_NOT_OPENED &&
-            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
-          )
+          ...caseNotOpenedItems
         ];
+        
+        if (caseNotOpenedItems.length > 0) {
+          console.log(`[BOARD-GROUP] CASE_NOT_OPENED: added ${caseNotOpenedItems.length} conversation items`, 
+            caseNotOpenedItems.slice(0, 2).map(o => ({ 
+              orderId: o.orderId, 
+              status: o.complianceBoardStatus, 
+              source: o.returnBoardSource 
+            })));
+        }
+        
         
         // Other return statuses (Follow Up, Provide Return Label, etc.) from Order Communication
         // IMPORTANT: Only add boardOrders that are not already in caseSourceOrderIds!
@@ -3026,7 +3097,12 @@ function ComplianceBoardPage() {
       console.log(`[APPLY-ORDER] Successfully applied ${moves.length} order(s) to ${status}`);
       setSnackbar({ open: true, message: `Applied ${moves.length} order(s) to ${getColumnTitle(status)}` });
       
-      // Smart refill: check which columns need filling after this apply
+      // Smart refill: check which columns need filling after this apply (Order fulfillment only)
+      // Skip smart refill for specialized boards (return_refund, cancellation, inr)
+      if (['return_refund', 'cancellation', 'inr'].includes(selectedCategory)) {
+        return;
+      }
+      
       const COLUMN_LIMITS = {
         [COLUMN_STATUS.TODO]: 50,
         [COLUMN_STATUS.OUT_OF_STOCK]: 50,
@@ -3260,6 +3336,17 @@ function ComplianceBoardPage() {
 
     const sourceColumn = resolveOrderColumnStatus(source.droppableId);
     const destColumn = resolveOrderColumnStatus(destination.droppableId);
+    
+    // Debug logging for CASE_NOT_OPENED drag operations
+    if (sourceColumn === COLUMN_STATUS.CASE_NOT_OPENED && selectedCategory === 'return_refund') {
+      console.log(`[DRAG-END] CASE_NOT_OPENED drag: ${draggableId}`, {
+        fromColumn: sourceColumn,
+        toColumn: destColumn,
+        sourceIndex: source.index,
+        destIndex: destination.index,
+        itemsInSource: orders[sourceColumn]?.length || 0
+      });
+    }
 
     // Handle Order Communication drag-and-drop differently
     if (selectedCategory === 'order_communication') {
@@ -3732,8 +3819,63 @@ function ComplianceBoardPage() {
   };
 
   const handleCloseMessageDialog = () => {
+    if (selectedOrderForMessage) {
+      const orderId = selectedOrderForMessage.orderId || selectedOrderForMessage.legacyOrderId;
+      const buyerUsername = selectedOrderForMessage.buyer?.username || selectedOrderForMessage.buyerUsername;
+      const itemId = selectedOrderForMessage.itemNumber || selectedOrderForMessage.lineItems?.[0]?.legacyItemId || selectedOrderForMessage.lineItems?.[0]?.itemId || selectedOrderForMessage.itemId;
+      
+      console.log('[COMPLIANCE-BOARD] Syncing unread count for:', { orderId, buyerUsername, itemId });
+      
+      // Immediately set unreadCount to 0 in local state for this specific message
+      // Backend now properly updates EbayMessageConversation.unreadCount when marking as read
+      if (selectedCategory === 'order_communication') {
+        setMessages(prevMessages => {
+          const updated = { ...prevMessages };
+          Object.keys(updated).forEach(category => {
+            updated[category] = updated[category].map(item => {
+              const isMatch = (item.orderId && item.orderId === orderId) ||
+                            (item.buyerUsername === buyerUsername && item.itemId === itemId);
+              if (isMatch) {
+                console.log('[COMPLIANCE-BOARD] Setting unreadCount to 0 for:', item.buyerUsername);
+                return { ...item, unreadCount: 0 };
+              }
+              return item;
+            });
+          });
+          return updated;
+        });
+      }
+    }
+    
     setMessageModalOpen(false);
     setSelectedOrderForMessage(null);
+  };
+
+  const handleMessageSent = async (messageData) => {
+    // When a message is sent from ChatModal and marked as read, update local state
+    // No need for full refresh since backend now properly updates EbayMessageConversation.unreadCount
+    console.log('[COMPLIANCE-BOARD] Message sent and marked as read:', messageData);
+    
+    // Immediately update the specific message in local state
+    const { orderId, buyerUsername, itemId } = messageData;
+    
+    if (selectedCategory === 'order_communication') {
+      setMessages(prevMessages => {
+        const updated = { ...prevMessages };
+        Object.keys(updated).forEach(category => {
+          updated[category] = updated[category].map(item => {
+            const isMatch = (item.orderId && item.orderId === orderId) ||
+                          (item.buyerUsername === buyerUsername && item.itemId === itemId);
+            if (isMatch) {
+              console.log('[COMPLIANCE-BOARD] Message sent - Setting unreadCount to 0 for:', item.buyerUsername);
+              return { ...item, unreadCount: 0 };
+            }
+            return item;
+          });
+        });
+        return updated;
+      });
+    }
   };
 
   const handleOpenActivityLogs = async (order) => {
@@ -4272,7 +4414,7 @@ function ComplianceBoardPage() {
                     fontWeight={700}
                     onClick={(e) => {
                       e.stopPropagation();
-                      handleOpenOrderDetails(order.orderId || order.legacyOrderId, {
+                      handleOpenOrderDetails(order.originalOrderId || order.orderId || order.legacyOrderId, {
                         canEditFulfillment: selectedCategory === 'order_fulfillment' && columnStatus === COLUMN_STATUS.TODO
                       });
                     }}
@@ -4338,7 +4480,7 @@ function ComplianceBoardPage() {
                   </IconButton>
                 </Tooltip>
                 <Tooltip title="Message Buyer">
-                  <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleOpenMessageDialog(order); }} sx={{ color: '#3b82f6', p: 0.5 }}>
+                  <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleOpenMessageDialog({ ...order, orderId: order.originalOrderId || order.orderId }); }} sx={{ color: '#3b82f6', p: 0.5 }}>
                     <ChatIcon sx={{ fontSize: 16 }} />
                   </IconButton>
                 </Tooltip>
@@ -4493,6 +4635,17 @@ function ComplianceBoardPage() {
   const renderDroppableColumn = (status, title, color, height = '100%', minHeight = 500, headerControl = null, droppableId = status) => {
     // Filter orders by unread status if the filter is enabled
     let statusOrders = orders[status] || [];
+    
+    // Debug logging for CASE_NOT_OPENED items
+    if (status === COLUMN_STATUS.CASE_NOT_OPENED && selectedCategory === 'return_refund') {
+      console.log(`[RENDER-COL] CASE_NOT_OPENED column: ${statusOrders.length} items available`, 
+        statusOrders.slice(0, 2).map(o => ({ 
+          orderId: o.orderId, 
+          _id: o._id, 
+          returnBoardSource: o.returnBoardSource
+        })));
+    }
+    
     if (showOnlyUnreadMessages) {
       statusOrders = statusOrders.filter(order => getUnreadMessageCountForOrder(order) > 0);
     }
@@ -4826,7 +4979,7 @@ function ComplianceBoardPage() {
                 type="button"
                 variant="body2"
                 fontWeight={700}
-                onClick={() => handleOpenOrderDetails(order.orderId || order.legacyOrderId)}
+                onClick={() => handleOpenOrderDetails(order.originalOrderId || order.orderId || order.legacyOrderId)}
                 sx={{
                   color: BRAND_DARK,
                   p: 0,
@@ -4847,7 +5000,7 @@ function ComplianceBoardPage() {
                 <IconButton size="small" onClick={() => handleCopyOrderId(order.orderId)} sx={{ p: 0.25 }}>
                   <ContentCopyIcon sx={{ fontSize: 14 }} />
                 </IconButton>
-                <IconButton size="small" onClick={() => handleOpenMessageDialog(order)} sx={{ color: BRAND_BLUE, p: 0.25 }}>
+                <IconButton size="small" onClick={() => handleOpenMessageDialog({ ...order, orderId: order.originalOrderId || order.orderId })} sx={{ color: BRAND_BLUE, p: 0.25 }}>
                   <ChatIcon sx={{ fontSize: 14 }} />
                 </IconButton>
                 <IconButton size="small" onClick={() => handleOpenActivityLogs(order)} sx={{ color: '#8b5cf6', p: 0.25 }}>
@@ -5915,6 +6068,7 @@ function ComplianceBoardPage() {
           conversationId={selectedOrderForMessage.conversationId || null}
           title="Chat"
           showManageCase={false}
+          onMessageSent={handleMessageSent}
         />
       )}
 

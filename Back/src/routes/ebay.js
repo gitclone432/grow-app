@@ -10758,7 +10758,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
     const orders = orderIds.length
       ? await Order.find(
         { $or: [{ orderId: { $in: orderIds } }, { legacyOrderId: { $in: orderIds } }] },
-        { _id: 1, orderId: 1, legacyOrderId: 1, productName: 1, creationDate: 1, dateSold: 1, purchaseMarketplaceId: 1, remark: 1, fulfillmentNotes: 1 }
+        { _id: 1, orderId: 1, legacyOrderId: 1, productName: 1, creationDate: 1, dateSold: 1, purchaseMarketplaceId: 1, remark: 1, fulfillmentNotes: 1, amazonAccount: 1, azOrderId: 1 }
       ).lean()
       : [];
     const orderMap = {};
@@ -10769,7 +10769,9 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         orderDateSold: o.dateSold || o.creationDate, // dateSold from order (actual order sale date)
         purchaseMarketplaceId: o.purchaseMarketplaceId,
         remark: o.remark || '', // Get remark from Order (same field as FulfillmentDashboard)
-        notes: o.fulfillmentNotes || '' // Get notes from Order (same field as FulfillmentDashboard)
+        notes: o.fulfillmentNotes || '', // Get notes from Order (same field as FulfillmentDashboard)
+        amazonAccount: o.amazonAccount || null,
+        amazonOrderId: o.azOrderId || ''
       };
       if (o.orderId) orderMap[o.orderId] = payload;
       if (o.legacyOrderId) orderMap[o.legacyOrderId] = payload;
@@ -10784,7 +10786,9 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         dateSold: orderMap[key]?.orderDateSold || c.dateSold || null, // Order's date sold, not cancellation request date
         purchaseMarketplaceId: orderMap[key]?.purchaseMarketplaceId || c.marketplaceId || 'EBAY_US',
         remark: orderMap[key]?.remark || '', // Use remark from Order (same field as FulfillmentDashboard)
-        notes: orderMap[key]?.notes || '' // Use notes from Order (same field as FulfillmentDashboard)
+        notes: orderMap[key]?.notes || '', // Use notes from Order (same field as FulfillmentDashboard)
+        amazonAccount: orderMap[key]?.amazonAccount || null,
+        amazonOrderId: orderMap[key]?.amazonOrderId || ''
       };
     });
 
@@ -12956,6 +12960,87 @@ router.get('/payment-dispute/:paymentDisputeId', requireAuth, requirePageAccess(
   }
 });
 
+// PATCH /ebay/inquiry/{inquiryId}/notes - Save internal notes on INR inquiry case
+router.patch('/inquiry/:inquiryId/notes', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const inquiryId = String(req.params.inquiryId || '').trim();
+    const { notes } = req.body;
+
+    if (!inquiryId) {
+      return res.status(400).json({ error: 'Inquiry ID is required' });
+    }
+
+    const updated = await Case.findOneAndUpdate(
+      { caseId: inquiryId },
+      { notes: notes || '' },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Inquiry case not found' });
+    }
+
+    res.json({ message: 'Notes saved successfully', notes: updated.notes });
+  } catch (err) {
+    console.error('[Inquiry Notes] Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to save notes' });
+  }
+});
+
+// PATCH /ebay/case-management/{caseId}/notes - Save internal notes on case management case
+router.patch('/case-management/:caseId/notes', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const caseId = String(req.params.caseId || '').trim();
+    const { notes } = req.body;
+
+    if (!caseId) {
+      return res.status(400).json({ error: 'Case ID is required' });
+    }
+
+    const updated = await CaseManagement.findOneAndUpdate(
+      { caseId: caseId },
+      { notes: notes || '' },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Case Management case not found' });
+    }
+
+    res.json({ message: 'Notes saved successfully', notes: updated.notes });
+  } catch (err) {
+    console.error('[Case Management Notes] Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to save notes' });
+  }
+});
+
+// PATCH /ebay/payment-dispute/{paymentDisputeId}/notes - Save internal notes on payment dispute
+router.patch('/payment-dispute/:paymentDisputeId/notes', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const paymentDisputeId = String(req.params.paymentDisputeId || '').trim();
+    const { notes } = req.body;
+
+    if (!paymentDisputeId) {
+      return res.status(400).json({ error: 'Payment Dispute ID is required' });
+    }
+
+    const updated = await PaymentDispute.findOneAndUpdate(
+      { paymentDisputeId: paymentDisputeId },
+      { notes: notes || '' },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Payment dispute not found' });
+    }
+
+    res.json({ message: 'Notes saved successfully', notes: updated.notes });
+  } catch (err) {
+    console.error('[Payment Dispute Notes] Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to save notes' });
+  }
+});
+
 
 // Get a lightweight index of all issues (INR/SNAD cases, returns, disputes) keyed by orderId
 // Used by Fulfillment Dashboard to show an "Issues" column
@@ -14994,12 +15079,34 @@ router.post('/chat/mark-read', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Invalid query params' });
     }
 
+    // Update all unread messages to read in Message collection
     const result = await Message.updateMany(
       { ...query, sender: 'BUYER', read: false },
       { read: true }
     );
 
-    res.json({ success: true, modifiedCount: result.modifiedCount });
+    // CRITICAL: Also update the EbayMessageConversation unreadCount to 0
+    // This ensures the Compliance Board shows correct unread counts
+    const convQuery = {};
+    if (orderId) {
+      convQuery.orderId = orderId;
+    } else if (buyerUsername && itemId) {
+      convQuery.buyerUsername = buyerUsername;
+      convQuery.itemId = itemId;
+    }
+
+    const convResult = await EbayMessageConversation.updateMany(
+      convQuery,
+      { unreadCount: 0 }
+    );
+
+    console.log('[MARK-READ] Updated messages:', result.modifiedCount, 'Updated conversations:', convResult.modifiedCount);
+
+    res.json({ 
+      success: true, 
+      modifiedCount: result.modifiedCount,
+      conversationModifiedCount: convResult.modifiedCount 
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -1181,6 +1181,42 @@ export default function BuyerChatPage() {
       } else if (res.data.message?.conversationId && !selectedThread.conversationId) {
         setSelectedThread({ ...selectedThread, conversationId: res.data.message.conversationId });
       }
+
+      // AUTO-MARK AS READ: Since the seller just replied to the buyer, automatically mark the conversation as read
+      // This prevents confusion and avoids the need to manually click "Mark Read" after replying
+      try {
+        const payload = {
+          orderId: selectedThread.orderId,
+          buyerUsername: selectedThread.buyerUsername,
+          itemId: selectedThread.itemId
+        };
+
+        await api.post('/ebay/chat/mark-read', payload);
+
+        // Update local thread state to reflect that it's no longer unread
+        setThreads(prevThreads =>
+          prevThreads.map(t => {
+            const isMatch = t.orderId
+              ? t.orderId === selectedThread.orderId
+              : (t.buyerUsername === selectedThread.buyerUsername && t.itemId === selectedThread.itemId);
+
+            if (isMatch) {
+              return { ...t, unreadCount: 0 };
+            }
+            return t;
+          })
+        );
+        setSelectedThread(prev => prev ? { ...prev, unreadCount: 0 } : prev);
+
+        console.log('[AUTO-MARK-READ] Conversation marked as read after seller reply:', {
+          orderId: selectedThread.orderId,
+          buyerUsername: selectedThread.buyerUsername,
+          itemId: selectedThread.itemId
+        });
+      } catch (autoMarkErr) {
+        // Log but don't fail the send if auto-mark-read fails
+        console.warn('[AUTO-MARK-READ] Failed to auto-mark as read:', autoMarkErr.message);
+      }
     } catch (e) {
       alert('Failed to send: ' + (e.response?.data?.error || e.message));
     } finally {
