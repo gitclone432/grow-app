@@ -1360,6 +1360,9 @@ function ComplianceBoardPage() {
           });
         });
         
+        // Build set of orderIds from cancellation cases to avoid duplicates
+        const cancellationCaseOrderIds = new Set(dedupCancellationCases.map(c => String(c.orderId || c.legacyOrderId || '').toLowerCase()).filter(Boolean));
+        
         // Group deduplicated cancellation cases by their complianceBoardStatus
         dedupCancellationCases.forEach((caseItem) => {
           const status = caseItem.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
@@ -1369,9 +1372,23 @@ function ComplianceBoardPage() {
         });
         
         // Case Opened = Cancellation cases (from Issues & Resolutions / stored cancellation cases)
-        // Case Not Opened = Orders with status 'case_not_opened' from Order Communication
-        // Backend already filters to only return orders with 'cancellation' category, so we just need to check status
-        // Note: Cases are already grouped by status above, so this uses that existing grouped data
+        // Case Not Opened = Orders from Order Communication that don't have a cancellation case
+        // Extract conversation items that are NOT in cancellation cases and add them to appropriate columns
+        
+        // Case Not Opened: Conversation items that don't have a cancellation case associated
+        // (similar to return board logic - these are unassigned cancellation threads)
+        const cancellationCaseNotOpenedItems = (grouped[COLUMN_STATUS.CASE_NOT_OPENED] || [])
+          .filter((order) => !cancellationCaseOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase()));
+        
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = cancellationCaseNotOpenedItems;
+        
+        // Accepted: Conversation items explicitly moved to accepted (not from cancellation cases)
+        grouped[COLUMN_STATUS.ACCEPTED] = (grouped[COLUMN_STATUS.ACCEPTED] || [])
+          .filter((order) => !cancellationCaseOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase()));
+        
+        // Declined: Conversation items explicitly moved to declined (not from cancellation cases)
+        grouped[COLUMN_STATUS.DECLINED] = (grouped[COLUMN_STATUS.DECLINED] || [])
+          .filter((order) => !cancellationCaseOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase()));
       }
 
       // Merge cancelled orders into Order Fulfillment board as well
@@ -2991,6 +3008,28 @@ function ComplianceBoardPage() {
       return;
     }
 
+    // For Order Communication board, map message categories to board categories and default statuses
+    let patchStatus = status;
+    let patchCategory = selectedCategory;
+    
+    if (selectedCategory === 'order_communication') {
+      // Message category to board category and status mapping
+      const messageCategoryMap = {
+        [MESSAGE_CATEGORIES.CANCELLATION]: { boardCategory: 'cancellation', boardStatus: 'case_not_opened' },
+        [MESSAGE_CATEGORIES.INR]: { boardCategory: 'inr', boardStatus: 'case_not_opened' },
+        [MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE]: { boardCategory: 'return_refund', boardStatus: 'case_not_opened' },
+        [MESSAGE_CATEGORIES.ON_HOLD]: { boardCategory: 'order_fulfillment', boardStatus: 'todo' },
+        [MESSAGE_CATEGORIES.OUT_OF_STOCK]: { boardCategory: 'order_fulfillment', boardStatus: 'out_of_stock' },
+      };
+      
+      if (messageCategoryMap[status]) {
+        const mapping = messageCategoryMap[status];
+        patchStatus = mapping.boardStatus;
+        patchCategory = mapping.boardCategory;
+        console.log(`[APPLY-ORDER] [MESSAGE-CATEGORY-MAP] Mapped '${status}' to category='${patchCategory}', status='${patchStatus}'`);
+      }
+    }
+    
     setApplyingColumns((prev) => ({ ...prev, [`order:${status}`]: true }));
     try {
       console.log(`[APPLY-ORDER] Processing ${moves.length} order move(s):`);
@@ -3017,8 +3056,8 @@ function ComplianceBoardPage() {
         });
 
         const patchData = {
-          complianceBoardStatus: status,
-          complianceBoardCategory: selectedCategory,
+          complianceBoardStatus: patchStatus,
+          complianceBoardCategory: patchCategory,
         };
         console.log(`[APPLY-ORDER] Sending PATCH to /orders/${encodeURIComponent(targetId)}/compliance-status with:`, patchData);
         
@@ -3049,38 +3088,38 @@ function ComplianceBoardPage() {
               : (order.complianceBoardCategory ? [order.complianceBoardCategory] : []);
             return {
               ...order,
-              complianceBoardStatus: status,
-              complianceBoardCategories: categories.includes(selectedCategory)
+              complianceBoardStatus: patchStatus,
+              complianceBoardCategories: categories.includes(patchCategory)
                 ? categories
-                : [...categories, selectedCategory],
+                : [...categories, patchCategory],
               outOfStockAssignedAt:
-                selectedCategory === 'order_fulfillment' && status === COLUMN_STATUS.OUT_OF_STOCK
+                patchCategory === 'order_fulfillment' && patchStatus === COLUMN_STATUS.OUT_OF_STOCK
                   ? appliedAt
-                  : selectedCategory === 'order_fulfillment'
+                  : patchCategory === 'order_fulfillment'
                     ? null
                     : order.outOfStockAssignedAt,
               cancellationAssignedAt:
-                selectedCategory === 'order_fulfillment' && status === COLUMN_STATUS.CANCELLATION
+                patchCategory === 'order_fulfillment' && patchStatus === COLUMN_STATUS.CANCELLATION
                   ? appliedAt
-                  : selectedCategory === 'order_fulfillment'
+                  : patchCategory === 'order_fulfillment'
                     ? null
                     : order.cancellationAssignedAt,
               addressIssueAssignedAt:
-                selectedCategory === 'order_fulfillment' && status === COLUMN_STATUS.ADDRESS_ISSUE
+                patchCategory === 'order_fulfillment' && patchStatus === COLUMN_STATUS.ADDRESS_ISSUE
                   ? appliedAt
-                  : selectedCategory === 'order_fulfillment'
+                  : patchCategory === 'order_fulfillment'
                     ? null
                     : order.addressIssueAssignedAt,
               returnCaseNotOpenedAssignedAt:
-                selectedCategory === 'return_refund' && status === COLUMN_STATUS.CASE_NOT_OPENED
+                patchCategory === 'return_refund' && patchStatus === COLUMN_STATUS.CASE_NOT_OPENED
                   ? appliedAt
-                  : selectedCategory === 'return_refund'
+                  : patchCategory === 'return_refund'
                     ? null
                     : order.returnCaseNotOpenedAssignedAt,
               returnItemDeliveredAssignedAt:
-                selectedCategory === 'return_refund' && status === COLUMN_STATUS.ITEM_DELIVERED
+                patchCategory === 'return_refund' && patchStatus === COLUMN_STATUS.ITEM_DELIVERED
                   ? appliedAt
-                  : selectedCategory === 'return_refund'
+                  : patchCategory === 'return_refund'
                     ? null
                     : order.returnItemDeliveredAssignedAt,
             };
@@ -3094,12 +3133,12 @@ function ComplianceBoardPage() {
         delete next[status];
         return next;
       });
-      console.log(`[APPLY-ORDER] Successfully applied ${moves.length} order(s) to ${status}`);
-      setSnackbar({ open: true, message: `Applied ${moves.length} order(s) to ${getColumnTitle(status)}` });
+      console.log(`[APPLY-ORDER] Successfully applied ${moves.length} order(s) to ${status} (mapped to status='${patchStatus}', category='${patchCategory}')`);
+      setSnackbar({ open: true, message: `Applied ${moves.length} order(s) to ${getColumnTitle(patchStatus)}` });
       
       // Smart refill: check which columns need filling after this apply (Order fulfillment only)
-      // Skip smart refill for specialized boards (return_refund, cancellation, inr)
-      if (['return_refund', 'cancellation', 'inr'].includes(selectedCategory)) {
+      // Skip smart refill for specialized boards (return_refund, cancellation, inr, order_communication)
+      if (['return_refund', 'cancellation', 'inr', 'order_communication'].includes(selectedCategory)) {
         return;
       }
       

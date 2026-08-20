@@ -2516,6 +2516,60 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       detailQuery = timedStatusQuery(query, 'address_issue', 'addressIssueAssignedAt');
     }
 
+    // For cancellation board, fetch counts from BOTH Order and Cancellation collections
+    // to ensure stats accurately reflect all displayed items
+    const isCancellationBoard = category === 'cancellation';
+    
+    let cancellationStatusCountRows = [];
+    let cancellationTotal = 0;
+    
+    if (isCancellationBoard) {
+      // Build cancellation collection query with same date filters
+      const cancellationQuery = {
+        ...dateFilter
+      };
+      
+      if (sellerObjectId) {
+        cancellationQuery.seller = sellerObjectId;
+      } else if (excludedSellerIds.length > 0) {
+        // Note: Cancellation model doesn't have seller field, skip this filter for cancellations
+      }
+      
+      if (orderIdRegex) {
+        cancellationQuery.$or = cancellationQuery.$or || [];
+        cancellationQuery.$or.push(
+          { orderId: orderIdRegex },
+          { legacyOrderId: orderIdRegex },
+          { cancelId: orderIdRegex }
+        );
+      }
+      
+      if (buyerNameRegex) {
+        cancellationQuery.$or = cancellationQuery.$or || [];
+        cancellationQuery.$or.push(
+          { buyerName: buyerNameRegex },
+          { buyerUsername: buyerNameRegex }
+        );
+      }
+      
+      // Fetch cancellation status counts
+      const [cancellationCount, cancellationStatusRows] = await Promise.all([
+        Cancellation.countDocuments(cancellationQuery),
+        Cancellation.aggregate([
+          { $match: cancellationQuery },
+          {
+            $group: {
+              _id: { $ifNull: ['$complianceBoardStatus', 'cancellation_request'] },
+              count: { $sum: 1 }
+            }
+          }
+        ])
+      ]);
+      
+      cancellationTotal = cancellationCount;
+      cancellationStatusCountRows = cancellationStatusRows || [];
+    }
+
     const [
       total,
       statusCountRows,
@@ -2523,7 +2577,9 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       overdueCancellationCount,
       overdueAddressIssueCount
     ] = await Promise.all([
-      Order.countDocuments(detailQuery),
+      isCancellationBoard 
+        ? Promise.resolve(0)  // Don't count Order collection for cancellation board
+        : Order.countDocuments(detailQuery),
       Order.aggregate([
         { $match: detailQuery },
         {
@@ -2537,11 +2593,28 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       Order.countDocuments(timedStatusQuery(query, 'cancellation', 'cancellationAssignedAt')),
       Order.countDocuments(timedStatusQuery(query, 'address_issue', 'addressIssueAssignedAt'))
     ]);
-    const statusCounts = statusCountRows.reduce((acc, row) => {
+    
+    // Merge status counts from Order and Cancellation collections
+    const statusCounts = {};
+    
+    // Add Order status counts
+    statusCountRows.forEach((row) => {
       const status = row._id || 'todo';
-      acc[status] = row.count || 0;
-      return acc;
-    }, {});
+      statusCounts[status] = (statusCounts[status] || 0) + row.count;
+    });
+    
+    // Add Cancellation status counts (overwrite/merge for cancellation board)
+    if (isCancellationBoard) {
+      cancellationStatusCountRows.forEach((row) => {
+        const status = row._id || 'cancellation_request';
+        statusCounts[status] = (statusCounts[status] || 0) + row.count;
+      });
+    }
+    
+    // For cancellation board, use combined total
+    const combinedTotal = isCancellationBoard 
+      ? (total + cancellationTotal)
+      : total;
     const overdueCounts = {
       fulfillment_out_of_stock_overdue: overdueOutOfStockCount,
       fulfillment_cancellation_overdue: overdueCancellationCount,
@@ -2560,6 +2633,101 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       .skip(skip)
       .limit(limitNum)
       .lean();
+
+    // For cancellation board, also fetch Cancellation records and merge with Order records
+    if (isCancellationBoard) {
+      const cancellationQuery = {
+        ...dateFilter
+      };
+      
+      if (sellerObjectId) {
+        cancellationQuery.seller = sellerObjectId;
+      }
+      
+      if (orderIdRegex) {
+        cancellationQuery.$or = cancellationQuery.$or || [];
+        cancellationQuery.$or.push(
+          { orderId: orderIdRegex },
+          { legacyOrderId: orderIdRegex },
+          { cancelId: orderIdRegex }
+        );
+      }
+      
+      if (buyerNameRegex) {
+        cancellationQuery.$or = cancellationQuery.$or || [];
+        cancellationQuery.$or.push(
+          { buyerUsername: buyerNameRegex }
+        );
+      }
+
+      // Apply status filter to cancellation records
+      // Map frontend status names to Cancellation model's enum values
+      if (statusFilter) {
+        const statusMap = {
+          'case_not_opened': 'cancellation_request',  // Maps frontend status to Cancellation model status
+          'accepted': 'accepted',
+          'declined': 'declined'
+        };
+        const cancellationStatus = statusMap[statusFilter] || statusFilter;
+        cancellationQuery.complianceBoardStatus = cancellationStatus;
+      }
+
+      // Fetch cancellation records
+      let cancellations = await Cancellation.find(cancellationQuery)
+        .select('cancelId orderId legacyOrderId cancelState cancelStatus cancelReason buyerUsername complianceBoardStatus dateSold remark seller itemId itemTitle updatedAt')
+        .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+        .sort({ dateSold: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean();
+
+      // Enrich cancellations with related Order data
+      const ordersByOrderId = new Map();
+      orders.forEach(order => {
+        ordersByOrderId.set(order.orderId, order);
+      });
+
+      // Map Cancellation model's status to frontend status names
+      const cancellationStatusToFrontend = (status) => {
+        const map = {
+          'cancellation_request': 'case_not_opened',
+          'accepted': 'accepted',
+          'declined': 'declined'
+        };
+        return map[status] || status;
+      };
+
+      const enrichedCancellations = cancellations.map(cancellation => {
+        const relatedOrder = ordersByOrderId.get(cancellation.orderId);
+        return {
+          ...cancellation,
+          _id: cancellation._id || `cancel:${cancellation.cancelId}`,
+          orderId: cancellation.orderId || cancellation.legacyOrderId,
+          dateSold: cancellation.dateSold,
+          buyer: relatedOrder?.buyer || { username: cancellation.buyerUsername },
+          subtotal: relatedOrder?.subtotal,
+          subtotalUSD: relatedOrder?.subtotalUSD,
+          productName: relatedOrder?.productName || cancellation.itemTitle || 'Item',
+          amazonAccount: relatedOrder?.amazonAccount || '',
+          azOrderId: relatedOrder?.azOrderId || '',
+          complianceBoardStatus: cancellationStatusToFrontend(cancellation.complianceBoardStatus || 'cancellation_request'),
+          complianceBoardCategory: 'cancellation',
+          complianceBoardCategories: ['cancellation'],
+          complianceBoardSource: 'cancellation_collection'
+        };
+      });
+
+      // Merge orders and cancellations, maintaining order by dateSold
+      const orderCount = orders.length;
+      const cancellationCount = enrichedCancellations.length;
+      orders = [...orders, ...enrichedCancellations].sort((a, b) => {
+        const aDate = new Date(a.dateSold || 0).getTime();
+        const bDate = new Date(b.dateSold || 0).getTime();
+        return bDate - aDate;
+      });
+
+      console.log(`[BOARD-CANCELLATION] Fetched ${orderCount} Order records + ${cancellationCount} Cancellation records = ${orders.length} total for this page`);
+    }
 
     // Deduplicate orders by orderId - keep the one with the latest updatedAt
     // This prevents duplicate orders from appearing in multiple columns
@@ -2674,7 +2842,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       statusCounts,
       overdueCounts,
       pagination: {
-        total,
+        total: isCancellationBoard ? combinedTotal : total,
         page: pageNum,
         limit: limitNum,
         totalPages: Math.ceil(total / limitNum)
@@ -3321,12 +3489,21 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
     console.log(`[PATCH-COMPLIANCE] [FALLBACK] Return not found with returnId='${orderId}', falling back to Order...`);
 
     // Fallback: Try to find as Order
+    // Build the update object properly:
+    // - complianceBoardStatus: always set it
+    // - complianceBoardCategories: add to array (plural, not singular)
+    const updateObj = {
+      $set: { complianceBoardStatus }
+    };
+    
+    // Use $addToSet to add category to the array without duplicates
+    if (complianceBoardCategory) {
+      updateObj.$addToSet = { complianceBoardCategories: complianceBoardCategory };
+    }
+    
     const order = await Order.findOneAndUpdate(
       { $or: [{ _id: orderId }, { orderId: orderId }] },
-      {
-        $set: { complianceBoardStatus },
-        ...(complianceBoardCategory && { complianceBoardCategory }),
-      },
+      updateObj,
       { new: true }
     );
 
