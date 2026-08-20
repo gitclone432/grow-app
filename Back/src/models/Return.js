@@ -101,6 +101,9 @@ const ReturnSchema = new mongoose.Schema(
     // Compliance board status for kanban board
     complianceBoardStatus: { type: String, default: 'case_opened' },
 
+    // Timestamp of when card was first moved to Case Not Opened column
+    returnCaseNotOpenedAssignedAt: Date,
+
     // Manual SNAD override — counts this return in the BBE calculation even if the reason code is not SNAD
     markedAsSNAD: { type: Boolean, default: false }
   },

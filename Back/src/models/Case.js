@@ -18,6 +18,8 @@ const CaseSchema = new mongoose.Schema({
     enum: ['inr_case_opened', 'inr_follow_up', 'inr_tracking_id_upload', 'inr_case_open_ebay_step_in', 'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'],
     default: 'inr_case_opened'
   }, // Status for compliance board kanban view
+
+  inrCaseNotOpenedAssignedAt: Date, // Timestamp of when card was first moved to Case Not Opened column
   
   // Dates
   creationDate: Date,

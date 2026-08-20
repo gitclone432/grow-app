@@ -693,10 +693,11 @@ function ComplianceBoardPage() {
       
       // Date filter is based on INR Case's creationDate (when case was created), NOT Order's transaction date
       if (dateFilter.mode === 'single' && dateFilter.single) {
+        // When single date is selected, show ONLY that date (not from that date to today)
         inquiryParams.dateFrom = dateFilter.single;
-        inquiryParams.dateTo = new Date().toISOString().split('T')[0];
+        inquiryParams.dateTo = dateFilter.single;
         disputeParams.dateFrom = dateFilter.single;
-        disputeParams.dateTo = new Date().toISOString().split('T')[0];
+        disputeParams.dateTo = dateFilter.single;
       } else if (dateFilter.mode === 'range') {
         if (dateFilter.from) {
           inquiryParams.dateFrom = dateFilter.from;
@@ -746,7 +747,7 @@ function ComplianceBoardPage() {
           ? item.complianceBoardCategories
           : (item.complianceBoardCategory ? [item.complianceBoardCategory] : ['inr']),
         complianceBoardCategory: item.complianceBoardCategory || 'inr',
-        status: item.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED,
+        status: item.status,  // KEEP ORIGINAL: This is the INR case status (OPEN, WAITING_SELLER_RESPONSE, etc.) - NOT complianceBoardStatus!
         sourceType: source,
         // Include enriched fields from fulfillment dashboard for display in card
         amazonAccount: item.amazonAccount,
@@ -761,6 +762,12 @@ function ComplianceBoardPage() {
         ...cases.map(item => transformINRItem(item, 'inr-case')),
         ...disputes.map(item => transformINRItem(item, 'inr-dispute')),
       ];
+
+      // DEBUG: Log status field for first few items
+      console.log(`[INR-TRANSFORM] Total transformed items: ${allItems.length}`);
+      allItems.slice(0, 5).forEach((item, idx) => {
+        console.log(`[INR-TRANSFORM] Item ${idx}: orderId=${item.orderId}, status='${item.status}', complianceBoardStatus='${item.complianceBoardStatus}', sourceType=${item.sourceType}`);
+      });
 
       return allItems;
     } catch (err) {
@@ -1187,6 +1194,21 @@ function ComplianceBoardPage() {
         };
       });
 
+      // Log all boardOrders with cancellation category for debugging
+      if (selectedCategory === 'cancellation') {
+        const cancellationOrders = boardOrders.filter(o => 
+          o.complianceBoardCategories?.includes('cancellation') || o.complianceBoardCategory === 'cancellation'
+        );
+        console.log(`[BOARD-ORDERS] Total boardOrders from API: ${boardOrders.length}`);
+        console.log(`[BOARD-ORDERS] Orders with 'cancellation' category: ${cancellationOrders.length}`);
+        if (cancellationOrders.length > 0) {
+          console.log(`[BOARD-ORDERS] ALL cancellation orders details:`);
+          cancellationOrders.forEach((o, idx) => {
+            console.log(`  [${idx+1}] orderId=${o.orderId}, status=${o.complianceBoardStatus}, source=${o.complianceBoardSource}, hasCategories=${!!o.complianceBoardCategories}, category=${o.complianceBoardCategory}`);
+          });
+        }
+      }
+
       // Log orders if searching for specific order ID
       if (searchOrderId.trim()) {
         const searchedOrders = boardOrders.filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
@@ -1230,8 +1252,64 @@ function ComplianceBoardPage() {
 
       // Merge INR cases from Issues & Resolutions into INR board's Case Opened column
       if (selectedCategory === 'inr') {
+        console.log(`[BOARD-GROUP] ===== INR BOARD GROUPING START =====`);
+        console.log(`[BOARD-GROUP] boardOrders total: ${boardOrders.length}`);
+        console.log(`[BOARD-GROUP] grouped[CASE_NOT_OPENED] before processing: ${(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).length}`);
+        
         // INR cases should be grouped by their complianceBoardStatus
         let inrCasesForBoard = inrCasesResult ? [...inrCasesResult] : [];
+        
+        console.log(`[BOARD-GROUP] INR: Total inrCasesResult received: ${inrCasesForBoard.length}`);
+        
+        // DEBUG: Log status field on first few items
+        inrCasesForBoard.slice(0, 5).forEach((item, idx) => {
+          console.log(`[BOARD-GROUP-INR-STATUS] Item ${idx}: orderId=${item.orderId}, status='${item.status}', caseType='${item.caseType}', complianceBoardStatus='${item.complianceBoardStatus}'`);
+        });
+        
+        // FILTER: Only show INQUIRY-type cases (caseType = 'INR', not 'SNAD' or 'OTHER')
+        // This matches the "Inquiry (131)" filter on the INR API page
+        inrCasesForBoard = inrCasesForBoard.filter(c => c.caseType === 'INR' || c.caseType === 'ITEM_NOT_RECEIVED');
+        console.log(`[BOARD-GROUP] INR: After filtering to Inquiry types only: ${inrCasesForBoard.length}`);
+        
+        // Apply date filter based on case creationDate or first changed date for Case Not Opened items
+        if (dateFilter.mode === 'single' && dateFilter.single) {
+          const selectedDate = new Date(dateFilter.single);
+          selectedDate.setUTCHours(0, 0, 0, 0);
+          const nextDate = new Date(selectedDate);
+          nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+          
+          inrCasesForBoard = inrCasesForBoard.filter(c => {
+            // For Case Not Opened items, use the first changed date if available
+            const dateToCheck = (c.complianceBoardStatus === 'case_not_opened' && c.inrCaseNotOpenedAssignedAt)
+              ? new Date(c.inrCaseNotOpenedAssignedAt)
+              : new Date(c.creationDate);
+            return dateToCheck >= selectedDate && dateToCheck < nextDate;
+          });
+          console.log(`[BOARD-GROUP] INR: After filtering by single date (${dateFilter.single}): ${inrCasesForBoard.length}`);
+        } else if (dateFilter.mode === 'range') {
+          if (dateFilter.from) {
+            const fromDate = new Date(dateFilter.from);
+            fromDate.setUTCHours(0, 0, 0, 0);
+            inrCasesForBoard = inrCasesForBoard.filter(c => {
+              const dateToCheck = (c.complianceBoardStatus === 'case_not_opened' && c.inrCaseNotOpenedAssignedAt)
+                ? new Date(c.inrCaseNotOpenedAssignedAt)
+                : new Date(c.creationDate);
+              return dateToCheck >= fromDate;
+            });
+          }
+          if (dateFilter.to) {
+            const toDate = new Date(dateFilter.to);
+            toDate.setUTCDate(toDate.getUTCDate() + 1);
+            toDate.setUTCHours(0, 0, 0, 0);
+            inrCasesForBoard = inrCasesForBoard.filter(c => {
+              const dateToCheck = (c.complianceBoardStatus === 'case_not_opened' && c.inrCaseNotOpenedAssignedAt)
+                ? new Date(c.inrCaseNotOpenedAssignedAt)
+                : new Date(c.creationDate);
+              return dateToCheck < toDate;
+            });
+          }
+          console.log(`[BOARD-GROUP] INR: After filtering by date range: ${inrCasesForBoard.length}`);
+        }
         
         // Apply only basic filters: search order ID and buyer name
         if (searchOrderId.trim()) {
@@ -1273,17 +1351,17 @@ function ComplianceBoardPage() {
           }
         });
         
-        // Extract deduplicated cases and build Set of orderIds for filtering
+        // Extract deduplicated cases and build Set of orderIds for deduplication
         const dedupInrCases = Array.from(inrByOrderId.values()).map(item => item.caseItem);
-        const inrOrderIds = new Set(inrByOrderId.keys());
+        const inrCaseSourceOrderIds = new Set(
+          Object.values(inrByOrderId).map(item => String(item.caseItem.orderId || item.caseItem.caseOrderId || '').toLowerCase()).filter(Boolean)
+        );
         
-        // Remove duplicate Order Communication entries if same orderId exists in INR cases
-        Object.keys(grouped).forEach((status) => {
-          grouped[status] = grouped[status].filter((order) => {
-            const orderId = String(order.orderId || order.caseOrderId || '').toLowerCase();
-            return !inrOrderIds.has(orderId);
-          });
+        console.log(`[BOARD-GROUP] INR: Found ${dedupInrCases.length} deduplicated Inquiry cases`);
+        dedupInrCases.slice(0, 5).forEach((item, idx) => {
+          console.log(`[BOARD-GROUP-DEDUP-STATUS] Item ${idx}: orderId=${item.orderId}, status='${item.status}', complianceBoardStatus='${item.complianceBoardStatus}'`);
         });
+        console.log(`[BOARD-GROUP] INR: Order IDs already in stored INR cases: ${Array.from(inrCaseSourceOrderIds).join(', ')}`);
         
         // Group deduplicated INR cases by their complianceBoardStatus
         dedupInrCases.forEach((caseItem) => {
@@ -1293,15 +1371,143 @@ function ComplianceBoardPage() {
           }
         });
         
-        // Case Not Opened = Orders with status 'case_not_opened'
-        // Backend already filters to only return orders with 'inr' category, so we just need to check status
-        // These are typically from Order Communication messages assigned to INR
-        // Note: Orders are already grouped by status above, so this just uses that existing grouped data
-        // grouped[COLUMN_STATUS.CASE_NOT_OPENED] is already populated by the status-based grouping above
+        // DEBUG: Log what's in grouped[INR_CASE_OPENED] after adding
+        const inrCaseOpenedItems = grouped[COLUMN_STATUS.INR_CASE_OPENED] || [];
+        console.log(`[BOARD-GROUP] After grouping, INR_CASE_OPENED has ${inrCaseOpenedItems.length} items`);
+        inrCaseOpenedItems.slice(0, 5).forEach((item, idx) => {
+          console.log(`[BOARD-GROUP-GROUPED-STATUS] Column INR_CASE_OPENED Item ${idx}: orderId=${item.orderId}, status='${item.status}', complianceBoardStatus='${item.complianceBoardStatus}'`);
+        });
+        
+        console.log(`[BOARD-GROUP] ===== ADDING BACK ORDER COMMUNICATION ITEMS (INR) =====`);
+        console.log(`[BOARD-GROUP] Total boardOrders to check: ${boardOrders.length}`);
+        
+        // Log boardOrders with INR category
+        const inrBoardOrders = boardOrders.filter(o => 
+          o.complianceBoardCategories?.includes('inr') || o.complianceBoardCategory === 'inr'
+        );
+        console.log(`[BOARD-GROUP] boardOrders with 'inr' category: ${inrBoardOrders.length}`);
+        if (inrBoardOrders.length > 0) {
+          console.log(`[BOARD-GROUP] All boardOrders with INR category:`);
+          inrBoardOrders.forEach((o, idx) => {
+            console.log(`  [${idx+1}] orderId=${o.orderId}, status='${o.complianceBoardStatus}', source='${o.complianceBoardSource}'`);
+          });
+        }
+        
+        // Helper function to check if an order matches the date filter
+        const matchesDateFilter = (order) => {
+          if (dateFilter.mode === 'single' && dateFilter.single) {
+            const selectedDate = new Date(dateFilter.single);
+            selectedDate.setUTCHours(0, 0, 0, 0);
+            const nextDate = new Date(selectedDate);
+            nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+            
+            // For Case Not Opened items, use the first changed date if available
+            const orderDate = (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && order.inrCaseNotOpenedAssignedAt)
+              ? order.inrCaseNotOpenedAssignedAt
+              : (order.createdAt || order.creationDate || order.dateSold);
+            if (!orderDate) return false;
+            
+            const orderDateObj = new Date(orderDate);
+            return orderDateObj >= selectedDate && orderDateObj < nextDate;
+          } else if (dateFilter.mode === 'range') {
+            let matchesFilter = true;
+            if (dateFilter.from) {
+              const fromDate = new Date(dateFilter.from);
+              fromDate.setUTCHours(0, 0, 0, 0);
+              const orderDate = (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && order.inrCaseNotOpenedAssignedAt)
+                ? order.inrCaseNotOpenedAssignedAt
+                : (order.createdAt || order.creationDate || order.dateSold);
+              if (orderDate) {
+                matchesFilter = matchesFilter && new Date(orderDate) >= fromDate;
+              }
+            }
+            if (dateFilter.to) {
+              const toDate = new Date(dateFilter.to);
+              toDate.setUTCDate(toDate.getUTCDate() + 1);
+              toDate.setUTCHours(0, 0, 0, 0);
+              const orderDate = (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && order.inrCaseNotOpenedAssignedAt)
+                ? order.inrCaseNotOpenedAssignedAt
+                : (order.createdAt || order.creationDate || order.dateSold);
+              if (orderDate) {
+                matchesFilter = matchesFilter && new Date(orderDate) < toDate;
+              }
+            }
+            return matchesFilter;
+          }
+          return true;
+        };
+        
+        // Case Not Opened: Order Communication items with case_not_opened status
+        const inrCaseNotOpenedItems = boardOrders.filter((order) => {
+          const isOrderComm = order.complianceBoardSource === 'order_communication';
+          const hasCategory = order.complianceBoardCategories?.includes('inr') || order.complianceBoardCategory === 'inr';
+          const correctStatus = order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED;
+          const notDuplicate = !inrCaseSourceOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase());
+          const matchesDate = matchesDateFilter(order);
+          
+          if (hasCategory) {
+            console.log(`[FILTER-DETAIL-INR] orderId=${order.orderId}, isOrderComm=${isOrderComm}, hasCategory=${hasCategory}, correctStatus=${correctStatus} (status='${order.complianceBoardStatus}'), notDuplicate=${notDuplicate}, matchesDate=${matchesDate}`);
+          }
+          
+          return isOrderComm && hasCategory && correctStatus && notDuplicate && matchesDate;
+        });
+        
+        // Remove any existing items with same orderId to avoid duplicates before re-adding
+        const inrCaseNotOpenedOrderIds = new Set(inrCaseNotOpenedItems.map(o => String(o.orderId || o.caseOrderId || '').toLowerCase()).filter(Boolean));
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = (grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).filter(order => 
+          !inrCaseNotOpenedOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase())
+        );
+        
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = [
+          ...(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []),
+          ...inrCaseNotOpenedItems
+        ];
+        
+        // Case Opened: Only show Inquiry-type stored cases here (the deduplicated ones)
+        // Don't re-add Order Communication items to Case Opened - they should stay in their mapped status column
+        
+        // Follow Up: Order Communication items with follow_up status
+        const inrFollowUpItems = boardOrders.filter((order) => 
+          order.complianceBoardSource === 'order_communication' &&
+          (order.complianceBoardCategories?.includes('inr') || order.complianceBoardCategory === 'inr') &&
+          (order.complianceBoardStatus === COLUMN_STATUS.FOLLOW_UP || order.complianceBoardStatus === COLUMN_STATUS.INR_FOLLOW_UP) &&
+          !inrCaseSourceOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase()) &&
+          matchesDateFilter(order)
+        );
+        
+        // Remove any existing items with same orderId to avoid duplicates before re-adding
+        const inrFollowUpOrderIds = new Set(inrFollowUpItems.map(o => String(o.orderId || o.caseOrderId || '').toLowerCase()).filter(Boolean));
+        grouped[COLUMN_STATUS.INR_FOLLOW_UP] = (grouped[COLUMN_STATUS.INR_FOLLOW_UP] || []).filter(order => 
+          !inrFollowUpOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase())
+        );
+        
+        grouped[COLUMN_STATUS.INR_FOLLOW_UP] = [
+          ...(grouped[COLUMN_STATUS.INR_FOLLOW_UP] || []),
+          ...inrFollowUpItems
+        ];
+        
+        console.log(`[BOARD-GROUP] INR board: CASE_NOT_OPENED=${inrCaseNotOpenedItems.length}, INR_CASE_OPENED (stored Inquiry)=${(grouped[COLUMN_STATUS.INR_CASE_OPENED] || []).length}, INR_FOLLOW_UP=${inrFollowUpItems.length}`);
+        console.log(`[BOARD-GROUP] Final CASE_NOT_OPENED total: ${grouped[COLUMN_STATUS.CASE_NOT_OPENED].length}`);
+        console.log(`[BOARD-GROUP] ===== INR BOARD GROUPING END =====`);
       }
 
       // Merge stored cancellation cases from Issues & Resolutions into Cancellation board's columns
       if (selectedCategory === 'cancellation') {
+        console.log(`[BOARD-GROUP] ===== CANCELLATION BOARD GROUPING START =====`);
+        console.log(`[BOARD-GROUP] boardOrders total: ${boardOrders.length}`);
+        console.log(`[BOARD-GROUP] grouped[CASE_NOT_OPENED] before processing: ${(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).length}`);
+        
+        // Log first few items in CASE_NOT_OPENED to see what's there
+        const initialCaseNotOpened = grouped[COLUMN_STATUS.CASE_NOT_OPENED] || [];
+        if (initialCaseNotOpened.length > 0) {
+          console.log(`[BOARD-GROUP] Initial CASE_NOT_OPENED items (first 3):`, initialCaseNotOpened.slice(0, 3).map(o => ({
+            orderId: o.orderId,
+            status: o.complianceBoardStatus,
+            source: o.complianceBoardSource,
+            categories: o.complianceBoardCategories
+          })));
+        }
+        
         // Stored cancellation cases should be grouped by their complianceBoardStatus
         let cancellationCasesForBoard = cancellationCasesResult ? [...cancellationCasesResult] : [];
         
@@ -1320,6 +1526,42 @@ function ComplianceBoardPage() {
             const buyerName = String(c.buyer?.buyerRegistrationAddress?.fullName || c.buyerName || c.buyerUsername || '');
             return buyerName.toLowerCase().includes(searchBuyerName.trim().toLowerCase());
           });
+        }
+        
+        // Apply date filter (check both creation date and first changed date for Case Not Opened items)
+        if (dateFilter.mode === 'single' && dateFilter.single) {
+          const selectedDate = new Date(dateFilter.single);
+          selectedDate.setUTCHours(0, 0, 0, 0);
+          const nextDate = new Date(selectedDate);
+          nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+          
+          cancellationCasesForBoard = cancellationCasesForBoard.filter((item) => {
+            // For Case Not Opened items, use the first changed date if available
+            const dateToCheck = item.cancellationCaseNotOpenedAssignedAt || item.createdAt || item.creationDate || item.cancelRequestDate || item.dateSold;
+            if (!dateToCheck) return false;
+            const orderDateObj = new Date(dateToCheck);
+            return orderDateObj >= selectedDate && orderDateObj < nextDate;
+          });
+        } else if (dateFilter.mode === 'range') {
+          if (dateFilter.from) {
+            const fromDate = new Date(dateFilter.from);
+            fromDate.setUTCHours(0, 0, 0, 0);
+            cancellationCasesForBoard = cancellationCasesForBoard.filter((item) => {
+              const dateToCheck = item.cancellationCaseNotOpenedAssignedAt || item.createdAt || item.creationDate || item.cancelRequestDate || item.dateSold;
+              if (!dateToCheck) return true;
+              return new Date(dateToCheck) >= fromDate;
+            });
+          }
+          if (dateFilter.to) {
+            const toDate = new Date(dateFilter.to);
+            toDate.setUTCDate(toDate.getUTCDate() + 1);
+            toDate.setUTCHours(0, 0, 0, 0);
+            cancellationCasesForBoard = cancellationCasesForBoard.filter((item) => {
+              const dateToCheck = item.cancellationCaseNotOpenedAssignedAt || item.createdAt || item.creationDate || item.cancelRequestDate || item.dateSold;
+              if (!dateToCheck) return true;
+              return new Date(dateToCheck) < toDate;
+            });
+          }
         }
         
         // Deduplicate cancellationCasesForBoard by cancelId
@@ -1352,43 +1594,208 @@ function ComplianceBoardPage() {
         const dedupCancellationCases = Array.from(cancellationByOrderId.values()).map(item => item.caseItem);
         const cancellationOrderIds = new Set(dedupCancellationCases.map(c => String(c.orderId || c.legacyOrderId || '').toLowerCase()).filter(Boolean));
         
+        console.log(`[BOARD-GROUP] dedupCancellationCases: ${dedupCancellationCases.length}`);
+        console.log(`[BOARD-GROUP] cancellationOrderIds: ${cancellationOrderIds.size} unique orderIds`);
+        
         // Remove duplicate Order Communication entries if same orderId exists in cancellation cases
+        console.log(`[BOARD-GROUP] BEFORE removing duplicates - CASE_NOT_OPENED: ${(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).length}`);
+        
         Object.keys(grouped).forEach((status) => {
+          const beforeCount = grouped[status].length;
           grouped[status] = grouped[status].filter((order) => {
             const orderId = String(order.orderId || order.legacyOrderId || '').toLowerCase();
-            return !cancellationOrderIds.has(orderId);
+            const shouldKeep = !cancellationOrderIds.has(orderId);
+            if (!shouldKeep && status === COLUMN_STATUS.CASE_NOT_OPENED) {
+              console.log(`[BOARD-GROUP-FILTER] Removing ${order.orderId} from ${status} (matches stored case)`);
+            }
+            return shouldKeep;
           });
+          const afterCount = grouped[status].length;
+          if (beforeCount !== afterCount) {
+            console.log(`[BOARD-GROUP] Status ${status}: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
+          }
         });
+        
+        console.log(`[BOARD-GROUP] AFTER removing duplicates - CASE_NOT_OPENED: ${(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).length}`);
         
         // Build set of orderIds from cancellation cases to avoid duplicates
         const cancellationCaseOrderIds = new Set(dedupCancellationCases.map(c => String(c.orderId || c.legacyOrderId || '').toLowerCase()).filter(Boolean));
         
         // Group deduplicated cancellation cases by their complianceBoardStatus
-        dedupCancellationCases.forEach((caseItem) => {
+        console.log(`[BOARD-GROUP] Processing ${dedupCancellationCases.length} deduplicated cancellation cases for grouping`);
+        dedupCancellationCases.forEach((caseItem, idx) => {
           const status = caseItem.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
           if (grouped[status]) {
             grouped[status].push(caseItem);
+            
+            // Log first few cancellations to show what status they're getting
+            if (idx < 3) {
+              console.log(`[BOARD-GROUP] Cancellation ${idx + 1}: cancelId=${caseItem.cancelId}, orderId=${caseItem.orderId}, status=${status}`);
+            }
           }
         });
         
-        // Case Opened = Cancellation cases (from Issues & Resolutions / stored cancellation cases)
-        // Case Not Opened = Orders from Order Communication that don't have a cancellation case
-        // Extract conversation items that are NOT in cancellation cases and add them to appropriate columns
+        // Track all orderIds that have been added from stored cancellation cases
+        // This prevents duplicate cards for the same orderId
+        let cancellationCaseSourceOrderIds = new Set(
+          Object.values(grouped)
+            .flat()
+            .map(c => String(c.orderId || c.legacyOrderId || '').toLowerCase())
+            .filter(Boolean)
+        );
         
-        // Case Not Opened: Conversation items that don't have a cancellation case associated
-        // (similar to return board logic - these are unassigned cancellation threads)
-        const cancellationCaseNotOpenedItems = (grouped[COLUMN_STATUS.CASE_NOT_OPENED] || [])
-          .filter((order) => !cancellationCaseOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase()));
+        // Now add back Order Communication items from cancellation board that don't duplicate stored cases
+        // These are orders from the Order Communication board that were explicitly assigned to Cancellation category
+        // Key identifier: complianceBoardSource === 'order_communication' AND complianceBoardCategory/Categories includes 'cancellation'
         
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = cancellationCaseNotOpenedItems;
+        console.log(`[BOARD-GROUP] ===== ADDING BACK ORDER COMMUNICATION ITEMS =====`);
+        console.log(`[BOARD-GROUP] Total boardOrders to check: ${boardOrders.length}`);
         
-        // Accepted: Conversation items explicitly moved to accepted (not from cancellation cases)
-        grouped[COLUMN_STATUS.ACCEPTED] = (grouped[COLUMN_STATUS.ACCEPTED] || [])
-          .filter((order) => !cancellationCaseOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase()));
+        // Log sample of boardOrders with cancellation category
+        const cancellationBoardOrders = boardOrders.filter(o => 
+          o.complianceBoardCategories?.includes('cancellation') || o.complianceBoardCategory === 'cancellation'
+        );
+        console.log(`[BOARD-GROUP] boardOrders with 'cancellation' category: ${cancellationBoardOrders.length}`);
+        if (cancellationBoardOrders.length > 0) {
+          console.log(`[BOARD-GROUP] All boardOrders with cancellation category:`);
+          cancellationBoardOrders.forEach((o, idx) => {
+            console.log(`  [${idx+1}] orderId=${o.orderId}, status='${o.complianceBoardStatus}', source='${o.complianceBoardSource}'`);
+          });
+        }
         
-        // Declined: Conversation items explicitly moved to declined (not from cancellation cases)
-        grouped[COLUMN_STATUS.DECLINED] = (grouped[COLUMN_STATUS.DECLINED] || [])
-          .filter((order) => !cancellationCaseOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase()));
+        // Case Not Opened: Conversation items that have CASE_NOT_OPENED status and came from Order Communication
+        const matchesCancellationDateFilter = (order) => {
+          if (dateFilter.mode === 'single' && dateFilter.single) {
+            const selectedDate = new Date(dateFilter.single);
+            selectedDate.setUTCHours(0, 0, 0, 0);
+            const nextDate = new Date(selectedDate);
+            nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+            
+            // For Case Not Opened items, use the first changed date if available
+            const dateToCheck = (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && order.cancellationCaseNotOpenedAssignedAt)
+              ? order.cancellationCaseNotOpenedAssignedAt
+              : (order.createdAt || order.creationDate || order.dateSold);
+            if (!dateToCheck) return false;
+            const orderDateObj = new Date(dateToCheck);
+            return orderDateObj >= selectedDate && orderDateObj < nextDate;
+          } else if (dateFilter.mode === 'range') {
+            let matchesFilter = true;
+            if (dateFilter.from) {
+              const fromDate = new Date(dateFilter.from);
+              fromDate.setUTCHours(0, 0, 0, 0);
+              const dateToCheck = (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && order.cancellationCaseNotOpenedAssignedAt)
+                ? order.cancellationCaseNotOpenedAssignedAt
+                : (order.createdAt || order.creationDate || order.dateSold);
+              if (dateToCheck) {
+                matchesFilter = matchesFilter && new Date(dateToCheck) >= fromDate;
+              }
+            }
+            if (dateFilter.to) {
+              const toDate = new Date(dateFilter.to);
+              toDate.setUTCDate(toDate.getUTCDate() + 1);
+              toDate.setUTCHours(0, 0, 0, 0);
+              const dateToCheck = (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && order.cancellationCaseNotOpenedAssignedAt)
+                ? order.cancellationCaseNotOpenedAssignedAt
+                : (order.createdAt || order.creationDate || order.dateSold);
+              if (dateToCheck) {
+                matchesFilter = matchesFilter && new Date(dateToCheck) < toDate;
+              }
+            }
+            return matchesFilter;
+          }
+          return true;
+        };
+
+        const cancellationCaseNotOpenedItems = boardOrders.filter((order) => {
+          const isOrderComm = order.complianceBoardSource === 'order_communication';
+          const hasCategory = order.complianceBoardCategories?.includes('cancellation') || order.complianceBoardCategory === 'cancellation';
+          const correctStatus = order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED;
+          const notDuplicate = !cancellationCaseSourceOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase());
+          const matchesDateFilter = matchesCancellationDateFilter(order);
+          
+          if (hasCategory) {
+            console.log(`[FILTER-DETAIL] orderId=${order.orderId}, isOrderComm=${isOrderComm}, hasCategory=${hasCategory}, correctStatus=${correctStatus} (status='${order.complianceBoardStatus}'), notDuplicate=${notDuplicate}, matchesDateFilter=${matchesDateFilter}`);
+          }
+          
+          return isOrderComm && hasCategory && correctStatus && notDuplicate && matchesDateFilter;
+        });
+        
+        // Remove any existing items with same orderId to avoid duplicates before re-adding
+        const caseNotOpenedOrderIds = new Set(cancellationCaseNotOpenedItems.map(o => String(o.orderId || o.legacyOrderId || '').toLowerCase()).filter(Boolean));
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = (grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).filter(order => 
+          !caseNotOpenedOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase())
+        );
+        
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = [
+          ...(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []),
+          ...cancellationCaseNotOpenedItems
+        ];
+        
+        // Accepted: Conversation items that have ACCEPTED status and came from Order Communication
+        const cancellationAcceptedItems = boardOrders.filter((order) => 
+          order.complianceBoardSource === 'order_communication' &&
+          (order.complianceBoardCategories?.includes('cancellation') || order.complianceBoardCategory === 'cancellation') &&
+          order.complianceBoardStatus === COLUMN_STATUS.ACCEPTED &&
+          !cancellationCaseSourceOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase()) &&
+          matchesCancellationDateFilter(order)
+        );
+        
+        // Remove any existing items with same orderId to avoid duplicates before re-adding
+        const acceptedOrderIds = new Set(cancellationAcceptedItems.map(o => String(o.orderId || o.legacyOrderId || '').toLowerCase()).filter(Boolean));
+        grouped[COLUMN_STATUS.ACCEPTED] = (grouped[COLUMN_STATUS.ACCEPTED] || []).filter(order => 
+          !acceptedOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase())
+        );
+        
+        grouped[COLUMN_STATUS.ACCEPTED] = [
+          ...(grouped[COLUMN_STATUS.ACCEPTED] || []),
+          ...cancellationAcceptedItems
+        ];
+        
+        // Declined: Conversation items that have DECLINED status and came from Order Communication
+        const cancellationDeclinedItems = boardOrders.filter((order) => 
+          order.complianceBoardSource === 'order_communication' &&
+          (order.complianceBoardCategories?.includes('cancellation') || order.complianceBoardCategory === 'cancellation') &&
+          order.complianceBoardStatus === COLUMN_STATUS.DECLINED &&
+          !cancellationCaseSourceOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase()) &&
+          matchesCancellationDateFilter(order)
+        );
+        
+        // Remove any existing items with same orderId to avoid duplicates before re-adding
+        const declinedOrderIds = new Set(cancellationDeclinedItems.map(o => String(o.orderId || o.legacyOrderId || '').toLowerCase()).filter(Boolean));
+        grouped[COLUMN_STATUS.DECLINED] = (grouped[COLUMN_STATUS.DECLINED] || []).filter(order => 
+          !declinedOrderIds.has(String(order.orderId || order.legacyOrderId || '').toLowerCase())
+        );
+        
+        grouped[COLUMN_STATUS.DECLINED] = [
+          ...(grouped[COLUMN_STATUS.DECLINED] || []),
+          ...cancellationDeclinedItems
+        ];
+        
+        console.log(`[BOARD-GROUP] Cancellation board: CASE_NOT_OPENED=${cancellationCaseNotOpenedItems.length}, ACCEPTED=${cancellationAcceptedItems.length}, DECLINED=${cancellationDeclinedItems.length}`);
+        console.log(`[BOARD-GROUP] Final CASE_NOT_OPENED total: ${grouped[COLUMN_STATUS.CASE_NOT_OPENED].length}`);
+        console.log(`[BOARD-GROUP] ===== CANCELLATION BOARD GROUPING END =====`);
+        
+        if (cancellationCaseNotOpenedItems.length > 0) {
+          console.log(`[BOARD-GROUP] CASE_NOT_OPENED items:`, cancellationCaseNotOpenedItems.slice(0, 3).map(o => ({ 
+            orderId: o.orderId, 
+            status: o.complianceBoardStatus,
+            source: o.complianceBoardSource
+          })));
+        }
+        if (cancellationAcceptedItems.length > 0) {
+          console.log(`[BOARD-GROUP] ACCEPTED items:`, cancellationAcceptedItems.slice(0, 3).map(o => ({ 
+            orderId: o.orderId, 
+            status: o.complianceBoardStatus,
+            source: o.complianceBoardSource
+          })));
+        }
+        if (cancellationDeclinedItems.length > 0) {
+          console.log(`[BOARD-GROUP] DECLINED items:`, cancellationDeclinedItems.slice(0, 3).map(o => ({ 
+            orderId: o.orderId, 
+            status: o.complianceBoardStatus,
+            source: o.complianceBoardSource
+          })));
+        }
       }
 
       // Merge cancelled orders into Order Fulfillment board as well
@@ -1479,6 +1886,42 @@ function ComplianceBoardPage() {
           });
         }
         
+        // Apply date filter (check both creation date and first changed date for Case Not Opened items)
+        if (dateFilter.mode === 'single' && dateFilter.single) {
+          const selectedDate = new Date(dateFilter.single);
+          selectedDate.setUTCHours(0, 0, 0, 0);
+          const nextDate = new Date(selectedDate);
+          nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+          
+          storedReturnCasesForBoard = storedReturnCasesForBoard.filter((item) => {
+            // For Case Not Opened items, use the first changed date if available
+            const dateToCheck = item.returnCaseNotOpenedAssignedAt || item.createdAt || item.creationDate || item.returnCreatedDate || item.dateSold;
+            if (!dateToCheck) return false;
+            const orderDateObj = new Date(dateToCheck);
+            return orderDateObj >= selectedDate && orderDateObj < nextDate;
+          });
+        } else if (dateFilter.mode === 'range') {
+          if (dateFilter.from) {
+            const fromDate = new Date(dateFilter.from);
+            fromDate.setUTCHours(0, 0, 0, 0);
+            storedReturnCasesForBoard = storedReturnCasesForBoard.filter((item) => {
+              const dateToCheck = item.returnCaseNotOpenedAssignedAt || item.createdAt || item.creationDate || item.returnCreatedDate || item.dateSold;
+              if (!dateToCheck) return true;
+              return new Date(dateToCheck) >= fromDate;
+            });
+          }
+          if (dateFilter.to) {
+            const toDate = new Date(dateFilter.to);
+            toDate.setUTCDate(toDate.getUTCDate() + 1);
+            toDate.setUTCHours(0, 0, 0, 0);
+            storedReturnCasesForBoard = storedReturnCasesForBoard.filter((item) => {
+              const dateToCheck = item.returnCaseNotOpenedAssignedAt || item.createdAt || item.creationDate || item.returnCreatedDate || item.dateSold;
+              if (!dateToCheck) return true;
+              return new Date(dateToCheck) < toDate;
+            });
+          }
+        }
+        
         // Deduplicate storedReturnCasesForBoard by orderId (not returnId)
         // Keep only one return per order, preferring the one with case_opened status or most recent
         const returnByOrderId = new Map();
@@ -1552,12 +1995,56 @@ function ComplianceBoardPage() {
         
         // Case Opened: Merge Return cases with conversation-based items
         // Keep existing Return items, add only conversation items that don't duplicate existing orderIds
+        // Filter by date as well (check both creation date and first changed date for Case Not Opened items)
+        const matchesReturnDateFilter = (order) => {
+          if (dateFilter.mode === 'single' && dateFilter.single) {
+            const selectedDate = new Date(dateFilter.single);
+            selectedDate.setUTCHours(0, 0, 0, 0);
+            const nextDate = new Date(selectedDate);
+            nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+            
+            // For Case Not Opened items, use the first changed date if available
+            const dateToCheck = (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && order.returnCaseNotOpenedAssignedAt)
+              ? order.returnCaseNotOpenedAssignedAt
+              : (order.createdAt || order.creationDate || order.dateSold);
+            if (!dateToCheck) return false;
+            const orderDateObj = new Date(dateToCheck);
+            return orderDateObj >= selectedDate && orderDateObj < nextDate;
+          } else if (dateFilter.mode === 'range') {
+            let matchesFilter = true;
+            if (dateFilter.from) {
+              const fromDate = new Date(dateFilter.from);
+              fromDate.setUTCHours(0, 0, 0, 0);
+              const dateToCheck = (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && order.returnCaseNotOpenedAssignedAt)
+                ? order.returnCaseNotOpenedAssignedAt
+                : (order.createdAt || order.creationDate || order.dateSold);
+              if (dateToCheck) {
+                matchesFilter = matchesFilter && new Date(dateToCheck) >= fromDate;
+              }
+            }
+            if (dateFilter.to) {
+              const toDate = new Date(dateFilter.to);
+              toDate.setUTCDate(toDate.getUTCDate() + 1);
+              toDate.setUTCHours(0, 0, 0, 0);
+              const dateToCheck = (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && order.returnCaseNotOpenedAssignedAt)
+                ? order.returnCaseNotOpenedAssignedAt
+                : (order.createdAt || order.creationDate || order.dateSold);
+              if (dateToCheck) {
+                matchesFilter = matchesFilter && new Date(dateToCheck) < toDate;
+              }
+            }
+            return matchesFilter;
+          }
+          return true;
+        };
+        
         grouped[COLUMN_STATUS.CASE_OPENED] = [
           ...(grouped[COLUMN_STATUS.CASE_OPENED] || []),
           ...boardOrders.filter((order) => 
             order.returnBoardSource === 'conversation' &&
             (order.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED) === COLUMN_STATUS.CASE_OPENED &&
-            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase()) &&
+            matchesReturnDateFilter(order)
           )
         ];
         
@@ -1569,7 +2056,8 @@ function ComplianceBoardPage() {
            order.complianceBoardStatus === undefined || 
            order.complianceBoardStatus === null ||
            order.complianceBoardStatus === COLUMN_STATUS.TODO) &&
-          !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
+          !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase()) &&
+          matchesReturnDateFilter(order)
         );
         
         grouped[COLUMN_STATUS.CASE_NOT_OPENED] = [
@@ -1594,7 +2082,8 @@ function ComplianceBoardPage() {
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
             (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.RETURN_FOLLOW_UP &&
-            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase()) &&
+            matchesReturnDateFilter(order)
           )
         ];
         grouped[COLUMN_STATUS.PROVIDE_RETURN_LABEL] = [
@@ -1602,7 +2091,8 @@ function ComplianceBoardPage() {
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
             (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.PROVIDE_RETURN_LABEL &&
-            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase()) &&
+            matchesReturnDateFilter(order)
           )
         ];
         grouped[COLUMN_STATUS.BUYER_DROP_OFF] = [
@@ -1610,7 +2100,8 @@ function ComplianceBoardPage() {
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
             (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.BUYER_DROP_OFF &&
-            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase()) &&
+            matchesReturnDateFilter(order)
           )
         ];
         grouped[COLUMN_STATUS.ITEM_DELIVERED] = [
@@ -1618,7 +2109,8 @@ function ComplianceBoardPage() {
           ...boardOrders.filter((order) =>
             order.returnBoardSource === 'conversation' &&
             (order.complianceBoardStatus || COLUMN_STATUS.TODO) === COLUMN_STATUS.ITEM_DELIVERED &&
-            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase())
+            !caseSourceOrderIds.has(String(order.orderId || order.itemId || '').toLowerCase()) &&
+            matchesReturnDateFilter(order)
           )
         ];
         grouped[COLUMN_STATUS.PARTIAL_REFUND] = [
@@ -3058,6 +3550,7 @@ function ComplianceBoardPage() {
         const patchData = {
           complianceBoardStatus: patchStatus,
           complianceBoardCategory: patchCategory,
+          complianceBoardSource: 'order_communication',  // KEY: Mark that this came from Order Communication board
         };
         console.log(`[APPLY-ORDER] Sending PATCH to /orders/${encodeURIComponent(targetId)}/compliance-status with:`, patchData);
         
@@ -3122,6 +3615,18 @@ function ComplianceBoardPage() {
                   : patchCategory === 'return_refund'
                     ? null
                     : order.returnItemDeliveredAssignedAt,
+              cancellationCaseNotOpenedAssignedAt:
+                patchCategory === 'cancellation' && patchStatus === COLUMN_STATUS.CASE_NOT_OPENED
+                  ? appliedAt
+                  : patchCategory === 'cancellation'
+                    ? null
+                    : order.cancellationCaseNotOpenedAssignedAt,
+              inrCaseNotOpenedAssignedAt:
+                patchCategory === 'inr' && patchStatus === COLUMN_STATUS.CASE_NOT_OPENED
+                  ? appliedAt
+                  : patchCategory === 'inr'
+                    ? null
+                    : order.inrCaseNotOpenedAssignedAt,
             };
           });
         });
@@ -4543,11 +5048,47 @@ function ComplianceBoardPage() {
                       </Typography>
                     </Stack>
                   )}
-                  {order.dateSold && (
-                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.8rem' }}>
-                      {formatDateSoldPT(order.dateSold)}
-                    </Typography>
-                  )}
+                  {/* Show "Last Changed" date if it exists, otherwise show Order Date */}
+                  {(() => {
+                    const lastChangedDate = 
+                      (selectedCategory === 'return_refund' && order.returnCaseNotOpenedAssignedAt) ||
+                      (selectedCategory === 'cancellation' && order.cancellationCaseNotOpenedAssignedAt) ||
+                      (selectedCategory === 'inr' && order.inrCaseNotOpenedAssignedAt) ||
+                      order.conversationInfo?.updatedAt ||
+                      null;
+                    
+                    return lastChangedDate ? (
+                      <Stack direction="row" alignItems="center" spacing={0.5}>
+                        <Box
+                          sx={{
+                            width: 16,
+                            height: 16,
+                            borderRadius: '4px',
+                            bgcolor: '#3b82f6',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '0.65rem',
+                            color: '#fff',
+                            fontWeight: 700,
+                            flexShrink: 0
+                          }}
+                          title="Last changed"
+                        >
+                          📋
+                        </Box>
+                        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.8rem' }}>
+                          {formatDateSoldPT(lastChangedDate)}
+                        </Typography>
+                      </Stack>
+                    ) : (
+                      order.dateSold && (
+                        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.8rem' }}>
+                          {formatDateSoldPT(order.dateSold)}
+                        </Typography>
+                      )
+                    );
+                  })()}
                 </Stack>
 
                 {/* Remark Box */}
@@ -4656,6 +5197,26 @@ function ComplianceBoardPage() {
                       label={`Conversation: ${order.conversationInfo?.category || 'Return'}`}
                       size="small"
                       sx={{ bgcolor: '#ffedd5', color: '#9a3412', fontSize: '0.75rem', height: 24, fontWeight: 700 }}
+                    />
+                  )}
+                  {/* INR Case Status Badge */}
+                  {order.status && (
+                    <Chip
+                      label={order.status}
+                      size="small"
+                      sx={{
+                        bgcolor: order.status === 'OPEN' ? '#fee2e2' : order.status === 'WAITING_SELLER_RESPONSE' ? '#fef3c7' : order.status === 'WAITING_BUYER_RESPONSE' ? '#dbeafe' : '#f1f5f9',
+                        color: order.status === 'OPEN' ? '#b91c1c' : order.status === 'WAITING_SELLER_RESPONSE' ? '#92400e' : order.status === 'WAITING_BUYER_RESPONSE' ? '#1e40af' : '#374151',
+                        fontSize: '0.75rem',
+                        height: 24,
+                        fontWeight: 700,
+                        maxWidth: '100%',
+                        '& .MuiChip-label': {
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }
+                      }}
                     />
                   )}
                   {order.subtotal && (
@@ -4947,6 +5508,7 @@ function ComplianceBoardPage() {
       (selectedCategory === 'cancellation' || selectedCategory === 'inr') &&
       order.complianceBoardSource === 'order_communication'
     );
+    
     const trackingNumber = order.manualTrackingNumber || order.trackingNumber || '';
     const unreadMessageCount = getUnreadMessageCountForOrder(order);
     const sellerName = resolveOrderSellerName(order);
@@ -5054,11 +5616,47 @@ function ComplianceBoardPage() {
               <Typography variant="body2" color="text.secondary">
                 {buyerName}
               </Typography>
-              {order.dateSold && (
-                <Typography variant="caption" color="text.secondary">
-                  {formatDateSoldPT(order.dateSold)}
-                </Typography>
-              )}
+              {/* Show "Last Changed" date if it exists, otherwise show Order Date */}
+              {(() => {
+                const lastChangedDate = 
+                  (selectedCategory === 'return_refund' && order.returnCaseNotOpenedAssignedAt) ||
+                  (selectedCategory === 'cancellation' && order.cancellationCaseNotOpenedAssignedAt) ||
+                  (selectedCategory === 'inr' && order.inrCaseNotOpenedAssignedAt) ||
+                  order.conversationInfo?.updatedAt ||
+                  null;
+                
+                return lastChangedDate ? (
+                  <Stack direction="row" alignItems="center" spacing={0.5}>
+                    <Box
+                      sx={{
+                        width: 14,
+                        height: 14,
+                        borderRadius: '3px',
+                        bgcolor: '#3b82f6',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: '0.6rem',
+                        color: '#fff',
+                        fontWeight: 700,
+                        flexShrink: 0
+                      }}
+                      title="Last changed"
+                    >
+                      📋
+                    </Box>
+                    <Typography variant="caption" color="text.secondary">
+                      {formatDateSoldPT(lastChangedDate)}
+                    </Typography>
+                  </Stack>
+                ) : (
+                  order.dateSold && (
+                    <Typography variant="caption" color="text.secondary">
+                      {formatDateSoldPT(order.dateSold)}
+                    </Typography>
+                  )
+                );
+              })()}
             </Stack>
             <Typography variant="caption" color="text.secondary">
               Seller: {sellerName}
@@ -5131,6 +5729,32 @@ function ComplianceBoardPage() {
                       whiteSpace: 'nowrap',
                     }
                   }}
+                />
+              )}
+              {order.status && (
+                <Chip
+                  label={order.status}
+                  size="small"
+                  sx={{
+                    bgcolor: order.status === 'OPEN' ? '#fee2e2' : order.status === 'WAITING_SELLER_RESPONSE' ? '#fef3c7' : order.status === 'WAITING_BUYER_RESPONSE' ? '#dbeafe' : '#f1f5f9',
+                    color: order.status === 'OPEN' ? '#b91c1c' : order.status === 'WAITING_SELLER_RESPONSE' ? '#92400e' : order.status === 'WAITING_BUYER_RESPONSE' ? '#1e40af' : '#374151',
+                    fontSize: '0.75rem',
+                    height: 24,
+                    fontWeight: 700,
+                    maxWidth: '100%',
+                    '& .MuiChip-label': {
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }
+                  }}
+                />
+              )}
+              {order.status === undefined && (
+                <Chip
+                  label="NO-STATUS-FIELD"
+                  size="small"
+                  sx={{ bgcolor: '#ff0000', color: '#fff', fontSize: '0.65rem', height: 20 }}
                 />
               )}
               {returnStatusChip && selectedCategory === 'return_refund' && (
