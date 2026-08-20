@@ -17,6 +17,47 @@ import User from '../models/User.js';
 const router = Router();
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
 const FINAL_CANCELLED_STATES = ['CANCELED', 'CANCELLED'];
+const REFUNDED_PAYMENT_STATUSES = ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'];
+
+function isFinalCancelledOrder(order) {
+  const cancelState = String(order?.cancelState || '').toUpperCase();
+  const nestedCancelState = String(order?.cancelStatus?.cancelState || '').toUpperCase();
+  return FINAL_CANCELLED_STATES.includes(cancelState) || FINAL_CANCELLED_STATES.includes(nestedCancelState);
+}
+
+function isRefundedOrder(order) {
+  const status = String(order?.orderPaymentStatus || '').toUpperCase();
+  return REFUNDED_PAYMENT_STATUSES.includes(status);
+}
+
+async function returnedOrderIdSet(orderDocs = []) {
+  const ids = [...new Set(
+    orderDocs.flatMap((order) => [order?.orderId, order?.legacyOrderId].filter(Boolean).map(String))
+  )];
+  if (!ids.length) return new Set();
+
+  const rows = await Return.find({
+    $or: [{ orderId: { $in: ids } }, { legacyOrderId: { $in: ids } }],
+  })
+    .select('orderId legacyOrderId')
+    .lean();
+
+  const hit = new Set();
+  for (const row of rows) {
+    if (row.orderId) hit.add(String(row.orderId));
+    if (row.legacyOrderId) hit.add(String(row.legacyOrderId));
+  }
+
+  const returned = new Set();
+  for (const order of orderDocs) {
+    const orderId = order?.orderId ? String(order.orderId) : '';
+    const legacyId = order?.legacyOrderId ? String(order.legacyOrderId) : '';
+    if ((orderId && hit.has(orderId)) || (legacyId && hit.has(legacyId))) {
+      if (orderId) returned.add(orderId);
+    }
+  }
+  return returned;
+}
 
 async function enrichOrdersWithConversationMeta(orders = []) {
   const orderIds = [...new Set(
@@ -719,8 +760,10 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
       lowValueClause
     );
 
-    const [todayOrdersCount, awaitingCount, arrivalsCount, unreadMessagesCount, todayOrdersTable, topSellersRaw, awaitingBySellerRaw, arrivalsBySellerRaw, unreadBySellerRaw, nonCompliantSet] = await Promise.all([
-      Order.countDocuments(todayOrdersMatch),
+    const [todayOrderStatusDocs, awaitingCount, arrivalsCount, unreadMessagesCount, todayOrdersTable, topSellersRaw, awaitingBySellerRaw, arrivalsBySellerRaw, unreadBySellerRaw, nonCompliantSet] = await Promise.all([
+      Order.find(todayOrdersMatch)
+        .select('orderId legacyOrderId cancelState cancelStatus orderPaymentStatus')
+        .lean(),
       Order.countDocuments(awaitingMatch),
       Order.countDocuments(arrivalsMatch),
       Message.countDocuments({
@@ -730,9 +773,9 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
         messageDate: { $gte: start, $lte: end }
       }),
       Order.find(todayOrdersMatch)
+        .select('orderId legacyOrderId dateSold purchaseMarketplaceId shipByDate cancelState cancelStatus orderPaymentStatus seller')
         .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
         .sort({ dateSold: -1 })
-        .limit(25)
         .lean(),
       Order.aggregate([
         { $match: todayOrdersMatch },
@@ -764,6 +807,15 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
       ]),
       getCurrentNonCompliantSellerSet(sellerId)
     ]);
+
+    const todayOrdersCount = todayOrderStatusDocs.length;
+    const returnedIds = await returnedOrderIdSet(todayOrderStatusDocs);
+    const todaySuccessfulOrders = todayOrderStatusDocs.filter((order) => {
+      if (isFinalCancelledOrder(order) || isRefundedOrder(order)) return false;
+      const orderId = order?.orderId ? String(order.orderId) : '';
+      const legacyId = order?.legacyOrderId ? String(order.legacyOrderId) : '';
+      return !(returnedIds.has(orderId) || (legacyId && returnedIds.has(legacyId)));
+    }).length;
 
     const allSellerIds = new Set([
       ...topSellersRaw.map((r) => String(r._id)),
@@ -823,6 +875,7 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
       timezone: PT_TIMEZONE,
       kpis: {
         todayOrders: todayOrdersCount,
+        todaySuccessfulOrders,
         monthlyDeltaNet: currentMonthCount - previousMonthCount,
         awaitingToday: awaitingCount,
         arrivalsToday: arrivalsCount,
@@ -830,16 +883,22 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
         nonCompliantAccounts: nonCompliantSet.size
       },
       topSellers: toSellerRows(topSellersRaw),
-      todayOrdersTable: todayOrdersTable.map((o) => ({
-        id: o._id,
-        sellerId: o.seller?._id ? String(o.seller._id) : String(o.seller),
-        sellerName: o.seller?.user?.username || o.seller?.user?.email || 'Unknown',
-        orderId: o.orderId,
-        dateSold: o.dateSold,
-        purchaseMarketplaceId: o.purchaseMarketplaceId,
-        shipByDate: o.shipByDate,
-        trackingNumber: o.trackingNumber || o.manualTrackingNumber || ''
-      })),
+      todayOrdersTable: todayOrdersTable.map((o) => {
+        const orderId = o.orderId ? String(o.orderId) : '';
+        const legacyId = o.legacyOrderId ? String(o.legacyOrderId) : '';
+        return {
+          id: o._id,
+          sellerId: o.seller?._id ? String(o.seller._id) : String(o.seller),
+          sellerName: o.seller?.user?.username || o.seller?.user?.email || 'Unknown',
+          orderId: o.orderId,
+          dateSold: o.dateSold,
+          purchaseMarketplaceId: o.purchaseMarketplaceId,
+          shipByDate: o.shipByDate,
+          cancelState: o.cancelState || o.cancelStatus?.cancelState || '',
+          orderPaymentStatus: o.orderPaymentStatus || '',
+          hasReturn: Boolean(orderId && returnedIds.has(orderId)) || Boolean(legacyId && returnedIds.has(legacyId)),
+        };
+      }),
       riskQueues: {
         nonCompliantSellerList,
         unreadBySeller: toSellerRows(unreadBySellerRaw),

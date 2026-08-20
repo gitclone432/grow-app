@@ -2736,7 +2736,10 @@ function FulfillmentDashboard() {
     const updated = tdsData?.results?.updated || 0;
     const skipped = tdsData?.results?.skipped || 0;
     const failed = tdsData?.results?.failed || 0;
-    return `${baseMsg}\n\nTDS: ${updated} updated, ${skipped} skipped, ${failed} failed`;
+    const paused = tdsData?.rateLimited || tdsData?.results?.rateLimited
+      ? ' (paused on Finances burst 429 — wait ~1 min)'
+      : '';
+    return `${baseMsg}\n\nTDS: ${updated} updated, ${skipped} skipped, ${failed} failed${paused}`;
   }
 
   // Standalone Poll TDS for ALL orders in DB (More actions) — batched until done
@@ -2782,6 +2785,18 @@ function FulfillmentDashboard() {
         );
         setSnackbarSeverity('info');
         setSnackbarOpen(true);
+
+        if (data?.rateLimited || r.rateLimited) {
+          setSnackbarMsg(
+            `TDS paused: eBay Finances burst limit (429), not the daily 15,000 quota. ` +
+            `Wait about ${Math.max(1, Math.ceil((data?.retryAfterMs || 60000) / 60000))} min, then run Poll TDS again.` +
+            ` ${grand.updated} updated, ${grand.failed} failed.` +
+            (remaining != null ? ` ${remaining} still pending.` : '')
+          );
+          setSnackbarSeverity('warning');
+          setSnackbarOpen(true);
+          break;
+        }
 
         // Done when nothing checked this round, or remaining hit 0
         if ((r.total || 0) === 0 || remaining === 0) break;

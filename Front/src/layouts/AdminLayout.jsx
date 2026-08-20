@@ -129,6 +129,7 @@ import {
   StoreListingsPage,
   ListingRecommendationsPage,
   SendOfferEligiblePage,
+  NegotiatedPricePoliciesPage,
   FeedUploadStatsPage,
   SellerUploadLimitsPage,
   SalaryPage,
@@ -293,6 +294,7 @@ const COMPONENT_MAP = {
   'StoreListings': StoreListingsPage,
   'ListingRecommendations': ListingRecommendationsPage,
   'SendOfferEligible': SendOfferEligiblePage,
+  'NegotiatedPricePolicies': NegotiatedPricePoliciesPage,
   'OrdersDashboard': OrdersDepartmentDashboardPage,
   'OrderAnalytics': OrderAnalyticsPage,
   'MicroOrders': MicroOrdersPage,
@@ -1030,7 +1032,6 @@ export default function AdminLayout({ user, onLogout }) {
           {hasAccess('Fulfillment') && (
             <>
               <Route path="/conversation-tracking" element={<ConversationTrackingPage />} />
-              <Route path="/cancelled-status" element={<DisputesPage initialTab={3} />} />
               <Route path="/return-requested" element={<DisputesPage initialTab={2} />} />
               <Route path="/worksheet" element={<DisputesPage initialTab={4} />} />
             </>

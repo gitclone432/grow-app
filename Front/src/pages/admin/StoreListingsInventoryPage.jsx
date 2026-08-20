@@ -946,6 +946,9 @@ export default function StoreListingsInventoryPage({
         <Button variant="outlined" onClick={openSendOfferEligible}>
           Send Offer Eligible
         </Button>
+        <Button variant="outlined" onClick={() => navigate('/admin/negotiated-price-policies')}>
+          Negotiated Price Policies
+        </Button>
         <Button variant="outlined" onClick={(e) => setCustomizeAnchorEl(e.currentTarget)}>
           Customize Table
         </Button>

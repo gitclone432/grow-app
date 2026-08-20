@@ -20,6 +20,7 @@ const ActiveListingSchema = new mongoose.Schema({
 
     // Primary category from eBay
     categoryName: { type: String },
+    categoryId: { type: String },
 
     // Clean HTML description
     descriptionPreview: { type: String },
@@ -32,5 +33,6 @@ const ActiveListingSchema = new mongoose.Schema({
 // Index for efficient queries
 ActiveListingSchema.index({ seller: 1, listingStatus: 1, startTime: -1 });
 ActiveListingSchema.index({ seller: 1, startTime: -1, listingStatus: 1 });
+ActiveListingSchema.index({ seller: 1, categoryId: 1 });
 
 export default mongoose.model('ActiveListing', ActiveListingSchema);

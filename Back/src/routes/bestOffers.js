@@ -5,6 +5,7 @@
  * POST /api/ebay/best-offers/respond    — RespondToBestOffer
  * GET  /api/ebay/eligible-offers        — find_eligible_items (single store)
  * POST /api/ebay/eligible-offers/send   — send_offer_to_interested_buyers
+ * GET  /api/ebay/metadata/negotiated-price-policies — getNegotiatedPricePolicies
  */
 
 import express from 'express';
@@ -12,7 +13,13 @@ import axios from 'axios';
 import { parseStringPromise } from 'xml2js';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
-import { ensureValidToken } from './ebay.js';
+import ActiveListing from '../models/ActiveListing.js';
+import { ensureValidToken, getEbayClientCredentialsToken } from './ebay.js';
+import {
+  activeListingStatusFilter,
+  getSellersForStoreListings,
+  sellerIdsInMatch,
+} from '../utils/storeListingsQuery.js';
 
 const router = express.Router();
 const offerPageAccess = requirePageAccess(['StoreListings', 'SendOfferEligible']);
@@ -21,6 +28,7 @@ const EBAY_TRADING_URL = 'https://api.ebay.com/ws/api.dll';
 
 const MARKETPLACE_SITEID = {
   EBAY_US: '0',
+  EBAY_MOTORS_US: '100',
   EBAY_GB: '3',
   EBAY_DE: '77',
   EBAY_AU: '15',
@@ -295,6 +303,98 @@ router.get('/eligible-offers', requireAuth, offerPageAccess, async (req, res) =>
   }
 });
 
+function isTrueFlag(value) {
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function ebayErrorText(err) {
+  const errors = err?.response?.data?.errors;
+  return String(errors?.[0]?.longMessage || errors?.[0]?.message || err?.message || '');
+}
+
+function allowCounterOfferRejected(err) {
+  return /allowCounterOffer cannot be true/i.test(ebayErrorText(err));
+}
+
+function parseTradingAck(parsed, responseKey) {
+  const root = parsed?.[responseKey] || {};
+  const ack = String(root?.Ack || '');
+  const errors = toArray(root?.Errors);
+  const failed = ack === 'Failure' || (ack === 'PartialFailure' && errors.some((e) => String(e?.SeverityCode) === 'Error'));
+  return {
+    ack,
+    failed,
+    message: errors.map((e) => e.LongMessage || e.ShortMessage).filter(Boolean).join('; '),
+    bestOfferEnabled: isTrueFlag(
+      root?.Item?.BestOfferDetails?.BestOfferEnabled ?? root?.Item?.BestOfferEnabled
+    ),
+  };
+}
+
+async function getListingBestOfferEnabled(token, siteId, listingId) {
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ItemID>${escapeXml(listingId)}</ItemID>
+  <IncludeItemSpecifics>false</IncludeItemSpecifics>
+</GetItemRequest>`;
+  const resp = await axios.post(EBAY_TRADING_URL, xml, {
+    headers: tradingHeaders('GetItem', siteId),
+    timeout: 45000,
+  });
+  const parsed = await parseStringPromise(resp.data, { explicitArray: false });
+  const item = parsed?.GetItemResponse?.Item || {};
+  return isTrueFlag(item?.BestOfferDetails?.BestOfferEnabled ?? item?.BestOfferEnabled);
+}
+
+async function enableListingBestOffer(token, siteId, listingId) {
+  const alreadyOn = await getListingBestOfferEnabled(token, siteId, listingId).catch(() => false);
+  if (alreadyOn) return { enabled: true, already: true };
+
+  const itemXml = `<Item>
+    <ItemID>${escapeXml(listingId)}</ItemID>
+    <BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>
+  </Item>`;
+
+  const tryRevise = async (callName) => {
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<${callName}Request xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  ${itemXml}
+</${callName}Request>`;
+    const resp = await axios.post(EBAY_TRADING_URL, xml, {
+      headers: tradingHeaders(callName, siteId),
+      timeout: 45000,
+    });
+    const parsed = await parseStringPromise(resp.data, { explicitArray: false });
+    return parseTradingAck(parsed, `${callName}Response`);
+  };
+
+  let result = await tryRevise('ReviseFixedPriceItem');
+  if (result.failed) result = await tryRevise('ReviseItem');
+  if (result.failed) {
+    const err = new Error(result.message || 'Failed to enable Best Offer on listing');
+    err.code = 'BEST_OFFER_ENABLE_FAILED';
+    throw err;
+  }
+  return { enabled: true, already: false };
+}
+
+async function postSendOfferToInterestedBuyers(token, marketplaceId, payload) {
+  return axios.post(
+    'https://api.ebay.com/sell/negotiation/v1/send_offer_to_interested_buyers',
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
+        'Content-Type': 'application/json',
+      },
+      timeout: 45000,
+    }
+  );
+}
+
 router.post('/eligible-offers/send', requireAuth, offerPageAccess, async (req, res) => {
   try {
     const {
@@ -339,6 +439,7 @@ router.post('/eligible-offers/send', requireAuth, offerPageAccess, async (req, r
 
     const token = await ensureValidToken(seller);
     const marketplaceId = seller.ebayMarketplaces?.[0] ?? 'EBAY_US';
+    const siteId = getSiteId(seller);
 
     const offeredItem = {
       listingId: String(listingId),
@@ -354,8 +455,9 @@ router.post('/eligible-offers/send', requireAuth, offerPageAccess, async (req, r
     }
 
     const durationDays = parseInt(offerDurationDays, 10);
+    const wantCounter = isTrueFlag(allowCounter);
     const payload = {
-      allowCounterOffer: Boolean(allowCounter),
+      allowCounterOffer: wantCounter,
       message: typeof message === 'string' && message.trim() ? message.trim() : undefined,
       offeredItems: [offeredItem],
     };
@@ -363,30 +465,363 @@ router.post('/eligible-offers/send', requireAuth, offerPageAccess, async (req, r
       payload.offerDuration = { unit: 'DAY', value: durationDays };
     }
 
-    const response = await axios.post(
-      'https://api.ebay.com/sell/negotiation/v1/send_offer_to_interested_buyers',
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'X-EBAY-C-MARKETPLACE-ID': marketplaceId,
-          'Content-Type': 'application/json',
-        },
-        timeout: 45000,
+    let listingBestOfferEnabled = false;
+    let listingBestOfferWarning = null;
+    if (wantCounter) {
+      try {
+        const bo = await enableListingBestOffer(token, siteId, String(listingId));
+        listingBestOfferEnabled = Boolean(bo.enabled);
+      } catch (boErr) {
+        listingBestOfferWarning = boErr.message;
+        console.warn('[BestOffers] enable Best Offer failed:', boErr.message);
       }
-    );
+    }
+
+    let response;
+    let counterOfferOnOffer = wantCounter;
+    let counterOfferWarning = null;
+    try {
+      response = await postSendOfferToInterestedBuyers(token, marketplaceId, payload);
+    } catch (sendErr) {
+      if (wantCounter && allowCounterOfferRejected(sendErr)) {
+        // Public Negotiation API still rejects true. Send the offer anyway, and
+        // leave listing Best Offer on so buyers can still negotiate.
+        payload.allowCounterOffer = false;
+        counterOfferOnOffer = false;
+        counterOfferWarning =
+          'eBay’s send-offer API will not attach a counter to this offer. ' +
+          (listingBestOfferEnabled
+            ? 'Best Offer is on for the listing, so interested buyers can still make or counter an offer from the item page.'
+            : listingBestOfferWarning
+              ? `Could not enable listing Best Offer: ${listingBestOfferWarning}`
+              : 'Buyers can only accept or decline this offer.');
+        response = await postSendOfferToInterestedBuyers(token, marketplaceId, payload);
+      } else {
+        throw sendErr;
+      }
+    }
+
+    const warning = [counterOfferWarning, !listingBestOfferEnabled ? listingBestOfferWarning : null]
+      .filter(Boolean)
+      .join(' ');
 
     return res.json({
       success: true,
-      message: 'Offer sent to interested buyers',
+      message: warning || 'Offer sent to interested buyers',
+      warning: warning || undefined,
+      counterOfferOnOffer,
+      listingBestOfferEnabled,
       offers: response.data?.offers || response.data,
     });
   } catch (err) {
-    const errors = err.response?.data?.errors;
-    const ebayError = errors?.[0]?.longMessage || errors?.[0]?.message || err.message;
+    const ebayError = ebayErrorText(err);
     console.error('[BestOffers] send_offer_to_interested_buyers error:', err.response?.data ?? err.message);
     return res.status(err.response?.status ?? 500).json({ error: 'Failed to send offer', details: ebayError });
   }
 });
+
+const NEGOTIATED_PRICE_MARKETPLACES = [
+  'EBAY_US', 'EBAY_MOTORS_US', 'EBAY_GB', 'EBAY_AU', 'EBAY_CA',
+  'EBAY_DE', 'EBAY_FR', 'EBAY_IT', 'EBAY_ES', 'EBAY_AT',
+  'EBAY_BE', 'EBAY_CH', 'EBAY_IE', 'EBAY_NL', 'EBAY_PL',
+];
+const negotiatedPriceCache = new Map();
+const NEGOTIATED_PRICE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+function parseCategoryIds(raw, { max = 50 } = {}) {
+  const ids = [...new Set(
+    String(raw || '')
+      .split(/[\s,|;]+/)
+      .map((id) => id.trim())
+      .filter(Boolean)
+  )];
+  return max ? ids.slice(0, max) : ids;
+}
+
+function normalizeNegotiatedPolicy(row = {}) {
+  return {
+    categoryId: String(row.categoryId ?? row.category_id ?? ''),
+    categoryTreeId: String(row.categoryTreeId ?? row.category_tree_id ?? ''),
+    bestOfferAutoAcceptEnabled: Boolean(row.bestOfferAutoAcceptEnabled ?? row.best_offer_auto_accept_enabled),
+    bestOfferAutoDeclineEnabled: Boolean(row.bestOfferAutoDeclineEnabled ?? row.best_offer_auto_decline_enabled),
+    bestOfferCounterEnabled: Boolean(row.bestOfferCounterEnabled ?? row.best_offer_counter_enabled),
+  };
+}
+
+function sellerDisplayName(seller) {
+  return seller?.user?.username || seller?.user?.email || seller?.username || String(seller?._id || '');
+}
+
+async function fetchItemPrimaryCategory(token, siteId, itemId) {
+  const xml = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ItemID>${escapeXml(itemId)}</ItemID>
+  <IncludeItemSpecifics>false</IncludeItemSpecifics>
+</GetItemRequest>`;
+  const resp = await axios.post(EBAY_TRADING_URL, xml, {
+    headers: tradingHeaders('GetItem', siteId),
+    timeout: 45000,
+  });
+  const parsed = await parseStringPromise(resp.data, { explicitArray: false });
+  const cat = parsed?.GetItemResponse?.Item?.PrimaryCategory || {};
+  return {
+    categoryId: String(cat.CategoryID || '').trim(),
+    categoryName: String(cat.CategoryName || '').trim(),
+  };
+}
+
+async function backfillListingCategoryIds(usageRows) {
+  const missing = usageRows.filter((row) => !String(row._id.categoryId || '').trim() && row.sampleItemId);
+  if (!missing.length) return { filled: 0, attempted: 0 };
+
+  const batch = missing.slice(0, 40);
+  const tokenSellers = await Seller.find({
+    _id: { $in: batch.map((row) => row._id.seller) },
+  }).select('ebayTokens ebayMarketplaces');
+  const sellerById = new Map(tokenSellers.map((s) => [String(s._id), s]));
+  const tokenBySeller = new Map();
+  let filled = 0;
+
+  for (const row of batch) {
+    const seller = sellerById.get(String(row._id.seller));
+    if (!seller?.ebayTokens?.refresh_token && !seller?.ebayTokens?.access_token) continue;
+    try {
+      let token = tokenBySeller.get(String(seller._id));
+      if (!token) {
+        token = await ensureValidToken(seller);
+        tokenBySeller.set(String(seller._id), token);
+      }
+      const siteId = getSiteId(seller);
+      let cat = await fetchItemPrimaryCategory(token, siteId, row.sampleItemId);
+      if (!cat.categoryId && siteId !== '100') {
+        cat = await fetchItemPrimaryCategory(token, '100', row.sampleItemId);
+      }
+      if (!cat.categoryId) continue;
+
+      const name = String(row._id.categoryName || '').trim();
+      const match = {
+        seller: row._id.seller,
+        $and: [
+          activeListingStatusFilter(),
+          { $or: [{ categoryId: { $exists: false } }, { categoryId: null }, { categoryId: '' }] },
+        ],
+      };
+      if (name) match.categoryName = name;
+      await ActiveListing.updateMany(match, { $set: { categoryId: cat.categoryId } });
+      filled += 1;
+    } catch (err) {
+      console.warn('[Metadata] categoryId backfill failed:', row.sampleItemId, err.message);
+    }
+  }
+
+  return { filled, attempted: batch.length };
+}
+
+async function fetchPoliciesForCategoryIds(marketplaceId, categoryIds, { forceRefresh = false } = {}) {
+  if (!categoryIds.length) return { policies: [], warnings: [], cached: true };
+  const primary = await fetchNegotiatedPoliciesFromEbay(marketplaceId, categoryIds, { forceRefresh });
+  const found = new Set(primary.policies.map((row) => row.categoryId));
+  const missing = categoryIds.filter((id) => !found.has(id));
+  const fallbackMarketplace = marketplaceId === 'EBAY_US' ? 'EBAY_MOTORS_US'
+    : marketplaceId === 'EBAY_MOTORS_US' ? 'EBAY_US'
+      : null;
+  if (!fallbackMarketplace || !missing.length) return primary;
+
+  const extra = await fetchNegotiatedPoliciesFromEbay(fallbackMarketplace, missing, { forceRefresh });
+  const byId = new Map(primary.policies.map((row) => [row.categoryId, row]));
+  for (const row of extra.policies) {
+    if (!byId.has(row.categoryId)) byId.set(row.categoryId, row);
+  }
+  return {
+    policies: [...byId.values()],
+    warnings: [...(primary.warnings || []), ...(extra.warnings || [])],
+    cached: Boolean(primary.cached && extra.cached),
+  };
+}
+
+async function fetchNegotiatedPoliciesFromEbay(marketplaceId, categoryIds = [], { forceRefresh = false } = {}) {
+  const chunks = categoryIds.length
+    ? Array.from({ length: Math.ceil(categoryIds.length / 50) }, (_, i) => categoryIds.slice(i * 50, i * 50 + 50))
+    : [null];
+
+  const byId = new Map();
+  const warnings = [];
+  let cached = true;
+  let token = null;
+
+  for (const chunk of chunks) {
+    const filter = chunk?.length ? `categoryIds:{${chunk.join('|')}}` : undefined;
+    const cacheKey = `${marketplaceId}|${filter || '*'}`;
+    const hit = negotiatedPriceCache.get(cacheKey);
+    if (!forceRefresh && hit && (Date.now() - hit.fetchedAt) < NEGOTIATED_PRICE_CACHE_TTL_MS) {
+      for (const row of hit.payload.policies || []) byId.set(row.categoryId, row);
+      warnings.push(...(hit.payload.warnings || []));
+      continue;
+    }
+
+    cached = false;
+    if (!token) token = await getEbayClientCredentialsToken('https://api.ebay.com/oauth/api_scope');
+    const response = await axios.get(
+      `https://api.ebay.com/sell/metadata/v1/marketplace/${encodeURIComponent(marketplaceId)}/get_negotiated_price_policies`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+          'Accept-Encoding': 'gzip',
+        },
+        params: filter ? { filter } : {},
+        timeout: 120000,
+        maxContentLength: 80 * 1024 * 1024,
+      }
+    );
+    const policies = (response.data?.negotiatedPricePolicies || response.data?.negotiated_price_policies || [])
+      .map(normalizeNegotiatedPolicy)
+      .filter((row) => row.categoryId);
+    const chunkWarnings = response.data?.warnings || [];
+    negotiatedPriceCache.set(cacheKey, {
+      fetchedAt: Date.now(),
+      payload: { policies, warnings: chunkWarnings },
+    });
+    for (const row of policies) byId.set(row.categoryId, row);
+    warnings.push(...chunkWarnings);
+  }
+
+  return { policies: [...byId.values()], warnings, cached };
+}
+
+router.get(
+  '/metadata/negotiated-price-policies',
+  requireAuth,
+  requirePageAccess(['StoreListings', 'NegotiatedPricePolicies']),
+  async (req, res) => {
+    const marketplaceId = String(req.query.marketplace || req.query.marketplaceId || 'EBAY_US').trim().toUpperCase();
+    if (!NEGOTIATED_PRICE_MARKETPLACES.includes(marketplaceId)) {
+      return res.status(400).json({
+        error: `Unsupported marketplace. Use one of: ${NEGOTIATED_PRICE_MARKETPLACES.join(', ')}`,
+      });
+    }
+
+    const view = String(req.query.view || 'stores').toLowerCase() === 'marketplace' ? 'marketplace' : 'stores';
+    const sellerId = String(req.query.sellerId || '').trim();
+    const manualCategoryIds = parseCategoryIds(req.query.categoryIds || req.query.filter, { max: 50 });
+    const forceRefresh = String(req.query.refresh || '').toLowerCase() === 'true';
+
+    try {
+      if (view === 'marketplace') {
+        const { policies, warnings, cached } = await fetchNegotiatedPoliciesFromEbay(
+          marketplaceId,
+          manualCategoryIds,
+          { forceRefresh }
+        );
+        return res.json({
+          success: true,
+          view,
+          marketplaceId,
+          filter: manualCategoryIds.length ? `categoryIds:{${manualCategoryIds.join('|')}}` : null,
+          categoryIds: manualCategoryIds,
+          total: policies.length,
+          policies: policies.map((row) => ({
+            ...row,
+            sellerName: 'All eBay (marketplace rule)',
+            sellerId: null,
+            listingCount: null,
+            categoryName: '',
+            policyFound: true,
+          })),
+          warnings,
+          fetchedAt: new Date().toISOString(),
+          cached,
+        });
+      }
+
+      const scopedSellers = await getSellersForStoreListings(req);
+      const scopedIds = scopedSellers.map((s) => s._id);
+      const sellerFilterIds = sellerId
+        ? scopedIds.filter((id) => String(id) === sellerId)
+        : scopedIds;
+      if (sellerId && !sellerFilterIds.length) {
+        return res.status(404).json({ error: 'Seller not found' });
+      }
+
+      const sellerById = new Map(scopedSellers.map((s) => [String(s._id), s]));
+      const listingMatch = {
+        ...activeListingStatusFilter(),
+        seller: sellerIdsInMatch(sellerFilterIds),
+      };
+      const loadUsage = () => ActiveListing.aggregate([
+        { $match: listingMatch },
+        {
+          $group: {
+            _id: {
+              seller: '$seller',
+              categoryId: { $ifNull: ['$categoryId', ''] },
+              categoryName: { $ifNull: ['$categoryName', ''] },
+            },
+            listingCount: { $sum: 1 },
+            sampleItemId: { $first: '$itemId' },
+          },
+        },
+      ]);
+
+      let usage = await loadUsage();
+      const backfill = await backfillListingCategoryIds(usage);
+      if (backfill.filled > 0) usage = await loadUsage();
+
+      const categoryIds = [...new Set(
+        usage.map((row) => String(row._id.categoryId || '').trim()).filter(Boolean)
+      )];
+      const lookupIds = manualCategoryIds.length ? manualCategoryIds : categoryIds;
+      const { policies, warnings, cached } = lookupIds.length
+        ? await fetchPoliciesForCategoryIds(marketplaceId, lookupIds, { forceRefresh })
+        : { policies: [], warnings: [], cached: true };
+      const policyById = new Map(policies.map((row) => [row.categoryId, row]));
+
+      const rows = usage.map((row) => {
+        const catId = String(row._id.categoryId || '').trim();
+        const policy = catId ? (policyById.get(catId) || null) : null;
+        const seller = sellerById.get(String(row._id.seller));
+        const unknownReason = policy ? null
+          : (catId ? 'not_in_marketplace' : 'no_category_id');
+        return {
+          sellerId: String(row._id.seller),
+          sellerName: sellerDisplayName(seller),
+          categoryId: catId,
+          categoryName: row._id.categoryName || '',
+          listingCount: row.listingCount || 0,
+          categoryTreeId: policy?.categoryTreeId || '',
+          bestOfferAutoAcceptEnabled: policy ? policy.bestOfferAutoAcceptEnabled : null,
+          bestOfferAutoDeclineEnabled: policy ? policy.bestOfferAutoDeclineEnabled : null,
+          bestOfferCounterEnabled: policy ? policy.bestOfferCounterEnabled : null,
+          policyFound: Boolean(policy),
+          unknownReason,
+        };
+      }).filter((row) => (
+        !manualCategoryIds.length || manualCategoryIds.includes(row.categoryId)
+      ));
+
+      return res.json({
+        success: true,
+        view,
+        marketplaceId,
+        sellerId: sellerId || null,
+        total: rows.length,
+        policies: rows,
+        missingCategoryIds: usage.filter((row) => !String(row._id.categoryId || '').trim()).length,
+        categoryIdsBackfilled: backfill.filled,
+        warnings,
+        fetchedAt: new Date().toISOString(),
+        cached,
+      });
+    } catch (err) {
+      const ebayError = ebayErrorText(err);
+      console.error('[Metadata] getNegotiatedPricePolicies error:', err.response?.data ?? err.message);
+      return res.status(err.response?.status ?? 500).json({
+        error: 'Failed to fetch negotiated price policies',
+        details: ebayError,
+      });
+    }
+  }
+);
 
 export default router;

@@ -995,6 +995,9 @@ export default function AllOrdersSheetPage() {
       );
       await loadOrders();
       setInfoMsg(data?.message || 'TDS poll complete');
+      if (data?.rateLimited) {
+        setError('');
+      }
     } catch (e) {
       console.error('Poll TDS error:', e);
       setInfoMsg('');

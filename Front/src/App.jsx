@@ -34,7 +34,6 @@ const STATIC_PAGE_TITLES = {
 
 const ADMIN_ROUTE_TITLE_OVERRIDES = {
   '/admin/conversation-tracking': 'Conversation Tracking',
-  '/admin/cancelled-status': 'Issues and Resolutions',
   '/admin/return-requested': 'Issues and Resolutions',
   '/admin/return-search': 'Issues and Resolutions',
   '/admin/return-api': 'Issues and Resolutions',

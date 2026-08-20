@@ -65,6 +65,7 @@ export const DiscountsPage = lazy(() => import('../pages/admin/DiscountsPage.jsx
 export const StoreListingsPage = lazy(() => import('../pages/admin/StoreListingsPage.jsx'));
 export const ListingRecommendationsPage = lazy(() => import('../pages/admin/MarketingListingRecommendationsPage.jsx'));
 export const SendOfferEligiblePage = lazy(() => import('../pages/admin/SendOfferEligiblePage.jsx'));
+export const NegotiatedPricePoliciesPage = lazy(() => import('../pages/admin/NegotiatedPricePoliciesPage.jsx'));
 export const FeedUploadStatsPage = lazy(() => import('../pages/admin/FeedUploadStatsPage.jsx'));
 export const SellerUploadLimitsPage = lazy(() => import('../pages/admin/SellerUploadLimitsPage.jsx'));
 export const SalaryPage = lazy(() => import('../pages/admin/SalaryPage.jsx'));

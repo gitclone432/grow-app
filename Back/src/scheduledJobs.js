@@ -6,6 +6,7 @@ import {
   scheduledSyncAllSellers,
   scheduledRunAutoCompatForDate,
   scheduledPollNewOrders,
+  scheduledPollOrderFinances,
   scheduledSyncBuyerInbox,
   scheduledFetchCancellations,
   refreshPayoneerFeedCache,
@@ -58,10 +59,18 @@ export const CRON_JOB_DEFINITIONS = [
   {
     jobKey: 'pollNewOrders',
     label: 'Poll new orders',
-    description: 'Fetch and import new eBay orders for all connected sellers.',
+    description: 'Fetch and import new eBay orders for all connected sellers. Does not call Sell Finances. Ad fee and TDS are handled by "Poll order ad fee & TDS".',
     cronExpr: '*/10 * * * *',
     timezone: 'Asia/Kolkata',
     enabled: false,
+  },
+  {
+    jobKey: 'pollOrderFinances',
+    label: 'Poll order ad fee & TDS',
+    description: 'Call eBay Sell Finances for recent orders that still need ad fee and TDS. Independent of Poll new orders — set cron to every 1 hour (0 * * * *) or every 2 hours (0 */2 * * *). Caps 80 orders per run.',
+    cronExpr: '0 */2 * * *',
+    timezone: 'Asia/Kolkata',
+    enabled: true,
   },
   {
     jobKey: 'fetchCancellations',
@@ -173,6 +182,17 @@ export async function ensureCronConfigDefaults() {
   );
 
   // Force bandwidth-throttled schedules onto existing CronJobConfig rows ($setOnInsert alone would leave old */5 and */15).
+  await CronJobConfig.updateOne(
+    { jobKey: 'pollNewOrders' },
+    {
+      $set: {
+        label: 'Poll new orders',
+        description:
+          'Fetch and import new eBay orders for all connected sellers. Does not call Sell Finances. Ad fee and TDS are handled by "Poll order ad fee & TDS".',
+      },
+    }
+  );
+
   const bandwidthThrottleSets = [
     {
       jobKey: 'buyerMessagesAutoSync',
@@ -233,7 +253,19 @@ async function runPollAllSellers() {
 
 async function runPollNewOrders() {
   console.log('[CRON] Scheduled Poll New Orders starting...');
-  await withEbayPollRun('poll-new-orders', 'cron', null, scheduledPollNewOrders);
+  await withEbayPollRun('poll-new-orders', 'cron', null, () => scheduledPollNewOrders({ fetchFinances: false }));
+}
+
+async function runPollOrderFinances() {
+  console.log('[CRON] Scheduled Poll Order Ad Fee & TDS starting...');
+  const result = await scheduledPollOrderFinances();
+  if (result?.skipped) {
+    console.log('[CRON] Poll Order Finances skipped (already running)');
+    return;
+  }
+  console.log(
+    `[CRON] Poll Order Finances done: updated=${result?.totalUpdated || 0}, failed=${result?.totalFailed || 0}, lookups=${result?.totalChecked || 0}`
+  );
 }
 
 async function runFetchCancellations() {
@@ -311,6 +343,7 @@ const CRON_JOB_HANDLERS = {
   directListBulkJobs: runDirectListBulkJobs,
   pollAllSellers: runPollAllSellers,
   pollNewOrders: runPollNewOrders,
+  pollOrderFinances: runPollOrderFinances,
   fetchCancellations: runFetchCancellations,
   orderListingQtyUpdate: runOrderListingQtyUpdate,
   policyMessages: runPolicyMessages,
