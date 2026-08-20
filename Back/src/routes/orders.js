@@ -17,47 +17,6 @@ import User from '../models/User.js';
 const router = Router();
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
 const FINAL_CANCELLED_STATES = ['CANCELED', 'CANCELLED'];
-const REFUNDED_PAYMENT_STATUSES = ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'];
-
-function isFinalCancelledOrder(order) {
-  const cancelState = String(order?.cancelState || '').toUpperCase();
-  const nestedCancelState = String(order?.cancelStatus?.cancelState || '').toUpperCase();
-  return FINAL_CANCELLED_STATES.includes(cancelState) || FINAL_CANCELLED_STATES.includes(nestedCancelState);
-}
-
-function isRefundedOrder(order) {
-  const status = String(order?.orderPaymentStatus || '').toUpperCase();
-  return REFUNDED_PAYMENT_STATUSES.includes(status);
-}
-
-async function returnedOrderIdSet(orderDocs = []) {
-  const ids = [...new Set(
-    orderDocs.flatMap((order) => [order?.orderId, order?.legacyOrderId].filter(Boolean).map(String))
-  )];
-  if (!ids.length) return new Set();
-
-  const rows = await Return.find({
-    $or: [{ orderId: { $in: ids } }, { legacyOrderId: { $in: ids } }],
-  })
-    .select('orderId legacyOrderId')
-    .lean();
-
-  const hit = new Set();
-  for (const row of rows) {
-    if (row.orderId) hit.add(String(row.orderId));
-    if (row.legacyOrderId) hit.add(String(row.legacyOrderId));
-  }
-
-  const returned = new Set();
-  for (const order of orderDocs) {
-    const orderId = order?.orderId ? String(order.orderId) : '';
-    const legacyId = order?.legacyOrderId ? String(order.legacyOrderId) : '';
-    if ((orderId && hit.has(orderId)) || (legacyId && hit.has(legacyId))) {
-      if (orderId) returned.add(orderId);
-    }
-  }
-  return returned;
-}
 
 async function enrichOrdersWithConversationMeta(orders = []) {
   const orderIds = [...new Set(
@@ -760,10 +719,8 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
       lowValueClause
     );
 
-    const [todayOrderStatusDocs, awaitingCount, arrivalsCount, unreadMessagesCount, todayOrdersTable, topSellersRaw, awaitingBySellerRaw, arrivalsBySellerRaw, unreadBySellerRaw, nonCompliantSet] = await Promise.all([
-      Order.find(todayOrdersMatch)
-        .select('orderId legacyOrderId cancelState cancelStatus orderPaymentStatus')
-        .lean(),
+    const [todayOrdersCount, awaitingCount, arrivalsCount, unreadMessagesCount, todayOrdersTable, topSellersRaw, awaitingBySellerRaw, arrivalsBySellerRaw, unreadBySellerRaw, nonCompliantSet] = await Promise.all([
+      Order.countDocuments(todayOrdersMatch),
       Order.countDocuments(awaitingMatch),
       Order.countDocuments(arrivalsMatch),
       Message.countDocuments({
@@ -773,9 +730,9 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
         messageDate: { $gte: start, $lte: end }
       }),
       Order.find(todayOrdersMatch)
-        .select('orderId legacyOrderId dateSold purchaseMarketplaceId shipByDate cancelState cancelStatus orderPaymentStatus seller')
         .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
         .sort({ dateSold: -1 })
+        .limit(25)
         .lean(),
       Order.aggregate([
         { $match: todayOrdersMatch },
@@ -807,15 +764,6 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
       ]),
       getCurrentNonCompliantSellerSet(sellerId)
     ]);
-
-    const todayOrdersCount = todayOrderStatusDocs.length;
-    const returnedIds = await returnedOrderIdSet(todayOrderStatusDocs);
-    const todaySuccessfulOrders = todayOrderStatusDocs.filter((order) => {
-      if (isFinalCancelledOrder(order) || isRefundedOrder(order)) return false;
-      const orderId = order?.orderId ? String(order.orderId) : '';
-      const legacyId = order?.legacyOrderId ? String(order.legacyOrderId) : '';
-      return !(returnedIds.has(orderId) || (legacyId && returnedIds.has(legacyId)));
-    }).length;
 
     const allSellerIds = new Set([
       ...topSellersRaw.map((r) => String(r._id)),
@@ -875,7 +823,6 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
       timezone: PT_TIMEZONE,
       kpis: {
         todayOrders: todayOrdersCount,
-        todaySuccessfulOrders,
         monthlyDeltaNet: currentMonthCount - previousMonthCount,
         awaitingToday: awaitingCount,
         arrivalsToday: arrivalsCount,
@@ -883,22 +830,16 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
         nonCompliantAccounts: nonCompliantSet.size
       },
       topSellers: toSellerRows(topSellersRaw),
-      todayOrdersTable: todayOrdersTable.map((o) => {
-        const orderId = o.orderId ? String(o.orderId) : '';
-        const legacyId = o.legacyOrderId ? String(o.legacyOrderId) : '';
-        return {
-          id: o._id,
-          sellerId: o.seller?._id ? String(o.seller._id) : String(o.seller),
-          sellerName: o.seller?.user?.username || o.seller?.user?.email || 'Unknown',
-          orderId: o.orderId,
-          dateSold: o.dateSold,
-          purchaseMarketplaceId: o.purchaseMarketplaceId,
-          shipByDate: o.shipByDate,
-          cancelState: o.cancelState || o.cancelStatus?.cancelState || '',
-          orderPaymentStatus: o.orderPaymentStatus || '',
-          hasReturn: Boolean(orderId && returnedIds.has(orderId)) || Boolean(legacyId && returnedIds.has(legacyId)),
-        };
-      }),
+      todayOrdersTable: todayOrdersTable.map((o) => ({
+        id: o._id,
+        sellerId: o.seller?._id ? String(o.seller._id) : String(o.seller),
+        sellerName: o.seller?.user?.username || o.seller?.user?.email || 'Unknown',
+        orderId: o.orderId,
+        dateSold: o.dateSold,
+        purchaseMarketplaceId: o.purchaseMarketplaceId,
+        shipByDate: o.shipByDate,
+        trackingNumber: o.trackingNumber || o.manualTrackingNumber || ''
+      })),
       riskQueues: {
         nonCompliantSellerList,
         unreadBySeller: toSellerRows(unreadBySellerRaw),
@@ -2083,7 +2024,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           ],
           ...dateFilter
         })
-          .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
+          .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
           .sort({ dateSold: -1 })
           .lean()
@@ -2115,7 +2056,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           { 'lineItems.legacyItemId': { $in: sourceOrderIds } },
         ]
       })
-        .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
+        .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
         .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
         .lean();
 
@@ -2575,6 +2516,60 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       detailQuery = timedStatusQuery(query, 'address_issue', 'addressIssueAssignedAt');
     }
 
+    // For cancellation board, fetch counts from BOTH Order and Cancellation collections
+    // to ensure stats accurately reflect all displayed items
+    const isCancellationBoard = category === 'cancellation';
+    
+    let cancellationStatusCountRows = [];
+    let cancellationTotal = 0;
+    
+    if (isCancellationBoard) {
+      // Build cancellation collection query with same date filters
+      const cancellationQuery = {
+        ...dateFilter
+      };
+      
+      if (sellerObjectId) {
+        cancellationQuery.seller = sellerObjectId;
+      } else if (excludedSellerIds.length > 0) {
+        // Note: Cancellation model doesn't have seller field, skip this filter for cancellations
+      }
+      
+      if (orderIdRegex) {
+        cancellationQuery.$or = cancellationQuery.$or || [];
+        cancellationQuery.$or.push(
+          { orderId: orderIdRegex },
+          { legacyOrderId: orderIdRegex },
+          { cancelId: orderIdRegex }
+        );
+      }
+      
+      if (buyerNameRegex) {
+        cancellationQuery.$or = cancellationQuery.$or || [];
+        cancellationQuery.$or.push(
+          { buyerName: buyerNameRegex },
+          { buyerUsername: buyerNameRegex }
+        );
+      }
+      
+      // Fetch cancellation status counts
+      const [cancellationCount, cancellationStatusRows] = await Promise.all([
+        Cancellation.countDocuments(cancellationQuery),
+        Cancellation.aggregate([
+          { $match: cancellationQuery },
+          {
+            $group: {
+              _id: { $ifNull: ['$complianceBoardStatus', 'cancellation_request'] },
+              count: { $sum: 1 }
+            }
+          }
+        ])
+      ]);
+      
+      cancellationTotal = cancellationCount;
+      cancellationStatusCountRows = cancellationStatusRows || [];
+    }
+
     const [
       total,
       statusCountRows,
@@ -2582,7 +2577,9 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       overdueCancellationCount,
       overdueAddressIssueCount
     ] = await Promise.all([
-      Order.countDocuments(detailQuery),
+      isCancellationBoard 
+        ? Promise.resolve(0)  // Don't count Order collection for cancellation board
+        : Order.countDocuments(detailQuery),
       Order.aggregate([
         { $match: detailQuery },
         {
@@ -2596,11 +2593,28 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       Order.countDocuments(timedStatusQuery(query, 'cancellation', 'cancellationAssignedAt')),
       Order.countDocuments(timedStatusQuery(query, 'address_issue', 'addressIssueAssignedAt'))
     ]);
-    const statusCounts = statusCountRows.reduce((acc, row) => {
+    
+    // Merge status counts from Order and Cancellation collections
+    const statusCounts = {};
+    
+    // Add Order status counts
+    statusCountRows.forEach((row) => {
       const status = row._id || 'todo';
-      acc[status] = row.count || 0;
-      return acc;
-    }, {});
+      statusCounts[status] = (statusCounts[status] || 0) + row.count;
+    });
+    
+    // Add Cancellation status counts (overwrite/merge for cancellation board)
+    if (isCancellationBoard) {
+      cancellationStatusCountRows.forEach((row) => {
+        const status = row._id || 'cancellation_request';
+        statusCounts[status] = (statusCounts[status] || 0) + row.count;
+      });
+    }
+    
+    // For cancellation board, use combined total
+    const combinedTotal = isCancellationBoard 
+      ? (total + cancellationTotal)
+      : total;
     const overdueCounts = {
       fulfillment_out_of_stock_overdue: overdueOutOfStockCount,
       fulfillment_cancellation_overdue: overdueCancellationCount,
@@ -2613,12 +2627,107 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     const skip = (pageNum - 1) * limitNum;
 
     let orders = await Order.find(detailQuery)
-      .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
+      .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
       .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
       .sort({ dateSold: -1 })
       .skip(skip)
       .limit(limitNum)
       .lean();
+
+    // For cancellation board, also fetch Cancellation records and merge with Order records
+    if (isCancellationBoard) {
+      const cancellationQuery = {
+        ...dateFilter
+      };
+      
+      if (sellerObjectId) {
+        cancellationQuery.seller = sellerObjectId;
+      }
+      
+      if (orderIdRegex) {
+        cancellationQuery.$or = cancellationQuery.$or || [];
+        cancellationQuery.$or.push(
+          { orderId: orderIdRegex },
+          { legacyOrderId: orderIdRegex },
+          { cancelId: orderIdRegex }
+        );
+      }
+      
+      if (buyerNameRegex) {
+        cancellationQuery.$or = cancellationQuery.$or || [];
+        cancellationQuery.$or.push(
+          { buyerUsername: buyerNameRegex }
+        );
+      }
+
+      // Apply status filter to cancellation records
+      // Map frontend status names to Cancellation model's enum values
+      if (statusFilter) {
+        const statusMap = {
+          'case_not_opened': 'cancellation_request',  // Maps frontend status to Cancellation model status
+          'accepted': 'accepted',
+          'declined': 'declined'
+        };
+        const cancellationStatus = statusMap[statusFilter] || statusFilter;
+        cancellationQuery.complianceBoardStatus = cancellationStatus;
+      }
+
+      // Fetch cancellation records
+      let cancellations = await Cancellation.find(cancellationQuery)
+        .select('cancelId orderId legacyOrderId cancelState cancelStatus cancelReason buyerUsername complianceBoardStatus dateSold remark seller itemId itemTitle updatedAt')
+        .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+        .sort({ dateSold: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean();
+
+      // Enrich cancellations with related Order data
+      const ordersByOrderId = new Map();
+      orders.forEach(order => {
+        ordersByOrderId.set(order.orderId, order);
+      });
+
+      // Map Cancellation model's status to frontend status names
+      const cancellationStatusToFrontend = (status) => {
+        const map = {
+          'cancellation_request': 'case_not_opened',
+          'accepted': 'accepted',
+          'declined': 'declined'
+        };
+        return map[status] || status;
+      };
+
+      const enrichedCancellations = cancellations.map(cancellation => {
+        const relatedOrder = ordersByOrderId.get(cancellation.orderId);
+        return {
+          ...cancellation,
+          _id: cancellation._id || `cancel:${cancellation.cancelId}`,
+          orderId: cancellation.orderId || cancellation.legacyOrderId,
+          dateSold: cancellation.dateSold,
+          buyer: relatedOrder?.buyer || { username: cancellation.buyerUsername },
+          subtotal: relatedOrder?.subtotal,
+          subtotalUSD: relatedOrder?.subtotalUSD,
+          productName: relatedOrder?.productName || cancellation.itemTitle || 'Item',
+          amazonAccount: relatedOrder?.amazonAccount || '',
+          azOrderId: relatedOrder?.azOrderId || '',
+          complianceBoardStatus: cancellationStatusToFrontend(cancellation.complianceBoardStatus || 'cancellation_request'),
+          complianceBoardCategory: 'cancellation',
+          complianceBoardCategories: ['cancellation'],
+          complianceBoardSource: 'cancellation_collection'
+        };
+      });
+
+      // Merge orders and cancellations, maintaining order by dateSold
+      const orderCount = orders.length;
+      const cancellationCount = enrichedCancellations.length;
+      orders = [...orders, ...enrichedCancellations].sort((a, b) => {
+        const aDate = new Date(a.dateSold || 0).getTime();
+        const bDate = new Date(b.dateSold || 0).getTime();
+        return bDate - aDate;
+      });
+
+      console.log(`[BOARD-CANCELLATION] Fetched ${orderCount} Order records + ${cancellationCount} Cancellation records = ${orders.length} total for this page`);
+    }
 
     // Deduplicate orders by orderId - keep the one with the latest updatedAt
     // This prevents duplicate orders from appearing in multiple columns
@@ -2733,7 +2842,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       statusCounts,
       overdueCounts,
       pagination: {
-        total,
+        total: isCancellationBoard ? combinedTotal : total,
         page: pageNum,
         limit: limitNum,
         totalPages: Math.ceil(total / limitNum)
@@ -3255,9 +3364,23 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       
       console.log(`[PATCH-COMPLIANCE] [QUERY] Cancellation query:`, JSON.stringify(query));
       
+      // For Cancellation, also fetch current document to check AssignedAt
+      const currentCancellation = await Cancellation.findOne(query).select('cancellationCaseNotOpenedAssignedAt');
+      
+      const cancellationSetObj = { complianceBoardStatus };
+      
+      // Add "first changed" date logic for Cancellation
+      if (complianceBoardStatus === 'case_not_opened' && complianceBoardCategory === 'cancellation') {
+        if (!currentCancellation?.cancellationCaseNotOpenedAssignedAt) {
+          cancellationSetObj.cancellationCaseNotOpenedAssignedAt = new Date().toISOString();
+        }
+      } else if (complianceBoardStatus !== 'case_not_opened' && complianceBoardCategory === 'cancellation') {
+        cancellationSetObj.cancellationCaseNotOpenedAssignedAt = null;
+      }
+      
       const cancellationDoc = await Cancellation.findOneAndUpdate(
         query,
-        { $set: { complianceBoardStatus } },
+        { $set: cancellationSetObj },
         { new: true }
       );
 
@@ -3302,9 +3425,23 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       
       console.log(`[PATCH-COMPLIANCE] [QUERY] INR query:`, JSON.stringify(query));
       
+      // For INR, also fetch current document to check AssignedAt
+      const currentInr = await Case.findOne(query).select('inrCaseNotOpenedAssignedAt');
+      
+      const inrSetObj = { complianceBoardStatus };
+      
+      // Add "first changed" date logic for INR
+      if (complianceBoardStatus === 'case_not_opened' && complianceBoardCategory === 'inr') {
+        if (!currentInr?.inrCaseNotOpenedAssignedAt) {
+          inrSetObj.inrCaseNotOpenedAssignedAt = new Date().toISOString();
+        }
+      } else if (complianceBoardStatus !== 'case_not_opened' && complianceBoardCategory === 'inr') {
+        inrSetObj.inrCaseNotOpenedAssignedAt = null;
+      }
+      
       const inrDoc = await Case.findOneAndUpdate(
         query,
-        { $set: { complianceBoardStatus } },
+        { $set: inrSetObj },
         { new: true }
       );
 
@@ -3349,9 +3486,23 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
     
     console.log(`[PATCH-COMPLIANCE] [QUERY] Searching Return by returnId='${orderId}'`);
     
+    // For Return, also fetch current document to check AssignedAt
+    const currentReturn = await Return.findOne(returnQuery).select('returnCaseNotOpenedAssignedAt');
+    
+    const returnSetObj = { complianceBoardStatus };
+    
+    // Add "first changed" date logic for Returns
+    if (complianceBoardStatus === 'case_not_opened' && complianceBoardCategory === 'return_refund') {
+      if (!currentReturn?.returnCaseNotOpenedAssignedAt) {
+        returnSetObj.returnCaseNotOpenedAssignedAt = new Date().toISOString();
+      }
+    } else if (complianceBoardStatus !== 'case_not_opened' && complianceBoardCategory === 'return_refund') {
+      returnSetObj.returnCaseNotOpenedAssignedAt = null;
+    }
+    
     let returnDoc = await Return.findOneAndUpdate(
       returnQuery,
-      { $set: { complianceBoardStatus } },
+      { $set: returnSetObj },
       { new: true }
     );
 
@@ -3380,12 +3531,68 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
     console.log(`[PATCH-COMPLIANCE] [FALLBACK] Return not found with returnId='${orderId}', falling back to Order...`);
 
     // Fallback: Try to find as Order
+    // Build the update object properly:
+    // - complianceBoardStatus: always set it
+    // - complianceBoardCategories: add to array (plural, not singular)
+    // - complianceBoardSource: set if provided (marks where the assignment came from)
+    const setObj = { complianceBoardStatus };
+    
+    // Add complianceBoardSource if provided
+    if (complianceBoardSource) {
+      setObj.complianceBoardSource = complianceBoardSource;
+    }
+    
+    // Add "first changed" date for Case Not Opened status
+    // This tracks when the item was FIRST moved to Case Not Opened (only set once, never updated)
+    const now = new Date().toISOString();
+    
+    // First, fetch the current document to check if AssignedAt field already exists
+    const orderQuery = mongoose.Types.ObjectId.isValid(orderId)
+      ? { $or: [{ _id: orderId }, { orderId: orderId }] }
+      : { orderId: orderId };
+    
+    const currentOrder = await Order.findOne(orderQuery).select('returnCaseNotOpenedAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt');
+    
+    if (complianceBoardStatus === 'case_not_opened') {
+      // Only set the AssignedAt if it doesn't already exist (first time only)
+      if (complianceBoardCategory === 'return_refund') {
+        if (!currentOrder?.returnCaseNotOpenedAssignedAt) {
+          setObj.returnCaseNotOpenedAssignedAt = now;
+        }
+      } else if (complianceBoardCategory === 'cancellation') {
+        if (!currentOrder?.cancellationCaseNotOpenedAssignedAt) {
+          setObj.cancellationCaseNotOpenedAssignedAt = now;
+        }
+      } else if (complianceBoardCategory === 'inr') {
+        if (!currentOrder?.inrCaseNotOpenedAssignedAt) {
+          setObj.inrCaseNotOpenedAssignedAt = now;
+        }
+      }
+    } else {
+      // Clear the AssignedAt fields if moving away from Case Not Opened status
+      if (complianceBoardCategory === 'return_refund') {
+        setObj.returnCaseNotOpenedAssignedAt = null;
+      } else if (complianceBoardCategory === 'cancellation') {
+        setObj.cancellationCaseNotOpenedAssignedAt = null;
+      } else if (complianceBoardCategory === 'inr') {
+        setObj.inrCaseNotOpenedAssignedAt = null;
+      }
+    }
+    
+    const updateObj = {
+      $set: setObj
+    };
+    
+    // Use $addToSet to add category to the array without duplicates
+    if (complianceBoardCategory) {
+      updateObj.$addToSet = { complianceBoardCategories: complianceBoardCategory };
+    }
+    
+    console.log(`[PATCH-COMPLIANCE] [QUERY] Order query:`, JSON.stringify(orderQuery));
+    
     const order = await Order.findOneAndUpdate(
-      { $or: [{ _id: orderId }, { orderId: orderId }] },
-      {
-        $set: { complianceBoardStatus },
-        ...(complianceBoardCategory && { complianceBoardCategory }),
-      },
+      orderQuery,
+      updateObj,
       { new: true }
     );
 

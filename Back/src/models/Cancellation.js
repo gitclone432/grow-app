@@ -48,6 +48,8 @@ const CancellationSchema = new mongoose.Schema(
       default: 'cancellation_request'
     }, // Status for compliance board kanban view
 
+    cancellationCaseNotOpenedAssignedAt: Date, // Timestamp of when card was first moved to Case Not Opened column
+
     dateSold: Date, // Date the order was sold (from related Order.creationDate or Order.dateSold)
     remark: String, // Cancellation-specific remark/note
 

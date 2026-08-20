@@ -243,6 +243,14 @@ const OrderSchema = new mongoose.Schema(
       type: Date,
       default: null
     },
+    cancellationCaseNotOpenedAssignedAt: {
+      type: Date,
+      default: null
+    },
+    inrCaseNotOpenedAssignedAt: {
+      type: Date,
+      default: null
+    },
   },
   { timestamps: true }
 );
