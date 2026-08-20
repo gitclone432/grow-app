@@ -295,6 +295,7 @@ export default function SendOfferEligiblePage() {
     setSendingOffer(true);
     let sent = 0;
     const failures = [];
+    const warnings = [];
     try {
       for (const item of sendTargets) {
         const payload = {
@@ -310,8 +311,9 @@ export default function SendOfferEligiblePage() {
         }
         delete payload.amountOff;
         try {
-          await api.post('/ebay/eligible-offers/send', payload);
+          const { data } = await api.post('/ebay/eligible-offers/send', payload);
           sent += 1;
+          if (data?.warning) warnings.push(data.warning);
         } catch (error) {
           failures.push({
             listingId: item.listingId,
@@ -323,8 +325,9 @@ export default function SendOfferEligiblePage() {
       if (failures.length === 0) {
         setSnackbar({
           open: true,
-          message: sent === 1 ? 'Offer sent to interested buyers' : `Offers sent for ${sent} listings`,
-          severity: 'success',
+          message: warnings[0]
+            || (sent === 1 ? 'Offer sent to interested buyers' : `Offers sent for ${sent} listings`),
+          severity: warnings.length ? 'warning' : 'success',
         });
         setSendDialogOpen(false);
         setSendTargets([]);
@@ -693,7 +696,7 @@ export default function SendOfferEligiblePage() {
                   <Box>
                     <Typography variant="body2" sx={{ fontWeight: 600 }}>Allow counteroffers</Typography>
                     <Typography variant="caption" color="text.secondary">
-                      Increase buyer engagement by 25%.
+                      Turns on Best Offer for this listing so interested buyers can counter. eBay’s send-offer API cannot attach a counter to the offer itself.
                     </Typography>
                   </Box>
                 )}

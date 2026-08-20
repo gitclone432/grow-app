@@ -125,6 +125,9 @@ const OrderSchema = new mongoose.Schema(
     },
     // True after a Finances TDS lookup ran (hit or miss). Miss keeps calculated DB TDS — never force $0.
     tdsFinancesChecked: { type: Boolean, default: false },
+    // True after a Finances ad-fee lookup ran (including a real $0 / no promoted listing fee).
+    adFeeFinancesChecked: { type: Boolean, default: false },
+    financesFeesCheckedAt: { type: Date, default: null },
     tid: { type: Number, default: 0.24 }, // Transaction ID (fixed at $0.24)
     net: Number, // orderEarnings - tds - tid
     pBalanceINR: Number, // net * exchangeRate (for selected marketplace)

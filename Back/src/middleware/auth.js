@@ -50,6 +50,7 @@ export const PAGE_DEFAULT_ROLES = {
   'SellingSummary': ['superadmin', 'listingadmin'],
   'ListingRecommendations': ['superadmin', 'listingadmin'],
   'SendOfferEligible': ['superadmin', 'listingadmin'],
+  'NegotiatedPricePolicies': ['superadmin', 'listingadmin'],
 
   // Order Fulfilment
   'OrdersDashboard': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],

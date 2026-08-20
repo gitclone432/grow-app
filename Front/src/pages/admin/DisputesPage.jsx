@@ -42,7 +42,6 @@ import api from '../../lib/api';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ReturnRequestedPage from './ReturnRequestedPage.jsx';
 import ReturnPostOrderPage from './ReturnPostOrderPage.jsx';
-import CancelledStatusPage from './CancelledStatusPage.jsx';
 import CancellationSearchPage from './CancellationSearchPage.jsx';
 import WorksheetPage from './WorksheetPage.jsx';
 import InrApiPage from './InrApiPage.jsx';
@@ -802,11 +801,6 @@ export default function DisputesPage({ initialTab = 0 }) {
             /> */}
             <Tab
               icon={<CancelIcon sx={{ fontSize: 16 }} />}
-              label="Cancelled Status"
-              iconPosition="start"
-            />
-            <Tab
-              icon={<CancelIcon sx={{ fontSize: 16 }} />}
               label="Cancellation Search"
               iconPosition="start"
             />
@@ -1416,23 +1410,18 @@ export default function DisputesPage({ initialTab = 0 }) {
         <ReturnRequestedPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel> */}
 
-      {/* Cancelled Status Tab */}
-      <TabPanel value={tabValue} index={3}>
-        <CancelledStatusPage dateFilter={dateFilter} hideDateFilter embedded />
-      </TabPanel>
-
       {/* Cancellation Search (Post-Order API) Tab */}
-      <TabPanel value={tabValue} index={4}>
+      <TabPanel value={tabValue} index={3}>
         <CancellationSearchPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
       {/* Worksheet Tab */}
-      <TabPanel value={tabValue} index={5}>
+      <TabPanel value={tabValue} index={4}>
         <WorksheetPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 
       {/* INR API Tab (Post-Order inquiry + casemanagement) */}
-      <TabPanel value={tabValue} index={6}>
+      <TabPanel value={tabValue} index={5}>
         <InrApiPage dateFilter={dateFilter} hideDateFilter embedded />
       </TabPanel>
 

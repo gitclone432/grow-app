@@ -188,14 +188,7 @@ const NUMERIC_SORT_COLUMNS = new Set(['claim', 'created', 'responseDue', 'estima
 
 const SHIP_CARRIERS = ['USPS', 'UPS', 'FEDEX', 'DHL', 'AUSTRALIA_POST', 'ROYAL_MAIL', 'CANADA_POST', 'OTHER'];
 
-const INQUIRY_ESCALATE_REASONS = [
-  { value: 'OTHER', label: 'Other' },
-  { value: 'BUYER_NORESPONSE', label: 'Buyer no response' },
-  { value: 'TROUBLE_COMMUNICATION', label: 'Trouble communicating' },
-  { value: 'BUYER_UNHAPPY', label: 'Buyer unhappy' },
-  { value: 'SELLER_CONTACTED_BUYER', label: 'Seller contacted buyer' },
-  { value: 'ITEM_NOT_RECEIVED', label: 'Item not received' },
-];
+const INQUIRY_ESCALATE_REASON = 'SHIPPED_ITEM';
 
 function normalizeCarrier(carrier) {
   const s = String(carrier || '').trim().toUpperCase().replace(/\s+/g, '_');
@@ -1610,7 +1603,7 @@ export default function InrApiPage({
   const [actionBusyId, setActionBusyId] = useState('');
   const [shipDialog, setShipDialog] = useState(EMPTY_SHIP_DIALOG);
   const [escalateDialog, setEscalateDialog] = useState({
-    open: false, row: null, reason: 'OTHER', comments: '',
+    open: false, row: null, comments: '',
   });
   const [selectedCase, setSelectedCase] = useState(null);
 
@@ -1847,7 +1840,7 @@ export default function InrApiPage({
   }
 
   function openEscalateDialog(row) {
-    setEscalateDialog({ open: true, row, reason: 'OTHER', comments: '' });
+    setEscalateDialog({ open: true, row, comments: '' });
   }
 
   async function saveInquiryNotes(caseId, notes) {
@@ -1923,12 +1916,12 @@ export default function InrApiPage({
       const { data } = await api.post(
         `/ebay/inquiry/${encodeURIComponent(inquiryId)}/escalate`,
         {
-          escalateInquiryReason: escalateDialog.reason,
+          escalateInquiryReason: INQUIRY_ESCALATE_REASON,
           comments: escalateDialog.comments.trim(),
         },
         { timeout: 45000 }
       );
-      setEscalateDialog({ open: false, row: null, reason: 'OTHER', comments: '' });
+      setEscalateDialog({ open: false, row: null, comments: '' });
       setSnackbar({
         open: true,
         severity: 'success',
@@ -2558,7 +2551,7 @@ export default function InrApiPage({
 
       <Dialog
         open={escalateDialog.open}
-        onClose={() => !actionBusyId && setEscalateDialog({ open: false, row: null, reason: 'OTHER', comments: '' })}
+        onClose={() => !actionBusyId && setEscalateDialog({ open: false, row: null, comments: '' })}
         fullWidth
         maxWidth="sm"
       >
@@ -2568,18 +2561,13 @@ export default function InrApiPage({
             After the response due date, escalate this inquiry. It becomes a Case.
           </Alert>
           <Stack spacing={1.5} sx={{ mt: 0.5 }}>
-            <FormControl size="small" fullWidth>
-              <InputLabel>Reason</InputLabel>
-              <Select
-                label="Reason"
-                value={escalateDialog.reason}
-                onChange={(e) => setEscalateDialog((d) => ({ ...d, reason: e.target.value }))}
-              >
-                {INQUIRY_ESCALATE_REASONS.map((reason) => (
-                  <MenuItem key={reason.value} value={reason.value}>{reason.label}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <TextField
+              label="Reason"
+              fullWidth
+              size="small"
+              value="Shipped item"
+              disabled
+            />
             <TextField
               label="Comments"
               required
@@ -2594,7 +2582,7 @@ export default function InrApiPage({
         </DialogContent>
         <DialogActions>
           <Button
-            onClick={() => setEscalateDialog({ open: false, row: null, reason: 'OTHER', comments: '' })}
+            onClick={() => setEscalateDialog({ open: false, row: null, comments: '' })}
             disabled={Boolean(actionBusyId)}
           >
             Cancel

@@ -30,6 +30,20 @@ function formatResetTime(resetStr) {
     return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+function formatWindowLabel(seconds) {
+    const n = Number(seconds) || 0;
+    if (n === 86400) return '24h';
+    if (n >= 86400 && n % 86400 === 0) return `${n / 86400}d`;
+    if (n >= 3600 && n % 3600 === 0) return `${n / 3600}h`;
+    if (n >= 60 && n % 60 === 0) return `${n / 60}m`;
+    return `${n}s`;
+}
+
+function isFinancesContext(ctx) {
+    const names = (ctx.resources || []).map((r) => (typeof r === 'string' ? r : r?.name || '')).join(' ');
+    return /finances|payoutapi/i.test(`${ctx.apiContext || ''} ${ctx.apiName || ''} ${names}`);
+}
+
 const CHIP_DENSE = { height: 22, fontSize: '0.7rem' };
 
 export default function EbayApiUsagePage() {
@@ -54,7 +68,9 @@ export default function EbayApiUsagePage() {
                 setRateLimits(res.data.rateLimits || []);
                 setSellers(res.data.sellers || []);
                 setFetchedAt(res.data.fetchedAt ? new Date(res.data.fetchedAt) : new Date());
-                setCached(res.data.cached && !forceRefresh);
+                setCached(Boolean(res.data.cached));
+            } else {
+                setError(res.data.error || 'Failed to fetch API usage data.');
             }
         } catch (err) {
             setError('Failed to fetch API usage data.');
@@ -145,7 +161,7 @@ export default function EbayApiUsagePage() {
             {/* Info — one short line */}
             <Alert severity="info" sx={{ mb: 1.5, py: 0.5, '& .MuiAlert-message': { py: 0.25 } }}>
                 <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>
-                    Rate limits are per-app, not per-seller — all {sellers.length || '…'} sellers share one daily pool per category.
+                    Rate limits come from eBay Developer Analytics. App-level quotas are shared by all {sellers.length || '…'} sellers. Post-Order inquiry/case calls are per-seller (user quota), so app-level `post-order.inquiry` often stays 0.
                 </Typography>
             </Alert>
 
@@ -207,8 +223,8 @@ export default function EbayApiUsagePage() {
 
                 return (
                     <Accordion
-                        key={`${ctx.apiContext}-${i}`}
-                        defaultExpanded={ctx.used > 0}
+                        key={`${ctx.apiContext}-${ctx.apiName || i}`}
+                        defaultExpanded={ctx.used > 0 || ctx.totalCalls > 0}
                         disableGutters
                         elevation={0}
                         sx={{
@@ -290,33 +306,50 @@ export default function EbayApiUsagePage() {
                                     bgcolor: 'action.hover',
                                     borderBottom: '1px solid',
                                     borderColor: 'divider',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'space-between',
-                                    gap: 1.5,
                                 }}
                             >
-                                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.75rem' }}>
-                                    Shared pool:{' '}
-                                    <Box component="span" fontWeight={600} color="text.primary">
-                                        {ctx.used.toLocaleString()} used
-                                    </Box>
-                                    {' / '}
-                                    {ctx.limit.toLocaleString()} limit
-                                    {' · '}
-                                    {ctx.remaining.toLocaleString()} remaining
-                                    {' · '}
-                                    <Box component="span" fontWeight={700} sx={{ color: getUsageHex(ctx.usagePercent) }}>
-                                        {ctx.usagePercent}%
-                                    </Box>
-                                </Typography>
-                                <Typography
-                                    variant="caption"
-                                    color="text.secondary"
-                                    sx={{ flexShrink: 0, fontSize: '0.7rem', fontWeight: 600 }}
+                                <Box
+                                    sx={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        gap: 1.5,
+                                    }}
                                 >
-                                    Calls
-                                </Typography>
+                                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.75rem' }}>
+                                        {ctx.sharedPool !== false ? 'Shared daily pool' : 'Per-resource daily quota (highest shown above)'}
+                                        {': '}
+                                        <Box component="span" fontWeight={600} color="text.primary">
+                                            {ctx.used.toLocaleString()} used
+                                        </Box>
+                                        {' / '}
+                                        {ctx.limit.toLocaleString()} limit
+                                        {' · '}
+                                        {ctx.remaining.toLocaleString()} remaining
+                                        {' · '}
+                                        <Box component="span" fontWeight={700} sx={{ color: getUsageHex(ctx.usagePercent) }}>
+                                            {ctx.usagePercent}%
+                                        </Box>
+                                        {ctx.totalCalls != null ? ` · ${ctx.totalCalls.toLocaleString()} method calls` : ''}
+                                    </Typography>
+                                    <Typography
+                                        variant="caption"
+                                        color="text.secondary"
+                                        sx={{ flexShrink: 0, fontSize: '0.7rem', fontWeight: 600 }}
+                                    >
+                                        Calls / quota
+                                    </Typography>
+                                </Box>
+                                {isFinancesContext(ctx) && (
+                                    <Typography
+                                        variant="caption"
+                                        color="text.secondary"
+                                        sx={{ display: 'block', fontSize: '0.7rem', mt: 0.5 }}
+                                    >
+                                        Daily remaining can still 429. eBay also enforces a short burst cap on Finances
+                                        that this 15,000/day number does not show. After a 429 the app waits about 1 minute.
+                                    </Typography>
+                                )}
                             </Box>
 
                             <Box
@@ -333,6 +366,11 @@ export default function EbayApiUsagePage() {
                                 {(ctx.resources || []).map((resource, j) => {
                                     const name = resourceName(resource);
                                     const count = typeof resource === 'object' ? (resource.count ?? 0) : null;
+                                    const limit = typeof resource === 'object' ? Number(resource.limit) || 0 : 0;
+                                    const remaining = typeof resource === 'object' ? Number(resource.remaining) || 0 : 0;
+                                    const used = typeof resource === 'object'
+                                        ? (resource.used ?? (limit ? Math.max(0, limit - remaining) : count))
+                                        : null;
                                     return (
                                         <Box
                                             component="li"
@@ -373,9 +411,17 @@ export default function EbayApiUsagePage() {
                                                         fontWeight: count > 0 ? 700 : 400,
                                                         color: count > 0 ? 'text.primary' : 'text.secondary',
                                                         fontSize: '0.75rem',
+                                                        textAlign: 'right',
                                                     }}
                                                 >
-                                                    {count.toLocaleString()}
+                                                    {resource.scope === 'user'
+                                                      ? `${count.toLocaleString()} · ${limit.toLocaleString()}/seller`
+                                                      : `${count.toLocaleString()}${limit ? ` · ${used.toLocaleString()}/${limit.toLocaleString()}` : ''}`}
+                                                    {Array.isArray(resource.otherWindows) && resource.otherWindows.length > 0
+                                                      ? ` · burst ${resource.otherWindows
+                                                          .map((w) => `${formatWindowLabel(w.timeWindow)} ${Number(w.remaining || 0).toLocaleString()}/${Number(w.limit || 0).toLocaleString()}`)
+                                                          .join(', ')}`
+                                                      : ''}
                                                 </Typography>
                                             )}
                                         </Box>

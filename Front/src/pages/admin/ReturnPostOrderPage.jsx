@@ -163,6 +163,205 @@ const NotesCell = React.memo(function NotesCell({ row, onSave, onNotify }) {
   );
 });
 
+function formatEbayInstant(value) {
+  if (!value) return '';
+  const raw = typeof value === 'object' ? (value.value || value.formattedValue || '') : value;
+  if (!raw) return '';
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return String(raw);
+  return date.toLocaleString('en-US', {
+    timeZone: 'America/Los_Angeles',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatEbayMoney(amount) {
+  if (amount == null || amount === '') return '';
+  if (typeof amount !== 'object') return String(amount);
+  const value = amount.value ?? amount.convertedFromValue;
+  const currency = amount.currency || amount.convertedFromCurrency || '';
+  if (value == null || value === '') return '';
+  return currency ? `${currency} ${value}` : String(value);
+}
+
+function humanizeEnum(value) {
+  return String(value || '').replace(/_/g, ' ');
+}
+
+function ReadField({ label, value }) {
+  if (value == null || value === '') return null;
+  return (
+    <Box>
+      <Typography variant="caption" color="text.secondary">{label}</Typography>
+      <Typography variant="body2" sx={{ fontSize: '0.85rem', wordBreak: 'break-word' }}>
+        {value}
+      </Typography>
+    </Box>
+  );
+}
+
+function ReadGrid({ children }) {
+  return (
+    <Box
+      sx={{
+        display: 'grid',
+        gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
+        gap: 1.25,
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+function ReturnDetailReadable({ payload }) {
+  if (!payload || typeof payload !== 'object') {
+    return <Alert severity="info">No detail payload available for this return.</Alert>;
+  }
+
+  const summary = payload.summary || {};
+  const detail = payload.detail || {};
+  const creation = summary.creationInfo || {};
+  const item = creation.item || detail.itemDetail || {};
+  const refund = summary.sellerTotalRefund?.actualRefundAmount
+    || summary.sellerTotalRefund?.estimatedRefundAmount
+    || detail.refundInfo?.sellerTotalRefund?.actualRefundAmount
+    || detail.refundInfo?.sellerTotalRefund?.estimatedRefundAmount;
+  const shipment = detail.returnShipmentInfo?.shipmentTracking
+    || detail.returnShipmentInfo?.allShipmentTrackings?.[0]
+    || null;
+  const comments = creation.comments?.content
+    || detail.buyerComments?.content
+    || (typeof detail.buyerComments === 'string' ? detail.buyerComments : '');
+  const sellerComments = detail.sellerComments?.content
+    || (typeof detail.sellerComments === 'string' ? detail.sellerComments : '');
+
+  return (
+    <Stack spacing={1.75}>
+      <ReadGrid>
+        <ReadField label="Return ID" value={summary.returnId} />
+        <ReadField label="Order ID" value={summary.orderId} />
+        <ReadField label="Buyer" value={summary.buyerLoginName} />
+        <ReadField label="Seller" value={summary.sellerLoginName} />
+        <ReadField label="Status" value={humanizeEnum(summary.status)} />
+        <ReadField label="State" value={humanizeEnum(summary.state)} />
+        <ReadField label="Type" value={humanizeEnum(summary.currentType || creation.type)} />
+        <ReadField label="Reason" value={humanizeEnum(creation.reason)} />
+        <ReadField label="Reason type" value={humanizeEnum(creation.reasonType)} />
+        <ReadField label="Close reason" value={humanizeEnum(summary.closeInfo?.returnCloseReason)} />
+        <ReadField label="Created" value={formatEbayInstant(creation.creationDate)} />
+        <ReadField
+          label="Seller respond by"
+          value={formatEbayInstant(summary.sellerResponseDue?.respondByDate)}
+        />
+        <ReadField label="Refund" value={formatEbayMoney(refund)} />
+        <ReadField label="Marketplace" value={detail.marketplaceId} />
+        <ReadField label="Item ID" value={item.itemId} />
+        <ReadField label="Item" value={item.title || item.itemTitle} />
+        <ReadField label="Qty" value={item.returnQuantity != null ? String(item.returnQuantity) : ''} />
+        <ReadField label="Transaction ID" value={item.transactionId} />
+      </ReadGrid>
+
+      {comments ? (
+        <>
+          <Divider />
+          <ReadField label="Buyer comments" value={comments} />
+        </>
+      ) : null}
+      {sellerComments ? <ReadField label="Seller comments" value={sellerComments} /> : null}
+
+      {shipment ? (
+        <>
+          <Divider />
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 0.75 }}>Return shipment</Typography>
+            <ReadGrid>
+              <ReadField label="Tracking" value={shipment.trackingNumber} />
+              <ReadField
+                label="Carrier"
+                value={shipment.carrierUsed || shipment.carrierName || shipment.carrierEnum}
+              />
+              <ReadField label="Method" value={humanizeEnum(shipment.shippingMethod)} />
+              <ReadField label="Delivery" value={humanizeEnum(shipment.deliveryStatus)} />
+            </ReadGrid>
+          </Box>
+        </>
+      ) : null}
+    </Stack>
+  );
+}
+
+function ReturnTrackingReadable({ payload }) {
+  if (!payload || typeof payload !== 'object' || !Object.keys(payload).length) {
+    return (
+      <Alert severity="info">
+        No tracking data yet. eBay needs carrier and tracking number on the return.
+      </Alert>
+    );
+  }
+  const history = Array.isArray(payload.scanHistory) ? payload.scanHistory : [];
+  return (
+    <Stack spacing={1.5}>
+      <ReadGrid>
+        <ReadField label="Tracking" value={payload.trackingNumber} />
+        <ReadField label="Carrier" value={payload.carrierUsed || payload.carrierName} />
+        <ReadField label="Status" value={humanizeEnum(payload.trackingStatus)} />
+      </ReadGrid>
+      {history.length ? (
+        <Box>
+          <Typography variant="subtitle2" sx={{ mb: 0.75 }}>Scan history</Typography>
+          <Stack spacing={0.85}>
+            {history.map((event, index) => (
+              <Box key={`${event.eventCode || 'scan'}-${index}`}>
+                <Typography variant="caption" color="text.secondary">
+                  {formatEbayInstant(event.eventTime) || '—'}
+                  {event.eventStatus ? ` · ${humanizeEnum(event.eventStatus)}` : ''}
+                </Typography>
+                <Typography variant="body2" sx={{ fontSize: '0.82rem' }}>
+                  {event.eventDesc || humanizeEnum(event.eventCode) || 'Update'}
+                </Typography>
+              </Box>
+            ))}
+          </Stack>
+        </Box>
+      ) : null}
+    </Stack>
+  );
+}
+
+function ReturnFilesReadable({ files }) {
+  const list = Array.isArray(files) ? files : [];
+  if (!list.length) {
+    return <Alert severity="info">No files uploaded for this return.</Alert>;
+  }
+  return (
+    <Table size="small">
+      <TableHead>
+        <TableRow>
+          <TableCell>File</TableCell>
+          <TableCell>Purpose</TableCell>
+          <TableCell>Format</TableCell>
+          <TableCell>Size</TableCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {list.map((file, index) => (
+          <TableRow key={file.fileId || index}>
+            <TableCell>{file.fileName || file.fileId || '—'}</TableCell>
+            <TableCell>{humanizeEnum(file.filePurpose)}</TableCell>
+            <TableCell>{file.fileFormat || '—'}</TableCell>
+            <TableCell>{file.fileSize ? String(file.fileSize) : '—'}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
 export default function ReturnPostOrderPage({
   dateFilter: dateFilterProp,
   hideDateFilter = false,
@@ -190,6 +389,7 @@ export default function ReturnPostOrderPage({
     error: '',
   });
   const [detailTab, setDetailTab] = useState(0);
+  const [detailShowJson, setDetailShowJson] = useState(false);
   const [actionBusyId, setActionBusyId] = useState('');
   const [actionMenu, setActionMenu] = useState({ anchorEl: null, row: null });
   const [declineDialog, setDeclineDialog] = useState({ open: false, row: null });
@@ -296,14 +496,14 @@ export default function ReturnPostOrderPage({
     setError('');
     try {
       // 1) Sync return/search (same as Return Search "Fetch from eBay")
-      const res = await api.post('/ebay/fetch-returns', {}, { timeout: 300000 });
+      const res = await api.post('/ebay/fetch-returns', {}, { timeout: 180000 });
       const newCount = res.data.totalNewReturns || 0;
       const updatedCount = res.data.totalUpdatedReturns || 0;
       const errCount = res.data.errors?.length || 0;
       setSellerFilter('');
       setPage(1);
+      await loadStored();
 
-      // 2) Enrich only rows missing detail/files/tracking (no force — force:true re-hits eBay for every row and hangs)
       setFetchPhase('details');
       let checked = 0;
       let updated = 0;
@@ -312,8 +512,8 @@ export default function ReturnPostOrderPage({
       try {
         const enrichRes = await api.post(
           '/ebay/enrich-return-details',
-          { limit: 100 },
-          { timeout: 300000 }
+          { limit: 80 },
+          { timeout: 180000 }
         );
         checked = enrichRes.data.checked || 0;
         updated = enrichRes.data.updated || 0;
@@ -344,6 +544,7 @@ export default function ReturnPostOrderPage({
 
   async function openApiDetails(row) {
     setDetailTab(0);
+    setDetailShowJson(false);
     setDetailDialog({
       open: true,
       row,
@@ -857,6 +1058,7 @@ export default function ReturnPostOrderPage({
       open: false, row: null, loading: false, detail: null, tracking: null, files: null, error: '',
     });
     setDetailTab(0);
+    setDetailShowJson(false);
   };
 
   const detailPayload = detailDialog.detail?.data || detailDialog.row?.rawDetail || null;
@@ -899,7 +1101,7 @@ export default function ReturnPostOrderPage({
         useFlexGap
       >
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-          <Tooltip title="GET /post-order/v2/return/search, then fill missing detail / files / tracking">
+          <Tooltip title="Search returns, then fill missing detail in one FULL call per new row">
             <span>
               <Button
                 size="small"
@@ -1478,77 +1680,95 @@ export default function ReturnPostOrderPage({
                 <Tab label={`Files (${filesCount})`} />
               </Tabs>
 
-              <Box sx={{ p: 1.5, flex: 1, minHeight: 0 }}>
+              <Box sx={{ p: 1.5, flex: 1, minHeight: 0, overflow: 'auto' }}>
                 {detailTab === 0 && (
                   <Stack spacing={1}>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
-                        GET /post-order/v2/return/{'{returnId}'}
-                      </Typography>
-                      <Button
-                        size="small"
-                        startIcon={<ContentCopyIcon sx={{ fontSize: 14 }} />}
-                        onClick={() => copyJson(detailPayload, 'detail JSON')}
-                        sx={{ textTransform: 'none' }}
-                      >
-                        Copy
-                      </Button>
+                    <Stack direction="row" justifyContent="flex-end" alignItems="center">
+                      <Stack direction="row" spacing={0.5}>
+                        <Button
+                          size="small"
+                          onClick={() => setDetailShowJson((v) => !v)}
+                          sx={{ textTransform: 'none' }}
+                        >
+                          {detailShowJson ? 'Readable view' : 'View JSON'}
+                        </Button>
+                        <Button
+                          size="small"
+                          startIcon={<ContentCopyIcon sx={{ fontSize: 14 }} />}
+                          onClick={() => copyJson(detailPayload, 'detail JSON')}
+                          sx={{ textTransform: 'none' }}
+                        >
+                          Copy
+                        </Button>
+                      </Stack>
                     </Stack>
-                    {detailPayload
-                      ? jsonBlock(detailPayload)
-                      : (
+                    {detailShowJson
+                      ? (detailPayload ? jsonBlock(detailPayload) : (
                         <Alert severity="info">No detail payload available for this return.</Alert>
-                      )}
+                      ))
+                      : <ReturnDetailReadable payload={detailPayload} />}
                   </Stack>
                 )}
 
                 {detailTab === 1 && (
                   <Stack spacing={1}>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
-                        GET /post-order/v2/return/{'{returnId}'}/tracking
-                      </Typography>
-                      <Button
-                        size="small"
-                        startIcon={<ContentCopyIcon sx={{ fontSize: 14 }} />}
-                        disabled={!hasTrackingData}
-                        onClick={() => copyJson(trackingPayload, 'tracking JSON')}
-                        sx={{ textTransform: 'none' }}
-                      >
-                        Copy
-                      </Button>
+                    <Stack direction="row" justifyContent="flex-end" alignItems="center">
+                      <Stack direction="row" spacing={0.5}>
+                        <Button
+                          size="small"
+                          onClick={() => setDetailShowJson((v) => !v)}
+                          sx={{ textTransform: 'none' }}
+                        >
+                          {detailShowJson ? 'Readable view' : 'View JSON'}
+                        </Button>
+                        <Button
+                          size="small"
+                          startIcon={<ContentCopyIcon sx={{ fontSize: 14 }} />}
+                          disabled={!hasTrackingData}
+                          onClick={() => copyJson(trackingPayload, 'tracking JSON')}
+                          sx={{ textTransform: 'none' }}
+                        >
+                          Copy
+                        </Button>
+                      </Stack>
                     </Stack>
-                    {hasTrackingData ? (
-                      jsonBlock(trackingPayload)
-                    ) : (
-                      <Alert severity="info">
-                        No tracking data yet. eBay needs <code>carrier_used</code> and <code>tracking_number</code> on the return.
-                      </Alert>
-                    )}
+                    {detailShowJson
+                      ? (hasTrackingData ? jsonBlock(trackingPayload) : (
+                        <Alert severity="info">
+                          No tracking data yet. eBay needs <code>carrier_used</code> and <code>tracking_number</code> on the return.
+                        </Alert>
+                      ))
+                      : <ReturnTrackingReadable payload={hasTrackingData ? trackingPayload : null} />}
                   </Stack>
                 )}
 
                 {detailTab === 2 && (
                   <Stack spacing={1}>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
-                        GET /post-order/v2/return/{'{returnId}'}/files
-                      </Typography>
-                      <Button
-                        size="small"
-                        startIcon={<ContentCopyIcon sx={{ fontSize: 14 }} />}
-                        disabled={filesCount === 0}
-                        onClick={() => copyJson(filesPayload, 'files JSON')}
-                        sx={{ textTransform: 'none' }}
-                      >
-                        Copy
-                      </Button>
+                    <Stack direction="row" justifyContent="flex-end" alignItems="center">
+                      <Stack direction="row" spacing={0.5}>
+                        <Button
+                          size="small"
+                          onClick={() => setDetailShowJson((v) => !v)}
+                          sx={{ textTransform: 'none' }}
+                        >
+                          {detailShowJson ? 'Readable view' : 'View JSON'}
+                        </Button>
+                        <Button
+                          size="small"
+                          startIcon={<ContentCopyIcon sx={{ fontSize: 14 }} />}
+                          disabled={filesCount === 0}
+                          onClick={() => copyJson(filesPayload, 'files JSON')}
+                          sx={{ textTransform: 'none' }}
+                        >
+                          Copy
+                        </Button>
+                      </Stack>
                     </Stack>
-                    {filesCount > 0 ? (
-                      jsonBlock(filesPayload)
-                    ) : (
-                      <Alert severity="info">No files uploaded for this return.</Alert>
-                    )}
+                    {detailShowJson
+                      ? (filesCount > 0 ? jsonBlock(filesPayload) : (
+                        <Alert severity="info">No files uploaded for this return.</Alert>
+                      ))
+                      : <ReturnFilesReadable files={filesPayload} />}
                   </Stack>
                 )}
               </Box>

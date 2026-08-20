@@ -341,7 +341,7 @@ async function buildPayoneerSucceededPayoutFeedRows() {
           let guard = 0;
 
           while (guard < PAYONEER_FEED_MAX_PAGES_PER_SELLER) {
-            const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
+            const payoutsRes = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/payout', {
               headers: financesApiHeaders(accessToken, marketplaceId),
               params: { sort: '-payoutDate', limit, offset, filter: payoutFilter },
             });
@@ -2041,6 +2041,98 @@ function financesApiHeaders(accessToken, marketplaceId) {
   };
 }
 
+/** Pause Finances calls after a 429. Default is a short burst cooldown — not the daily 15k window. */
+let financesBlockedUntil = 0;
+let financesLastCallAt = 0;
+let financesCallChain = Promise.resolve();
+const FINANCES_MIN_GAP_MS = 400;
+
+function delayMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function financesRetryAfterMs(err) {
+  const header = err?.response?.headers?.['retry-after'] || err?.response?.headers?.['Retry-After'];
+  if (header) {
+    const sec = Number(header);
+    if (Number.isFinite(sec) && sec > 0) {
+      return Math.min(Math.max(sec, 5) * 1000, 10 * 60 * 1000);
+    }
+    const when = Date.parse(header);
+    if (!Number.isNaN(when)) {
+      return Math.min(Math.max(when - Date.now(), 5000), 10 * 60 * 1000);
+    }
+  }
+  return 60 * 1000;
+}
+
+function financesQuotaBlockedMs() {
+  return Math.max(0, financesBlockedUntil - Date.now());
+}
+
+function tripFinancesRateLimit(err) {
+  const wait = financesRetryAfterMs(err);
+  financesBlockedUntil = Math.max(financesBlockedUntil, Date.now() + wait);
+  const retryAfter = err?.response?.headers?.['retry-after'] || err?.response?.headers?.['Retry-After'] || 'none';
+  console.warn(
+    `[Finances API] 429 burst limit (daily quota can still have remaining). ` +
+    `Pausing ${Math.ceil(wait / 1000)}s. Retry-After=${retryAfter}`
+  );
+}
+
+function assertFinancesQuota() {
+  const ms = financesQuotaBlockedMs();
+  if (ms <= 0) return;
+  const err = new Error('rate_limited');
+  err.code = 'FINANCES_RATE_LIMIT';
+  err.retryAfterMs = ms;
+  throw err;
+}
+
+function isFinancesRateLimitError(err) {
+  if (!err) return false;
+  if (err.code === 'FINANCES_RATE_LIMIT' || err.error === 'rate_limited') return true;
+  if (err.response?.status === 429) return true;
+  return /too many requests|rate_limited/i.test(String(err.message || ''));
+}
+
+function financesRateLimitedResult() {
+  return {
+    success: false,
+    error: 'rate_limited',
+    rateLimited: true,
+    adFeeGeneral: null,
+    tds: null,
+    nonSaleChargeChecked: false,
+    retryAfterMs: financesQuotaBlockedMs(),
+  };
+}
+
+async function financesAxiosGet(url, config) {
+  const run = financesCallChain.then(async () => {
+    assertFinancesQuota();
+    const wait = FINANCES_MIN_GAP_MS - (Date.now() - financesLastCallAt);
+    if (wait > 0) await delayMs(wait);
+    financesLastCallAt = Date.now();
+    try {
+      return await axios.get(url, { timeout: 30000, ...config });
+    } catch (err) {
+      if (err.response?.status === 429) {
+        tripFinancesRateLimit(err);
+        const paused = new Error('rate_limited');
+        paused.code = 'FINANCES_RATE_LIMIT';
+        paused.retryAfterMs = financesQuotaBlockedMs();
+        paused.response = err.response;
+        paused.status = 429;
+        throw paused;
+      }
+      throw err;
+    }
+  });
+  financesCallChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 function moneyFromNumber(value, currency = 'USD') {
   const v = Number.isFinite(value) ? value : 0;
   return { value: v.toFixed(2), currency: currency || 'USD' };
@@ -2058,7 +2150,7 @@ async function fetchFinancesTransactionsAllPages(accessToken, marketplaceId, fil
 
   while (hasMore && all.length < maxTransactions) {
     try {
-      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+      const response = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/transaction', {
         headers: financesApiHeaders(accessToken, mp),
         params: { filter: filters, limit, offset },
         paramsSerializer: (params) => qs.stringify(params, { arrayFormat: 'repeat' })
@@ -2241,7 +2333,7 @@ async function fetchNonSaleChargesIntoMap(accessToken, marketplaceId, adFeeMap) 
     const baseUrl = 'https://apiz.ebay.com/sell/finances/v1/transaction';
     const filterValue = 'transactionType:{NON_SALE_CHARGE}';
 
-    const response = await axios.get(baseUrl, {
+    const response = await financesAxiosGet(baseUrl, {
       headers: financesApiHeaders(accessToken, mp),
       params: {
         filter: filterValue,
@@ -2327,76 +2419,74 @@ function nonSaleChargeFilterForOrder(creationDate) {
   const d = new Date(creationDate);
   if (Number.isNaN(d.getTime())) return base;
   const start = new Date(d);
-  start.setUTCDate(start.getUTCDate() - 14);
+  start.setUTCDate(start.getUTCDate() - 7);
   const end = new Date(d);
-  end.setUTCDate(end.getUTCDate() + 120);
+  end.setUTCDate(end.getUTCDate() + 45);
   return `${base},transactionDate:[${start.toISOString()}..${end.toISOString()}]`;
 }
 
 async function fetchOrderAdFeeFromNonSaleCharges(accessToken, orderId, marketplaceIds, creationDate = null) {
   const ids = [...new Set((marketplaceIds || ['EBAY_US']).map(normalizeFinancesMarketplaceId))];
   const filterValue = nonSaleChargeFilterForOrder(creationDate);
-  let best = { adFeeGeneral: 0, tds: 0, marketplace: ids[0], source: 'non_sale_charge' };
+  const mp = ids[0] || 'EBAY_US';
+  let offset = 0;
+  const limit = 200;
+  let runningAdFee = 0;
+  let runningTds = 0;
+  let foundAnyAdFeeForOrder = false;
+  let foundAnyTdsForOrder = false;
+  let foundMatchOnPriorPage = false;
 
-  for (const mp of ids) {
-    let offset = 0;
-    const limit = 200;
-    let runningAdFee = 0;
-    let runningTds = 0;
-    let foundAnyAdFeeForOrder = false;
-    let foundAnyTdsForOrder = false;
+  while (offset < 3000) {
+    const response = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/transaction', {
+      headers: financesApiHeaders(accessToken, mp),
+      params: {
+        filter: filterValue,
+        limit,
+        offset,
+      },
+    });
 
-    while (offset < 10000) {
-      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
-        headers: financesApiHeaders(accessToken, mp),
-        params: {
-          filter: filterValue,
-          limit,
-          offset,
-        },
-      });
+    const transactions = response.data?.transactions || [];
+    let pageMatchedOrder = false;
+    for (const txn of transactions) {
+      const feeType = String(txn.feeType || '').toUpperCase();
+      if ((feeType !== 'AD_FEE' && feeType !== 'TAX_DEDUCTION_AT_SOURCE') || !txn.references) continue;
+      const orderRef = txn.references.find((ref) => ref.referenceType === 'ORDER_ID');
+      if (orderRef?.referenceId !== orderId) continue;
 
-      const transactions = response.data?.transactions || [];
-      for (const txn of transactions) {
-        const feeType = String(txn.feeType || '').toUpperCase();
-        if ((feeType !== 'AD_FEE' && feeType !== 'TAX_DEDUCTION_AT_SOURCE') || !txn.references) continue;
-        const orderRef = txn.references.find((ref) => ref.referenceType === 'ORDER_ID');
-        if (orderRef?.referenceId !== orderId) continue;
-
-        const feeAmount = parseFinancesAmountAsUsd(txn.amount);
-        if (feeType === 'AD_FEE') {
-          // Promoted Listings charge only (DEBIT) — ignore refund CREDITS
-          if (String(txn.bookingEntry || '').toUpperCase() === 'CREDIT') continue;
-          foundAnyAdFeeForOrder = true;
-          runningAdFee += feeAmount;
-        } else {
-          const signed = txn.bookingEntry === 'CREDIT' ? -feeAmount : feeAmount;
-          foundAnyTdsForOrder = true;
-          runningTds += signed;
-        }
+      pageMatchedOrder = true;
+      const feeAmount = parseFinancesAmountAsUsd(txn.amount);
+      if (feeType === 'AD_FEE') {
+        if (String(txn.bookingEntry || '').toUpperCase() === 'CREDIT') continue;
+        foundAnyAdFeeForOrder = true;
+        runningAdFee += feeAmount;
+      } else {
+        const signed = txn.bookingEntry === 'CREDIT' ? -feeAmount : feeAmount;
+        foundAnyTdsForOrder = true;
+        runningTds += signed;
       }
-
-      if (transactions.length < limit) break;
-      offset += limit;
     }
 
-    const adFeeGeneral = Math.max(0, parseFloat(runningAdFee.toFixed(2)));
-    const tds = Math.max(0, parseFloat(runningTds.toFixed(2)));
-    if (adFeeGeneral > 0 || tds > 0) {
-      return {
-        success: true,
-        adFeeGeneral,
-        tds,
-        marketplace: mp,
-        source: 'non_sale_charge',
-      };
-    }
-    if (foundAnyAdFeeForOrder || foundAnyTdsForOrder) {
-      best = { adFeeGeneral: 0, tds: 0, marketplace: mp, source: 'non_sale_charge' };
-    }
+    if (foundMatchOnPriorPage && !pageMatchedOrder) break;
+    if (pageMatchedOrder) foundMatchOnPriorPage = true;
+    if (transactions.length < limit) break;
+    offset += limit;
   }
 
-  return { success: true, ...best };
+  const adFeeGeneral = Math.max(0, parseFloat(runningAdFee.toFixed(2)));
+  const tds = Math.max(0, parseFloat(runningTds.toFixed(2)));
+  if (adFeeGeneral > 0 || tds > 0 || foundAnyAdFeeForOrder || foundAnyTdsForOrder) {
+    return {
+      success: true,
+      adFeeGeneral,
+      tds,
+      marketplace: mp,
+      source: 'non_sale_charge',
+    };
+  }
+
+  return { success: true, adFeeGeneral: 0, tds: 0, marketplace: mp, source: 'non_sale_charge' };
 }
 
 // Single order lookup (used when ad fee map is not available)
@@ -2405,6 +2495,10 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
     const adFee = adFeeMap.get(orderId) || 0;
     // Map path has no TDS — caller should not treat tds:null as "looked up"
     return { success: true, adFeeGeneral: adFee, tds: null, source: 'map', nonSaleChargeChecked: false };
+  }
+
+  if (financesQuotaBlockedMs() > 0) {
+    return financesRateLimitedResult();
   }
 
   const idsToTry = [...new Set(
@@ -2450,12 +2544,27 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
       if (error.response?.status === 403) {
         return { success: false, error: 'missing_scope', adFeeGeneral: null, tds: null, nonSaleChargeChecked: false };
       }
+      if (isFinancesRateLimitError(error)) {
+        return financesRateLimitedResult();
+      }
       console.warn(`[Finances API] orderId filter for ${orderId} on ${mp}:`, error.message);
     }
   }
 
-  // Step 2: always scan NON_SALE_CHARGE — AD_FEE and TDS commonly live here.
+  // Step 2: scan NON_SALE_CHARGE when orderId filter did not already return both fees.
+  // AD_FEE / TDS often live here, but paging every seller NSC for every order causes 429s.
   let nonSaleChargeChecked = false;
+  if (bestAdFee > 0 && bestTds > 0) {
+    return {
+      success: true,
+      adFeeGeneral: bestAdFee,
+      tds: bestTds,
+      marketplace: bestMarketplace,
+      source: bestSource,
+      transactionCount: bestTransactionCount,
+      nonSaleChargeChecked: false,
+    };
+  }
   try {
     const fromNonSale = await fetchOrderAdFeeFromNonSaleCharges(
       accessToken,
@@ -2477,6 +2586,9 @@ async function fetchOrderAdFee(accessToken, orderId, adFeeMap = null, marketplac
     lastError = error;
     if (error.response?.status === 403) {
       return { success: false, error: 'missing_scope', adFeeGeneral: null, tds: null, nonSaleChargeChecked: false };
+    }
+    if (isFinancesRateLimitError(error)) {
+      return financesRateLimitedResult();
     }
     console.warn(`[Finances API] NON_SALE_CHARGE scan for ${orderId}:`, error.message);
   }
@@ -2513,16 +2625,58 @@ function applyFinancesFeeResult(order, feeResult) {
   if (feeResult.nonSaleChargeChecked || (feeResult.tds != null && Number(feeResult.tds) > 0)) {
     order.tdsFinancesChecked = true;
   }
+  order.adFeeFinancesChecked = true;
+  order.financesFeesCheckedAt = new Date();
 }
 
 /** True when poll/resync should hit Finances for ad fee and/or TDS. */
 function orderNeedsFinancesFeeFetch(order) {
   if (!order) return false;
   const adFee = parseFloat(order.adFeeGeneral);
-  const needsAdFee = !Number.isFinite(adFee) || adFee === 0;
+  const needsAdFee = (!Number.isFinite(adFee) || adFee === 0) && !order.adFeeFinancesChecked;
   const hasFinancesTds = order.tdsSource === 'finances' && Number(order.tds) > 0;
   const needsTds = !hasFinancesTds && !order.tdsFinancesChecked;
   return needsAdFee || needsTds;
+}
+
+async function refreshOrderAdFeeAndTds(seller, order, accessToken) {
+  const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, order.purchaseMarketplaceId);
+  const adFeeResult = await fetchOrderAdFee(
+    accessToken,
+    order.orderId,
+    null,
+    financeMpIds[0],
+    financeMpIds,
+    { creationDate: order.creationDate }
+  );
+  if (!adFeeResult.success) {
+    return {
+      success: false,
+      error: adFeeResult.error || 'fetch failed',
+      rateLimited: Boolean(adFeeResult.rateLimited),
+    };
+  }
+  applyFinancesFeeResult(order, adFeeResult);
+  order.adFeeGeneralUSD = parseFloat((Number(order.adFeeGeneral || 0) * (order.conversionRate || 1)).toFixed(2));
+  order.orderEarnings = computeOrderEarningsFromComponents(order);
+  const marketplace = order.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
+    order.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
+  const snapshot = typeof order.toObject === 'function' ? order.toObject() : { ...order };
+  const financials = await calculateFinancials(
+    { ...snapshot, orderEarnings: order.orderEarnings },
+    marketplace
+  );
+  Object.assign(order, {
+    tds: financials.tds,
+    tdsSource: financials.tdsSource,
+    tid: financials.tid,
+    net: financials.net,
+    pBalanceINR: financials.pBalanceINR,
+    ebayExchangeRate: financials.ebayExchangeRate,
+    profit: financials.profit,
+  });
+  await order.save();
+  return { success: true, adFeeGeneral: order.adFeeGeneral, tds: order.tds };
 }
 
 // ============================================
@@ -4679,7 +4833,7 @@ router.get('/test-finances-basic', requireAuth, requirePageAccess('AllOrdersShee
     console.log(`[Test Finances Basic] Testing API without filter...`);
 
     // Try WITHOUT any filter first
-    const response = await axios.get(
+    const response = await financesAxiosGet(
       `https://apiz.ebay.com/sell/finances/v1/transaction`,
       {
         headers: financesApiHeaders(accessToken, marketplaceId),
@@ -4739,7 +4893,7 @@ router.get('/test-finances/:orderId', requireAuth, requirePageAccess('AllOrdersS
     console.log(`[Test Finances] Testing order: ${orderId}`);
     console.log(`[Test Finances] Filter: ${filterValue}`);
 
-    const response = await axios.get(
+    const response = await financesAxiosGet(
       `https://apiz.ebay.com/sell/finances/v1/transaction`,
       {
         headers: financesApiHeaders(accessToken, marketplaceId),
@@ -5346,6 +5500,7 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
       updated: 0,
       skipped: 0,
       failed: 0,
+      rateLimited: false,
       sellerErrors: [],
       errors: [],
     };
@@ -5373,6 +5528,10 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
           totals.failed++;
           if (totals.errors.length < 25) {
             totals.errors.push({ orderId: order.orderId, error: feeResult.error || 'fetch failed' });
+          }
+          if (feeResult.rateLimited) {
+            totals.rateLimited = true;
+            return 'rate_limited';
           }
           return;
         }
@@ -5409,6 +5568,10 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
         totals.failed++;
         if (totals.errors.length < 25) {
           totals.errors.push({ orderId: order.orderId, error: orderErr.message });
+        }
+        if (isFinancesRateLimitError(orderErr)) {
+          totals.rateLimited = true;
+          return 'rate_limited';
         }
       }
     };
@@ -5451,12 +5614,20 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
             continue;
           }
         }
-        await processOrder(order, sellerEntry.seller, sellerEntry.accessToken);
+        const outcome = await processOrder(order, sellerEntry.seller, sellerEntry.accessToken);
+        if (outcome === 'rate_limited') {
+          console.warn('[Poll TDS] Stopping batch: Finances API 429');
+          break;
+        }
       }
 
       return res.json({
-        message: `TDS poll complete: ${totals.updated} updated from Finances, ${totals.skipped} with no TAX_DEDUCTION_AT_SOURCE, ${totals.failed} failed (${totals.total} checked)`,
+        message: totals.rateLimited
+          ? `TDS poll paused: Finances burst 429 (daily 15k quota can still have remaining). Wait ~1 min. ${totals.updated} updated, ${totals.failed} failed.`
+          : `TDS poll complete: ${totals.updated} updated from Finances, ${totals.skipped} with no TAX_DEDUCTION_AT_SOURCE, ${totals.failed} failed (${totals.total} checked)`,
         results: totals,
+        rateLimited: Boolean(totals.rateLimited),
+        retryAfterMs: totals.rateLimited ? financesQuotaBlockedMs() : 0,
       });
     }
 
@@ -5507,8 +5678,13 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
         console.log(`[Poll TDS] ${seller.user?.username || seller._id}: ${orders.length} orders to check`);
 
         for (let i = 0; i < orders.length; i++) {
-          await processOrder(orders[i], seller, accessToken);
+          const outcome = await processOrder(orders[i], seller, accessToken);
           processedBudget -= 1;
+          if (outcome === 'rate_limited') {
+            console.warn('[Poll TDS] Stopping batch: Finances API 429');
+            processedBudget = 0;
+            break;
+          }
           if ((i + 1) % 25 === 0) {
             console.log(`[Poll TDS] ${seller.user?.username || seller._id}: ${i + 1}/${orders.length}`);
           }
@@ -5531,9 +5707,13 @@ router.post('/poll-tds', requireAuth, requirePageAccess(['Fulfillment', 'AllOrde
     const remaining = skipAlreadySet ? await Order.countDocuments(remainingQuery) : 0;
 
     res.json({
-      message: `TDS poll complete: ${totals.updated} updated from Finances, ${totals.skipped} with no TAX_DEDUCTION_AT_SOURCE, ${totals.failed} failed (${totals.total} checked). Remaining: ${remaining}`,
+      message: totals.rateLimited
+        ? `TDS poll paused: Finances burst 429 (daily 15k quota can still have remaining). Wait ~1 min. ${totals.updated} updated, ${totals.failed} failed. Remaining: ${remaining}`
+        : `TDS poll complete: ${totals.updated} updated from Finances, ${totals.skipped} with no TAX_DEDUCTION_AT_SOURCE, ${totals.failed} failed (${totals.total} checked). Remaining: ${remaining}`,
       results: totals,
       remaining,
+      rateLimited: Boolean(totals.rateLimited),
+      retryAfterMs: totals.rateLimited ? financesQuotaBlockedMs() : 0,
     });
   } catch (err) {
     console.error('[Poll TDS] Error:', err);
@@ -6519,7 +6699,7 @@ router.post('/poll-all-sellers', requireAuth, requirePageAccess('Fulfillment'), 
 });
 
 // Poll all sellers for NEW ORDERS ONLY (Phase 1)
-export async function scheduledPollNewOrders() {
+export async function scheduledPollNewOrders({ fetchFinances = true } = {}) {
   // Preserve manually entered fulfillment fields when refreshing from eBay.
   const MANUAL_FIELDS = new Set([
     'amazonAccount', 'beforeTax', 'estimatedTax', 'beforeTaxUSD', 'estimatedTaxUSD',
@@ -6592,39 +6772,15 @@ export async function scheduledPollNewOrders() {
             console.log(`  🆕 NEW: ${ebayOrder.orderId}`);
             await sendAutoWelcomeMessage(seller, newOrder);
 
-            try {
-              const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, newOrder.purchaseMarketplaceId);
-              const adFeeResult = await fetchOrderAdFee(
-                accessToken,
-                ebayOrder.orderId,
-                null,
-                financeMpIds[0],
-                financeMpIds,
-                { creationDate: newOrder.creationDate || ebayOrder.creationDate }
-              );
-              if (adFeeResult.success) {
-                applyFinancesFeeResult(newOrder, adFeeResult);
-                newOrder.adFeeGeneralUSD = parseFloat((newOrder.adFeeGeneral * (newOrder.conversionRate || 1)).toFixed(2));
-                newOrder.orderEarnings = computeOrderEarningsFromComponents(newOrder);
-                const marketplace = newOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-                  newOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                const financials = await calculateFinancials(
-                  { ...newOrder.toObject(), orderEarnings: newOrder.orderEarnings },
-                  marketplace
-                );
-                Object.assign(newOrder, {
-                  tds: financials.tds,
-                  tdsSource: financials.tdsSource,
-                  tid: financials.tid,
-                  net: financials.net,
-                  pBalanceINR: financials.pBalanceINR,
-                  ebayExchangeRate: financials.ebayExchangeRate,
-                  profit: financials.profit,
-                });
-                await newOrder.save();
+            if (fetchFinances) {
+              try {
+                const feeResult = await refreshOrderAdFeeAndTds(seller, newOrder, accessToken);
+                if (!feeResult.success) {
+                  console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${feeResult.error}`);
+                }
+              } catch (adFeeErr) {
+                console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
               }
-            } catch (adFeeErr) {
-              console.log(`  ⚠️ Ad fee fetch failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
             }
             continue;
           }
@@ -6681,40 +6837,15 @@ export async function scheduledPollNewOrders() {
             console.log(`  🔄 UPDATED: ${ebayOrder.orderId} - ${changedFields.join(', ')}`);
           }
 
-          if (orderNeedsFinancesFeeFetch(existingOrder)) {
+          if (fetchFinances && orderNeedsFinancesFeeFetch(existingOrder)) {
             try {
-              const financeMpIds = resolveOrderFinancesMarketplaceIds(seller, existingOrder.purchaseMarketplaceId);
-              const adFeeResult = await fetchOrderAdFee(
-                accessToken,
-                ebayOrder.orderId,
-                null,
-                financeMpIds[0],
-                financeMpIds,
-                { creationDate: existingOrder.creationDate || ebayOrder.creationDate }
-              );
-              if (adFeeResult.success) {
-                applyFinancesFeeResult(existingOrder, adFeeResult);
-                existingOrder.adFeeGeneralUSD = parseFloat((existingOrder.adFeeGeneral * (existingOrder.conversionRate || 1)).toFixed(2));
-                existingOrder.orderEarnings = computeOrderEarningsFromComponents(existingOrder);
-                const marketplace = existingOrder.purchaseMarketplaceId === 'EBAY_ENCA' ? 'EBAY_CA' :
-                  existingOrder.purchaseMarketplaceId === 'EBAY_AU' ? 'EBAY_AU' : 'EBAY';
-                const financials = await calculateFinancials(
-                  { ...existingOrder.toObject(), orderEarnings: existingOrder.orderEarnings },
-                  marketplace
-                );
-                Object.assign(existingOrder, {
-                  tds: financials.tds,
-                  tdsSource: financials.tdsSource,
-                  tid: financials.tid,
-                  net: financials.net,
-                  pBalanceINR: financials.pBalanceINR,
-                  ebayExchangeRate: financials.ebayExchangeRate,
-                  profit: financials.profit,
-                });
-                await existingOrder.save();
+              const feeResult = await refreshOrderAdFeeAndTds(seller, existingOrder, accessToken);
+              if (feeResult.success) {
                 if (!updatedOrders.some((u) => u.orderId === existingOrder.orderId)) {
                   updatedOrders.push({ orderId: existingOrder.orderId, changedFields: ['adFeeGeneral', 'tds'] });
                 }
+              } else {
+                console.log(`  ⚠️ Ad fee/TDS refresh failed for ${ebayOrder.orderId}: ${feeResult.error}`);
               }
             } catch (adFeeErr) {
               console.log(`  ⚠️ Ad fee/TDS refresh failed for ${ebayOrder.orderId}: ${adFeeErr.message}`);
@@ -6800,6 +6931,178 @@ export async function scheduledPollNewOrders() {
   } catch (err) {
     console.error('Error polling new orders:', err);
     throw err;
+  }
+}
+
+const ORDER_FINANCES_POLL_LOOKBACK_DAYS = 7;
+const ORDER_FINANCES_POLL_MAX_ORDERS = 80;
+let orderFinancesPollInFlight = null;
+
+/**
+ * Independent of Poll new orders: fetch Sell Finances ad fee + TDS for recent orders
+ * that still need a lookup. Schedule this every 1–2 hours from Cron Jobs.
+ */
+export async function scheduledPollOrderFinances() {
+  if (orderFinancesPollInFlight) {
+    console.log('[Poll Order Finances] Already running, skipping overlap');
+    return { skipped: true, message: 'A finances poll is already running' };
+  }
+
+  orderFinancesPollInFlight = (async () => {
+    const since = new Date(Date.now() - ORDER_FINANCES_POLL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+    const sellers = await Seller.find({
+      'ebayTokens.access_token': { $exists: true, $ne: null },
+      'ebayTokens.refresh_token': { $exists: true, $ne: null },
+    }).populate('user', 'username email');
+
+    console.log(`\n========== POLL ORDER AD FEE & TDS (last ${ORDER_FINANCES_POLL_LOOKBACK_DAYS} days, max ${ORDER_FINANCES_POLL_MAX_ORDERS}) ==========`);
+
+    const pollResults = [];
+    let totalChecked = 0;
+    let totalUpdated = 0;
+    let totalFailed = 0;
+    let totalSkipped = 0;
+
+    for (const seller of sellers) {
+      if (totalChecked >= ORDER_FINANCES_POLL_MAX_ORDERS) break;
+      const sellerName = seller.user?.username || seller.user?.email || seller._id.toString();
+      const remaining = ORDER_FINANCES_POLL_MAX_ORDERS - totalChecked;
+      let sellerUpdated = 0;
+      let sellerFailed = 0;
+      let sellerSkipped = 0;
+
+      try {
+        const candidates = await Order.find({
+          seller: seller._id,
+          creationDate: { $gte: since },
+          $or: [
+            { adFeeFinancesChecked: { $ne: true } },
+            { tdsFinancesChecked: { $ne: true } },
+          ],
+        })
+          .sort({ creationDate: -1 })
+          .limit(remaining);
+
+        const accessToken = candidates.length ? await ensureValidToken(seller) : null;
+
+        for (const order of candidates) {
+          if (!orderNeedsFinancesFeeFetch(order)) {
+            sellerSkipped += 1;
+            continue;
+          }
+          totalChecked += 1;
+          try {
+            const feeResult = await refreshOrderAdFeeAndTds(seller, order, accessToken);
+            if (feeResult.success) {
+              sellerUpdated += 1;
+              totalUpdated += 1;
+            } else if (feeResult.error === 'rate_limited' || feeResult.rateLimited) {
+              sellerFailed += 1;
+              totalFailed += 1;
+              console.warn(`[Poll Order Finances] 429 — stopping remaining lookups (${Math.ceil(financesQuotaBlockedMs() / 60000)}m pause)`);
+              pollResults.push({
+                sellerId: seller._id,
+                sellerName,
+                success: true,
+                updated: sellerUpdated,
+                failed: sellerFailed,
+                skipped: sellerSkipped,
+                scanned: candidates.length,
+                rateLimited: true,
+              });
+              return {
+                message: `Ad fee & TDS poll paused after Finances 429: ${totalUpdated} updated, ${totalFailed} failed`,
+                pollResults,
+                totalPolled: sellers.length,
+                totalChecked,
+                totalUpdated,
+                totalFailed,
+                totalSkipped,
+                rateLimited: true,
+                lookbackDays: ORDER_FINANCES_POLL_LOOKBACK_DAYS,
+                maxOrders: ORDER_FINANCES_POLL_MAX_ORDERS,
+              };
+            } else {
+              sellerFailed += 1;
+              totalFailed += 1;
+              console.log(`  ⚠️ [${sellerName}] ${order.orderId}: ${feeResult.error}`);
+            }
+          } catch (err) {
+            if (isFinancesRateLimitError(err)) {
+              sellerFailed += 1;
+              totalFailed += 1;
+              console.warn(`[Poll Order Finances] 429 — stopping remaining lookups`);
+              pollResults.push({
+                sellerId: seller._id,
+                sellerName,
+                success: true,
+                updated: sellerUpdated,
+                failed: sellerFailed,
+                skipped: sellerSkipped,
+                scanned: candidates.length,
+                rateLimited: true,
+              });
+              return {
+                message: `Ad fee & TDS poll paused after Finances 429: ${totalUpdated} updated, ${totalFailed} failed`,
+                pollResults,
+                totalPolled: sellers.length,
+                totalChecked,
+                totalUpdated,
+                totalFailed,
+                totalSkipped,
+                rateLimited: true,
+                lookbackDays: ORDER_FINANCES_POLL_LOOKBACK_DAYS,
+                maxOrders: ORDER_FINANCES_POLL_MAX_ORDERS,
+              };
+            }
+            sellerFailed += 1;
+            totalFailed += 1;
+            console.log(`  ⚠️ [${sellerName}] ${order.orderId}: ${err.message}`);
+          }
+        }
+        totalSkipped += sellerSkipped;
+        console.log(`[${sellerName}] Finances: updated=${sellerUpdated}, failed=${sellerFailed}, skipped=${sellerSkipped}, scanned=${candidates.length}`);
+        pollResults.push({
+          sellerId: seller._id,
+          sellerName,
+          success: true,
+          updated: sellerUpdated,
+          failed: sellerFailed,
+          skipped: sellerSkipped,
+          scanned: candidates.length,
+        });
+      } catch (sellerErr) {
+        console.error(`[${sellerName}] Finances poll error:`, sellerErr.message);
+        pollResults.push({
+          sellerId: seller._id,
+          sellerName,
+          success: false,
+          error: sellerErr.message,
+          updated: 0,
+          failed: 0,
+        });
+      }
+    }
+
+    const payload = {
+      message: `Ad fee & TDS poll: ${totalUpdated} updated, ${totalFailed} failed (${totalChecked} Finances lookups, last ${ORDER_FINANCES_POLL_LOOKBACK_DAYS} days)`,
+      pollResults,
+      totalPolled: sellers.length,
+      totalChecked,
+      totalUpdated,
+      totalFailed,
+      totalSkipped,
+      lookbackDays: ORDER_FINANCES_POLL_LOOKBACK_DAYS,
+      maxOrders: ORDER_FINANCES_POLL_MAX_ORDERS,
+    };
+    console.log(`\n========== POLL ORDER FINANCES SUMMARY ==========\n${payload.message}`);
+    return payload;
+  })();
+
+  try {
+    return await orderFinancesPollInFlight;
+  } finally {
+    orderFinancesPollInFlight = null;
   }
 }
 
@@ -8897,7 +9200,8 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
               creation_date_range_from: thirtyDaysAgo,
               creation_date_range_to: new Date().toISOString(),
               limit: 200
-            }
+            },
+            timeout: 45000,
           });
 
           const returns = returnRes.data.members || [];
@@ -8905,15 +9209,27 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
 
           let newReturns = 0;
           let updatedReturns = 0;
-          let updateDetails = []; // Track updates for frontend snackbar
+          const updateDetails = [];
+          const getUnix = (d) => (d ? Math.floor(new Date(d).getTime() / 1000) : 0);
+          const safeStr = (v) => (v == null ? '' : String(v));
+          const optionsKey = (opts) => JSON.stringify(
+            (Array.isArray(opts) ? opts : []).map((o) => o?.actionType || '').filter(Boolean).sort()
+          );
+
+          const returnIds = returns.map((r) => String(r.returnId || '')).filter(Boolean);
+          const existingDocs = returnIds.length
+            ? await Return.find({ returnId: { $in: returnIds } })
+              .select('returnId returnStatus refundAmount responseDate creationDate returnReason reasonType returnCloseReason notes buyerComments sellerAvailableOptions')
+              .lean()
+            : [];
+          const existingById = new Map(existingDocs.map((d) => [String(d.returnId), d]));
+          const bulkOps = [];
 
           for (const ebayReturn of returns) {
-            // 1. Safe Extraction
             const creationInfo = ebayReturn.creationInfo || {};
             const itemInfo = creationInfo.item || {};
             const sellerRefund = ebayReturn.sellerTotalRefund?.estimatedRefundAmount || {};
 
-            // 2. Build Data Object (CASTING TO MATCH SCHEMA)
             const returnData = {
               seller: seller._id,
               returnId: ebayReturn.returnId,
@@ -8937,7 +9253,6 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
               itemTitle: itemInfo.title || itemInfo.itemId,
               returnQuantity: itemInfo.returnQuantity,
               refundAmount: {
-                // FIX 1: Force String to match Mongoose Schema "String"
                 value: String(sellerRefund.value || 0),
                 currency: sellerRefund.currency
               },
@@ -8945,91 +9260,76 @@ router.post('/fetch-returns', requireAuth, requirePageAccess('Disputes'), async 
               responseDate: ebayReturn.sellerResponseDue?.respondByDate?.value ? new Date(ebayReturn.sellerResponseDue.respondByDate.value) : null,
               rmaNumber: ebayReturn.RMANumber,
               buyerComments: creationInfo.comments?.content,
-              notes: '', // Internal notes only - NOT buyer comments
-              rawData: ebayReturn
+              notes: '',
+              rawData: ebayReturn,
+              updatedAt: new Date(),
             };
 
-            const existing = await Return.findOne({ returnId: ebayReturn.returnId });
-
-            if (existing) {
-              // --- HELPER FUNCTIONS FOR COMPARISON ---
-              // Convert to seconds (ignore milliseconds)
-              const getUnix = (d) => d ? Math.floor(new Date(d).getTime() / 1000) : 0;
-              // Convert to string to handle "63.95" vs 63.95 mismatch
-              const safeStr = (v) => (v === undefined || v === null) ? '' : String(v);
-
-              // --- COMPARISON LOGIC ---
-              const statusChanged = existing.returnStatus !== returnData.returnStatus;
-
-              // FIX 2: Compare as Strings
-              const refundChanged = safeStr(existing.refundAmount?.value) !== safeStr(returnData.refundAmount?.value);
-
-              // FIX 3: Compare as Unix Timestamps (seconds)
-              const responseDateChanged = getUnix(existing.responseDate) !== getUnix(returnData.responseDate);
-              const creationDateChanged = getUnix(existing.creationDate) !== getUnix(returnData.creationDate);
-
-              if (statusChanged || refundChanged || responseDateChanged || creationDateChanged) {
-
-                // DIAGNOSTIC LOG: This will show you exactly what changed in your terminal
-                console.log(`[Update Triggered] Return ${ebayReturn.returnId}:`);
-                if (statusChanged) console.log(`   - Status: ${existing.returnStatus} -> ${returnData.returnStatus}`);
-                if (refundChanged) console.log(`   - Refund: ${existing.refundAmount?.value} -> ${returnData.refundAmount?.value}`);
-                if (responseDateChanged) console.log(`   - RespDate: ${existing.responseDate} -> ${returnData.responseDate}`);
-                if (creationDateChanged) console.log(`   - CreateDate: ${existing.creationDate} -> ${returnData.creationDate}`);
-
-                // PRESERVE compliance board status when updating from eBay fetch
-                const savedComplianceBoardStatus = existing.complianceBoardStatus;
-                const savedInternalNotes = existing.internalNotes;
-                
-                console.log(`[FETCH-RETURN] [PRESERVE] Return ${ebayReturn.returnId}: saving status='${savedComplianceBoardStatus}' before .set()`);
-                
-                // Use .set() to update fields
-                existing.set(returnData);
-                
-                // Restore preserved fields after set()
-                existing.complianceBoardStatus = savedComplianceBoardStatus;
-                existing.internalNotes = savedInternalNotes;
-                
-                console.log(`[FETCH-RETURN] [RESTORE] Return ${ebayReturn.returnId}: restored status='${existing.complianceBoardStatus}' after .set()`);
-                
-                await existing.save();
-                
-                console.log(`[FETCH-RETURN] [SAVED] Return ${ebayReturn.returnId}: status='${existing.complianceBoardStatus}' has been persisted to DB`);
-                updatedReturns++;
-
-                // Track update details for frontend snackbar
-                if (!updateDetails) updateDetails = [];
-                updateDetails.push({
-                  returnId: ebayReturn.returnId,
-                  orderId: returnData.orderId,
-                  changes: {
-                    ...(statusChanged && { status: { from: existing.returnStatus, to: returnData.returnStatus } }),
-                    ...(refundChanged && { refund: { from: existing.refundAmount?.value, to: returnData.refundAmount?.value } })
-                  }
-                });
-              } else {
-                // Keep action metadata fresh even when core fields are unchanged
-                existing.returnReason = returnData.returnReason;
-                existing.reasonType = returnData.reasonType;
-                existing.returnCloseReason = returnData.returnCloseReason;
-                // Do NOT update notes field - preserve internal notes
-                // existing.notes is kept as-is
-                existing.buyerComments = returnData.buyerComments;
-                existing.sellerAvailableOptions = returnData.sellerAvailableOptions;
-                existing.rawData = returnData.rawData;
-                await existing.save();
-              }
-            } else {
-              await Return.create(returnData);
+            const existing = existingById.get(String(ebayReturn.returnId));
+            if (!existing) {
+              bulkOps.push({
+                updateOne: {
+                  filter: { returnId: ebayReturn.returnId },
+                  update: {
+                    $set: returnData,
+                    $setOnInsert: { createdAt: new Date(), worksheetStatus: 'open' },
+                  },
+                  upsert: true,
+                },
+              });
               newReturns++;
+              continue;
             }
+
+            const statusChanged = existing.returnStatus !== returnData.returnStatus;
+            const refundChanged = safeStr(existing.refundAmount?.value) !== safeStr(returnData.refundAmount?.value);
+            const responseDateChanged = getUnix(existing.responseDate) !== getUnix(returnData.responseDate);
+            const creationDateChanged = getUnix(existing.creationDate) !== getUnix(returnData.creationDate);
+            const metaChanged =
+              existing.returnReason !== returnData.returnReason
+              || existing.reasonType !== returnData.reasonType
+              || existing.returnCloseReason !== returnData.returnCloseReason
+              || existing.buyerComments !== returnData.buyerComments
+              || optionsKey(existing.sellerAvailableOptions) !== optionsKey(returnData.sellerAvailableOptions);
+
+            if (!statusChanged && !refundChanged && !responseDateChanged && !creationDateChanged && !metaChanged) {
+              continue;
+            }
+
+            bulkOps.push({
+              updateOne: {
+                filter: { returnId: ebayReturn.returnId },
+                update: {
+                  $set: {
+                    ...returnData,
+                    notes: existing.notes,
+                  },
+                },
+              },
+            });
+
+            if (statusChanged || refundChanged || responseDateChanged || creationDateChanged) {
+              updatedReturns++;
+              updateDetails.push({
+                returnId: ebayReturn.returnId,
+                orderId: returnData.orderId,
+                changes: {
+                  ...(statusChanged && { status: { from: existing.returnStatus, to: returnData.returnStatus } }),
+                  ...(refundChanged && { refund: { from: existing.refundAmount?.value, to: returnData.refundAmount?.value } }),
+                },
+              });
+            }
+          }
+
+          if (bulkOps.length) {
+            await Return.bulkWrite(bulkOps, { ordered: false });
           }
 
           return {
             sellerName: sellerName,
             newReturns,
             updatedReturns,
-            updateDetails, // Include update details for frontend snackbar
+            updateDetails,
             totalReturns: returns.length
           };
 
@@ -9102,6 +9402,7 @@ async function ebayReturnGet(accessToken, path, { marketplaceId = 'EBAY_US', par
       'X-EBAY-C-MARKETPLACE-ID': marketplaceId || 'EBAY_US',
     },
     params,
+    timeout: 20000,
     validateStatus: () => true,
   });
   if (res.status >= 400) {
@@ -9133,9 +9434,9 @@ async function ebayReturnPost(accessToken, path, { marketplaceId = 'EBAY_US', bo
 }
 
 /**
- * Pull GET /return/{id}, /files, and /tracking (when carrier+number known).
+ * Pull GET /return/{id} (FULL). Extra /files and /tracking only when needed.
  */
-async function enrichReturnFromEbayApis(doc, accessToken) {
+async function enrichReturnFromEbayApis(doc, accessToken, { includeTracking = true, fetchFilesIfMissing = true } = {}) {
   const returnId = doc.returnId;
   const marketplaceId = doc.marketplaceId || 'EBAY_US';
 
@@ -9144,7 +9445,7 @@ async function enrichReturnFromEbayApis(doc, accessToken) {
     detailPayload = await ebayReturnGet(
       accessToken,
       `/post-order/v2/return/${returnId}`,
-      { marketplaceId }
+      { marketplaceId, params: { fieldgroups: 'FULL' } }
     );
   } catch (e) {
     console.warn(`[Return Detail] ${returnId}:`, e.message);
@@ -9211,29 +9512,25 @@ async function enrichReturnFromEbayApis(doc, accessToken) {
     doc.trackingInfo = shipment;
   }
 
-  // Files: dedicated endpoint (and sometimes embedded in detail)
-  let filesPayload = null;
-  try {
-    filesPayload = await ebayReturnGet(
-      accessToken,
-      `/post-order/v2/return/${returnId}/files`,
-      { marketplaceId }
-    );
-  } catch (e) {
-    console.warn(`[Return Files] ${returnId}:`, e.message);
+  let files = sanitizeReturnFiles(detail.files || detailPayload?.files || []);
+  if (fetchFilesIfMissing && !files.length) {
+    try {
+      const filesPayload = await ebayReturnGet(
+        accessToken,
+        `/post-order/v2/return/${returnId}/files`,
+        { marketplaceId }
+      );
+      files = sanitizeReturnFiles(filesPayload?.files || []);
+    } catch (e) {
+      console.warn(`[Return Files] ${returnId}:`, e.message);
+    }
   }
-  const files = sanitizeReturnFiles(
-    filesPayload?.files
-    || detail.files
-    || []
-  );
   doc.files = files;
   doc.filesCount = files.length;
 
-  // Tracking history needs carrier_used + tracking_number query params
   const carrier = doc.carrierUsed;
   const trackingNumber = doc.trackingNumber;
-  if (carrier && trackingNumber) {
+  if (includeTracking && carrier && trackingNumber && !doc.rawTracking) {
     try {
       const trackingPayload = await ebayReturnGet(
         accessToken,
@@ -9299,8 +9596,6 @@ router.post('/enrich-return-details', requireAuth, requirePageAccess('Disputes')
       match.$or = [
         { rawDetail: { $exists: false } },
         { rawDetail: null },
-        { trackingNumber: { $in: [null, ''] } },
-        { filesCount: { $in: [null, 0] } },
       ];
     }
 
@@ -9329,14 +9624,15 @@ router.post('/enrich-return-details', requireAuth, requirePageAccess('Disputes')
     let updated = 0;
     let failed = 0;
     const errors = [];
+    const sellerLimit = pLimit(4);
 
-    for (const [, sellerDocs] of bySeller) {
+    await Promise.all([...bySeller.values()].map((sellerDocs) => sellerLimit(async () => {
       const seller = sellerDocs[0]?.seller;
       const sellerName = seller?.user?.username || String(seller?._id || 'unknown');
       if (!seller?.ebayTokens?.refresh_token && !seller?.ebayTokens?.access_token) {
         failed += sellerDocs.length;
         errors.push(`${sellerName}: no eBay token`);
-        continue;
+        return;
       }
 
       let accessToken;
@@ -9345,22 +9641,26 @@ router.post('/enrich-return-details', requireAuth, requirePageAccess('Disputes')
       } catch (tokenErr) {
         failed += sellerDocs.length;
         errors.push(`${sellerName}: token refresh failed (${tokenErr.message})`);
-        continue;
+        return;
       }
 
-      for (const doc of sellerDocs) {
+      const docLimit = pLimit(4);
+      await Promise.all(sellerDocs.map((doc) => docLimit(async () => {
         try {
-          await enrichReturnFromEbayApis(doc, accessToken);
+          await enrichReturnFromEbayApis(doc, accessToken, {
+            includeTracking: false,
+            fetchFilesIfMissing: false,
+          });
           updated += 1;
         } catch (e) {
           failed += 1;
           errors.push(`${sellerName}/${doc.returnId}: ${e.message}`);
         }
-      }
-    }
+      })));
+    })));
 
     res.json({
-      message: 'Enriched returns via GET /return/{id}, /files, /tracking',
+      message: 'Enriched returns via GET /return/{id} (FULL)',
       checked: docs.length,
       updated,
       failed,
@@ -16697,6 +16997,7 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
         if (status !== 'Active') continue;
 
         const categoryName = item.PrimaryCategory?.[0]?.CategoryName?.[0] || '';
+        const categoryId = item.PrimaryCategory?.[0]?.CategoryID?.[0] || '';
         const rawHtml = item.Description ? item.Description[0] : '';
         const cleanHtml = extractCleanDescription(rawHtml);
         const promotedStatusRaw =
@@ -16741,6 +17042,7 @@ router.post('/sync-all-listings', requireAuth, async (req, res) => {
             listingStatus: status,
             mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
             categoryName: categoryName,
+            ...(categoryId ? { categoryId } : {}),
             descriptionPreview: cleanHtml,
             startTime: item.ListingDetails?.[0]?.StartTime?.[0],
             ...(promoted !== null ? { promoted } : {}),
@@ -17868,82 +18170,263 @@ let _rateLimitCache = null;
 let _rateLimitCacheTime = 0;
 const RATE_LIMIT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+function pickDailyRate(rates = []) {
+  if (!Array.isArray(rates) || !rates.length) return null;
+  return rates.find((rate) => Number(rate.timeWindow) === 86400)
+    || [...rates].sort((a, b) => Number(b.timeWindow || 0) - Number(a.timeWindow || 0))[0];
+}
+
+function parseRateResource(resource) {
+  if (!resource?.name) return null;
+  const daily = pickDailyRate(resource.rates);
+  if (!daily) return null;
+  const limit = Number(daily.limit) || 0;
+  const remaining = daily.remaining == null ? null : Number(daily.remaining);
+  const count = daily.count == null ? null : Number(daily.count);
+  const usedFromPool = remaining == null ? null : Math.max(0, limit - remaining);
+  const used = usedFromPool ?? count ?? 0;
+  const otherWindows = (resource.rates || [])
+    .filter((rate) => Number(rate.timeWindow) > 0 && Number(rate.timeWindow) !== Number(daily.timeWindow))
+    .map((rate) => {
+      const winLimit = Number(rate.limit) || 0;
+      const winRemaining = rate.remaining == null ? null : Number(rate.remaining);
+      const winCount = rate.count == null ? null : Number(rate.count);
+      const winUsed = winRemaining == null ? (winCount ?? 0) : Math.max(0, winLimit - winRemaining);
+      return {
+        timeWindow: Number(rate.timeWindow),
+        limit: winLimit,
+        remaining: winRemaining ?? Math.max(0, winLimit - winUsed),
+        count: winCount ?? winUsed,
+        used: winUsed,
+        reset: rate.reset || null,
+      };
+    })
+    .sort((a, b) => a.timeWindow - b.timeWindow);
+  return {
+    name: resource.name,
+    count: count ?? used,
+    used,
+    limit,
+    remaining: remaining ?? Math.max(0, limit - used),
+    reset: daily.reset || null,
+    timeWindow: Number(daily.timeWindow) || 86400,
+    otherWindows,
+  };
+}
+
+function resourcesSharePool(resources) {
+  if (resources.length <= 1) return true;
+  const keys = new Set(resources.map((row) => `${row.limit}|${row.remaining}|${row.reset || ''}`));
+  return keys.size === 1;
+}
+
+function parseRateLimitPayload(data) {
+  const contexts = [];
+  for (const api of data?.rateLimits || []) {
+    const resources = (api.resources || [])
+      .map(parseRateResource)
+      .filter(Boolean)
+      .sort((a, b) => (b.count - a.count) || (b.used - a.used));
+    if (!resources.length) continue;
+
+    const sharedPool = resourcesSharePool(resources);
+    const totalCalls = resources.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
+    const hottest = resources.reduce((best, row) => {
+      const bestPct = best.limit > 0 ? best.used / best.limit : 0;
+      const rowPct = row.limit > 0 ? row.used / row.limit : 0;
+      return rowPct > bestPct ? row : best;
+    }, resources[0]);
+    const pool = sharedPool ? resources[0] : hottest;
+    const used = sharedPool ? pool.used : hottest.used;
+    const limit = pool.limit || 0;
+    const remaining = sharedPool ? pool.remaining : Math.max(0, limit - hottest.used);
+    const usagePercent = limit > 0 ? Math.round((used / limit) * 100) : 0;
+
+    contexts.push({
+      apiContext: api.apiContext || 'Other',
+      apiName: api.apiName || '',
+      apiVersion: api.apiVersion || '',
+      sharedPool,
+      totalCalls,
+      limit,
+      remaining,
+      reset: pool.reset,
+      used,
+      usagePercent,
+      resources,
+    });
+  }
+  return contexts;
+}
+
+async function fetchAnalyticsJson(accessToken, kind) {
+  const url = kind === 'user'
+    ? 'https://api.ebay.com/developer/analytics/v1_beta/user_rate_limit/'
+    : 'https://api.ebay.com/developer/analytics/v1_beta/rate_limit/';
+  const response = await axios.get(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    timeout: 30000,
+  });
+  return parseRateLimitPayload(response.data);
+}
+
+function resourceKey(ctx, resourceName) {
+  return `${ctx.apiContext || ''}|${ctx.apiName || ''}|${resourceName || ''}`;
+}
+
+function summarizeContext(ctx) {
+  const resources = ctx.resources || [];
+  if (!resources.length) return ctx;
+  const sharedPool = ctx.sharedPool !== false && resourcesSharePool(resources.filter((row) => row.scope !== 'user'));
+  const totalCalls = resources.reduce((sum, row) => sum + (Number(row.count) || 0), 0);
+  const hottest = resources.reduce((best, row) => {
+    const bestPct = best.limit > 0 ? best.used / best.limit : 0;
+    const rowPct = row.limit > 0 ? row.used / row.limit : 0;
+    return rowPct > bestPct ? row : best;
+  }, resources[0]);
+  const userScoped = resources.some((row) => row.scope === 'user' && row.count > 0);
+  const pool = userScoped ? hottest : (sharedPool ? resources[0] : hottest);
+  const used = pool.used || 0;
+  const limit = pool.limit || 0;
+  return {
+    ...ctx,
+    sharedPool: userScoped ? false : sharedPool,
+    quotaScope: userScoped ? 'user' : 'app',
+    totalCalls,
+    used,
+    limit,
+    remaining: pool.remaining ?? Math.max(0, limit - used),
+    reset: pool.reset || ctx.reset,
+    usagePercent: limit > 0 ? Math.round((used / limit) * 100) : 0,
+  };
+}
+
+function mergeUserRateLimits(appContexts, userContextSets) {
+  const totals = new Map();
+  for (const contexts of userContextSets) {
+    for (const ctx of contexts || []) {
+      for (const resource of ctx.resources || []) {
+        const key = resourceKey(ctx, resource.name);
+        const prev = totals.get(key) || {
+          apiContext: ctx.apiContext,
+          apiName: ctx.apiName,
+          apiVersion: ctx.apiVersion,
+          name: resource.name,
+          count: 0,
+          used: 0,
+          limit: resource.limit,
+          remaining: resource.remaining,
+          reset: resource.reset,
+          timeWindow: resource.timeWindow,
+        };
+        prev.count += Number(resource.count) || 0;
+        prev.used += Number(resource.used) || 0;
+        if (resource.limit) prev.limit = resource.limit;
+        if (resource.reset) prev.reset = resource.reset;
+        totals.set(key, prev);
+      }
+    }
+  }
+
+  const merged = appContexts.map((ctx) => {
+    const resources = (ctx.resources || []).map((resource) => {
+      const user = totals.get(resourceKey(ctx, resource.name));
+      totals.delete(resourceKey(ctx, resource.name));
+      if (!user || user.count <= (resource.count || 0)) return resource;
+      return {
+        ...resource,
+        count: user.count,
+        used: user.used,
+        limit: user.limit || resource.limit,
+        remaining: user.remaining,
+        reset: user.reset || resource.reset,
+        scope: 'user',
+      };
+    });
+    return summarizeContext({ ...ctx, resources });
+  });
+
+  const leftoverByContext = new Map();
+  for (const [key, resource] of totals) {
+    if (!resource.count) continue;
+    const ctxKey = `${resource.apiContext}|${resource.apiName}`;
+    if (!leftoverByContext.has(ctxKey)) {
+      leftoverByContext.set(ctxKey, {
+        apiContext: resource.apiContext,
+        apiName: resource.apiName,
+        apiVersion: resource.apiVersion,
+        resources: [],
+      });
+    }
+    leftoverByContext.get(ctxKey).resources.push({
+      name: resource.name,
+      count: resource.count,
+      used: resource.used,
+      limit: resource.limit,
+      remaining: resource.remaining,
+      reset: resource.reset,
+      timeWindow: resource.timeWindow,
+      scope: 'user',
+    });
+  }
+  for (const ctx of leftoverByContext.values()) {
+    merged.push(summarizeContext(ctx));
+  }
+  return merged;
+}
+
+let _userRateLimitCache = null;
+let _userRateLimitCacheTime = 0;
+
+async function aggregateUserRateLimits(sellers, forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && _userRateLimitCache && (now - _userRateLimitCacheTime) < RATE_LIMIT_CACHE_TTL_MS) {
+    return _userRateLimitCache;
+  }
+  const sets = [];
+  const queue = [...sellers];
+  const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+    while (queue.length) {
+      const seller = queue.shift();
+      try {
+        const token = await ensureValidToken(seller);
+        sets.push(await fetchAnalyticsJson(token, 'user'));
+      } catch (err) {
+        console.warn(`[Rate Limits] user limits skipped for ${seller._id}:`, err.message);
+      }
+    }
+  });
+  await Promise.all(workers);
+  _userRateLimitCache = sets;
+  _userRateLimitCacheTime = now;
+  return sets;
+}
+
 async function fetchEbayRateLimits(accessToken, forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && _rateLimitCache && (now - _rateLimitCacheTime) < RATE_LIMIT_CACHE_TTL_MS) {
     console.log('[Rate Limits] Returning cached result');
-    return _rateLimitCache;
+    return { ..._rateLimitCache, cached: true };
   }
 
   try {
-    const response = await axios.get(
-      'https://api.ebay.com/developer/analytics/v1_beta/rate_limit',
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-        }
-      }
-    );
-
-    const rateLimitData = response.data?.rateLimits || [];
-
-    // Build per-context entries, each with their individual resources + call counts.
-    // Note: eBay uses a SHARED pool per context — limit/remaining are the same bucket,
-    // but each resource still reports its own `count` (calls made to that method).
-    const contexts = [];
-    for (const api of rateLimitData) {
-      const ctx = api.apiContext || 'Other';
-      const firstResource = api.resources?.[0];
-      const firstRate = firstResource?.rates?.[0];
-      if (!firstRate) continue;
-
-      const used = (firstRate.limit || 0) - (firstRate.remaining || 0);
-      const usagePercent = firstRate.limit > 0
-        ? Math.round((used / firstRate.limit) * 100)
-        : 0;
-
-      // Per-resource call counts (prefer daily window when multiple rates exist)
-      const resources = (api.resources || [])
-        .map(r => {
-          if (!r?.name) return null;
-          const rate = (r.rates || []).find(rt => rt.timeWindow === 86400) || r.rates?.[0];
-          const count = rate?.count ?? 0;
-          const limit = rate?.limit ?? firstRate.limit ?? 0;
-          const remaining = rate?.remaining ?? firstRate.remaining ?? 0;
-          const resourceUsed = limit > 0 ? Math.max(0, limit - remaining) : count;
-          return {
-            name: r.name,
-            count,
-            used: resourceUsed,
-            limit,
-            remaining,
-          };
-        })
-        .filter(Boolean)
-        .sort((a, b) => (b.count || 0) - (a.count || 0));
-
-      contexts.push({
-        apiContext: ctx,
-        apiName: api.apiName,
-        apiVersion: api.apiVersion,
-        limit: firstRate.limit,
-        remaining: firstRate.remaining,
-        reset: firstRate.reset,
-        used,
-        usagePercent,
-        resources
-      });
-    }
-
-    const result = { success: true, rateLimits: contexts, fetchedAt: new Date().toISOString() };
+    const contexts = await fetchAnalyticsJson(accessToken, 'app');
+    const result = {
+      success: true,
+      rateLimits: contexts,
+      fetchedAt: new Date().toISOString(),
+      cached: false,
+    };
     _rateLimitCache = result;
     _rateLimitCacheTime = now;
     return result;
   } catch (err) {
     console.error('[Rate Limits] Error fetching from eBay:', err.message);
-    return { success: false, error: err.message, rateLimits: [] };
+    return { success: false, error: err.message, rateLimits: [], cached: false };
   }
 }
 
@@ -18011,11 +18494,25 @@ router.get('/api-usage-stats/all', requireAuth, async (req, res) => {
 
     if (!stats) stats = { success: false, error: 'No valid seller token found', rateLimits: [] };
 
+    if (stats.success) {
+      try {
+        const userSets = await aggregateUserRateLimits(sellers, forceRefresh);
+        stats = {
+          ...stats,
+          rateLimits: mergeUserRateLimits(stats.rateLimits || [], userSets),
+          cached: Boolean(stats.cached) && !forceRefresh,
+        };
+      } catch (err) {
+        console.warn('[API Usage All] user rate limits merge failed:', err.message);
+      }
+    }
+
     res.json({
       success: stats.success,
       rateLimits: stats.rateLimits,
       fetchedAt: stats.fetchedAt || null,
-      cached: !forceRefresh,
+      cached: Boolean(stats.cached),
+      error: stats.error,
       sellers: sellers.map(s => ({
         _id: s._id,
         name: s.user?.username || s.user?.email || 'Unknown'
@@ -23497,7 +23994,7 @@ router.get('/account/privileges/all', requireAuth, requirePageAccess('StoreOverv
   }
 });
 
-async function getEbayClientCredentialsToken(scope = 'https://api.ebay.com/oauth/api_scope') {
+export async function getEbayClientCredentialsToken(scope = 'https://api.ebay.com/oauth/api_scope') {
   const response = await axios.post(
     'https://api.ebay.com/identity/v1/oauth2/token',
     qs.stringify({ grant_type: 'client_credentials', scope }),
@@ -25729,7 +26226,7 @@ router.get('/finances/transaction-summary', requireAuth, requirePageAccess('Fina
       transactionId: req.query.transactionId,
     });
 
-    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction_summary', {
+    const response = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/transaction_summary', {
       headers: financesApiHeaders(accessToken, marketplaceId),
       params: { filter: filters },
       paramsSerializer: (params) => qs.stringify(params, { arrayFormat: 'repeat' }),
@@ -25874,7 +26371,7 @@ async function fetchFinancesPayoutById(accessToken, marketplaceId, payoutId) {
   const pid = String(payoutId || '').trim();
   if (!pid) return null;
   try {
-    const response = await axios.get(`https://apiz.ebay.com/sell/finances/v1/payout/${pid}`, {
+    const response = await financesAxiosGet(`https://apiz.ebay.com/sell/finances/v1/payout/${pid}`, {
       headers: financesApiHeaders(accessToken, normalizeFinancesMarketplaceId(marketplaceId)),
       timeout: 30000,
     });
@@ -25986,7 +26483,7 @@ async function fetchFinancesPayoutsInRange(accessToken, marketplaceId, {
   while (hasMore && all.length < maxPayouts) {
     const params = { sort: '-payoutDate', limit, offset };
     if (filters.length) params.filter = filters;
-    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
+    const response = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/payout', {
       headers: financesApiHeaders(accessToken, mp),
       params,
       paramsSerializer: (p) => qs.stringify(p, { arrayFormat: 'repeat' }),
@@ -26101,7 +26598,7 @@ async function fetchFinancesTransactionsForSellerMarketplace(accessToken, market
   if (filters.length) params.filter = filters;
   if (effectiveQuery.sort) params.sort = String(effectiveQuery.sort);
 
-  const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+  const response = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/transaction', {
     headers: financesApiHeaders(accessToken, marketplaceId),
     params,
     paramsSerializer: (p) => qs.stringify(p, { arrayFormat: 'repeat' }),
@@ -29159,7 +29656,7 @@ async function fetchSellerFundsSummaryRow(seller) {
   const sellerName = seller.user?.username || seller._id.toString();
   try {
     const accessToken = await ensureValidToken(seller);
-    const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/seller_funds_summary', {
+    const response = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/seller_funds_summary', {
       headers: financesApiHeaders(accessToken, 'EBAY_US'),
       timeout: 30000,
     });
@@ -29602,7 +30099,7 @@ router.get('/available-transactions/:sellerId', requireAuth, requirePageAccess('
       } else {
         params.filter = `transactionDate:[${fromIso}..${nowIso}]`;
       }
-      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+      const response = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/transaction', {
         headers: financesApiHeaders(accessToken, marketplaceId),
         params
       });
@@ -29765,7 +30262,7 @@ router.get('/upcoming-payouts/:sellerId', requireAuth, requirePageAccess('Seller
     const marketplaceId = resolvePrimaryFinancesMarketplaceId(seller, req.query.marketplace);
 
     // Fetch upcoming and recent payouts
-    const payoutsRes = await axios.get('https://apiz.ebay.com/sell/finances/v1/payout', {
+    const payoutsRes = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/payout', {
       headers: financesApiHeaders(accessToken, marketplaceId),
       params: {
         sort: '-payoutDate',
@@ -29874,7 +30371,7 @@ router.get('/payout-transactions/:sellerId/:payoutId', requireAuth, requirePageA
     let hasMore = true;
 
     while (hasMore) {
-      const response = await axios.get('https://apiz.ebay.com/sell/finances/v1/transaction', {
+      const response = await financesAxiosGet('https://apiz.ebay.com/sell/finances/v1/transaction', {
         headers: financesApiHeaders(accessToken, marketplaceId),
         params: {
           filter: `payoutId:{${payoutId}}`,
@@ -30644,6 +31141,9 @@ async function paginateGetSellerListForActiveListings({
       const categoryName = firstXmlTextNode(item.PrimaryCategory?.[0]?.CategoryName)
         || firstXmlTextNode(item.PrimaryCategory?.CategoryName)
         || '';
+      const categoryId = firstXmlTextNode(item.PrimaryCategory?.[0]?.CategoryID)
+        || firstXmlTextNode(item.PrimaryCategory?.CategoryID)
+        || '';
 
       // Persist ended/completed rows too — free-listing usage needs "relist then ended" inserts.
       if (!/^active$/i.test(status)) {
@@ -30662,6 +31162,7 @@ async function paginateGetSellerListForActiveListings({
                 listingStatus: endedStatus,
                 mainImageUrl,
                 categoryName,
+                ...(categoryId ? { categoryId } : {}),
                 ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
                 endTime: endTimeRaw || new Date(),
               },
@@ -30701,6 +31202,7 @@ async function paginateGetSellerListForActiveListings({
               listingStatus: 'Active',
               mainImageUrl,
               categoryName,
+              ...(categoryId ? { categoryId } : {}),
               ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
               ...(endTimeRaw ? { endTime: endTimeRaw } : {}),
             },
@@ -30723,6 +31225,7 @@ async function paginateGetSellerListForActiveListings({
                 listingStatus: 'Active',
                 mainImageUrl,
                 categoryName,
+                ...(categoryId ? { categoryId } : {}),
                 ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
                 ...(endTimeRaw ? { endTime: endTimeRaw } : {}),
               },

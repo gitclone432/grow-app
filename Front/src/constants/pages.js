@@ -45,6 +45,7 @@ export const PAGE_REGISTRY = [
   { id: 'StoreListings', name: 'Store Listings', path: '/store-listings', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ListingRecommendations', name: 'Listing Recommendations', path: '/listing-recommendations', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'SendOfferEligible', name: 'Send Offer Eligible', path: '/send-offer-eligible', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'NegotiatedPricePolicies', name: 'Negotiated Price Policies', path: '/negotiated-price-policies', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'SellingSummary', name: 'Selling Summary', path: '/selling-summary', category: 'storeListings', defaultRoles: ['superadmin', 'listingadmin'] },
 
   // ====== ORDER FULFILMENT ======
