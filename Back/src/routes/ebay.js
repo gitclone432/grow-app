@@ -11012,12 +11012,20 @@ router.patch('/cancellations/:cancelId/remark', requireAuth, requirePageAccess('
 
 router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
-    const { sellerId, status, state, startDate, endDate, sortBy, sortDir } = req.query;
+    const { sellerId, status, state, orderId, startDate, endDate, sortBy, sortDir } = req.query;
     const query = {};
 
     if (sellerId) query.seller = sellerId;
     if (status) query.cancelStatus = status;
     if (state) query.cancelState = state;
+    
+    // Order ID filter - search both orderId and legacyOrderId fields
+    if (orderId) {
+      query.$or = [
+        { orderId: new RegExp(orderId, 'i') },
+        { legacyOrderId: new RegExp(orderId, 'i') }
+      ];
+    }
 
     // Date range filter on cancelRequestDate using PT timezone-aware parsing
     // IMPORTANT: Filter by Cancellation's cancelRequestDate (when cancellation was requested), NOT Order's transaction date
@@ -11111,7 +11119,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
 // Get stored returns from database
 
 router.get('/stored-returns', async (req, res) => {
-  const { sellerId, status, reason, startDate, endDate, urgentOnly, page = 1, limit = 50 } = req.query;
+  const { sellerId, status, reason, orderId, startDate, endDate, urgentOnly, page = 1, limit = 50 } = req.query;
 
   try {
     let query = {};
@@ -11125,6 +11133,11 @@ router.get('/stored-returns', async (req, res) => {
       } else if (reasons.length > 1) {
         query.returnReason = { $in: reasons };
       }
+    }
+    
+    // Order ID filter - search orderId field
+    if (orderId) {
+      query.orderId = new RegExp(orderId, 'i');
     }
 
     // Date range filter on creationDate using PT timezone-aware parsing

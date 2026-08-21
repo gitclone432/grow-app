@@ -375,6 +375,7 @@ export default function ReturnPostOrderPage({
   const [sellers, setSellers] = useState([]);
   const [sellerFilter, setSellerFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [orderIdFilter, setOrderIdFilter] = useState('');
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -454,11 +455,11 @@ export default function ReturnPostOrderPage({
 
   useEffect(() => {
     loadStored();
-  }, [dateFilter, sellerFilter, statusFilter, page]);
+  }, [dateFilter, sellerFilter, statusFilter, orderIdFilter, page]);
 
   useEffect(() => {
     setPage(1);
-  }, [dateFilter.mode, dateFilter.single, dateFilter.from, dateFilter.to, sellerFilter, statusFilter]);
+  }, [dateFilter.mode, dateFilter.single, dateFilter.from, dateFilter.to, sellerFilter, statusFilter, orderIdFilter]);
 
   async function loadStored() {
     setLoading(true);
@@ -467,6 +468,7 @@ export default function ReturnPostOrderPage({
       const params = { page, limit };
       if (sellerFilter) params.sellerId = sellerFilter;
       if (statusFilter) params.status = statusFilter;
+      if (orderIdFilter) params.orderId = orderIdFilter;
       if (dateFilter.mode === 'single' && dateFilter.single) {
         params.startDate = dateFilter.single;
         params.endDate = dateFilter.single;
@@ -1151,6 +1153,14 @@ export default function ReturnPostOrderPage({
               <MenuItem value="CLOSED">CLOSED</MenuItem>
             </Select>
           </FormControl>
+
+          <TextField
+            size="small"
+            placeholder="Order ID"
+            value={orderIdFilter}
+            onChange={(e) => setOrderIdFilter(e.target.value)}
+            sx={{ minWidth: 140 }}
+          />
 
           <Button
             size="small"
