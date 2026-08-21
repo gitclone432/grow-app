@@ -4498,4 +4498,86 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
   }
 });
 
+/**
+ * Get all issues/cases associated with an order (Returns, INR Cases, Cancellations)
+ * Used to show a badge in Buyer Messages indicating if order has open cases
+ */
+router.get('/order-issues/:orderId', requireAuth, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    if (!orderId) {
+      return res.status(400).json({ error: 'Order ID required' });
+    }
+
+    // Search for issues in parallel
+    const [returns, inrCases, cancellations] = await Promise.all([
+      Return.findOne({ orderId: String(orderId) })
+        .select('returnId returnStatus')
+        .lean(),
+      Case.findOne({ orderId: String(orderId) })
+        .select('caseId status caseType')
+        .lean(),
+      Cancellation.findOne({ orderId: String(orderId) })
+        .select('cancelId cancelStatus cancelState')
+        .lean()
+    ]);
+
+    // Compile issues - prioritize by severity
+    const issues = [];
+
+    if (inrCases) {
+      const caseType = inrCases.caseType || 'INR';
+      const status = inrCases.status || 'Unknown';
+      const isClosed = String(status).toUpperCase() === 'CLOSED' || String(status).includes('CLOSED');
+      issues.push({
+        type: caseType,
+        status: status,
+        id: inrCases.caseId,
+        isClosed: isClosed,
+        severity: 'high'
+      });
+    }
+
+    if (returns) {
+      const status = returns.returnStatus || 'Unknown';
+      const isClosed = String(status).toUpperCase() === 'CLOSED';
+      issues.push({
+        type: 'Return',
+        status: status,
+        id: returns.returnId,
+        isClosed: isClosed,
+        severity: 'high'
+      });
+    }
+
+    if (cancellations) {
+      const status = cancellations.cancelStatus || 'Unknown';
+      const isClosed = String(status).toUpperCase().includes('CLOSED');
+      issues.push({
+        type: 'Cancellation',
+        status: status,
+        id: cancellations.cancelId,
+        isClosed: isClosed,
+        severity: 'medium'
+      });
+    }
+
+    // Sort by severity
+    issues.sort((a, b) => {
+      const severityMap = { high: 0, medium: 1, low: 2 };
+      return (severityMap[a.severity] || 3) - (severityMap[b.severity] || 3);
+    });
+
+    res.json({
+      orderId: String(orderId),
+      hasIssues: issues.length > 0,
+      issues: issues,
+      primaryIssue: issues.length > 0 ? issues[0] : null
+    });
+  } catch (error) {
+    console.error('Error fetching order issues:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch order issues' });
+  }
+});
+
 export default router;

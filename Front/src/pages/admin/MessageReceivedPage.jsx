@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   Box,
   Paper,
@@ -33,6 +33,52 @@ import CancelIcon from '@mui/icons-material/Cancel';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import api from '../../lib/api';
 
+/**
+ * Component to display an issue status badge/chip for an order
+ * Shows the type of issue (INR, Return, Cancellation) with color coding
+ */
+function IssueStatusChip({ issue }) {
+  if (!issue) return null;
+
+  const getChipColor = () => {
+    if (issue.isClosed) return 'default';
+    
+    switch (issue.type?.toLowerCase()) {
+      case 'inr':
+      case 'case':
+        return 'error'; // Red for open INR cases
+      case 'return':
+        return 'warning'; // Orange for open returns
+      case 'cancellation':
+        return 'info'; // Blue for cancellations
+      default:
+        return 'default';
+    }
+  };
+
+  const getChipLabel = () => {
+    const type = issue.type?.substring(0, 3).toUpperCase() || 'ISSUE';
+    const status = issue.isClosed ? '✓' : '●';
+    return `${status} ${type}`;
+  };
+
+  return (
+    <Tooltip title={`${issue.type} - ${issue.status}`}>
+      <Chip
+        label={getChipLabel()}
+        size="small"
+        color={getChipColor()}
+        variant="outlined"
+        sx={{
+          height: 20,
+          fontSize: '0.7rem',
+          fontWeight: 'bold'
+        }}
+      />
+    </Tooltip>
+  );
+}
+
 export default function MessageReceivedPage() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -40,6 +86,9 @@ export default function MessageReceivedPage() {
   const [error, setError] = useState('');
   const [snackbarMsg, setSnackbarMsg] = useState('');
   const [resolvedFilter, setResolvedFilter] = useState('false'); // Show unresolved by default
+  const [orderIssuesCache, setOrderIssuesCache] = useState({});
+  const [loadingIssueIds, setLoadingIssueIds] = useState(new Set());
+  const fetchedOrderIds = useRef(new Set()); // Track which orders we've already fetched
 
   // Dialog state
   const [selectedMessage, setSelectedMessage] = useState(null);
@@ -59,6 +108,7 @@ export default function MessageReceivedPage() {
       const res = await api.get('/ebay/stored-messages', { params });
       const messageData = res.data.messages || [];
       console.log(`Loaded ${messageData.length} messages from database`);
+      console.log('Message data sample:', messageData.slice(0, 2).map(m => ({ orderId: m.orderId, seller: m.seller?.username })));
       setMessages(messageData);
     } catch (e) {
       console.error('Failed to load messages:', e);
@@ -115,6 +165,77 @@ export default function MessageReceivedPage() {
       setError(e.response?.data?.error || e.message);
     }
   }
+
+  const fetchOrderIssues = async (orderId) => {
+    console.log(`[IssuesBadge] fetchOrderIssues called for: ${orderId}`);
+    
+    if (!orderId) {
+      console.log('[IssuesBadge] No orderId provided');
+      return;
+    }
+    
+    if (fetchedOrderIds.current.has(orderId)) {
+      console.log(`[IssuesBadge] Order ${orderId} already fetched, skipping`);
+      return;
+    }
+
+    // Mark as fetching
+    fetchedOrderIds.current.add(orderId);
+    setLoadingIssueIds(prev => new Set(prev).add(orderId));
+    console.log(`[IssuesBadge] Making API call for order: ${orderId}`);
+
+    try {
+      const res = await api.get(`/orders/order-issues/${orderId}`);
+      console.log(`[IssuesBadge] API Response for ${orderId}:`, res.data);
+      
+      setOrderIssuesCache(prev => {
+        console.log(`[IssuesBadge] Updating cache for ${orderId}, hasIssues: ${res.data.hasIssues}`);
+        return {
+          ...prev,
+          [orderId]: res.data
+        };
+      });
+    } catch (e) {
+      console.error(`[IssuesBadge] Failed to fetch issues for order ${orderId}:`, e.message);
+      // Cache empty result to avoid retrying
+      setOrderIssuesCache(prev => ({
+        ...prev,
+        [orderId]: { hasIssues: false, issues: [], primaryIssue: null }
+      }));
+    } finally {
+      setLoadingIssueIds(prev => {
+        const next = new Set(prev);
+        next.delete(orderId);
+        return next;
+      });
+    }
+  };
+
+  // Fetch issues for all messages when they load
+  useEffect(() => {
+    console.log('[IssuesBadge] useEffect triggered, messages count:', messages?.length);
+    
+    if (!messages || messages.length === 0) {
+      console.log('[IssuesBadge] No messages to process');
+      return;
+    }
+
+    const orderIds = messages
+      .map(msg => msg.orderId)
+      .filter(Boolean)
+      .filter(orderId => !fetchedOrderIds.current.has(orderId));
+    
+    console.log('[IssuesBadge] Extracted order IDs:', orderIds);
+    console.log('[IssuesBadge] Already fetched:', Array.from(fetchedOrderIds.current));
+    
+    if (orderIds.length === 0) {
+      console.log('[IssuesBadge] All orders already fetched or no order IDs found');
+      return;
+    }
+    
+    console.log('[IssuesBadge] Fetching issues for order IDs:', orderIds);
+    orderIds.forEach(fetchOrderIssues);
+  }, [messages]);
 
   const handleCopy = (text) => {
     const val = text || '-';
@@ -262,7 +383,15 @@ export default function MessageReceivedPage() {
                       </Stack>
                     </TableCell>
                     <TableCell>
-                      <Typography variant="body2">{msg.seller?.username || '-'}</Typography>
+                      <Stack direction="row" alignItems="center" spacing={1}>
+                        <Typography variant="body2">{msg.seller?.username || '-'}</Typography>
+                        {msg.orderId && orderIssuesCache[msg.orderId] && orderIssuesCache[msg.orderId].hasIssues && (
+                          <IssueStatusChip issue={orderIssuesCache[msg.orderId].primaryIssue} />
+                        )}
+                        {msg.orderId && loadingIssueIds.has(msg.orderId) && (
+                          <CircularProgress size={16} />
+                        )}
+                      </Stack>
                     </TableCell>
                     <TableCell>
                       <Typography variant="body2">{msg.buyerUsername || '-'}</Typography>

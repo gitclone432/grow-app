@@ -372,6 +372,13 @@ const createEmptyDateFilter = () => ({
   to: ''
 });
 
+// Helper function to get order board categories (handles both singular and plural forms)
+const getOrderBoardCategories = (order) => (
+  Array.isArray(order?.complianceBoardCategories)
+    ? order.complianceBoardCategories
+    : (order?.complianceBoardCategory ? [order.complianceBoardCategory] : [])
+);
+
 function ComplianceBoardPage() {
   const [snackbar, setSnackbar] = useState({ open: false, message: '' });
   const [selectedCategory, setSelectedCategory] = useState('order_fulfillment');
@@ -1235,11 +1242,6 @@ function ComplianceBoardPage() {
         }
       });
 
-      const getOrderBoardCategories = (order) => (
-        Array.isArray(order?.complianceBoardCategories)
-          ? order.complianceBoardCategories
-          : (order?.complianceBoardCategory ? [order.complianceBoardCategory] : [])
-      );
       const isReturnConversationOrder = (order) => {
         const conversationCategory = order?.conversationInfo?.category;
         return (

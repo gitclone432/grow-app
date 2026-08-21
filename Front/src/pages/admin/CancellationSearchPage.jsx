@@ -232,6 +232,7 @@ export default function CancellationSearchPage({
   const [sellerFilter, setSellerFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [stateFilter, setStateFilter] = useState('');
+  const [orderIdFilter, setOrderIdFilter] = useState('');
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -297,11 +298,11 @@ export default function CancellationSearchPage({
 
   useEffect(() => {
     loadStored();
-  }, [dateFilter, sellerFilter, statusFilter, stateFilter, page, sortBy, sortDir]);
+  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, page, sortBy, sortDir]);
 
   useEffect(() => {
     setPage(1);
-  }, [dateFilter, sellerFilter, statusFilter, stateFilter, sortBy, sortDir]);
+  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, sortBy, sortDir]);
 
   async function loadStored() {
     setLoading(true);
@@ -316,6 +317,7 @@ export default function CancellationSearchPage({
       if (sellerFilter) params.sellerId = sellerFilter;
       if (statusFilter) params.status = statusFilter;
       if (stateFilter) params.state = stateFilter;
+      if (orderIdFilter) params.orderId = orderIdFilter;
 
       if (dateFilter.mode === 'single' && dateFilter.single) {
         params.startDate = dateFilter.single;
@@ -858,6 +860,14 @@ export default function CancellationSearchPage({
               <MenuItem value="APPROVAL_PENDING">APPROVAL_PENDING</MenuItem>
             </Select>
           </FormControl>
+
+          <TextField
+            size="small"
+            placeholder="Order ID"
+            value={orderIdFilter}
+            onChange={(e) => setOrderIdFilter(e.target.value)}
+            sx={{ minWidth: 140 }}
+          />
 
           <Button
             size="small"
