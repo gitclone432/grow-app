@@ -133,6 +133,62 @@ import {
 const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
 
+async function enrichINRRowsWithOrderNotesAndRemark(rows = []) {
+  const orderIds = [...new Set(
+    rows
+      .map((row) => row?.orderId)
+      .filter(Boolean)
+      .map(String)
+  )];
+
+  if (orderIds.length === 0) return rows;
+
+  try {
+    // Query Order by BOTH orderId AND legacyOrderId since Case might store either
+    // This matches the pattern used in lookupItemIdFromOrder and lookupRestOrderId
+    const orders = await Order.find(
+      { $or: [
+        { orderId: { $in: orderIds } },
+        { legacyOrderId: { $in: orderIds } }
+      ]},
+      { orderId: 1, legacyOrderId: 1, notes: 1, fulfillmentNotes: 1, remark: 1 }
+    )
+      .lean();
+
+    const orderDataByOrderId = new Map();
+    orders.forEach((order) => {
+      const orderNotesAndRemark = {
+        fulfillmentNotes: order.fulfillmentNotes || order.notes || '',
+        remark: order.remark || '',
+      };
+      // Map by orderId
+      if (order.orderId) {
+        orderDataByOrderId.set(String(order.orderId), orderNotesAndRemark);
+      }
+      // Also map by legacyOrderId if different
+      if (order.legacyOrderId && String(order.legacyOrderId) !== String(order.orderId)) {
+        orderDataByOrderId.set(String(order.legacyOrderId), orderNotesAndRemark);
+      }
+    });
+
+    return rows.map((row) => {
+      const orderData = orderDataByOrderId.get(String(row?.orderId || ''));
+      if (!orderData) return row;
+
+      return {
+        ...row,
+        // Prioritize Order fulfillment data (from fulfillment dashboard) over Case/CaseManagement/PaymentDispute data
+        // This ensures notes and remark are consistent and come from the authoritative source
+        fulfillmentNotes: orderData.fulfillmentNotes || row.fulfillmentNotes,
+        remark: orderData.remark || row.remark,
+      };
+    });
+  } catch (err) {
+    console.warn('[Enrich INR Notes/Remark] Error:', err.message);
+    return rows; // Return rows unmodified if enrichment fails
+  }
+}
+
 async function enrichCaseLikeRowsWithConversationMeta(rows = []) {
   const orderIds = [...new Set(
     rows
@@ -11885,7 +11941,13 @@ router.get('/stored-inr-cases', async (req, res) => {
     };
     if (sellerId) query.seller = sellerId;
     if (status) query.status = status;
-    if (caseType) query.caseType = caseType;
+    // If caseType is explicitly provided in params, use it; otherwise default to Inquiry types only (exclude Case Management)
+    if (caseType) {
+      query.caseType = caseType;
+    } else {
+      // Default: Only show Inquiry-type cases (INR, SNAD, OTHER) - exclude Case Management
+      query.caseType = { $in: ['INR', 'SNAD', 'OTHER'] };
+    }
     if (marketplace) {
       const sellerIdsForMarket = await Seller.find({ ebayMarketplaces: marketplace }).distinct('_id');
       query.$or = [
@@ -11933,9 +11995,10 @@ router.get('/stored-inr-cases', async (req, res) => {
 
     const withAddress = await attachShippingAddressToRows(enriched);
     const enrichedWithMeta = await enrichCaseLikeRowsWithConversationMeta(withAddress);
+    const enrichedWithOrderData = await enrichINRRowsWithOrderNotesAndRemark(enrichedWithMeta);
     res.json({
-      cases: enrichedWithMeta.map((row) => withParsedTracking(row)),
-      totalCases: enrichedWithMeta.length,
+      cases: enrichedWithOrderData.map((row) => withParsedTracking(row)),
+      totalCases: enrichedWithOrderData.length,
       totalCount,
     });
   } catch (err) {
@@ -12552,9 +12615,10 @@ router.get('/stored-case-management', requireAuth, requirePageAccess('Disputes')
     );
 
     const withAddress = await attachShippingAddressToRows(withOrderIds);
+    const enrichedWithOrderData = await enrichINRRowsWithOrderNotesAndRemark(withAddress);
     res.json({
-      cases: withAddress.map((row) => withParsedTracking(row)),
-      totalCases: withAddress.length,
+      cases: enrichedWithOrderData.map((row) => withParsedTracking(row)),
+      totalCases: enrichedWithOrderData.length,
       totalCount: await CaseManagement.countDocuments(query),
     });
   } catch (err) {
@@ -13187,7 +13251,8 @@ router.get('/stored-payment-disputes', async (req, res) => {
     );
 
     const withAddress = await attachShippingAddressToRows(rows);
-    res.json({ disputes: withAddress.map((row) => withParsedTracking(row)), totalDisputes: withAddress.length, totalCount });
+    const enrichedWithOrderData = await enrichINRRowsWithOrderNotesAndRemark(withAddress);
+    res.json({ disputes: enrichedWithOrderData.map((row) => withParsedTracking(row)), totalDisputes: enrichedWithOrderData.length, totalCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -13351,6 +13416,89 @@ router.patch('/payment-dispute/:paymentDisputeId/notes', requireAuth, requirePag
   } catch (err) {
     console.error('[Payment Dispute Notes] Error:', err);
     res.status(500).json({ error: err.message || 'Failed to save notes' });
+  }
+});
+
+// ==================== REMARK ENDPOINTS ====================
+
+// PATCH /ebay/inquiry/{inquiryId}/remark - Save remark on INR inquiry case
+router.patch('/inquiry/:inquiryId/remark', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const inquiryId = String(req.params.inquiryId || '').trim();
+    const { remark } = req.body;
+
+    if (!inquiryId) {
+      return res.status(400).json({ error: 'Inquiry ID is required' });
+    }
+
+    const updated = await Case.findOneAndUpdate(
+      { caseId: inquiryId },
+      { remark: remark || '' },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Inquiry case not found' });
+    }
+
+    res.json({ message: 'Remark saved successfully', remark: updated.remark });
+  } catch (err) {
+    console.error('[Inquiry Remark] Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to save remark' });
+  }
+});
+
+// PATCH /ebay/case-management/{caseId}/remark - Save remark on case management case
+router.patch('/case-management/:caseId/remark', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const caseId = String(req.params.caseId || '').trim();
+    const { remark } = req.body;
+
+    if (!caseId) {
+      return res.status(400).json({ error: 'Case ID is required' });
+    }
+
+    const updated = await CaseManagement.findOneAndUpdate(
+      { caseId: caseId },
+      { remark: remark || '' },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Case Management case not found' });
+    }
+
+    res.json({ message: 'Remark saved successfully', remark: updated.remark });
+  } catch (err) {
+    console.error('[Case Management Remark] Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to save remark' });
+  }
+});
+
+// PATCH /ebay/payment-dispute/{paymentDisputeId}/remark - Save remark on payment dispute
+router.patch('/payment-dispute/:paymentDisputeId/remark', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
+  try {
+    const paymentDisputeId = String(req.params.paymentDisputeId || '').trim();
+    const { remark } = req.body;
+
+    if (!paymentDisputeId) {
+      return res.status(400).json({ error: 'Payment Dispute ID is required' });
+    }
+
+    const updated = await PaymentDispute.findOneAndUpdate(
+      { paymentDisputeId: paymentDisputeId },
+      { remark: remark || '' },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Payment dispute not found' });
+    }
+
+    res.json({ message: 'Remark saved successfully', remark: updated.remark });
+  } catch (err) {
+    console.error('[Payment Dispute Remark] Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to save remark' });
   }
 });
 

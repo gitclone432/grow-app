@@ -33,6 +33,8 @@ const CaseManagementSchema = new mongoose.Schema({
   },
   rawData: Object,
   notes: { type: String, default: '' },
+  // Remark field for fulfillment status updates
+  remark: { type: String, default: '' },
 }, { timestamps: true });
 
 CaseManagementSchema.index({ seller: 1, status: 1 });

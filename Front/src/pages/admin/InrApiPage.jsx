@@ -48,6 +48,10 @@ import {
   yellowOutlinedButtonSx,
 } from '../../theme/tableStyles.js';
 import { sortSellersByName } from '../../lib/sellersSort.js';
+import {
+  loadRemarkTemplates,
+  remarkOptionsFromTemplates,
+} from '../../constants/remarkTemplates';
 import ChatModal from '../../components/ChatModal';
 
 const headerSx = {
@@ -168,6 +172,49 @@ const NotesCell = React.memo(function NotesCell({ row, onSave, onNotify }) {
   );
 });
 
+/**
+ * AutoSaveSelect component for remark dropdown with templates
+ */
+const AutoSaveSelect = React.memo(function AutoSaveSelect({ value, options, onSave, manageLabel = 'Manage Templates' }) {
+  const [localValue, setLocalValue] = React.useState(value || '');
+
+  React.useEffect(() => {
+    setLocalValue(value || '');
+  }, [value]);
+
+  const handleChange = (e) => {
+    const newVal = e.target.value;
+    setLocalValue(newVal);
+    onSave(newVal); // Auto-save immediately on selection
+  };
+
+  return (
+    <Select
+      value={localValue}
+      onChange={handleChange}
+      displayEmpty
+      size="small"
+      sx={{
+        backgroundColor: '#fff',
+        borderRadius: 1,
+        minWidth: 130,
+        height: 32,
+        fontSize: '0.85rem',
+        '& .MuiSelect-select': { py: 0.5, px: 1 }
+      }}
+    >
+      <MenuItem value="">
+        <em style={{ color: '#aaa' }}>- Select -</em>
+      </MenuItem>
+      {options.map((opt) => (
+        <MenuItem key={opt._id || opt.name} value={opt.name}>
+          {opt.name}
+        </MenuItem>
+      ))}
+    </Select>
+  );
+});
+
 const SORT_COLUMNS = [
   { id: 'seller', label: 'Seller' },
   { id: 'created', label: 'Created (PT)' },
@@ -181,7 +228,8 @@ const SORT_COLUMNS = [
   { id: 'outcome', label: 'Outcome' },
   { id: 'shippingAddress', label: 'Ship to' },
   { id: 'trackingNumber', label: 'Shipment' },
-  { id: 'notes', label: 'Notes' },
+  { id: 'notes', label: 'Fulfillment Notes' },
+  { id: 'remark', label: 'Remark' },
 ];
 
 const NUMERIC_SORT_COLUMNS = new Set(['claim', 'created', 'responseDue', 'estimateFrom']);
@@ -1606,6 +1654,7 @@ export default function InrApiPage({
     open: false, row: null, comments: '',
   });
   const [selectedCase, setSelectedCase] = useState(null);
+  const [remarkTemplates, setRemarkTemplates] = useState([]);
 
   const rows = useMemo(() => {
     const combined = [
@@ -1674,9 +1723,27 @@ export default function InrApiPage({
       .catch(() => setSellers([]));
   }, []);
 
+  // Load remark templates on mount
+  useEffect(() => {
+    loadRemarkTemplates()
+      .then((templates) => setRemarkTemplates(templates))
+      .catch((err) => console.warn('Failed to load remark templates:', err));
+  }, []);
+
   useEffect(() => {
     loadStored();
   }, [sellerFilter]);
+
+  // Helper function to normalize row data from backend
+  function normalizeRowData(rows) {
+    return (rows || []).map(row => ({
+      ...row,
+      // Prioritize fulfillmentNotes from Order model (fulfillment dashboard source)
+      notes: row.fulfillmentNotes || row.notes || '',
+      // Use remark from Order model (fulfillment dashboard source)
+      remark: row.remark || '',
+    }));
+  }
 
   async function loadStored() {
     setLoading(true);
@@ -1692,13 +1759,13 @@ export default function InrApiPage({
     ]);
     const errors = [];
     if (inqRes.status === 'fulfilled') {
-      setInquiries(Array.isArray(inqRes.value.data?.cases) ? inqRes.value.data.cases : []);
+      setInquiries(normalizeRowData(Array.isArray(inqRes.value.data?.cases) ? inqRes.value.data.cases : []));
     } else {
       setInquiries([]);
       errors.push(inqRes.reason?.response?.data?.error || inqRes.reason?.message || 'Inquiry load failed');
     }
     if (caseRes.status === 'fulfilled') {
-      setCases(Array.isArray(caseRes.value.data?.cases) ? caseRes.value.data.cases : []);
+      setCases(normalizeRowData(Array.isArray(caseRes.value.data?.cases) ? caseRes.value.data.cases : []));
     } else {
       setCases([]);
       errors.push(caseRes.reason?.response?.data?.error || caseRes.reason?.message || 'Case management load failed');
@@ -1849,28 +1916,23 @@ export default function InrApiPage({
       const row = rows.find((r) => r.caseId === caseId);
       if (!row) throw new Error('Row not found');
 
-      let endpoint = '';
-      if (row.source === 'inquiry') {
-        endpoint = `/ebay/inquiry/${encodeURIComponent(caseId)}/notes`;
-      } else if (row.source === 'case') {
-        endpoint = `/ebay/case-management/${encodeURIComponent(caseId)}/notes`;
-      } else if (row.source === 'dispute') {
-        endpoint = `/ebay/payment-dispute/${encodeURIComponent(caseId)}/notes`;
-      }
+      // Save to Order model instead of Case/CaseManagement/PaymentDispute
+      // This ensures notes are stored in the authoritative source (fulfillment dashboard)
+      if (!row.orderId) throw new Error('Order ID not found');
 
-      await api.patch(endpoint, { notes });
+      // Use the Order endpoint to save fulfillmentNotes
+      await api.patch(`/ebay/orders/${row.orderId}/manual-fields`, { fulfillmentNotes: notes });
 
-      // Update local state
-      const sameRow = (r) => String(r.caseId || r.paymentDisputeId) === String(caseId);
-      if (row.source === 'inquiry') {
-        setInquiries((prev) => prev.map((r) => (sameRow(r) ? { ...r, notes } : r)));
-      } else if (row.source === 'case') {
-        setCases((prev) => prev.map((r) => (sameRow(r) ? { ...r, notes } : r)));
-      } else {
-        setDisputes((prev) => prev.map((r) => (
-          String(r.paymentDisputeId) === String(caseId) ? { ...r, notes } : r
-        )));
-      }
+      // Update local state for all matching rows (all issue types for this order will show the same notes)
+      setInquiries((prev) =>
+        prev.map((r) => (r.orderId === row.orderId ? { ...r, notes, fulfillmentNotes: notes } : r))
+      );
+      setCases((prev) =>
+        prev.map((r) => (r.orderId === row.orderId ? { ...r, notes, fulfillmentNotes: notes } : r))
+      );
+      setDisputes((prev) =>
+        prev.map((r) => (r.orderId === row.orderId ? { ...r, notes, fulfillmentNotes: notes } : r))
+      );
     } catch (e) {
       throw new Error(e.response?.data?.error || e.message || 'Failed to save notes');
     }
@@ -1878,6 +1940,40 @@ export default function InrApiPage({
 
   const handleNotify = (severity, message) => {
     setSnackbar({ open: true, message, severity });
+  };
+
+  async function saveRemarkValue(caseId, remark) {
+    try {
+      // Determine which endpoint to use based on the source
+      const row = rows.find((r) => r.caseId === caseId);
+      if (!row) throw new Error('Row not found');
+
+      // Save to Order model instead of Case/CaseManagement/PaymentDispute
+      // This ensures remark is stored in the authoritative source (fulfillment dashboard)
+      if (!row.orderId) throw new Error('Order ID not found');
+
+      // Use the Order endpoint to save remark
+      await api.patch(`/ebay/orders/${row.orderId}/manual-fields`, { remark });
+
+      // Update local state for all matching rows (all issue types for this order will show the same remark)
+      setInquiries((prev) =>
+        prev.map((r) => (r.orderId === row.orderId ? { ...r, remark } : r))
+      );
+      setCases((prev) =>
+        prev.map((r) => (r.orderId === row.orderId ? { ...r, remark } : r))
+      );
+      setDisputes((prev) =>
+        prev.map((r) => (r.orderId === row.orderId ? { ...r, remark } : r))
+      );
+
+      handleNotify('success', 'Remark saved successfully');
+    } catch (e) {
+      handleNotify('error', e.response?.data?.error || e.message || 'Failed to save remark');
+    }
+  }
+
+  const handleRemarkUpdate = (caseId, remarkValue) => {
+    saveRemarkValue(caseId, remarkValue);
   };
 
   async function submitShipmentInfo() {
@@ -2346,6 +2442,13 @@ export default function InrApiPage({
                       row={row}
                       onSave={saveInquiryNotes}
                       onNotify={handleNotify}
+                    />
+                  </TableCell>
+                  <TableCell sx={{ ...denseCellSx, whiteSpace: 'normal', minWidth: 150 }}>
+                    <AutoSaveSelect
+                      value={row.remark || ''}
+                      options={remarkOptionsFromTemplates(remarkTemplates)}
+                      onSave={(val) => handleRemarkUpdate(row.caseId || row.paymentDisputeId, val)}
                     />
                   </TableCell>
                   <TableCell sx={actionCellSx} align="right">

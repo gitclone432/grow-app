@@ -49,7 +49,14 @@ const PaymentDisputeSchema = new mongoose.Schema({
   rawData: Object,
   
   // Internal notes
-  notes: { type: String, default: '' }
+  notes: { type: String, default: '' },
+
+  // Remark field for fulfillment status updates
+  remark: { type: String, default: '' },
+  
+  // Compliance Board tracking
+  complianceBoardStatus: String, // Status when moved on compliance board (e.g., 'inr_fully_refunded', 'inr_not_refunded_resolved_win')
+  complianceBoardCategory: String, // Board category (e.g., 'inr')
 }, { timestamps: true });
 
 // Index for faster queries (paymentDisputeId already indexed via unique: true)
