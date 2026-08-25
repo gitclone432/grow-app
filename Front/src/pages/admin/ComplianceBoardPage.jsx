@@ -45,7 +45,7 @@ const BOARD_CATEGORIES = [
   { value: 'order_communication', label: 'Order Communication' },
   { value: 'issue_hub', label: 'Issue Hub' },
   { value: 'cancellation', label: 'Cancellation' },
-  { value: 'inr', label: 'INR (Item Not Received)' },
+  { value: 'inr', label: 'INR / Disputes' },
   { value: 'return_refund', label: 'Return / Refund' },
 ];
 
@@ -80,6 +80,8 @@ const COLUMN_STATUS = {
   INR_FULLY_REFUNDED: 'inr_fully_refunded',
   INR_PARTIAL_REFUND: 'inr_partial_refund',
   INR_NOT_REFUNDED_RESOLVED: 'inr_not_refunded_resolved',
+  INR_NOT_REFUNDED_RESOLVED_WIN: 'inr_not_refunded_resolved_win',
+  INR_NOT_REFUNDED_RESOLVED_LOOSE: 'inr_not_refunded_resolved_loose',
 };
 
 // Message categories for Order Communication
@@ -158,6 +160,8 @@ const INR_REFUND_OPTIONS = [
   { id: COLUMN_STATUS.INR_FULLY_REFUNDED, label: 'Fully Refunded', color: '#10b981' },
   { id: COLUMN_STATUS.INR_PARTIAL_REFUND, label: 'Partial Refund', color: '#f59e0b' },
   { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Not Refunded but Resolved', color: '#3b82f6' },
+  { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN, label: 'Win', color: '#06b6d4', group: 'Not Refunded but Resolved' },
+  { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE, label: 'Loose', color: '#f97316', group: 'Not Refunded but Resolved' },
 ];
 
 const INR_ACTION_OPTIONS = [
@@ -226,6 +230,7 @@ const MESSAGE_REPLY_SLA_MS = 8 * ONE_HOUR_MS;
 const RETURN_LABEL_OVERDUE_ALERT_ID = 'return_label_overdue';
 const PAYMENT_STATUS_OVERDUE_ALERT_ID = 'payment_status_overdue';
 const MESSAGE_OVERDUE_ALERT_ID = 'message_overdue';
+const UNREAD_MESSAGES_ALERT_ID = 'unread_messages';
 const FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS = {
   [COLUMN_STATUS.OUT_OF_STOCK]: 'fulfillment_out_of_stock_overdue',
   [COLUMN_STATUS.CANCELLATION]: 'fulfillment_cancellation_overdue',
@@ -255,7 +260,7 @@ const ALERT_REQUEST_TIMEOUT_MS = 12000;
 const ensureArray = (value) => (Array.isArray(value) ? value : []);
 
 const toDraggableId = (prefix, item, fallback = '') => {
-  // For special case types (return, cancelled, inr), prepend the prefix to the ID
+  // For special case types (return, cancelled, inr, dispute), prepend the prefix to the ID
   if (prefix === 'return' && (item?.returnId || fallback)) {
     return `return:${item?.returnId || fallback}`;
   }
@@ -264,6 +269,9 @@ const toDraggableId = (prefix, item, fallback = '') => {
   }
   if (prefix === 'inr' && (item?.caseId || fallback)) {
     return `inr:${item?.caseId || fallback}`;
+  }
+  if (prefix === 'dispute' && (item?.paymentDisputeId || fallback)) {
+    return `dispute:${item?.paymentDisputeId || fallback}`;
   }
   // For regular orders and other types, return the ID as-is
   return String(item?._id || item?.orderObjectId || item?.orderId || item?.caseId || item?.returnId || fallback || `${prefix}-${Date.now()}`);
@@ -428,6 +436,8 @@ function ComplianceBoardPage() {
     [COLUMN_STATUS.INR_FULLY_REFUNDED]: [],
     [COLUMN_STATUS.INR_PARTIAL_REFUND]: [],
     [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]: [],
+    [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN]: [],
+    [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE]: [],
   });
   const [pagination, setPagination] = useState({ total: 0, page: 1, limit: 500, totalPages: 0 });
   const [currentPage, setCurrentPage] = useState(1);
@@ -598,10 +608,50 @@ function ComplianceBoardPage() {
 
   // Fetch stats details for modal
   const fetchStatsDetails = useCallback(async (statType) => {
-    console.log('[STATS-DETAILS-BADGE] Badge clicked with statType:', statType);
+    console.log('[STATS-DETAILS] Badge clicked with statType:', statType);
+    console.log('[STATS-DETAILS] Current board category:', selectedCategory);
     setStatsDetailsModal(prev => ({ ...prev, open: true, statType, items: [] }));
     
     try {
+      // Handle unread messages alert locally (no backend call needed)
+      if (statType === UNREAD_MESSAGES_ALERT_ID) {
+        console.log('[STATS-DETAILS] Handling UNREAD_MESSAGES_ALERT_ID');
+        console.log('[STATS-DETAILS] allMessagesForAlerts:', allMessagesForAlerts);
+        console.log('[STATS-DETAILS] allMessagesForAlerts length:', allMessagesForAlerts?.length);
+        
+        if (!allMessagesForAlerts || allMessagesForAlerts.length === 0) {
+          console.warn('[STATS-DETAILS] allMessagesForAlerts is empty!');
+          setStatsDetailsModal(prev => ({ ...prev, items: [] }));
+          return;
+        }
+        
+        const unreadItems = allMessagesForAlerts
+          .filter(thread => {
+            const unreadCount = Number(thread?.unreadCount) || 0;
+            console.log(`[STATS-DETAILS] Thread orderId=${thread?.orderId}, unreadCount=${unreadCount}, thread=`, thread);
+            return unreadCount > 0;
+          })
+          .map(thread => {
+            const unreadCount = Number(thread?.unreadCount) || 0;
+            return {
+              orderId: thread?.orderId || thread?._conversationMeta?.orderId || thread?.conversationId || 'Unknown',
+              orderObjectId: thread?._id,
+              itemTitle: thread?.subject || thread?.productName || thread?.message?.subject || 'Message Thread',
+              buyerName: thread?.buyerUsername || thread?.buyerName || thread?.buyer?.username || 'Unknown',
+              sellerName: thread?.seller?.user?.username || thread?.sellerName || 'Unknown',
+              price: thread?.price || 0,
+              creationDate: thread?.createdAt || thread?.lastMessageDate || thread?.updatedAt,
+              unreadCount: unreadCount,
+              isUnreadAlert: true
+            };
+          });
+        
+        console.log('[STATS-DETAILS] Filtered unreadItems count:', unreadItems.length);
+        console.log('[STATS-DETAILS] Filtered unreadItems:', unreadItems);
+        setStatsDetailsModal(prev => ({ ...prev, items: unreadItems }));
+        return;
+      }
+      
       const params = new URLSearchParams();
       params.append('status', statType);
       params.append('category', selectedCategory);
@@ -619,16 +669,24 @@ function ComplianceBoardPage() {
       if (excludeLowValue) params.append('excludeLowValue', 'true');
       
       const url = `/orders/stats-details?${params.toString()}`;
-      console.log('[STATS-DETAILS-BADGE] Fetching from:', url);
+      console.log('[STATS-DETAILS] Fetching from:', url);
+      console.log('[STATS-DETAILS] Request params: status=' + statType + ', category=' + selectedCategory);
+      
       const { data } = await api.get(url);
-      console.log('[STATS-DETAILS-BADGE] Received data:', data);
+      console.log('[STATS-DETAILS] Received response:', data);
+      console.log('[STATS-DETAILS] Response items count:', data?.items?.length);
+      
+      if (data?.items && data.items.length > 0) {
+        console.log('[STATS-DETAILS] First item:', data.items[0]);
+      }
       
       setStatsDetailsModal(prev => ({ ...prev, items: data.items || [] }));
     } catch (err) {
-      console.error('[STATS-DETAILS-BADGE] Error fetching stats details:', err);
+      console.error('[STATS-DETAILS] Error fetching stats details:', err);
+      console.error('[STATS-DETAILS] Error response:', err?.response?.data);
       setStatsDetailsModal(prev => ({ ...prev, items: [] }));
     }
-  }, [statsDateFilter, selectedSeller, excludeClient, excludeLowValue, selectedCategory]);
+  }, [statsDateFilter, selectedSeller, excludeClient, excludeLowValue, selectedCategory, allMessagesForAlerts]);
 
   // Fetch stats when date filter changes
   useEffect(() => {
@@ -716,13 +774,9 @@ function ComplianceBoardPage() {
         }
       }
 
-      // Fetch all three INR data sources in parallel
-      const [inrResponse, casesResponse, disputesResponse] = await Promise.all([
+      // Fetch INR data sources in parallel (Case Management excluded to show only Inquiry and Payment Disputes)
+      const [inrResponse, disputesResponse] = await Promise.all([
         api.get('/ebay/stored-inr-cases', {
-          params: inquiryParams,
-          timeout: BOARD_REQUEST_TIMEOUT_MS,
-        }),
-        api.get('/ebay/stored-case-management', {
           params: inquiryParams,
           timeout: BOARD_REQUEST_TIMEOUT_MS,
         }),
@@ -733,7 +787,6 @@ function ComplianceBoardPage() {
       ]);
 
       const inquiries = ensureArray(inrResponse.data?.cases || inrResponse.data?.inquiries);
-      const cases = ensureArray(casesResponse.data?.cases || casesResponse.data?.data);
       const disputes = ensureArray(disputesResponse.data?.disputes || disputesResponse.data?.cases || disputesResponse.data?.data);
       
       // Transform and merge all INR data sources
@@ -744,7 +797,10 @@ function ComplianceBoardPage() {
         originalOrderId: item.orderId,
         caseOrderId: item.orderId,
         orderId: item.caseId || item.caseItemId || item.orderId,
-        dateSold: item.creationDate || item.createdDate || item.created,
+        // Use openDate for disputes (PaymentDispute), otherwise use creationDate
+        dateSold: source === 'inr-dispute' 
+          ? (item.openDate || item.creationDate || item.createdDate || item.created)
+          : (item.creationDate || item.createdDate || item.created),
         buyer: {
           username: item.buyerUsername,
           buyerRegistrationAddress: { fullName: item.buyerName }
@@ -764,16 +820,28 @@ function ComplianceBoardPage() {
         fulfillmentNotes: item.fulfillmentNotes,
       });
 
+      // Filter out Case Management items - only show Inquiry and Payment Disputes
+      // Explicitly exclude items with sourceType 'inr-case' or that are from CaseManagement model
+      const inquiriesFiltered = inquiries.filter(item => {
+        // Exclude Case Management type cases based on caseType or model indicators
+        const isCaseManagement = item.caseType === 'CaseManagement' || item.__t === 'CaseManagement' || item._type === 'CaseManagement';
+        return !isCaseManagement;
+      });
+
       const allItems = [
-        ...inquiries.map(item => transformINRItem(item, 'inr-inquiry')),
-        ...cases.map(item => transformINRItem(item, 'inr-case')),
-        ...disputes.map(item => transformINRItem(item, 'inr-dispute')),
+        ...inquiriesFiltered.map(item => transformINRItem(item, 'inr-inquiry')),
+        ...disputes.map(item => ({
+          ...transformINRItem(item, 'inr-dispute'),
+          _id: toDraggableId('dispute', item, item.paymentDisputeId),
+          paymentDisputeId: item.paymentDisputeId,
+          caseId: item.paymentDisputeId // Map paymentDisputeId to caseId for consistency with other INR types
+        })),
       ];
 
       // DEBUG: Log status field for first few items
-      console.log(`[INR-TRANSFORM] Total transformed items: ${allItems.length}`);
-      allItems.slice(0, 5).forEach((item, idx) => {
-        console.log(`[INR-TRANSFORM] Item ${idx}: orderId=${item.orderId}, status='${item.status}', complianceBoardStatus='${item.complianceBoardStatus}', sourceType=${item.sourceType}`);
+      console.log(`[INR-TRANSFORM] Total transformed items: ${allItems.length} (inquiries: ${inquiriesFiltered.length}, disputes: ${disputes.length}) - Case Management items filtered out`);
+      allItems.slice(0, 10).forEach((item, idx) => {
+        console.log(`[INR-TRANSFORM] Item ${idx}: orderId=${item.orderId}, sourceType=${item.sourceType}, status='${item.status}', complianceBoardStatus='${item.complianceBoardStatus}', dateSold='${item.dateSold}'`);
       });
 
       return allItems;
@@ -1177,6 +1245,8 @@ function ComplianceBoardPage() {
         [COLUMN_STATUS.INR_FULLY_REFUNDED]: [],
         [COLUMN_STATUS.INR_PARTIAL_REFUND]: [],
         [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]: [],
+        [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN]: [],
+        [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE]: [],
       };
       
       const boardOrders = ensureArray(response.data?.orders).map((order, index) => {
@@ -1265,13 +1335,51 @@ function ComplianceBoardPage() {
         
         // DEBUG: Log status field on first few items
         inrCasesForBoard.slice(0, 5).forEach((item, idx) => {
-          console.log(`[BOARD-GROUP-INR-STATUS] Item ${idx}: orderId=${item.orderId}, status='${item.status}', caseType='${item.caseType}', complianceBoardStatus='${item.complianceBoardStatus}'`);
+          console.log(`[BOARD-GROUP-INR-STATUS] Item ${idx}: orderId=${item.orderId}, status='${item.status}', caseType='${item.caseType}', sourceType='${item.sourceType}', complianceBoardStatus='${item.complianceBoardStatus}'`);
         });
         
-        // FILTER: Only show INQUIRY-type cases (caseType = 'INR', not 'SNAD' or 'OTHER')
-        // This matches the "Inquiry (131)" filter on the INR API page
-        inrCasesForBoard = inrCasesForBoard.filter(c => c.caseType === 'INR' || c.caseType === 'ITEM_NOT_RECEIVED');
-        console.log(`[BOARD-GROUP] INR: After filtering to Inquiry types only: ${inrCasesForBoard.length}`);
+        // FILTER: Only show INQUIRY-type cases (caseType = 'INR' or non-Case-Management) + Payment Disputes
+        // EXCLUDE: Case Management cases and any items with sourceType='inr-case'
+        const beforeFilterCount = inrCasesForBoard.length;
+        inrCasesForBoard = inrCasesForBoard.filter(c => {
+          // Exclude if sourceType indicates Case Management
+          if (c.sourceType === 'inr-case') {
+            console.log(`[BOARD-GROUP-FILTER] REJECTED Item: orderId=${c.orderId}, sourceType='inr-case'`);
+            return false;
+          }
+          
+          // Exclude based on model discriminator if present
+          if (c.__t === 'CaseManagement' || c._type === 'CaseManagement') {
+            console.log(`[BOARD-GROUP-FILTER] REJECTED Item: orderId=${c.orderId}, model discriminator='${c.__t || c._type}'`);
+            return false;
+          }
+          
+          // Exclude if it's clearly a Case Management record (has caseManagementId)
+          if (c.caseManagementId) {
+            console.log(`[BOARD-GROUP-FILTER] REJECTED Item: orderId=${c.orderId}, has caseManagementId`);
+            return false;
+          }
+          
+          // Keep: Inquiry types (INR, SNAD, OTHER) and Payment Disputes
+          const isInquiry = c.caseType === 'INR' || c.caseType === 'SNAD' || c.caseType === 'OTHER' || c.caseType === 'ITEM_NOT_RECEIVED';
+          const isDispute = c.sourceType === 'inr-dispute' || c.paymentDisputeId;
+          
+          if (!isInquiry && !isDispute) {
+            console.log(`[BOARD-GROUP-FILTER] REJECTED Item: orderId=${c.orderId}, caseType='${c.caseType}', sourceType='${c.sourceType}', not inquiry or dispute`);
+            return false;
+          }
+          
+          return true;
+        });
+        console.log(`[BOARD-GROUP-FILTER] FINAL: Filtered ${beforeFilterCount} items down to ${inrCasesForBoard.length} (removed ${beforeFilterCount - inrCasesForBoard.length})`);
+        console.log(`[BOARD-GROUP] INR: After filtering to Inquiry types and Disputes: ${inrCasesForBoard.length}`);
+        
+        // Log what types we filtered by
+        const typeBreakdown = {
+          inquiry: inrCasesForBoard.filter(c => c.caseType === 'INR' || c.caseType === 'ITEM_NOT_RECEIVED').length,
+          dispute: inrCasesForBoard.filter(c => c.sourceType === 'inr-dispute').length
+        };
+        console.log(`[BOARD-GROUP] INR: Type breakdown: ${JSON.stringify(typeBreakdown)}`);
         
         // Apply date filter based on case creationDate or first changed date for Case Not Opened items
         if (dateFilter.mode === 'single' && dateFilter.single) {
@@ -1330,8 +1438,17 @@ function ComplianceBoardPage() {
         
         // Deduplicate inrCasesForBoard by orderId
         // Keep only one INR case per order, preferring the one with inr_case_opened status or most recent
+        // NOTE: Disputes (sourceType='inr-dispute') are NOT deduplicated - they appear separately
         const inrByOrderId = new Map();
+        const disputes = [];
+        
         inrCasesForBoard.forEach((caseItem) => {
+          // Separate disputes - they won't be deduplicated
+          if (caseItem.sourceType === 'inr-dispute') {
+            disputes.push(caseItem);
+            return;
+          }
+          
           const orderId = String(caseItem.orderId || caseItem.caseOrderId || '').toLowerCase();
           if (!orderId) return;
           
@@ -1359,25 +1476,48 @@ function ComplianceBoardPage() {
           Object.values(inrByOrderId).map(item => String(item.caseItem.orderId || item.caseItem.caseOrderId || '').toLowerCase()).filter(Boolean)
         );
         
-        console.log(`[BOARD-GROUP] INR: Found ${dedupInrCases.length} deduplicated Inquiry cases`);
+        console.log(`[BOARD-GROUP] INR: Found ${dedupInrCases.length} deduplicated Inquiry cases and ${disputes.length} disputes`);
         dedupInrCases.slice(0, 5).forEach((item, idx) => {
           console.log(`[BOARD-GROUP-DEDUP-STATUS] Item ${idx}: orderId=${item.orderId}, status='${item.status}', complianceBoardStatus='${item.complianceBoardStatus}'`);
         });
         console.log(`[BOARD-GROUP] INR: Order IDs already in stored INR cases: ${Array.from(inrCaseSourceOrderIds).join(', ')}`);
         
         // Group deduplicated INR cases by their complianceBoardStatus
+        // FINAL DEFENSE: Exclude Case Management cases before adding to columns
         dedupInrCases.forEach((caseItem) => {
+          // Multi-level exclusion to ensure NO Case Management cases slip through
+          if (caseItem.sourceType === 'inr-case' || caseItem.__t === 'CaseManagement' || caseItem._type === 'CaseManagement' || caseItem.caseManagementId) {
+            console.warn(`[BOARD-GROUP-FILTER] BLOCKED Case Management case: orderId=${caseItem.orderId}, sourceType=${caseItem.sourceType}`);
+            return; // Skip this item
+          }
           const status = caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
           if (grouped[status]) {
             grouped[status].push(caseItem);
           }
         });
         
+        // Add disputes to their respective columns (also based on complianceBoardStatus)
+        // FINAL DEFENSE: Exclude Case Management cases from disputes as well
+        const disputesByColumn = {};
+        disputes.forEach((disputeItem) => {
+          // Ensure only Payment Dispute items, not Case Management
+          if (disputeItem.sourceType !== 'inr-dispute' && !disputeItem.paymentDisputeId) {
+            console.warn(`[BOARD-GROUP-FILTER] BLOCKED non-dispute item: orderId=${disputeItem.orderId}, sourceType=${disputeItem.sourceType}`);
+            return; // Skip if not a dispute
+          }
+          const status = disputeItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
+          disputesByColumn[status] = (disputesByColumn[status] || 0) + 1;
+          if (grouped[status]) {
+            grouped[status].push(disputeItem);
+          }
+        });
+        console.log(`[BOARD-GROUP] INR: Added ${disputes.length} disputes to columns. Breakdown:`, disputesByColumn);
+        
         // DEBUG: Log what's in grouped[INR_CASE_OPENED] after adding
         const inrCaseOpenedItems = grouped[COLUMN_STATUS.INR_CASE_OPENED] || [];
-        console.log(`[BOARD-GROUP] After grouping, INR_CASE_OPENED has ${inrCaseOpenedItems.length} items`);
-        inrCaseOpenedItems.slice(0, 5).forEach((item, idx) => {
-          console.log(`[BOARD-GROUP-GROUPED-STATUS] Column INR_CASE_OPENED Item ${idx}: orderId=${item.orderId}, status='${item.status}', complianceBoardStatus='${item.complianceBoardStatus}'`);
+        console.log(`[BOARD-GROUP] After grouping, INR_CASE_OPENED has ${inrCaseOpenedItems.length} items (inquiries + disputes)`);
+        inrCaseOpenedItems.slice(0, 10).forEach((item, idx) => {
+          console.log(`[BOARD-GROUP-GROUPED-STATUS] Column INR_CASE_OPENED Item ${idx}: orderId=${item.orderId}, sourceType='${item.sourceType}', status='${item.status}', complianceBoardStatus='${item.complianceBoardStatus}', _id='${item._id}'`);
         });
         
         console.log(`[BOARD-GROUP] ===== ADDING BACK ORDER COMMUNICATION ITEMS (INR) =====`);
@@ -2539,6 +2679,8 @@ function ComplianceBoardPage() {
           [COLUMN_STATUS.INR_FULLY_REFUNDED]: 500,
           [COLUMN_STATUS.INR_PARTIAL_REFUND]: 500,
           [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED]: 500,
+          [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN]: 500,
+          [COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE]: 500,
         };
         
         // Check which columns need refilling
@@ -3094,6 +3236,11 @@ function ComplianceBoardPage() {
     if (selectedCategory === 'return_refund') {
       const overdueReturnLabelOrders = getOverdueReturnLabelOrders();
       const overduePaymentStatusOrders = getOverduePaymentStatusOrders();
+      const unreadReturnMessages = allMessagesForAlerts.reduce((total, thread) => {
+        const unreadCount = Number(thread?.unreadCount) || 0;
+        return total + Math.max(0, unreadCount);
+      }, 0);
+      
       return [
         { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.CASE_OPENED), type: 'stat' },
         { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.CASE_NOT_OPENED), type: 'stat' },
@@ -3106,21 +3253,33 @@ function ComplianceBoardPage() {
         { id: COLUMN_STATUS.REPLACEMENT, label: 'Replacement', color: '#0f766e', count: getStatusCount(COLUMN_STATUS.REPLACEMENT), type: 'stat' },
         { id: RETURN_LABEL_OVERDUE_ALERT_ID, label: '48h Not Moved', color: '#dc2626', count: getOverdueCount(RETURN_LABEL_OVERDUE_ALERT_ID, overdueReturnLabelOrders.length), type: 'alert' },
         { id: PAYMENT_STATUS_OVERDUE_ALERT_ID, label: 'Payment Status', color: '#b91c1c', count: getOverdueCount(PAYMENT_STATUS_OVERDUE_ALERT_ID, overduePaymentStatusOrders.length), type: 'alert' },
+        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadReturnMessages, type: 'alert' },
         { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#7f1d1d', count: overdueMessages.length, type: 'alert' },
       ];
     }
 
     if (selectedCategory === 'cancellation') {
+      const unreadCancellationMessages = allMessagesForAlerts.reduce((total, thread) => {
+        const unreadCount = Number(thread?.unreadCount) || 0;
+        return total + Math.max(0, unreadCount);
+      }, 0);
+      
       return [
         { id: COLUMN_STATUS.CANCELLATION_REQUEST, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.CANCELLATION_REQUEST), type: 'stat' },
         { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.CASE_NOT_OPENED), type: 'stat' },
         { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN, count: getStatusCount(COLUMN_STATUS.ACCEPTED), type: 'stat' },
         { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.DECLINED), type: 'stat' },
+        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadCancellationMessages, type: 'alert' },
         { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
       ];
     }
 
     if (selectedCategory === 'inr') {
+      const unreadInrMessages = allMessagesForAlerts.reduce((total, thread) => {
+        const unreadCount = Number(thread?.unreadCount) || 0;
+        return total + Math.max(0, unreadCount);
+      }, 0);
+      
       return [
         { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.INR_CASE_OPENED), type: 'stat' },
         { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.CASE_NOT_OPENED), type: 'stat' },
@@ -3129,7 +3288,10 @@ function ComplianceBoardPage() {
         { id: COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN, label: 'Case Open (Ebay Step In)', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN), type: 'stat' },
         { id: COLUMN_STATUS.INR_FULLY_REFUNDED, label: 'Fully Refunded', color: BRAND_GREEN, count: getStatusCount(COLUMN_STATUS.INR_FULLY_REFUNDED), type: 'stat' },
         { id: COLUMN_STATUS.INR_PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK, count: getStatusCount(COLUMN_STATUS.INR_PARTIAL_REFUND), type: 'stat' },
-        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Resolved', color: BRAND_BLUE, count: getStatusCount(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED), type: 'stat' },
+        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Not Refunded but Resolved', color: BRAND_BLUE, count: getStatusCount(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED), type: 'stat' },
+        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN, label: 'Win', color: '#06b6d4', count: getStatusCount(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN), type: 'stat' },
+        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE, label: 'Loose', color: '#f97316', count: getStatusCount(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE), type: 'stat' },
+        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadInrMessages, type: 'alert' },
         { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
       ];
     }
@@ -4106,6 +4268,10 @@ function ComplianceBoardPage() {
           return 'Partial Refund';
         case COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED:
           return 'Not Refunded but Resolved';
+        case COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN:
+          return 'Win';
+        case COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE:
+          return 'Loose';
         default:
           return status;
       }
@@ -5016,6 +5182,20 @@ function ComplianceBoardPage() {
                       height: 24, 
                       fontWeight: 800 
                     }}
+                  />
+                )}
+                {selectedCategory === 'inr' && order.sourceType === 'inr-dispute' && (
+                  <Chip
+                    label="🔶 Dispute"
+                    size="small"
+                    sx={{ 
+                      bgcolor: '#fed7aa',
+                      color: '#b45309',
+                      fontSize: '0.75rem', 
+                      height: 24, 
+                      fontWeight: 700 
+                    }}
+                    title="Payment Dispute case"
                   />
                 )}
               </Stack>
@@ -6947,6 +7127,10 @@ function ComplianceBoardPage() {
             {statsDetailsModal.statType === COLUMN_STATUS.NOT_FULFILLED && 'Not Fulfilled Details'}
             {statsDetailsModal.statType === COLUMN_STATUS.FULFILLED && 'Fulfilled Details'}
             {statsDetailsModal.statType === COLUMN_STATUS.BUYER_CONFIRMATION && 'Buyer Confirmation Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.CASE_OPENED && 'Case Opened Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.CANCELLATION_REQUEST && 'Case Opened Details'}
+            {statsDetailsModal.statType === COLUMN_STATUS.INR_CASE_OPENED && 'Case Opened Details'}
+            {statsDetailsModal.statType === UNREAD_MESSAGES_ALERT_ID && 'Unread Messages'}
           </Box>
           <IconButton 
             size="small" 
@@ -6978,6 +7162,16 @@ function ComplianceBoardPage() {
                     {item.itemTitle && (
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                         {item.itemTitle}
+                      </Typography>
+                    )}
+                    {item.issueId && (
+                      <Typography variant="caption" sx={{ display: 'block', fontWeight: 600, color: '#dc2626' }}>
+                        Issue ID: {item.issueId}
+                      </Typography>
+                    )}
+                    {item.unreadCount && item.unreadCount > 0 && (
+                      <Typography variant="caption" sx={{ display: 'block', fontWeight: 600, color: '#7c3aed' }}>
+                        Unread: {item.unreadCount}
                       </Typography>
                     )}
                     <Stack direction="row" spacing={2} sx={{ mt: 0.5 }}>

@@ -59,7 +59,10 @@ const CaseSchema = new mongoose.Schema({
   
   // Internal notes
   notes: { type: String, default: '' },
-  
+
+  // Remark field for fulfillment status updates
+  remark: { type: String, default: '' },
+
   // Manual logs field for internal notes
   logs: { type: String, default: '' }
 }, { timestamps: true });

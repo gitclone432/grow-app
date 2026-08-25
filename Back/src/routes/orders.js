@@ -3410,6 +3410,38 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       return res.json({ success: true, cancellation: cancellationDoc });
     }
 
+    // Check if this is a Dispute document (ID starts with 'dispute:')
+    if (String(orderId).startsWith('dispute:')) {
+      console.log(`[PATCH-COMPLIANCE] [DETECTED] 'dispute:' prefix format`);
+      
+      // Extract disputeId from 'dispute:disputeId' format
+      const disputeId = String(orderId).replace(/^dispute:/, '');
+      console.log(`[PATCH-COMPLIANCE] [EXTRACTED] disputeId: ${disputeId}`);
+      
+      // Try to match both MongoDB _id and PaymentDispute ID
+      const query = mongoose.Types.ObjectId.isValid(disputeId)
+        ? { $or: [{ _id: disputeId }, { paymentDisputeId: disputeId }] }
+        : { paymentDisputeId: disputeId };
+      
+      console.log(`[PATCH-COMPLIANCE] [QUERY] Dispute query:`, JSON.stringify(query));
+      
+      const disputeDoc = await PaymentDispute.findOneAndUpdate(
+        query,
+        { $set: { complianceBoardStatus } },
+        { new: true }
+      );
+
+      if (!disputeDoc) {
+        console.warn(`[PATCH-COMPLIANCE] [ERROR] Dispute not found with ID: ${disputeId}`);
+        return res.status(404).json({ error: 'Payment dispute not found' });
+      }
+
+      console.log(`[PATCH-COMPLIANCE] [SUCCESS] Updated Dispute, new complianceBoardStatus: ${disputeDoc.complianceBoardStatus}`);
+      console.log(`[PATCH-COMPLIANCE] [VERIFY] disputeId: ${disputeDoc.paymentDisputeId}, _id: ${disputeDoc._id}, orderId: ${disputeDoc.orderId}`);
+      
+      return res.json({ success: true, dispute: disputeDoc });
+    }
+
     // Check if this is an INR document (ID starts with 'inr:')
     if (String(orderId).startsWith('inr:')) {
       console.log(`[PATCH-COMPLIANCE] [DETECTED] 'inr:' prefix format`);
@@ -4343,6 +4375,8 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
       excludeLowValue = 'false'
     } = req.query;
 
+    console.log(`[STATS-DETAILS] Request: status=${status}, category=${category}`);
+
     // Minimum date for compliance boards
     // order_fulfillment: August 1, 2026 | others: July 19, 2026
     const COMPLIANCE_BOARD_MIN_DATE = category === 'order_fulfillment'
@@ -4366,6 +4400,226 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
       dateFilter.dateSold = { $gte: COMPLIANCE_BOARD_MIN_DATE };
     }
 
+    // Special handling for INR Case Opened status
+    if (status === 'inr_case_opened') {
+      try {
+        // Query INR Cases (Inquiries)
+        const cases = await Case.find({
+          caseType: { $in: ['INR', 'SNAD', 'OTHER'] },
+          orderId: { $exists: true, $ne: null }
+        }).select('caseId orderId creationDate notes remark').lean().limit(100);
+        
+        // Query Payment Disputes
+        const disputes = await PaymentDispute.find({
+          orderId: { $exists: true, $ne: null }
+        }).select('paymentDisputeId orderId creationDate notes remark').lean().limit(100);
+        
+        // Get order details for enrichment
+        const allOrderIds = [
+          ...cases.map(c => String(c.orderId).trim()),
+          ...disputes.map(d => String(d.orderId).trim())
+        ];
+        
+        const uniqueOrderIds = [...new Set(allOrderIds)].filter(Boolean);
+        
+        if (uniqueOrderIds.length === 0) {
+          return res.json({ items: [] });
+        }
+        
+        const orders = await Order.find({ orderId: { $in: uniqueOrderIds } })
+          .select('orderId buyer productName lineItems subtotalUSD seller')
+          .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
+          .lean();
+        
+        const orderMap = Object.fromEntries(orders.map(o => [String(o.orderId).trim(), o]));
+        
+        // Enrich cases with order details
+        const enrichedCases = cases.map(c => {
+          const normalizedOrderId = String(c.orderId).trim();
+          const order = orderMap[normalizedOrderId];
+          return {
+            orderId: c.orderId,
+            orderObjectId: order?._id,
+            itemTitle: order?.productName || (order?.lineItems?.[0]?.title || 'Item'),
+            buyerName: order?.buyer?.buyerRegistrationAddress?.fullName || order?.buyer?.username || 'Unknown',
+            sellerName: order?.seller?.user?.username || 'Unknown',
+            price: order?.subtotalUSD || 0,
+            creationDate: c.creationDate,
+            issueId: c.caseId,
+            status: status
+          };
+        });
+        
+        // Enrich disputes with order details
+        const enrichedDisputes = disputes.map(d => {
+          const normalizedOrderId = String(d.orderId).trim();
+          const order = orderMap[normalizedOrderId];
+          return {
+            orderId: d.orderId,
+            orderObjectId: order?._id,
+            itemTitle: order?.productName || (order?.lineItems?.[0]?.title || 'Item'),
+            buyerName: order?.buyer?.buyerRegistrationAddress?.fullName || order?.buyer?.username || 'Unknown',
+            sellerName: order?.seller?.user?.username || 'Unknown',
+            price: order?.subtotalUSD || 0,
+            creationDate: d.creationDate,
+            issueId: d.paymentDisputeId,
+            status: status
+          };
+        });
+        
+        return res.json({ items: [...enrichedCases, ...enrichedDisputes].slice(0, 100) });
+      } catch (err) {
+        console.error('[STATS-DETAILS] Error fetching INR case details:', err);
+        return res.status(500).json({ error: err.message, items: [] });
+      }
+    }
+
+    // Special handling for Return Case Opened status
+    if (status === 'case_opened') {
+      try {
+        const returns = await Return.find({ orderId: { $exists: true, $ne: null } })
+          .select('returnId orderId createdAt creationDate').lean().limit(100);
+        
+        const allOrderIds = returns.map(r => String(r.orderId).trim());
+        const uniqueOrderIds = [...new Set(allOrderIds)].filter(Boolean);
+        
+        if (uniqueOrderIds.length === 0) {
+          return res.json({ items: [] });
+        }
+        
+        const orders = await Order.find({ orderId: { $in: uniqueOrderIds } })
+          .select('orderId buyer productName lineItems subtotalUSD seller')
+          .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
+          .lean();
+        
+        const orderMap = Object.fromEntries(orders.map(o => [String(o.orderId).trim(), o]));
+        
+        const enrichedReturns = returns.map(r => {
+          const normalizedOrderId = String(r.orderId).trim();
+          const order = orderMap[normalizedOrderId];
+          return {
+            orderId: r.orderId,
+            orderObjectId: order?._id,
+            itemTitle: order?.productName || (order?.lineItems?.[0]?.title || 'Item'),
+            buyerName: order?.buyer?.buyerRegistrationAddress?.fullName || order?.buyer?.username || 'Unknown',
+            sellerName: order?.seller?.user?.username || 'Unknown',
+            price: order?.subtotalUSD || 0,
+            creationDate: r.createdAt || r.creationDate,
+            issueId: r.returnId,
+            status: status
+          };
+        });
+        
+        return res.json({ items: enrichedReturns });
+      } catch (err) {
+        console.error('[STATS-DETAILS] Error fetching Return case details:', err);
+        return res.status(500).json({ error: err.message, items: [] });
+      }
+    }
+
+    // Special handling for Cancellation board statuses (cancellation_request, accepted, declined)
+    // These need to combine both Order records and Cancellation records
+    if (['cancellation_request', 'accepted', 'declined'].includes(status)) {
+      try {
+        console.log(`[STATS-DETAILS] Handling Cancellation board status: ${status}`);
+        
+        // Query Order records with this status
+        const orderQuery = { ...dateFilter };
+        orderQuery.$and = [
+          { $or: [
+            { complianceBoardCategories: 'cancellation' },
+            { complianceBoardCategory: 'cancellation' }
+          ]},
+          { $or: [
+            { complianceBoardStatus: status }
+          ]}
+        ];
+        
+        const orders = await Order.find(orderQuery)
+          .select('orderId dateSold buyer itemNumber lineItems productName subtotalUSD seller')
+          .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
+          .lean()
+          .limit(100);
+        
+        console.log(`[STATS-DETAILS] Found ${orders.length} Order records with status=${status}`);
+        
+        // Query Cancellation records with this status (separate date filtering)
+        const cancellationQuery = {
+          complianceBoardStatus: status
+        };
+        
+        if (startDate || endDate) {
+          cancellationQuery.cancelRequestDate = {};
+          if (startDate) {
+            const { start } = getPTDayBoundsUTC(startDate);
+            cancellationQuery.cancelRequestDate.$gte = start;
+          }
+          if (endDate) {
+            const { end } = getPTDayBoundsUTC(endDate);
+            cancellationQuery.cancelRequestDate.$lte = end;
+          }
+        } else {
+          // Default: use minimum date
+          cancellationQuery.cancelRequestDate = { $gte: new Date('2026-07-19T00:00:00Z') };
+        }
+        
+        const cancellations = await Cancellation.find(cancellationQuery)
+          .select('cancelId orderId dateSold buyer lineItems productName subtotalUSD seller cancelRequestDate createdAt')
+          .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
+          .lean()
+          .limit(100);
+        
+        console.log(`[STATS-DETAILS] Found ${cancellations.length} Cancellation records with status=${status}`);
+        
+        // Combine and deduplicate by orderId
+        const deduped = {};
+        
+        // Add Order records
+        orders.forEach(order => {
+          if (!deduped[order.orderId]) {
+            deduped[order.orderId] = {
+              orderId: order.orderId,
+              orderObjectId: order._id,
+              itemTitle: order.productName || (order.lineItems?.[0]?.title || 'Item'),
+              buyerName: order.buyer?.buyerRegistrationAddress?.fullName || order.buyer?.username || 'Unknown',
+              sellerName: order.seller?.user?.username || 'Unknown',
+              price: order.subtotalUSD || 0,
+              creationDate: order.dateSold,
+              source: 'order',
+              status: status
+            };
+          }
+        });
+        
+        // Add Cancellation records (if not already present from Order)
+        cancellations.forEach(cancellation => {
+          if (!deduped[cancellation.orderId]) {
+            deduped[cancellation.orderId] = {
+              orderId: cancellation.orderId,
+              orderObjectId: cancellation._id,
+              itemTitle: cancellation.productName || 'Cancellation',
+              buyerName: cancellation.buyer?.buyerRegistrationAddress?.fullName || cancellation.buyer?.username || 'Unknown',
+              sellerName: cancellation.seller?.user?.username || 'Unknown',
+              price: cancellation.subtotalUSD || 0,
+              creationDate: cancellation.cancelRequestDate || cancellation.createdAt,
+              source: 'cancellation',
+              issueId: cancellation.cancelId,
+              status: status
+            };
+          }
+        });
+        
+        const uniqueItems = Object.values(deduped).slice(0, 100);
+        console.log(`[STATS-DETAILS] Returning ${uniqueItems.length} combined items (Order + Cancellation) for status=${status}`);
+        
+        return res.json({ items: uniqueItems });
+      } catch (err) {
+        console.error('[STATS-DETAILS] Error fetching Cancellation board status details:', err);
+        return res.status(500).json({ error: err.message, items: [] });
+      }
+    }
+
+    // Regular flow for other statuses
     const sellerObjectId = sellerId && mongoose.Types.ObjectId.isValid(sellerId)
       ? new mongoose.Types.ObjectId(sellerId)
       : null;
@@ -4432,46 +4686,22 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
       });
     }
 
-    // DEBUG: Log the query before executing
-    console.log(`[STATS-DETAILS] Query for status="${status}", category="${category}":`);
-    console.log(`  - COMPLIANCE_BOARD_MIN_DATE: ${COMPLIANCE_BOARD_MIN_DATE.toISOString()}`);
-    console.log(`  - dateFilter: ${JSON.stringify(dateFilter)}`);
-    console.log(`  - query.$and length: ${query.$and?.length || 0}`);
-    if (query.dateSold) {
-      console.log(`  - dateSold filter: ${JSON.stringify(query.dateSold)}`);
-    }
-
-    // Fetch orders for this status, deduplicating by orderId
+    // Fetch orders for this status
     let orders = await Order.find(query)
       .select('orderId dateSold buyer itemNumber lineItems productName subtotalUSD subtotal')
       .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
       .sort({ dateSold: -1, updatedAt: -1 })
       .lean();
 
-    // Deduplicate by orderId - keep the most recently updated version
+    // Deduplicate by orderId
     const deduped = {};
-    let dupCount = 0;
     orders.forEach(order => {
       if (!deduped[order.orderId]) {
         deduped[order.orderId] = order;
-      } else {
-        dupCount++;
-        // In this case, since we're already sorted by updatedAt desc, the first one we see is the newest
-        // So we don't need to replace it
       }
     });
-    if (dupCount > 0) {
-      console.warn(`[STATS-DETAILS] Found ${dupCount} duplicate orders for status ${status}, deduped to ${Object.keys(deduped).length} unique`);
-    }
     
     const uniqueOrders = Object.values(deduped).slice(0, 100);
-
-    // DEBUG: Log sample of returned orders and their dates
-    console.log(`[STATS-DETAILS] Returned ${uniqueOrders.length} unique orders for status="${status}":`);
-    uniqueOrders.slice(0, 3).forEach(o => {
-      const dateSoldISO = new Date(o.dateSold).toISOString();
-      console.log(`  - orderId: ${o.orderId}, dateSold: ${dateSoldISO}`);
-    });
 
     const enriched = uniqueOrders.map((order) => ({
       orderId: order.orderId,
@@ -4483,13 +4713,6 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
       creationDate: order.dateSold,
       status: status
     }));
-
-    // DEBUG: Log what was returned
-    console.log(`[STATS-DETAILS] Returned ${enriched.length} orders for status="${status}"`);
-    if (enriched.length > 0) {
-      console.log(`  - First order: orderId=${enriched[0].orderId}, date=${new Date(enriched[0].creationDate).toISOString()}`);
-      console.log(`  - Last order: orderId=${enriched[enriched.length-1].orderId}, date=${new Date(enriched[enriched.length-1].creationDate).toISOString()}`);
-    }
 
     res.json({ items: enriched });
   } catch (error) {
