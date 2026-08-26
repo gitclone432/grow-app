@@ -20,6 +20,7 @@ import {
   InputLabel,
   Pagination,
   Button,
+  Badge,
   Snackbar,
   Paper,
   TableSortLabel,
@@ -217,6 +218,10 @@ const headerSx = {
   '& .MuiTableSortLabel-icon': { color: 'rgba(255,255,255,0.7) !important' },
 };
 
+function hasUnreadBuyerMessage(row) {
+  return Boolean(row?.hasUnreadBuyerMessage || Number(row?.messageUnreadCount) > 0);
+}
+
 export default function CancellationSearchPage({
   dateFilter: dateFilterProp,
   hideDateFilter = false,
@@ -254,6 +259,27 @@ export default function CancellationSearchPage({
   const [selectedDetailsRow, setSelectedDetailsRow] = useState(null);
   const fileInputRefRemark = useRef(null);
   const limit = 25;
+
+  function clearBuyerMessageIndicator(payload = {}) {
+    const payloadOrderId = String(payload.orderId || '').trim();
+    const payloadBuyer = String(payload.buyerUsername || '').trim();
+    const payloadItemId = String(payload.itemId || '').trim();
+
+    setRows((prev) => prev.map((row) => {
+      const rowOrderIds = [row.orderId, row.legacyOrderId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      const rowBuyer = String(row.buyerLoginName || row.buyerUsername || '').trim();
+      const rowItemId = String(row.itemId || '').trim();
+      const isMatch = payloadOrderId
+        ? rowOrderIds.includes(payloadOrderId)
+        : Boolean(payloadBuyer && payloadItemId && rowBuyer === payloadBuyer && rowItemId === payloadItemId);
+
+      return isMatch
+        ? { ...row, hasUnreadBuyerMessage: false, messageUnreadCount: 0, lastSellerMessageAt: new Date().toISOString() }
+        : row;
+    }));
+  }
 
   const ALL_COLUMNS = [
     { id: 'cancelId', label: 'Cancel ID' },
@@ -626,6 +652,11 @@ export default function CancellationSearchPage({
             sellerId: cancellation.seller?._id,
             body: messageBody,
             mediaUrls: mediaUrls.length > 0 ? mediaUrls : []
+          });
+          clearBuyerMessageIndicator({
+            orderId: cancellation.orderId || cancellation.legacyOrderId,
+            buyerUsername: cancellation.buyerUsername || cancellation.buyerLoginName,
+            itemId: cancellation.itemId,
           });
         } catch (msgErr) {
           console.error('Message send failed (remark still saved):', msgErr);
@@ -1199,7 +1230,15 @@ export default function CancellationSearchPage({
                           )}
                           <Tooltip title="Open chat / manage">
                             <IconButton size="small" onClick={() => setSelectedRow(row)}>
-                              <ChatIcon fontSize="small" />
+                              <Badge
+                                color="error"
+                                variant="dot"
+                                overlap="circular"
+                                invisible={!hasUnreadBuyerMessage(row)}
+                                sx={{ '& .MuiBadge-badge': { boxShadow: '0 0 0 2px #fff' } }}
+                              >
+                                <ChatIcon fontSize="small" />
+                              </Badge>
                             </IconButton>
                           </Tooltip>
                         </Stack>
@@ -1243,6 +1282,7 @@ export default function CancellationSearchPage({
           caseStatus={selectedRow.cancelStatus || selectedRow.cancelState || 'Open'}
           entityId={selectedRow.cancelId || selectedRow._id}
           entityType="cancellation"
+          onMessageSent={clearBuyerMessageIndicator}
         />
       )}
 

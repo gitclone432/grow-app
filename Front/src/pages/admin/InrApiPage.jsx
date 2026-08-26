@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Badge,
   Box,
   Button,
   Chip,
@@ -38,6 +39,9 @@ import SearchIcon from '@mui/icons-material/Search';
 import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import ChatIcon from '@mui/icons-material/Chat';
+import AttachFileIcon from '@mui/icons-material/AttachFile';
+import InfoIcon from '@mui/icons-material/Info';
+import SendIcon from '@mui/icons-material/Send';
 import api from '../../lib/api';
 import {
   tableBodyCellSx,
@@ -49,6 +53,7 @@ import {
 } from '../../theme/tableStyles.js';
 import { sortSellersByName } from '../../lib/sellersSort.js';
 import {
+  findRemarkTemplateText,
   loadRemarkTemplates,
   remarkOptionsFromTemplates,
 } from '../../constants/remarkTemplates';
@@ -82,6 +87,10 @@ const actionCellSx = {
   pl: 1,
   pr: 0.75,
 };
+
+function hasUnreadBuyerMessage(row) {
+  return Boolean(row?.hasUnreadBuyerMessage || Number(row?.messageUnreadCount) > 0);
+}
 
 /**
  * NotesCell component for editable notes in INR page
@@ -1032,6 +1041,19 @@ function rowItemId(row) {
     || '';
 }
 
+function replaceRemarkTemplateVariables(template, row) {
+  const buyerFullName = row?.buyerName || row?.shippingFullName || row?.buyerUsername || 'Customer';
+  const buyerFirstName = String(buyerFullName).trim().split(/\s+/)[0] || 'Customer';
+  const orderId = rowOrderId(row);
+  const itemTitle = row?.itemTitle || row?.productName || row?.rawData?.itemTitle || row?.rawData?.lineItems?.[0]?.title || 'item';
+
+  return String(template || '')
+    .replace(/\{\{buyer_first_name\}\}/g, buyerFirstName)
+    .replace(/\{\{buyer_name\}\}/g, buyerFullName)
+    .replace(/\{\{order_id\}\}/g, orderId || '')
+    .replace(/\{\{item_title\}\}/g, itemTitle || 'item');
+}
+
 function rowItemPictureUrl(row) {
   const candidates = [
     row?.itemPictureUrl,
@@ -1655,6 +1677,11 @@ export default function InrApiPage({
   });
   const [selectedCase, setSelectedCase] = useState(null);
   const [remarkTemplates, setRemarkTemplates] = useState([]);
+  const [pendingRemarkUpdate, setPendingRemarkUpdate] = useState(null);
+  const [editableRemarkMessage, setEditableRemarkMessage] = useState('');
+  const [remarkAttachments, setRemarkAttachments] = useState([]);
+  const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
+  const fileInputRefRemark = useRef(null);
 
   const rows = useMemo(() => {
     const combined = [
@@ -1778,6 +1805,31 @@ export default function InrApiPage({
     }
     setError(errors.join(' '));
     setLoading(false);
+  }
+
+  function clearBuyerMessageIndicator(payload = {}) {
+    const payloadOrderId = String(payload.orderId || '').trim();
+    const payloadBuyer = String(payload.buyerUsername || '').trim();
+    const payloadItemId = String(payload.itemId || '').trim();
+
+    const patchRow = (row) => {
+      const rowOrderIds = [rowOrderId(row), row?.legacyOrderId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      const rowBuyer = String(row?.buyerUsername || '').trim();
+      const rowItem = String(rowItemId(row) || '').trim();
+      const isMatch = payloadOrderId
+        ? rowOrderIds.includes(payloadOrderId)
+        : Boolean(payloadBuyer && payloadItemId && rowBuyer === payloadBuyer && rowItem === payloadItemId);
+
+      return isMatch
+        ? { ...row, hasUnreadBuyerMessage: false, messageUnreadCount: 0, lastSellerMessageAt: new Date().toISOString() }
+        : row;
+    };
+
+    setInquiries((prev) => prev.map(patchRow));
+    setCases((prev) => prev.map(patchRow));
+    setDisputes((prev) => prev.map(patchRow));
   }
 
   async function fetchFromEbay() {
@@ -1942,39 +1994,133 @@ export default function InrApiPage({
     setSnackbar({ open: true, message, severity });
   };
 
+  function findRowByEntityId(entityId) {
+    return rows.find((row) => String(row.caseId || row.paymentDisputeId || row._id || '') === String(entityId || ''));
+  }
+
+  function updateRowRemarkState(orderId, remark) {
+    setInquiries((prev) =>
+      prev.map((r) => (r.orderId === orderId ? { ...r, remark } : r))
+    );
+    setCases((prev) =>
+      prev.map((r) => (r.orderId === orderId ? { ...r, remark } : r))
+    );
+    setDisputes((prev) =>
+      prev.map((r) => (r.orderId === orderId ? { ...r, remark } : r))
+    );
+  }
+
   async function saveRemarkValue(caseId, remark) {
     try {
-      // Determine which endpoint to use based on the source
-      const row = rows.find((r) => r.caseId === caseId);
+      const row = findRowByEntityId(caseId);
       if (!row) throw new Error('Row not found');
 
       // Save to Order model instead of Case/CaseManagement/PaymentDispute
       // This ensures remark is stored in the authoritative source (fulfillment dashboard)
       if (!row.orderId) throw new Error('Order ID not found');
 
-      // Use the Order endpoint to save remark
       await api.patch(`/ebay/orders/${row.orderId}/manual-fields`, { remark });
 
-      // Update local state for all matching rows (all issue types for this order will show the same remark)
-      setInquiries((prev) =>
-        prev.map((r) => (r.orderId === row.orderId ? { ...r, remark } : r))
-      );
-      setCases((prev) =>
-        prev.map((r) => (r.orderId === row.orderId ? { ...r, remark } : r))
-      );
-      setDisputes((prev) =>
-        prev.map((r) => (r.orderId === row.orderId ? { ...r, remark } : r))
-      );
+      updateRowRemarkState(row.orderId, remark);
 
       handleNotify('success', 'Remark saved successfully');
+      return true;
     } catch (e) {
       handleNotify('error', e.response?.data?.error || e.message || 'Failed to save remark');
+      return false;
     }
   }
 
   const handleRemarkUpdate = (caseId, remarkValue) => {
-    saveRemarkValue(caseId, remarkValue);
+    const row = findRowByEntityId(caseId);
+    if (!row) {
+      handleNotify('error', 'Row not found');
+      return;
+    }
+
+    const templateText = findRemarkTemplateText(remarkTemplates, remarkValue);
+    if (!templateText) {
+      saveRemarkValue(caseId, remarkValue);
+      return;
+    }
+
+    setPendingRemarkUpdate({ caseId, remarkValue, row });
+    setEditableRemarkMessage(replaceRemarkTemplateVariables(templateText, row));
+    setRemarkAttachments([]);
   };
+
+  async function handleRemarkFileSelect(event) {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+
+    try {
+      const { data } = await api.post('/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const uploaded = (data.urls || []).map((url, index) => ({
+        url,
+        name: files[index]?.name || 'Attachment',
+      }));
+      setRemarkAttachments((prev) => [...prev, ...uploaded]);
+    } catch (e) {
+      handleNotify('error', e.response?.data?.error || e.message || 'Failed to upload attachment');
+    } finally {
+      if (fileInputRefRemark.current) fileInputRefRemark.current.value = '';
+    }
+  }
+
+  async function handleSkipRemarkMessage() {
+    if (!pendingRemarkUpdate) return;
+
+    const saved = await saveRemarkValue(pendingRemarkUpdate.caseId, pendingRemarkUpdate.remarkValue);
+    if (saved) {
+      setPendingRemarkUpdate(null);
+      setEditableRemarkMessage('');
+      setRemarkAttachments([]);
+    }
+  }
+
+  async function handleConfirmRemarkMessage() {
+    if (!pendingRemarkUpdate) return;
+
+    setSendingRemarkMessage(true);
+    try {
+      const { row, caseId, remarkValue } = pendingRemarkUpdate;
+      const orderId = rowOrderId(row);
+      const mediaUrls = remarkAttachments.map((attachment) => attachment.url);
+
+      await api.post('/ebay/send-message', {
+        orderId,
+        buyerUsername: row.buyerUsername,
+        itemId: rowItemId(row),
+        sellerId: row.seller?._id || row.seller || row.sellerId || undefined,
+        body: editableRemarkMessage,
+        subject: `Regarding Order #${orderId}`,
+        mediaUrls,
+      });
+
+      clearBuyerMessageIndicator({
+        orderId,
+        buyerUsername: row.buyerUsername,
+        itemId: rowItemId(row),
+      });
+
+      const saved = await saveRemarkValue(caseId, remarkValue);
+      if (!saved) return;
+
+      setPendingRemarkUpdate(null);
+      setEditableRemarkMessage('');
+      setRemarkAttachments([]);
+      handleNotify('success', `Message sent and remark updated to "${remarkValue}"`);
+    } catch (e) {
+      handleNotify('error', e.response?.data?.error || e.message || 'Failed to send message');
+    } finally {
+      setSendingRemarkMessage(false);
+    }
+  }
 
   async function submitShipmentInfo() {
     const row = shipDialog.row;
@@ -1992,6 +2138,13 @@ export default function InrApiPage({
         },
         { timeout: 45000 }
       );
+      if (shipDialog.comments.trim()) {
+        clearBuyerMessageIndicator({
+          orderId: rowOrderId(row),
+          buyerUsername: row.buyerUsername,
+          itemId: rowItemId(row),
+        });
+      }
       setShipDialog(EMPTY_SHIP_DIALOG);
       setSnackbar({ open: true, severity: 'success', message: data.message || `Provided shipment info for ${inquiryId}` });
       await loadStored();
@@ -2513,7 +2666,15 @@ export default function InrApiPage({
                       ) : null}
                       <Tooltip title="Open chat / manage">
                         <IconButton size="small" onClick={() => setSelectedCase(row)} sx={{ p: 0.4 }}>
-                          <ChatIcon sx={{ fontSize: 18 }} />
+                          <Badge
+                            color="error"
+                            variant="dot"
+                            overlap="circular"
+                            invisible={!hasUnreadBuyerMessage(row)}
+                            sx={{ '& .MuiBadge-badge': { boxShadow: '0 0 0 2px #fff' } }}
+                          >
+                            <ChatIcon sx={{ fontSize: 18 }} />
+                          </Badge>
                         </IconButton>
                       </Tooltip>
                     </Stack>
@@ -2759,8 +2920,112 @@ export default function InrApiPage({
           caseStatus={rowStatus(selectedCase)}
           entityId={selectedCase.caseId || selectedCase.paymentDisputeId}
           entityType="inr"
+          onMessageSent={clearBuyerMessageIndicator}
         />
       )}
+
+      <Dialog
+        open={Boolean(pendingRemarkUpdate)}
+        onClose={() => {
+          if (!sendingRemarkMessage) {
+            setPendingRemarkUpdate(null);
+            setEditableRemarkMessage('');
+            setRemarkAttachments([]);
+          }
+        }}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <ChatIcon color="primary" />
+            <Typography variant="h6">Send Message to Buyer - Edit & Preview</Typography>
+          </Stack>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Alert severity="info" icon={<InfoIcon />}>
+              You're updating the remark to <strong>"{pendingRemarkUpdate?.remarkValue}"</strong>
+            </Alert>
+
+            <Box>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                Message Preview (Edit as needed):
+              </Typography>
+              <TextField
+                fullWidth
+                multiline
+                minRows={6}
+                maxRows={12}
+                value={editableRemarkMessage}
+                onChange={(e) => setEditableRemarkMessage(e.target.value)}
+                placeholder="Message text..."
+                variant="outlined"
+                size="small"
+              />
+            </Box>
+
+            {remarkAttachments.length > 0 && (
+              <Box>
+                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                  Attachments ({remarkAttachments.length}):
+                </Typography>
+                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                  {remarkAttachments.map((attachment, index) => (
+                    <Chip
+                      key={`${attachment.url}-${index}`}
+                      label={attachment.name}
+                      onDelete={() => setRemarkAttachments((prev) => prev.filter((_, i) => i !== index))}
+                      size="small"
+                      variant="outlined"
+                      sx={{ maxWidth: 200 }}
+                    />
+                  ))}
+                </Box>
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ p: 2, gap: 1 }}>
+          <input
+            ref={fileInputRefRemark}
+            type="file"
+            multiple
+            accept="image/*"
+            hidden
+            onChange={handleRemarkFileSelect}
+          />
+          <Tooltip title="Attach images">
+            <span>
+              <Button
+                size="small"
+                startIcon={<AttachFileIcon />}
+                onClick={() => fileInputRefRemark.current?.click()}
+                disabled={sendingRemarkMessage}
+                variant="outlined"
+              >
+                Add Attachment
+              </Button>
+            </span>
+          </Tooltip>
+          <Box sx={{ flex: 1 }} />
+          <Button
+            onClick={handleSkipRemarkMessage}
+            disabled={sendingRemarkMessage}
+            variant="outlined"
+          >
+            Just Update Remark
+          </Button>
+          <Button
+            onClick={handleConfirmRemarkMessage}
+            disabled={sendingRemarkMessage || !editableRemarkMessage.trim()}
+            variant="contained"
+            startIcon={sendingRemarkMessage ? <CircularProgress size={18} color="inherit" /> : <SendIcon />}
+          >
+            {sendingRemarkMessage ? 'Sending...' : 'Send Message & Update Remark'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar
         open={snackbar.open}

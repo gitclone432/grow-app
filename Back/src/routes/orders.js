@@ -2024,7 +2024,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           ],
           ...dateFilter
         })
-          .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
+          .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardTracking complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
           .sort({ dateSold: -1 })
           .lean()
@@ -2056,7 +2056,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           { 'lineItems.legacyItemId': { $in: sourceOrderIds } },
         ]
       })
-        .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
+        .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardTracking complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
         .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
         .lean();
 
@@ -2102,6 +2102,8 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         subtotalUSD: baseOrder?.subtotalUSD,
         remark: baseOrder?.remark || fallback.buyerComments || fallback.notes || '',
         complianceBoardStatus: status,
+        // Only include tracking for conversation-based cards, not for Return Request cards
+        ...(sourceType === 'conversation' && { complianceBoardTracking: baseOrder?.complianceBoardTracking || '' }),
         complianceBoardCategories: normalizeCategories(baseOrder),
         outOfStockAssignedAt: baseOrder?.outOfStockAssignedAt || null,
         cancellationAssignedAt: baseOrder?.cancellationAssignedAt || null,
@@ -4718,6 +4720,88 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
   } catch (error) {
     console.error('Error fetching stats details:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch stats details' });
+  }
+});
+
+/**
+ * Update compliance board tracking ID for an Order (Follow Up column in Return board)
+ * POST /:orderId/compliance-board-tracking
+ * Body: { complianceBoardTracking: string }
+ */
+router.post('/:orderId/compliance-board-tracking', requireAuth, async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { complianceBoardTracking } = req.body;
+
+    console.log(`[COMPLIANCE-BOARD-TRACKING] Received request for orderId=${orderId}, tracking=${complianceBoardTracking}`);
+
+    if (!complianceBoardTracking || !complianceBoardTracking.trim()) {
+      console.log(`[COMPLIANCE-BOARD-TRACKING] Error: Tracking ID is empty or missing`);
+      return res.status(400).json({ error: 'Tracking ID is required' });
+    }
+
+    // Debug: Check if order exists
+    const existingOrder = await Order.findOne({ orderId: orderId }).select('_id orderId complianceBoardTracking').lean();
+    console.log(`[COMPLIANCE-BOARD-TRACKING] Found order:`, existingOrder ? `Yes (${existingOrder._id})` : 'No');
+
+    const updatedOrder = await Order.findOneAndUpdate(
+      { orderId: orderId },
+      { complianceBoardTracking: complianceBoardTracking.trim() },
+      { new: true, runValidators: false }
+    ).lean();
+
+    if (!updatedOrder) {
+      console.log(`[COMPLIANCE-BOARD-TRACKING] Error: Order not found with orderId=${orderId}`);
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    console.log(`[COMPLIANCE-BOARD-TRACKING] ✅ Successfully updated orderId=${orderId} with tracking=${complianceBoardTracking.trim()}`);
+
+    res.json({
+      success: true,
+      orderId: updatedOrder.orderId,
+      complianceBoardTracking: updatedOrder.complianceBoardTracking
+    });
+  } catch (err) {
+    console.error('[COMPLIANCE-BOARD-TRACKING] ❌ Error:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to update compliance board tracking ID' });
+  }
+});
+
+/**
+ * Update compliance board tracking ID for a Return record (Follow Up column)
+ * POST /returns/:returnId/compliance-board-tracking
+ * Body: { complianceBoardTracking: string }
+ */
+router.post('/returns/:returnId/compliance-board-tracking', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const { complianceBoardTracking } = req.body;
+
+    if (!complianceBoardTracking || !complianceBoardTracking.trim()) {
+      return res.status(400).json({ error: 'Tracking ID is required' });
+    }
+
+    const updatedReturn = await Return.findOneAndUpdate(
+      { returnId: returnId },
+      { complianceBoardTracking: complianceBoardTracking.trim() },
+      { new: true, runValidators: false }
+    ).lean();
+
+    if (!updatedReturn) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    console.log(`[COMPLIANCE-BOARD-TRACKING] Updated returnId=${returnId} with tracking=${complianceBoardTracking.trim()}`);
+
+    res.json({
+      success: true,
+      returnId: updatedReturn.returnId,
+      complianceBoardTracking: updatedReturn.complianceBoardTracking
+    });
+  } catch (err) {
+    console.error('[COMPLIANCE-BOARD-TRACKING] Error updating tracking ID:', err);
+    res.status(500).json({ error: err.message || 'Failed to update compliance board tracking ID' });
   }
 });
 

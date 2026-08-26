@@ -236,6 +236,281 @@ async function enrichCaseLikeRowsWithConversationMeta(rows = []) {
   });
 }
 
+function normalizeMessageMatchValue(value) {
+  if (value == null) return '';
+  return String(value).trim();
+}
+
+function getRowMessageSellerId(row) {
+  return normalizeMessageMatchValue(row?.seller?._id || row?.seller);
+}
+
+function getRowMessageOrderIds(row) {
+  return [...new Set(
+    [row?.orderId, row?.legacyOrderId, row?.originalOrderId, row?.caseOrderId]
+      .map(normalizeMessageMatchValue)
+      .filter(Boolean)
+  )];
+}
+
+function getRowMessageBuyerUsername(row) {
+  return normalizeMessageMatchValue(row?.buyerUsername || row?.buyerLoginName);
+}
+
+function getRowMessageItemId(row) {
+  return normalizeMessageMatchValue(row?.itemId);
+}
+
+function emptyBuyerReplyState() {
+  return {
+    lastBuyerMessageAt: null,
+    lastSellerMessageAt: null,
+    unreadBuyerCount: 0,
+  };
+}
+
+function appendBuyerReplyState(stateMap, key, message) {
+  if (!key) return;
+  const current = stateMap.get(key) || emptyBuyerReplyState();
+  const when = message?.messageDate ? new Date(message.messageDate) : null;
+  const isValidDate = when && !Number.isNaN(when.getTime());
+
+  if (message?.sender === 'BUYER') {
+    if (isValidDate && (!current.lastBuyerMessageAt || when > current.lastBuyerMessageAt)) {
+      current.lastBuyerMessageAt = when;
+    }
+    if (message?.read === false) {
+      current.unreadBuyerCount += 1;
+    }
+  }
+
+  if (message?.sender === 'SELLER' && isValidDate) {
+    if (!current.lastSellerMessageAt || when > current.lastSellerMessageAt) {
+      current.lastSellerMessageAt = when;
+    }
+  }
+
+  stateMap.set(key, current);
+}
+
+async function enrichRowsWithBuyerReplyState(rows = []) {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+
+  try {
+    const orderIds = new Set();
+    const fallbackMatches = [];
+
+    rows.forEach((row) => {
+      const rowOrderIds = getRowMessageOrderIds(row);
+      rowOrderIds.forEach((orderId) => orderIds.add(orderId));
+
+      if (rowOrderIds.length > 0) return;
+
+      const sellerId = getRowMessageSellerId(row);
+      const buyerUsername = getRowMessageBuyerUsername(row);
+      const itemId = getRowMessageItemId(row);
+      if (sellerId && buyerUsername && itemId) {
+        fallbackMatches.push({ sellerId, buyerUsername, itemId });
+      }
+    });
+
+    const queryOr = [];
+    if (orderIds.size > 0) {
+      queryOr.push({ orderId: { $in: [...orderIds] } });
+    }
+
+    fallbackMatches.forEach(({ sellerId, buyerUsername, itemId }) => {
+      const clause = { buyerUsername, itemId };
+      clause.seller = mongoose.Types.ObjectId.isValid(sellerId)
+        ? new mongoose.Types.ObjectId(sellerId)
+        : sellerId;
+      queryOr.push(clause);
+    });
+
+    if (queryOr.length === 0) {
+      return rows.map((row) => ({
+        ...row,
+        hasUnreadBuyerMessage: false,
+        messageUnreadCount: 0,
+        lastBuyerMessageAt: null,
+        lastSellerMessageAt: null,
+      }));
+    }
+
+    const messages = await Message.find({ $or: queryOr })
+      .select('seller orderId buyerUsername itemId sender read messageDate')
+      .lean();
+
+    const bySellerOrder = new Map();
+    const byOrder = new Map();
+    const bySellerBuyerItem = new Map();
+
+    messages.forEach((message) => {
+      const sellerId = normalizeMessageMatchValue(message?.seller);
+      const orderId = normalizeMessageMatchValue(message?.orderId);
+      const buyerUsername = normalizeMessageMatchValue(message?.buyerUsername);
+      const itemId = normalizeMessageMatchValue(message?.itemId);
+
+      if (orderId) {
+        appendBuyerReplyState(byOrder, orderId, message);
+        if (sellerId) {
+          appendBuyerReplyState(bySellerOrder, `${sellerId}::${orderId}`, message);
+        }
+      }
+
+      if (sellerId && buyerUsername && itemId) {
+        appendBuyerReplyState(bySellerBuyerItem, `${sellerId}::${buyerUsername}::${itemId}`, message);
+      }
+    });
+
+    return rows.map((row) => {
+      const sellerId = getRowMessageSellerId(row);
+      const buyerUsername = getRowMessageBuyerUsername(row);
+      const itemId = getRowMessageItemId(row);
+      const rowOrderIds = getRowMessageOrderIds(row);
+
+      let replyState = null;
+      for (const orderId of rowOrderIds) {
+        replyState =
+          (sellerId ? bySellerOrder.get(`${sellerId}::${orderId}`) : null)
+          || byOrder.get(orderId)
+          || null;
+        if (replyState) break;
+      }
+
+      if (!replyState && sellerId && buyerUsername && itemId) {
+        replyState = bySellerBuyerItem.get(`${sellerId}::${buyerUsername}::${itemId}`) || null;
+      }
+
+      const lastBuyerMessageAt = replyState?.lastBuyerMessageAt || null;
+      const lastSellerMessageAt = replyState?.lastSellerMessageAt || null;
+      const hasUnreadBuyerMessage = Boolean(lastBuyerMessageAt)
+        && (!lastSellerMessageAt || lastBuyerMessageAt > lastSellerMessageAt);
+
+      return {
+        ...row,
+        hasUnreadBuyerMessage,
+        messageUnreadCount: hasUnreadBuyerMessage
+          ? Math.max(Number(replyState?.unreadBuyerCount) || 0, 1)
+          : 0,
+        lastBuyerMessageAt,
+        lastSellerMessageAt,
+      };
+    });
+  } catch (err) {
+    console.warn('[Buyer Reply State] Error enriching rows:', err.message);
+    return rows;
+  }
+}
+
+function buildBuyerConversationMatch({ orderId, buyerUsername, itemId }) {
+  const normalizedOrderId = normalizeMessageMatchValue(orderId);
+  if (normalizedOrderId) {
+    return { orderId: normalizedOrderId };
+  }
+
+  const normalizedBuyer = normalizeMessageMatchValue(buyerUsername);
+  const normalizedItemId = normalizeMessageMatchValue(itemId);
+  if (normalizedBuyer && normalizedItemId) {
+    return {
+      buyerUsername: normalizedBuyer,
+      itemId: normalizedItemId,
+    };
+  }
+
+  return null;
+}
+
+async function clearBuyerUnreadState({ orderId, buyerUsername, itemId }) {
+  const messageMatch = buildBuyerConversationMatch({ orderId, buyerUsername, itemId });
+  if (!messageMatch) return;
+
+  await Promise.all([
+    Message.updateMany(
+      { ...messageMatch, sender: 'BUYER', read: false },
+      { read: true }
+    ),
+    EbayMessageConversation.updateMany(messageMatch, { unreadCount: 0 })
+  ]);
+}
+
+async function trackSellerMessage({
+  sellerId,
+  orderId,
+  buyerUsername,
+  itemId,
+  itemTitle = '',
+  body,
+  subject = 'Reply',
+  messageType = 'ORDER',
+  mediaUrls = [],
+}) {
+  const normalizedSellerId = sellerId && typeof sellerId === 'object'
+    ? (sellerId._id || sellerId)
+    : sellerId;
+  const normalizedBuyer = normalizeMessageMatchValue(buyerUsername);
+  const normalizedOrderId = normalizeMessageMatchValue(orderId) || null;
+  const normalizedItemId = normalizeMessageMatchValue(itemId) || null;
+  const messageBody = String(body || '').trim();
+
+  if (!normalizedSellerId || !normalizedBuyer || !messageBody) return null;
+
+  const saved = await Message.create({
+    seller: normalizedSellerId,
+    orderId: normalizedOrderId,
+    itemId: normalizedItemId,
+    itemTitle: itemTitle || undefined,
+    buyerUsername: normalizedBuyer,
+    sender: 'SELLER',
+    subject,
+    body: messageBody,
+    mediaUrls,
+    read: true,
+    messageType,
+    messageDate: new Date(),
+  });
+
+  await clearBuyerUnreadState({
+    orderId: normalizedOrderId,
+    buyerUsername: normalizedBuyer,
+    itemId: normalizedItemId,
+  });
+
+  return saved;
+}
+
+// Helper: Find order by either MongoDB _id (if valid ObjectId) or by orderId field (string)
+async function findOrderByIdOrOrderId(idValue, populateOption = null) {
+  if (!idValue) return null;
+
+  // First, try to find by orderId (human-readable ID like "20-15018-65753")
+  try {
+    let query = Order.findOne({ orderId: String(idValue) });
+    if (populateOption) {
+      query = query.populate(populateOption);
+    }
+    const orderByOrderId = await query;
+    if (orderByOrderId) return orderByOrderId;
+  } catch (err) {
+    console.warn('[findOrderByIdOrOrderId] Error searching by orderId:', err.message);
+  }
+
+  // Fallback: try to find by MongoDB _id (if it's a valid ObjectId)
+  if (mongoose.Types.ObjectId.isValid(idValue)) {
+    try {
+      let query = Order.findById(idValue);
+      if (populateOption) {
+        query = query.populate(populateOption);
+      }
+      return await query;
+    } catch (err) {
+      console.warn('[findOrderByIdOrOrderId] Error searching by _id:', err.message);
+    }
+  }
+
+  return null;
+}
+
 async function enrichCancelledOrdersWithCaseState(rows = []) {
   if (!rows.length) return rows;
 
@@ -4065,7 +4340,7 @@ router.get('/stored-orders', async (req, res) => {
       orderIds.length
         ? ConversationMeta.find({ orderId: { $in: orderIds } }).select('orderId category caseStatus').lean()
         : Promise.resolve([]),
-      (amazonArriving === 'true' || awaitingShipment === 'true') && orderIds.length > 0 && sellerIdsForSla.length > 0
+      orderIds.length > 0 && sellerIdsForSla.length > 0
         ? Message.aggregate([
           { $match: { orderId: { $in: orderIds }, seller: { $in: sellerIdsForSla } } },
           {
@@ -4103,12 +4378,16 @@ router.get('/stored-orders', async (req, res) => {
     const ordersWithConvoData = enrichedOrders.map((order) => {
       const convoData = conversationMetaMap.get(order.orderId);
       const slaData = slaMap.get(`${order.seller?._id}_${order.orderId}`);
+      const lastBuyerMessageAt = slaData?.lastBuyerMessageAt || null;
+      const lastSellerMessageAt = slaData?.lastSellerMessageAt || null;
       return {
         ...order,
         convoCategory: convoData?.category || null,
         convoCaseStatus: convoData?.caseStatus || null,
-        lastBuyerMessageAt: slaData?.lastBuyerMessageAt || null,
-        lastSellerMessageAt: slaData?.lastSellerMessageAt || null,
+        lastBuyerMessageAt,
+        lastSellerMessageAt,
+        hasUnreadBuyerMessage: Boolean(lastBuyerMessageAt)
+          && (!lastSellerMessageAt || new Date(lastBuyerMessageAt) > new Date(lastSellerMessageAt)),
       };
     });
 
@@ -4989,7 +5268,7 @@ router.patch('/orders/:orderId/ad-fee-general', async (req, res) => {
   }
 
   try {
-    const order = await Order.findById(orderId);
+    const order = await findOrderByIdOrOrderId(orderId);
 
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
@@ -5029,7 +5308,7 @@ router.post('/orders/:orderId/fetch-ad-fee-general', requireAuth, requirePageAcc
   try {
     const { orderId } = req.params;
 
-    const order = await Order.findById(orderId);
+    const order = await findOrderByIdOrOrderId(orderId);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -5102,7 +5381,7 @@ router.post('/orders/:orderId/fetch-cancel-status', requireAuth, requirePageAcce
   try {
     const { orderId } = req.params;
 
-    const order = await Order.findById(orderId);
+    const order = await findOrderByIdOrOrderId(orderId);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -5278,7 +5557,7 @@ router.patch('/orders/:orderId/order-total', requireAuth, requirePageAccess('All
       return res.status(400).json({ error: 'Valid orderTotal is required' });
     }
 
-    const order = await Order.findById(orderId);
+    const order = await findOrderByIdOrOrderId(orderId);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -5326,7 +5605,7 @@ router.patch('/orders/:orderId/all-orders-usd-remark', requireAuth, requirePageA
     const { orderId } = req.params;
     const { allOrdersUsdRemark } = req.body;
 
-    const order = await Order.findById(orderId);
+    const order = await findOrderByIdOrOrderId(orderId);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -5941,7 +6220,7 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
 
   try {
     // Find the order in our database
-    const order = await Order.findById(orderId).populate('seller');
+    const order = await findOrderByIdOrOrderId(orderId, 'seller');
 
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
@@ -6148,7 +6427,7 @@ router.post('/orders/:orderId/upload-tracking-multiple', async (req, res) => {
 
   try {
     // Find the order in our database
-    const order = await Order.findById(orderId).populate('seller');
+    const order = await findOrderByIdOrOrderId(orderId, 'seller');
 
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
@@ -9164,7 +9443,7 @@ router.patch('/orders/:orderId/dismiss-arrival', requireAuth, async (req, res) =
   const { orderId } = req.params;
 
   try {
-    const order = await Order.findById(orderId);
+    const order = await findOrderByIdOrOrderId(orderId);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -10081,6 +10360,17 @@ router.post('/returns/:returnId/send-message', requireAuth, requirePageAccess('D
       { marketplaceId: doc.marketplaceId || 'EBAY_US', body }
     );
 
+    await trackSellerMessage({
+      sellerId: doc.seller?._id || doc.seller,
+      orderId: doc.orderId,
+      buyerUsername: doc.buyerUsername || doc.buyerLoginName,
+      itemId: doc.itemId,
+      itemTitle: doc.itemTitle || doc.productName || '',
+      body: message,
+      subject: `Return ${returnId}`,
+      messageType: doc.orderId ? 'ORDER' : 'INQUIRY',
+    });
+
     res.json({ message: `Message sent on return ${returnId}` });
   } catch (err) {
     console.error('[Return Send Message] Error:', err.ebay || err.message);
@@ -10129,6 +10419,19 @@ router.post('/returns/:returnId/add-shipping-label', requireAuth, requirePageAcc
       `/post-order/v2/return/${returnId}/add_shipping_label`,
       { marketplaceId: doc.marketplaceId || 'EBAY_US', body }
     );
+
+    if (req.body?.comments) {
+      await trackSellerMessage({
+        sellerId: doc.seller?._id || doc.seller,
+        orderId: doc.orderId,
+        buyerUsername: doc.buyerUsername || doc.buyerLoginName,
+        itemId: doc.itemId,
+        itemTitle: doc.itemTitle || doc.productName || '',
+        body: String(req.body.comments),
+        subject: `Return ${returnId} shipping label`,
+        messageType: doc.orderId ? 'ORDER' : 'INQUIRY',
+      });
+    }
 
     await enrichReturnFromEbayApis(doc, accessToken);
     const fresh = await leanReturnAfterAction(returnId);
@@ -10255,6 +10558,19 @@ router.post(
         `/post-order/v2/return/${returnId}/add_shipping_label`,
         { marketplaceId, body: labelBody }
       );
+
+      if (req.body?.comments) {
+        await trackSellerMessage({
+          sellerId: doc.seller?._id || doc.seller,
+          orderId: doc.orderId,
+          buyerUsername: doc.buyerUsername || doc.buyerLoginName,
+          itemId: doc.itemId,
+          itemTitle: doc.itemTitle || doc.productName || '',
+          body: String(req.body.comments),
+          subject: `Return ${returnId} shipping label`,
+          messageType: doc.orderId ? 'ORDER' : 'INQUIRY',
+        });
+      }
 
       await enrichReturnFromEbayApis(doc, accessToken);
       const fresh = await leanReturnAfterAction(returnId);
@@ -11156,8 +11472,10 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
       };
     });
 
+    const rowsWithBuyerReplyState = await enrichRowsWithBuyerReplyState(rows);
+
     res.json({
-      cancellations: rows,
+      cancellations: rowsWithBuyerReplyState,
       totalCancellations: totalCount,
       pagination: {
         currentPage: pageNum,
@@ -11270,12 +11588,14 @@ router.get('/stored-returns', async (req, res) => {
       returnCreatedDate: r.creationDate || r.createdDate || null,
     }));
 
+    const returnsWithBuyerReplyState = await enrichRowsWithBuyerReplyState(returnsWithOrderData);
+
     // Get total count for the query
     const totalCount = await Return.countDocuments(query);
     const totalPages = Math.ceil(totalCount / limitNum);
 
     res.json({
-      returns: returnsWithOrderData,
+      returns: returnsWithBuyerReplyState,
       pagination: {
         currentPage: pageNum,
         totalPages,
@@ -11996,9 +12316,10 @@ router.get('/stored-inr-cases', async (req, res) => {
     const withAddress = await attachShippingAddressToRows(enriched);
     const enrichedWithMeta = await enrichCaseLikeRowsWithConversationMeta(withAddress);
     const enrichedWithOrderData = await enrichINRRowsWithOrderNotesAndRemark(enrichedWithMeta);
+    const enrichedWithBuyerReplyState = await enrichRowsWithBuyerReplyState(enrichedWithOrderData);
     res.json({
-      cases: enrichedWithOrderData.map((row) => withParsedTracking(row)),
-      totalCases: enrichedWithOrderData.length,
+      cases: enrichedWithBuyerReplyState.map((row) => withParsedTracking(row)),
+      totalCases: enrichedWithBuyerReplyState.length,
       totalCount,
     });
   } catch (err) {
@@ -12869,6 +13190,18 @@ router.post('/inquiry/:inquiryId/provide-shipment-info', requireAuth, requirePag
 
     const stored = await loadInquiryForAction(inquiryId);
     await postInquiryEbayAction(stored, '/provide_shipment_info', body);
+    if (body.sellerComments?.content) {
+      await trackSellerMessage({
+        sellerId: stored.seller?._id || stored.seller,
+        orderId: stored.orderId,
+        buyerUsername: stored.buyerUsername,
+        itemId: stored.itemId,
+        itemTitle: stored.itemTitle || '',
+        body: body.sellerComments.content,
+        subject: `Inquiry ${inquiryId} shipment update`,
+        messageType: stored.orderId ? 'ORDER' : 'INQUIRY',
+      });
+    }
     let detail = null;
     try {
       detail = await refreshStoredInquiryFromEbay(stored);
@@ -15530,36 +15863,18 @@ router.post('/chat/mark-read', requireAuth, async (req, res) => {
   const { orderId, buyerUsername, itemId } = req.body;
 
   try {
-    let query = {};
-    if (orderId) {
-      query.orderId = orderId;
-    } else if (buyerUsername && itemId) {
-      query.buyerUsername = buyerUsername;
-      query.itemId = itemId;
-    } else {
+    const query = buildBuyerConversationMatch({ orderId, buyerUsername, itemId });
+    if (!query) {
       return res.status(400).json({ error: 'Invalid query params' });
     }
 
-    // Update all unread messages to read in Message collection
-    const result = await Message.updateMany(
-      { ...query, sender: 'BUYER', read: false },
-      { read: true }
-    );
-
-    // CRITICAL: Also update the EbayMessageConversation unreadCount to 0
-    // This ensures the Compliance Board shows correct unread counts
-    const convQuery = {};
-    if (orderId) {
-      convQuery.orderId = orderId;
-    } else if (buyerUsername && itemId) {
-      convQuery.buyerUsername = buyerUsername;
-      convQuery.itemId = itemId;
-    }
-
-    const convResult = await EbayMessageConversation.updateMany(
-      convQuery,
-      { unreadCount: 0 }
-    );
+    const [result, convResult] = await Promise.all([
+      Message.updateMany(
+        { ...query, sender: 'BUYER', read: false },
+        { read: true }
+      ),
+      EbayMessageConversation.updateMany(query, { unreadCount: 0 })
+    ]);
 
     console.log('[MARK-READ] Updated messages:', result.modifiedCount, 'Updated conversations:', convResult.modifiedCount);
 
@@ -18797,6 +19112,117 @@ function buildMetaChangeEntries(existing, updates, changedBy) {
   return entries;
 }
 
+const SPECIALIZED_CONVERSATION_CATEGORY_TO_BOARD = Object.freeze({
+  INR: { boardCategory: 'inr', boardStatus: 'case_not_opened', assignedAtField: 'inrCaseNotOpenedAssignedAt' },
+  Cancellation: { boardCategory: 'cancellation', boardStatus: 'case_not_opened', assignedAtField: 'cancellationCaseNotOpenedAssignedAt' },
+  Return: { boardCategory: 'return_refund', boardStatus: 'case_not_opened', assignedAtField: 'returnCaseNotOpenedAssignedAt' },
+  Refund: { boardCategory: 'return_refund', boardStatus: 'case_not_opened', assignedAtField: 'returnCaseNotOpenedAssignedAt' },
+  Replace: { boardCategory: 'return_refund', boardStatus: 'case_not_opened', assignedAtField: 'returnCaseNotOpenedAssignedAt' },
+});
+
+function getComplianceBoardAssignmentForConversationCategory(category) {
+  const normalizedCategory = String(category || '').trim();
+  return SPECIALIZED_CONVERSATION_CATEGORY_TO_BOARD[normalizedCategory] || null;
+}
+
+async function syncConversationMetaAssignmentToOrder({
+  orderId,
+  existingMeta,
+  nextCategory,
+  resolvedOrder,
+}) {
+  const normalizedOrderId = String(orderId || '').trim();
+  if (!normalizedOrderId) return null;
+
+  const previousAssignment = getComplianceBoardAssignmentForConversationCategory(existingMeta?.category);
+  const nextAssignment = getComplianceBoardAssignmentForConversationCategory(nextCategory);
+  if (!previousAssignment && !nextAssignment) return null;
+
+  const order = resolvedOrder || await Order.findOne({ orderId: normalizedOrderId })
+    .select([
+      'orderId',
+      'complianceBoardCategories',
+      'complianceBoardCategory',
+      'complianceBoardStatus',
+      'complianceBoardSource',
+      'returnCaseNotOpenedAssignedAt',
+      'cancellationCaseNotOpenedAssignedAt',
+      'inrCaseNotOpenedAssignedAt',
+    ].join(' '))
+    .lean();
+
+  if (!order) {
+    return null;
+  }
+
+  const existingCategories = new Set(
+    Array.isArray(order.complianceBoardCategories)
+      ? order.complianceBoardCategories.filter(Boolean).map(String)
+      : (order.complianceBoardCategory ? [String(order.complianceBoardCategory)] : [])
+  );
+  const nextCategories = new Set(existingCategories);
+  const setObj = {};
+  const pullCategories = [];
+  const now = new Date();
+
+  if (previousAssignment && previousAssignment.boardCategory !== nextAssignment?.boardCategory) {
+    nextCategories.delete(previousAssignment.boardCategory);
+    pullCategories.push(previousAssignment.boardCategory);
+    setObj[previousAssignment.assignedAtField] = null;
+    if (order.complianceBoardCategory === previousAssignment.boardCategory) {
+      setObj.complianceBoardCategory = null;
+    }
+  }
+
+  if (nextAssignment) {
+    const changedBoardCategory = previousAssignment?.boardCategory !== nextAssignment.boardCategory;
+    const missingTargetCategory = !existingCategories.has(nextAssignment.boardCategory);
+    const shouldSetCaseNotOpened =
+      changedBoardCategory ||
+      missingTargetCategory ||
+      !order.complianceBoardStatus ||
+      order.complianceBoardStatus === 'todo';
+
+    nextCategories.add(nextAssignment.boardCategory);
+    setObj.complianceBoardCategory = nextAssignment.boardCategory;
+    setObj.complianceBoardSource = 'order_communication';
+    if (shouldSetCaseNotOpened) {
+      setObj.complianceBoardStatus = nextAssignment.boardStatus;
+    }
+    if ((changedBoardCategory || missingTargetCategory) && !order[nextAssignment.assignedAtField]) {
+      setObj[nextAssignment.assignedAtField] = now;
+    }
+  } else if (previousAssignment) {
+    if (order.complianceBoardSource === 'order_communication') {
+      setObj.complianceBoardSource = null;
+    }
+    if (order.complianceBoardStatus === previousAssignment.boardStatus) {
+      setObj.complianceBoardStatus = 'todo';
+    }
+  }
+
+  const update = {};
+  if (Object.keys(setObj).length > 0) {
+    update.$set = setObj;
+  }
+  if (pullCategories.length > 0) {
+    update.$pull = { complianceBoardCategories: { $in: pullCategories } };
+  }
+  if (nextAssignment && !existingCategories.has(nextAssignment.boardCategory)) {
+    update.$addToSet = { complianceBoardCategories: nextAssignment.boardCategory };
+  }
+
+  if (Object.keys(update).length === 0) {
+    return order;
+  }
+
+  return Order.findOneAndUpdate(
+    { orderId: normalizedOrderId },
+    update,
+    { new: true }
+  ).lean();
+}
+
 // --- NEW ROUTE 1: UPSERT CONVERSATION TAGS (Called from BuyerChatPage) ---
 // 
 router.post('/conversation-meta', requireAuth, async (req, res) => {
@@ -18817,15 +19243,16 @@ router.post('/conversation-meta', requireAuth, async (req, res) => {
     // caller/UI value that may be the seller's eBay store id.
     let resolvedBuyerUsername = buyerUsername;
     let resolvedItemId = itemId;
+    let resolvedOrder = null;
     if (orderId) {
-      const order = await Order.findOne({ orderId: String(orderId) })
-        .select('buyer.username lineItems.legacyItemId')
+      resolvedOrder = await Order.findOne({ orderId: String(orderId) })
+        .select('buyer.username lineItems.legacyItemId complianceBoardCategories complianceBoardCategory complianceBoardStatus complianceBoardSource returnCaseNotOpenedAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt')
         .lean();
-      if (order?.buyer?.username) {
-        resolvedBuyerUsername = String(order.buyer.username).trim();
+      if (resolvedOrder?.buyer?.username) {
+        resolvedBuyerUsername = String(resolvedOrder.buyer.username).trim();
       }
-      if (!resolvedItemId && order?.lineItems?.[0]?.legacyItemId) {
-        resolvedItemId = String(order.lineItems[0].legacyItemId);
+      if (!resolvedItemId && resolvedOrder?.lineItems?.[0]?.legacyItemId) {
+        resolvedItemId = String(resolvedOrder.lineItems[0].legacyItemId);
       }
     }
 
@@ -18859,6 +19286,15 @@ router.post('/conversation-meta', requireAuth, async (req, res) => {
       update,
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
+    if (orderId) {
+      await syncConversationMetaAssignmentToOrder({
+        orderId,
+        existingMeta: existing,
+        nextCategory: category,
+        resolvedOrder,
+      });
+    }
 
     res.json({ success: true, meta });
   } catch (err) {
@@ -19532,7 +19968,7 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
   const updates = req.body;
 
   try {
-    const order = await Order.findById(orderId);
+    const order = await findOrderByIdOrOrderId(orderId);
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
     const result = await applyManualFieldUpdatesToOrder(order, updates);
@@ -22615,9 +23051,9 @@ router.patch('/orders/:orderId/auto-message-toggle', requireAuth, async (req, re
 // Fetch ship-by date for a single order from eBay and store it (without touching lastModifiedDate)
 router.post('/orders/:orderId/fetch-ship-by-date', requireAuth, async (req, res) => {
   try {
-    const { orderId } = req.params; // MongoDB _id
+    const { orderId } = req.params; // Can be either MongoDB _id or string orderId
 
-    const order = await Order.findById(orderId).populate('seller');
+    const order = await findOrderByIdOrOrderId(orderId, 'seller');
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
     const seller = order.seller;

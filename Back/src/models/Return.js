@@ -104,6 +104,9 @@ const ReturnSchema = new mongoose.Schema(
     // Timestamp of when card was first moved to Case Not Opened column
     returnCaseNotOpenedAssignedAt: Date,
 
+    // Internal tracking ID for compliance board follow-up workflow (only for Return board)
+    complianceBoardTracking: { type: String, default: '' },
+
     // Manual SNAD override — counts this return in the BBE calculation even if the reason code is not SNAD
     markedAsSNAD: { type: Boolean, default: false }
   },

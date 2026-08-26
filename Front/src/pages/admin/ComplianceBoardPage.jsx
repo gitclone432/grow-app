@@ -24,6 +24,7 @@ import {
   DialogActions,
   FormControlLabel,
   Switch,
+  Link,
 } from '@mui/material';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -35,6 +36,10 @@ import ChatIcon from '@mui/icons-material/Chat';
 import HistoryIcon from '@mui/icons-material/History';
 import CloseIcon from '@mui/icons-material/Close';
 import InfoIcon from '@mui/icons-material/Info';
+import LocalShippingIcon from '@mui/icons-material/LocalShipping';
+import CheckIcon from '@mui/icons-material/Check';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import { format } from 'date-fns';
 import api from '../../lib/api';
 import ChatModal from '../../components/ChatModal';
@@ -509,6 +514,8 @@ function ComplianceBoardPage() {
   const [allMessagesForAlerts, setAllMessagesForAlerts] = useState([]);
   const [chatAgents, setChatAgents] = useState([]);
   const [savingPickedUpByKey, setSavingPickedUpByKey] = useState('');
+  const [savingTrackingIdReturnId, setSavingTrackingIdReturnId] = useState('');
+  const [trackingIdInput, setTrackingIdInput] = useState({});
 
   // Stats section states
   const [showStats, setShowStats] = useState(true);
@@ -1739,18 +1746,23 @@ function ComplianceBoardPage() {
         console.log(`[BOARD-GROUP] dedupCancellationCases: ${dedupCancellationCases.length}`);
         console.log(`[BOARD-GROUP] cancellationOrderIds: ${cancellationOrderIds.size} unique orderIds`);
         
-        // Remove duplicate Order Communication entries if same orderId exists in cancellation cases
+        // Remove only duplicated stored-cancellation entries before re-adding the normalized
+        // cancellation case payloads. Keep assigned order cards from Order Communication visible
+        // in their board column even when the same order also has a stored cancellation record.
         console.log(`[BOARD-GROUP] BEFORE removing duplicates - CASE_NOT_OPENED: ${(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).length}`);
         
         Object.keys(grouped).forEach((status) => {
           const beforeCount = grouped[status].length;
           grouped[status] = grouped[status].filter((order) => {
             const orderId = String(order.orderId || order.legacyOrderId || '').toLowerCase();
-            const shouldKeep = !cancellationOrderIds.has(orderId);
-            if (!shouldKeep && status === COLUMN_STATUS.CASE_NOT_OPENED) {
-              console.log(`[BOARD-GROUP-FILTER] Removing ${order.orderId} from ${status} (matches stored case)`);
+            const isStoredCancellationEntry =
+              order.complianceBoardSource === 'cancellation_collection' ||
+              order.sourceType === 'cancellation-case';
+            const shouldRemove = cancellationOrderIds.has(orderId) && isStoredCancellationEntry;
+            if (shouldRemove && status === COLUMN_STATUS.CASE_NOT_OPENED) {
+              console.log(`[BOARD-GROUP-FILTER] Removing duplicated stored cancellation ${order.orderId} from ${status}`);
             }
-            return shouldKeep;
+            return !shouldRemove;
           });
           const afterCount = grouped[status].length;
           if (beforeCount !== afterCount) {
@@ -2856,6 +2868,71 @@ function ComplianceBoardPage() {
     item?._conversationMeta?.pickedUpBy ||
     ''
   );
+
+  const handleReturnTrackingIdChange = async (returnItem, trackingNumber) => {
+    // Get orderId (works for both Return Request and Conversation-based returns)
+    const orderId = returnItem.orderId || returnItem.caseOrderId || returnItem.originalOrderId;
+    if (!orderId) {
+      setSnackbar({ open: true, message: 'Invalid order ID' });
+      return;
+    }
+
+    const previousTrackingNumber = returnItem.complianceBoardTracking || '';
+
+    // Optimistic update
+    setSavingTrackingIdReturnId(orderId);
+    setOrders(prev => {
+      const updated = { ...prev };
+      Object.keys(updated).forEach(status => {
+        updated[status] = updated[status].map(item => {
+          const itemOrderId = item.orderId || item.caseOrderId || item.originalOrderId;
+          return itemOrderId === orderId ? { ...item, complianceBoardTracking: trackingNumber } : item;
+        });
+      });
+      return updated;
+    });
+
+    try {
+      const { data } = await api.post(`/orders/${encodeURIComponent(orderId)}/compliance-board-tracking`, {
+        complianceBoardTracking: trackingNumber.trim()
+      });
+
+      // Update UI with confirmed data
+      setOrders(prev => {
+        const updated = { ...prev };
+        Object.keys(updated).forEach(status => {
+          updated[status] = updated[status].map(item => {
+            const itemOrderId = item.orderId || item.caseOrderId || item.originalOrderId;
+            return itemOrderId === orderId ? { ...item, complianceBoardTracking: data.complianceBoardTracking } : item;
+          });
+        });
+        return updated;
+      });
+
+      setSnackbar({
+        open: true,
+        message: `✅ Tracking ID saved successfully`,
+      });
+    } catch (err) {
+      // Revert on error
+      setOrders(prev => {
+        const updated = { ...prev };
+        Object.keys(updated).forEach(status => {
+          updated[status] = updated[status].map(item => {
+            const itemOrderId = item.orderId || item.caseOrderId || item.originalOrderId;
+            return itemOrderId === orderId ? { ...item, complianceBoardTracking: previousTrackingNumber } : item;
+          });
+        });
+        return updated;
+      });
+      setSnackbar({
+        open: true,
+        message: `Failed: ${err.response?.data?.error || err.message}`,
+      });
+    } finally {
+      setSavingTrackingIdReturnId('');
+    }
+  };
 
   const buildVisibleCountMap = (itemsByColumn) => Object.keys(itemsByColumn || {}).reduce((acc, key) => {
     acc[key] = Math.min(LOAD_MORE_STEP, itemsByColumn[key]?.length || 0);
@@ -4080,6 +4157,22 @@ function ComplianceBoardPage() {
         setSnackbar({
           open: true,
           message: `❌ Cannot move to Fulfilled: Missing fields - ${missingFields.join(', ')}`
+        });
+        return;
+      }
+    }
+
+    // Check if trying to move Return Follow Up to Provide Return Label without compliance board tracking ID
+    if (selectedCategory === 'return_refund' && 
+        sourceColumn === COLUMN_STATUS.RETURN_FOLLOW_UP && 
+        destColumn === COLUMN_STATUS.PROVIDE_RETURN_LABEL) {
+      const sourceItems = orders[sourceColumn];
+      const movedItem = sourceItems[source.index];
+      
+      if (!movedItem.complianceBoardTracking) {
+        setSnackbar({
+          open: true,
+          message: `❌ Cannot move: Tracking ID is required. Please fill in the tracking number in Follow Up first.`
         });
         return;
       }
@@ -5405,6 +5498,156 @@ function ComplianceBoardPage() {
                     <Chip label={`$${order.subtotal.toFixed(2)}`} size="small" sx={{ bgcolor: '#f1f5f9', fontSize: '0.8rem', height: 24 }} />
                   )}
                 </Stack>
+
+                {/* Tracking ID Input for Return Board Case Not Opened Cards */}
+                {selectedCategory === 'return_refund' && 
+                 order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && 
+                 (order.orderId || order.caseOrderId || order.originalOrderId) && (
+                  <Stack spacing={0.75} sx={{ 
+                    borderTop: '1px solid #e2e8f0', 
+                    pt: 1.25, 
+                    mt: 1.25 
+                  }}>
+                    <Stack direction="row" alignItems="center" spacing={0.5}>
+                      <LocalShippingIcon sx={{ fontSize: 16, color: '#3b82f6' }} />
+                      <Typography variant="caption" fontWeight={700} sx={{ color: '#0f766e', textTransform: 'uppercase', fontSize: '0.7rem' }}>
+                        Tracking ID Required
+                      </Typography>
+                    </Stack>
+                    {(() => {
+                      const orderId = order.orderId || order.caseOrderId || order.originalOrderId;
+                      return (
+                        <>
+                          <TextField
+                            size="small"
+                            placeholder="Enter tracking number"
+                            value={trackingIdInput[orderId] !== undefined ? trackingIdInput[orderId] : (order.complianceBoardTracking || '')}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              setTrackingIdInput(prev => ({ ...prev, [orderId]: e.target.value }));
+                            }}
+                            onKeyPress={(e) => {
+                              if (e.key === 'Enter') {
+                                e.stopPropagation();
+                                const trackingNum = (trackingIdInput[orderId] || '').trim();
+                                if (trackingNum) {
+                                  handleReturnTrackingIdChange(order, trackingNum);
+                                }
+                              }
+                            }}
+                            onBlur={(e) => {
+                              e.stopPropagation();
+                              const trackingNum = (trackingIdInput[orderId] || '').trim();
+                              if (trackingNum && trackingNum !== (order.complianceBoardTracking || '')) {
+                                handleReturnTrackingIdChange(order, trackingNum);
+                              }
+                            }}
+                            disabled={savingTrackingIdReturnId === orderId}
+                            onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            sx={{
+                              '& .MuiOutlinedInput-root': {
+                                bgcolor: '#f0f9ff',
+                                '&:hover fieldset': { borderColor: '#3b82f6' },
+                                '&.Mui-focused fieldset': { borderColor: '#3b82f6' }
+                              }
+                            }}
+                            InputProps={{
+                              endAdornment: savingTrackingIdReturnId === orderId ? (
+                                <CircularProgress size={20} />
+                              ) : order.complianceBoardTracking ? (
+                                <CheckCircleIcon sx={{ fontSize: 18, color: '#10b981' }} />
+                              ) : (
+                                <IconButton
+                                  size="small"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const trackingNum = (trackingIdInput[orderId] || '').trim();
+                                    if (trackingNum) {
+                                      handleReturnTrackingIdChange(order, trackingNum);
+                                    }
+                                  }}
+                                  title="Save tracking number"
+                                  sx={{ p: 0.5 }}
+                                >
+                                  <CheckIcon sx={{ fontSize: 16, color: '#10b981' }} />
+                                </IconButton>
+                              )
+                            }}
+                          />
+                          {order.complianceBoardTracking && (
+                            <Chip 
+                              label={`✅ Tracking: ${order.complianceBoardTracking}`}
+                              size="small"
+                              sx={{ 
+                                bgcolor: '#ecfdf5', 
+                                color: '#059669', 
+                                fontSize: '0.75rem', 
+                                height: 24, 
+                                fontWeight: 700,
+                                border: '1px solid #d1fae5'
+                              }}
+                            />
+                          )}
+                        </>
+                      );
+                    })()}
+                  </Stack>
+                )}
+
+                {/* Aftership Tracking Link for Return Board Provide Return Label Column */}
+                {selectedCategory === 'return_refund' && 
+                 columnStatus === COLUMN_STATUS.PROVIDE_RETURN_LABEL && 
+                 order.complianceBoardTracking && (
+                  <Stack spacing={1} sx={{ 
+                    borderTop: '1px solid #e2e8f0', 
+                    pt: 1.25, 
+                    mt: 1.25 
+                  }}>
+                    <Stack direction="row" alignItems="center" spacing={0.5}>
+                      <LocalShippingIcon sx={{ fontSize: 16, color: '#0891b2' }} />
+                      <Typography variant="caption" fontWeight={700} sx={{ color: '#0891b2', textTransform: 'uppercase', fontSize: '0.7rem' }}>
+                        Shipment Tracking
+                      </Typography>
+                    </Stack>
+                    <Stack direction="row" alignItems="center" spacing={0.75} sx={{
+                      bgcolor: '#ecfdf5',
+                      p: 1,
+                      borderRadius: 0.75,
+                      border: '2px solid #d1fae5'
+                    }}>
+                      <CheckCircleIcon sx={{ fontSize: 18, color: '#10b981' }} />
+                      <Stack direction="column" spacing={0} sx={{ flex: 1 }}>
+                        <Typography variant="caption" sx={{ color: '#059669', fontSize: '0.7rem', fontWeight: 700 }}>
+                          Tracking Number
+                        </Typography>
+                        <Typography variant="body2" sx={{ color: '#047857', fontFamily: 'monospace', fontSize: '0.85rem', fontWeight: 600 }}>
+                          {order.complianceBoardTracking}
+                        </Typography>
+                      </Stack>
+                      <Button
+                        size="small"
+                        variant="contained"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          window.open(`https://www.aftership.com/track/${order.complianceBoardTracking}`, '_blank');
+                        }}
+                        sx={{
+                          bgcolor: '#10b981',
+                          color: 'white',
+                          fontSize: '0.75rem',
+                          fontWeight: 700,
+                          padding: '4px 12px',
+                          textTransform: 'none',
+                          '&:hover': { bgcolor: '#059669' }
+                        }}
+                      >
+                        🔗 Track
+                      </Button>
+                    </Stack>
+                  </Stack>
+                )}
               </>
             )}
           </Stack>

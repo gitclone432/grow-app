@@ -223,6 +223,8 @@ const OrderSchema = new mongoose.Schema(
       enum: ['order_communication'],
       default: null
     },
+    // Internal tracking ID for Return board compliance workflow (stores in Follow Up column)
+    complianceBoardTracking: { type: String, default: '' },
     outOfStockAssignedAt: {
       type: Date,
       default: null
