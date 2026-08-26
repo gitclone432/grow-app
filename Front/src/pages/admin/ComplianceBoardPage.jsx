@@ -4168,8 +4168,9 @@ function ComplianceBoardPage() {
         destColumn === COLUMN_STATUS.PROVIDE_RETURN_LABEL) {
       const sourceItems = orders[sourceColumn];
       const movedItem = sourceItems[source.index];
+      const requiresTrackingBeforeProvideReturnLabel = movedItem?.returnBoardSource === 'conversation';
       
-      if (!movedItem.complianceBoardTracking) {
+      if (requiresTrackingBeforeProvideReturnLabel && !movedItem.complianceBoardTracking) {
         setSnackbar({
           open: true,
           message: `❌ Cannot move: Tracking ID is required. Please fill in the tracking number in Follow Up first.`
@@ -5499,9 +5500,9 @@ function ComplianceBoardPage() {
                   )}
                 </Stack>
 
-                {/* Tracking ID Input for Return Board Case Not Opened Cards */}
+                {/* Tracking ID input becomes available after the card is saved into Follow Up. */}
                 {selectedCategory === 'return_refund' && 
-                 order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED && 
+                 order.complianceBoardStatus === COLUMN_STATUS.RETURN_FOLLOW_UP && 
                  (order.orderId || order.caseOrderId || order.originalOrderId) && (
                   <Stack spacing={0.75} sx={{ 
                     borderTop: '1px solid #e2e8f0', 

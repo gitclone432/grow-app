@@ -2156,6 +2156,36 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           console.log(`[BOARD-GET] [DEDUP] For orderId ${key}: keeping Return with status='${ret.complianceBoardStatus}' (updated: ${ret.updatedAt || ret.creationDate})`);
         }
       });
+
+      const placeholderReturnOrderIds = [...new Set([
+        ...assignedOrders.map((order) => order.orderId),
+        ...returnConversations.map((meta) => meta.orderId),
+      ].filter(Boolean).map(String))];
+
+      const [inrCasesForReturnBoard, inrDisputesForReturnBoard] = placeholderReturnOrderIds.length
+        ? await Promise.all([
+            Case.find(
+              { orderId: { $in: placeholderReturnOrderIds } },
+              { orderId: 1, caseType: 1, _id: 0 }
+            ).lean(),
+            PaymentDispute.find(
+              { orderId: { $in: placeholderReturnOrderIds } },
+              { orderId: 1, _id: 0 }
+            ).lean(),
+          ])
+        : [[], []];
+
+      const inrOwnedOrderIds = new Set([
+        ...inrCasesForReturnBoard
+          .filter((item) => String(item?.caseType || 'INR').toUpperCase() === 'INR')
+          .map((item) => String(item.orderId)),
+        ...inrDisputesForReturnBoard
+          .map((item) => String(item.orderId)),
+      ]);
+
+      if (inrOwnedOrderIds.size > 0) {
+        console.log(`[BOARD-GET] Excluding ${inrOwnedOrderIds.size} return placeholders because INR now owns those orders: ${Array.from(inrOwnedOrderIds).join(', ')}`);
+      }
       
       const uniqueReturnRequests = Array.from(deduplicatedReturns.values());
       console.log(`[BOARD-GET] After deduplication: ${uniqueReturnRequests.length} unique returns (was ${returnRequests.length})`);
@@ -2172,6 +2202,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
 
       assignedOrders.forEach((order) => {
         if (returnOrderIds.has(order.orderId)) return;
+        if (inrOwnedOrderIds.has(String(order.orderId || ''))) return;
 
         const status = order.complianceBoardStatus || 'case_not_opened';
         if (status === 'case_opened') return;
@@ -2195,6 +2226,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
 
       returnConversations.forEach((meta) => {
         if (meta.orderId && returnOrderIds.has(meta.orderId)) return;
+        if (meta.orderId && inrOwnedOrderIds.has(String(meta.orderId))) return;
         const order = meta.orderId ? orderByOrderId.get(meta.orderId) : orderByItemId.get(meta.itemId);
         
         // Determine the status to use: prioritize Order's complianceBoardStatus if it's set to an action status
