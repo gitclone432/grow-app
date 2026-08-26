@@ -20,6 +20,7 @@ import {
   InputLabel,
   Pagination,
   Button,
+  Badge,
   Snackbar,
   Paper,
   Dialog,
@@ -64,6 +65,10 @@ const headerSx = {
   top: 0,
   zIndex: 1,
 };
+
+function hasUnreadBuyerMessage(row) {
+  return Boolean(row?.hasUnreadBuyerMessage || Number(row?.messageUnreadCount) > 0);
+}
 
 // --- NOTES CELL COMPONENT (Inline Editable) ---
 const NotesCell = React.memo(function NotesCell({ row, onSave, onNotify }) {
@@ -492,6 +497,27 @@ export default function ReturnPostOrderPage({
     }
   }
 
+  function clearBuyerMessageIndicator(payload = {}) {
+    const payloadOrderId = String(payload.orderId || '').trim();
+    const payloadBuyer = String(payload.buyerUsername || '').trim();
+    const payloadItemId = String(payload.itemId || '').trim();
+
+    setRows((prev) => prev.map((row) => {
+      const rowOrderIds = [row.orderId, row.legacyOrderId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      const rowBuyer = String(row.buyerUsername || row.buyerLoginName || '').trim();
+      const rowItemId = String(row.itemId || '').trim();
+      const isMatch = payloadOrderId
+        ? rowOrderIds.includes(payloadOrderId)
+        : Boolean(payloadBuyer && payloadItemId && rowBuyer === payloadBuyer && rowItemId === payloadItemId);
+
+      return isMatch
+        ? { ...row, hasUnreadBuyerMessage: false, messageUnreadCount: 0, lastSellerMessageAt: new Date().toISOString() }
+        : row;
+    }));
+  }
+
   async function fetchFromEbayAndEnrich() {
     setFetching(true);
     setFetchPhase('search');
@@ -901,6 +927,11 @@ export default function ReturnPostOrderPage({
       const { data } = await api.post(`/ebay/returns/${row.returnId}/send-message`, {
         message: messageDialog.text.trim(),
       });
+      clearBuyerMessageIndicator({
+        orderId: row.orderId,
+        buyerUsername: row.buyerUsername,
+        itemId: row.itemId,
+      });
       setMessageDialog({ open: false, row: null, text: '' });
       setSnackbar({ open: true, severity: 'success', message: data.message || 'Message sent' });
     } catch (e) {
@@ -939,6 +970,13 @@ export default function ReturnPostOrderPage({
         ...(fileFormat ? { fileFormat } : {}),
       });
       mergeUpdatedRow(data.return);
+      if (labelDialog.comments.trim()) {
+        clearBuyerMessageIndicator({
+          orderId: row.orderId,
+          buyerUsername: row.buyerUsername,
+          itemId: row.itemId,
+        });
+      }
       setLabelDialog({
         open: false, row: null, trackingNumber: '', carrierEnum: 'USPS', comments: '', file: null, fileName: '',
       });
@@ -1475,7 +1513,15 @@ export default function ReturnPostOrderPage({
                           </Tooltip>
                           <Tooltip title="Open chat / manage">
                             <IconButton size="small" onClick={() => setSelectedReturn(row)} sx={{ p: 0.4 }}>
-                              <ChatIcon sx={{ fontSize: 18 }} />
+                              <Badge
+                                color="error"
+                                variant="dot"
+                                overlap="circular"
+                                invisible={!hasUnreadBuyerMessage(row)}
+                                sx={{ '& .MuiBadge-badge': { boxShadow: '0 0 0 2px #fff' } }}
+                              >
+                                <ChatIcon sx={{ fontSize: 18 }} />
+                              </Badge>
                             </IconButton>
                           </Tooltip>
                         </Stack>
@@ -2131,6 +2177,7 @@ export default function ReturnPostOrderPage({
           caseStatus={selectedReturn.returnStatus || 'Open'}
           entityId={selectedReturn.returnId || selectedReturn._id}
           entityType="return"
+          onMessageSent={clearBuyerMessageIndicator}
         />
       )}
 

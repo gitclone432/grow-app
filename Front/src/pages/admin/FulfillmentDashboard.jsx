@@ -25,6 +25,7 @@ import {
   Tooltip,
   IconButton,
   InputAdornment,
+  Badge,
   Pagination,
   Link,
   Checkbox,
@@ -426,6 +427,17 @@ function formatFullShippingAddress(order, options = {}) {
   return lines.join('\n');
 }
 
+function orderHasUnreadBuyerMessage(order) {
+  if (!order) return false;
+  if (order.hasUnreadBuyerMessage) return true;
+
+  const lastBuyerMessageAt = order.lastBuyerMessageAt ? new Date(order.lastBuyerMessageAt) : null;
+  const lastSellerMessageAt = order.lastSellerMessageAt ? new Date(order.lastSellerMessageAt) : null;
+  if (!lastBuyerMessageAt || Number.isNaN(lastBuyerMessageAt.getTime())) return false;
+  if (!lastSellerMessageAt || Number.isNaN(lastSellerMessageAt.getTime())) return true;
+  return lastBuyerMessageAt > lastSellerMessageAt;
+}
+
 // --- MOBILE ORDER CARD COMPONENT ---
 const MobileOrderCard = memo(function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages }) {
   const [expanded, setExpanded] = useState(false);
@@ -685,7 +697,17 @@ const MobileOrderCard = memo(function MobileOrderCard({ order, index, onCopy, on
               <Button
                 size="small"
                 variant="outlined"
-                startIcon={<ChatIcon fontSize="small" />}
+                startIcon={(
+                  <Badge
+                    color="error"
+                    variant="dot"
+                    overlap="circular"
+                    invisible={!orderHasUnreadBuyerMessage(order)}
+                    sx={{ '& .MuiBadge-badge': { boxShadow: '0 0 0 2px #fff' } }}
+                  >
+                    <ChatIcon fontSize="small" />
+                  </Badge>
+                )}
                 onClick={() => onMessage(order)}
                 sx={{ ...yellowOutlinedButtonSx, minHeight: 28, px: 1, fontSize: '0.7rem' }}
               >
@@ -2027,6 +2049,12 @@ function FulfillmentDashboard() {
         mediaUrls: mediaUrls.length > 0 ? mediaUrls : []
       });
 
+      clearBuyerMessageIndicator({
+        orderId: order.orderId || order.legacyOrderId || order._id,
+        buyerUsername: order.buyer?.username || order.buyerUsername,
+        itemId: order.itemId || order.itemNumber || order.lineItems?.[0]?.legacyItemId,
+      });
+
       setSnackbarMsg(`Remark updated to "${remarkValue}" and message sent to buyer`);
       setSnackbarSeverity('success');
       setSnackbarOpen(true);
@@ -2662,6 +2690,33 @@ function FulfillmentDashboard() {
 
   const handleOpenMessageDialog = useCallback((order) => {
     setSelectedOrderForMessage(order);
+  }, []);
+
+  const clearBuyerMessageIndicator = useCallback((payload = {}) => {
+    const payloadOrderId = String(payload.orderId || '').trim();
+    const payloadBuyer = String(payload.buyerUsername || '').trim();
+    const payloadItemId = String(payload.itemId || '').trim();
+
+    setOrders((prev) => prev.map((order) => {
+      const rowOrderIds = [order.orderId, order.legacyOrderId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      const rowBuyer = String(order.buyer?.username || order.buyerUsername || '').trim();
+      const rowItemId = String(
+        order.itemId || order.itemNumber || order.lineItems?.[0]?.legacyItemId || order.lineItems?.[0]?.itemId || ''
+      ).trim();
+      const isMatch = payloadOrderId
+        ? rowOrderIds.includes(payloadOrderId)
+        : Boolean(payloadBuyer && payloadItemId && rowBuyer === payloadBuyer && rowItemId === payloadItemId);
+
+      return isMatch
+        ? {
+            ...order,
+            hasUnreadBuyerMessage: false,
+            lastSellerMessageAt: new Date().toISOString(),
+          }
+        : order;
+    }));
   }, []);
 
   const handleCloseMessageDialog = () => {
@@ -5514,7 +5569,17 @@ function FulfillmentDashboard() {
                                   <Button
                                     size="small"
                                     variant="outlined"
-                                    startIcon={<ChatIcon fontSize="small" />}
+                                    startIcon={(
+                                      <Badge
+                                        color="error"
+                                        variant="dot"
+                                        overlap="circular"
+                                        invisible={!orderHasUnreadBuyerMessage(order)}
+                                        sx={{ '& .MuiBadge-badge': { boxShadow: '0 0 0 2px #fff' } }}
+                                      >
+                                        <ChatIcon fontSize="small" />
+                                      </Badge>
+                                    )}
                                     onClick={() => handleOpenMessageDialog(order)}
                                     sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
                                   >
@@ -5671,6 +5736,7 @@ function FulfillmentDashboard() {
             sellerName={selectedOrderForMessage.seller?.user?.username || ''}
             title="Chat"
             showManageCase={false}
+            onMessageSent={clearBuyerMessageIndicator}
           />
         )}
 
