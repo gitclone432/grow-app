@@ -533,6 +533,9 @@ function ComplianceBoardPage() {
   });
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsDetailsModal, setStatsDetailsModal] = useState({ open: false, statType: null, items: [] });
+  const [statusOverviewModal, setStatusOverviewModal] = useState({ open: false, activeStatus: null });
+  const [statusOverviewOrderSearch, setStatusOverviewOrderSearch] = useState('');
+  const [statusOverviewDateFilter, setStatusOverviewDateFilter] = useState(createEmptyDateFilter());
 
   const buildDateParams = () => {
     const params = {};
@@ -3285,6 +3288,130 @@ function ComplianceBoardPage() {
     overdueCounts[alertId] ?? fallbackCount
   );
 
+  const getBoardStatusOverviewOptions = () => {
+    if (selectedCategory === 'return_refund') {
+      return [
+        { id: COLUMN_STATUS.RETURN_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6' },
+        { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: BRAND_BLUE },
+        { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7' },
+        { id: COLUMN_STATUS.ITEM_DELIVERED, label: 'Item Delivered', color: '#06b6d4' },
+        { id: COLUMN_STATUS.PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK },
+        { id: COLUMN_STATUS.FULL_REFUND, label: 'Full Refund', color: BRAND_GREEN },
+        { id: COLUMN_STATUS.REPLACEMENT, label: 'Replacement', color: '#0f766e' },
+      ];
+    }
+
+    if (selectedCategory === 'cancellation') {
+      return [
+        { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN },
+        { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE },
+      ];
+    }
+
+    if (selectedCategory === 'inr') {
+      return [
+        { id: COLUMN_STATUS.INR_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6' },
+        { id: COLUMN_STATUS.INR_TRACKING_ID_UPLOAD, label: 'Tracking ID Upload', color: '#06b6d4' },
+        { id: COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN, label: 'Case Open (Ebay Step In)', color: BRAND_RED },
+        { id: COLUMN_STATUS.INR_FULLY_REFUNDED, label: 'Fully Refunded', color: BRAND_GREEN },
+        { id: COLUMN_STATUS.INR_PARTIAL_REFUND, label: 'Partial Refund', color: BRAND_YELLOW_DARK },
+        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Not Refunded but Resolved', color: BRAND_BLUE },
+        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN, label: 'Win', color: '#06b6d4' },
+        { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE, label: 'Loose', color: '#f97316' },
+      ];
+    }
+
+    return [];
+  };
+
+  const getBoardStatusDraggedDate = (order) => {
+    if (!order) return null;
+
+    if (selectedCategory === 'return_refund') {
+      if (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED) {
+        return order.returnCaseNotOpenedAssignedAt || order.conversationInfo?.updatedAt || order.updatedAt || null;
+      }
+      if (order.complianceBoardStatus === COLUMN_STATUS.ITEM_DELIVERED) {
+        return order.returnItemDeliveredAssignedAt || order.updatedAt || null;
+      }
+      return order.updatedAt || order.conversationInfo?.updatedAt || order.returnInfo?.responseDate || null;
+    }
+
+    if (selectedCategory === 'cancellation') {
+      if (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED) {
+        return order.cancellationCaseNotOpenedAssignedAt || order.updatedAt || null;
+      }
+      return order.updatedAt || null;
+    }
+
+    if (selectedCategory === 'inr') {
+      if (order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED) {
+        return order.inrCaseNotOpenedAssignedAt || order.updatedAt || null;
+      }
+      return order.updatedAt || order.openDate || null;
+    }
+
+    return order.updatedAt || null;
+  };
+
+  const hasStatusOverview = ['return_refund', 'cancellation', 'inr'].includes(selectedCategory);
+  const statusOverviewOptions = getBoardStatusOverviewOptions();
+  const activeStatusOverview = statusOverviewOptions.find((option) => option.id === statusOverviewModal.activeStatus)
+    || statusOverviewOptions[0]
+    || null;
+
+  const openStatusOverviewModal = () => {
+    if (statusOverviewOptions.length === 0) return;
+    const nextActiveStatus = statusOverviewModal.activeStatus && statusOverviewOptions.some((option) => option.id === statusOverviewModal.activeStatus)
+      ? statusOverviewModal.activeStatus
+      : statusOverviewOptions[0].id;
+    setStatusOverviewOrderSearch('');
+    setStatusOverviewDateFilter(createEmptyDateFilter());
+    setStatusOverviewModal({ open: true, activeStatus: nextActiveStatus });
+  };
+
+  const matchesStatusOverviewDateFilter = (item) => {
+    const draggedDate = getBoardStatusDraggedDate(item);
+    if (!draggedDate) return statusOverviewDateFilter.mode === 'none';
+
+    const draggedTime = new Date(draggedDate).getTime();
+    if (Number.isNaN(draggedTime)) return false;
+
+    if (statusOverviewDateFilter.mode === 'single' && statusOverviewDateFilter.single) {
+      const selectedDate = new Date(statusOverviewDateFilter.single);
+      selectedDate.setHours(0, 0, 0, 0);
+      const nextDate = new Date(selectedDate);
+      nextDate.setDate(nextDate.getDate() + 1);
+      return draggedTime >= selectedDate.getTime() && draggedTime < nextDate.getTime();
+    }
+
+    if (statusOverviewDateFilter.mode === 'range') {
+      let matches = true;
+      if (statusOverviewDateFilter.from) {
+        const fromDate = new Date(statusOverviewDateFilter.from);
+        fromDate.setHours(0, 0, 0, 0);
+        matches = matches && draggedTime >= fromDate.getTime();
+      }
+      if (statusOverviewDateFilter.to) {
+        const toDate = new Date(statusOverviewDateFilter.to);
+        toDate.setHours(0, 0, 0, 0);
+        toDate.setDate(toDate.getDate() + 1);
+        matches = matches && draggedTime < toDate.getTime();
+      }
+      return matches;
+    }
+
+    return true;
+  };
+
+  const filterStatusOverviewItems = (items) => {
+    const orderQuery = statusOverviewOrderSearch.trim().toLowerCase();
+    return items.filter((item) => {
+      const matchesOrder = !orderQuery || String(item.orderId || item.originalOrderId || item.caseOrderId || '').toLowerCase().includes(orderQuery);
+      return matchesOrder && matchesStatusOverviewDateFilter(item);
+    });
+  };
+
   const getAlertsForCurrentBoard = () => {
     const overdueMessages = getOverdueMessages();
     
@@ -5947,6 +6074,7 @@ function ComplianceBoardPage() {
     ].filter(Boolean).join(', ');
     const overdueInfo = order._overdueInfo;
     const pickedUpByLabel = getPickedUpByLabel(order);
+    const draggedDate = getBoardStatusDraggedDate(order);
     const returnStatusChip = overdueInfo?.sourceStatus || (
       order.complianceBoardStatus === COLUMN_STATUS.CASE_OPENED
         ? 'Case Opened'
@@ -6042,47 +6170,37 @@ function ComplianceBoardPage() {
               <Typography variant="body2" color="text.secondary">
                 {buyerName}
               </Typography>
-              {/* Show "Last Changed" date if it exists, otherwise show Order Date */}
-              {(() => {
-                const lastChangedDate = 
-                  (selectedCategory === 'return_refund' && order.returnCaseNotOpenedAssignedAt) ||
-                  (selectedCategory === 'cancellation' && order.cancellationCaseNotOpenedAssignedAt) ||
-                  (selectedCategory === 'inr' && order.inrCaseNotOpenedAssignedAt) ||
-                  order.conversationInfo?.updatedAt ||
-                  null;
-                
-                return lastChangedDate ? (
-                  <Stack direction="row" alignItems="center" spacing={0.5}>
-                    <Box
-                      sx={{
-                        width: 14,
-                        height: 14,
-                        borderRadius: '3px',
-                        bgcolor: '#3b82f6',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontSize: '0.6rem',
-                        color: '#fff',
-                        fontWeight: 700,
-                        flexShrink: 0
-                      }}
-                      title="Last changed"
-                    >
-                      📋
-                    </Box>
-                    <Typography variant="caption" color="text.secondary">
-                      {formatDateSoldPT(lastChangedDate)}
-                    </Typography>
-                  </Stack>
-                ) : (
-                  order.dateSold && (
-                    <Typography variant="caption" color="text.secondary">
-                      {formatDateSoldPT(order.dateSold)}
-                    </Typography>
-                  )
-                );
-              })()}
+              {draggedDate ? (
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <Box
+                    sx={{
+                      width: 14,
+                      height: 14,
+                      borderRadius: '3px',
+                      bgcolor: '#3b82f6',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '0.6rem',
+                      color: '#fff',
+                      fontWeight: 700,
+                      flexShrink: 0
+                    }}
+                    title="Dragged date"
+                  >
+                    D
+                  </Box>
+                  <Typography variant="caption" color="text.secondary">
+                    Dragged: {formatDateSoldPT(draggedDate)}
+                  </Typography>
+                </Stack>
+              ) : (
+                order.dateSold && (
+                  <Typography variant="caption" color="text.secondary">
+                    {formatDateSoldPT(order.dateSold)}
+                  </Typography>
+                )
+              )}
             </Stack>
             <Typography variant="caption" color="text.secondary">
               Seller: {sellerName}
@@ -6313,9 +6431,33 @@ function ComplianceBoardPage() {
 
     return (
       <Paper sx={{ p: 2, height: '100%', minHeight: 740, borderRadius: 2, border: '2px solid #e2e8f0', display: 'flex', flexDirection: 'column' }}>
-        <Typography variant="h6" fontWeight={700} sx={{ color: BRAND_DARK, mb: 1.5, pb: 1.5, borderBottom: '2px solid #e2e8f0' }}>
-          Stats
-        </Typography>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5, pb: 1.5, borderBottom: '2px solid #e2e8f0' }}>
+          <Typography variant="h6" fontWeight={700} sx={{ color: BRAND_DARK }}>
+            Stats
+          </Typography>
+          {hasStatusOverview && (
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={openStatusOverviewModal}
+              sx={{
+                minWidth: 80,
+                height: 28,
+                fontSize: '0.72rem',
+                fontWeight: 700,
+                textTransform: 'none',
+                color: BRAND_DARK,
+                borderColor: '#cbd5e1',
+                '&:hover': {
+                  borderColor: BRAND_BLUE,
+                  bgcolor: '#eff6ff',
+                }
+              }}
+            >
+              Status
+            </Button>
+          )}
+        </Stack>
 
         <Stack spacing={2} sx={{ overflowY: 'auto' }}>
           <Box>
@@ -6352,6 +6494,181 @@ function ComplianceBoardPage() {
       {renderAlertsTile(alerts, activeAlertPreviewId, handleAlertPreviewSelect)}
     </Box>
   );
+
+  const renderStatusOverviewDialog = () => {
+    if (!hasStatusOverview) return null;
+
+    const activeOption = activeStatusOverview;
+    const sourceItems = activeOption ? (orders[activeOption.id] || []) : [];
+    const activeItems = filterStatusOverviewItems(sourceItems);
+    const visibleCount = activeOption ? Math.min(getVisibleOrderCount(activeOption.id), activeItems.length) : 0;
+    const remainingCount = activeOption ? Math.max(0, activeItems.length - visibleCount) : 0;
+
+    return (
+      <Dialog
+        open={statusOverviewModal.open}
+        onClose={() => {
+          setStatusOverviewModal((prev) => ({ ...prev, open: false }));
+          setStatusOverviewOrderSearch('');
+          setStatusOverviewDateFilter(createEmptyDateFilter());
+        }}
+        fullWidth
+        maxWidth="md"
+        BackdropProps={{ style: { pointerEvents: 'none' } }}
+        disableEnforceFocus
+        PaperProps={{
+          sx: {
+            height: 'min(85vh, 900px)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }
+        }}
+      >
+        <Box sx={{ p: 2, borderBottom: '1px solid #e2e8f0', bgcolor: '#fff', flexShrink: 0 }}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2}>
+            <Box>
+              <Typography variant="h6" fontWeight={700} sx={{ color: BRAND_DARK }}>
+                Status Overview
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {selectedCategory === 'return_refund' ? 'Return / Refund' : selectedCategory === 'cancellation' ? 'Cancellation' : 'INR / Disputes'} board statuses
+              </Typography>
+            </Box>
+            <IconButton onClick={() => {
+              setStatusOverviewModal((prev) => ({ ...prev, open: false }));
+              setStatusOverviewOrderSearch('');
+              setStatusOverviewDateFilter(createEmptyDateFilter());
+            }} size="small" sx={{ color: 'text.disabled' }}>
+              <CloseIcon />
+            </IconButton>
+          </Stack>
+        </Box>
+        <DialogContent sx={{ p: 2.5, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+          <Stack spacing={2} sx={{ minHeight: 0, flex: 1 }}>
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              {statusOverviewOptions.map((option) => (
+                <Button
+                  key={option.id}
+                  variant={activeOption?.id === option.id ? 'contained' : 'outlined'}
+                  onClick={() => setStatusOverviewModal((prev) => ({ ...prev, activeStatus: option.id }))}
+                  sx={{
+                    justifyContent: 'space-between',
+                    textTransform: 'none',
+                    fontWeight: 700,
+                    borderColor: option.color,
+                    color: activeOption?.id === option.id ? '#fff' : option.color,
+                    bgcolor: activeOption?.id === option.id ? option.color : 'transparent',
+                    '&:hover': {
+                      borderColor: option.color,
+                      bgcolor: activeOption?.id === option.id ? option.color : `${option.color}12`,
+                    }
+                  }}
+                >
+                  <span>{option.label}</span>
+                  <Chip
+                    label={getStatusCount(option.id)}
+                    size="small"
+                    sx={{
+                      ml: 1,
+                      bgcolor: activeOption?.id === option.id ? '#fff' : option.color,
+                      color: activeOption?.id === option.id ? option.color : '#fff',
+                      fontWeight: 700,
+                      height: 22
+                    }}
+                  />
+                </Button>
+              ))}
+            </Stack>
+
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', sm: 'flex-end' }}>
+              <TextField
+                size="small"
+                label="Order ID"
+                value={statusOverviewOrderSearch}
+                onChange={(event) => setStatusOverviewOrderSearch(event.target.value)}
+                placeholder="Search order ID..."
+                sx={{ minWidth: { xs: '100%', sm: 220 } }}
+              />
+              <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 160 } }}>
+                <InputLabel>Date Mode</InputLabel>
+                <Select
+                  label="Date Mode"
+                  value={statusOverviewDateFilter.mode}
+                  onChange={(event) => setStatusOverviewDateFilter((prev) => ({ ...prev, mode: event.target.value, single: '', from: '', to: '' }))}
+                >
+                  <MenuItem value="none">None</MenuItem>
+                  <MenuItem value="single">Single Day</MenuItem>
+                  <MenuItem value="range">Date Range</MenuItem>
+                </Select>
+              </FormControl>
+              {statusOverviewDateFilter.mode === 'single' && (
+                <TextField
+                  size="small"
+                  label="Dragged Date"
+                  type="date"
+                  value={statusOverviewDateFilter.single}
+                  onChange={(event) => setStatusOverviewDateFilter((prev) => ({ ...prev, single: event.target.value }))}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ minWidth: { xs: '100%', sm: 180 } }}
+                />
+              )}
+              {statusOverviewDateFilter.mode === 'range' && (
+                <>
+                  <TextField
+                    size="small"
+                    label="From"
+                    type="date"
+                    value={statusOverviewDateFilter.from}
+                    onChange={(event) => setStatusOverviewDateFilter((prev) => ({ ...prev, from: event.target.value }))}
+                    InputLabelProps={{ shrink: true }}
+                    sx={{ minWidth: { xs: '100%', sm: 160 } }}
+                  />
+                  <TextField
+                    size="small"
+                    label="To"
+                    type="date"
+                    value={statusOverviewDateFilter.to}
+                    onChange={(event) => setStatusOverviewDateFilter((prev) => ({ ...prev, to: event.target.value }))}
+                    InputLabelProps={{ shrink: true }}
+                    sx={{ minWidth: { xs: '100%', sm: 160 } }}
+                  />
+                </>
+              )}
+            </Stack>
+
+            {!activeOption ? (
+              <Typography variant="body2" color="text.secondary">
+                No status options available for this board.
+              </Typography>
+            ) : activeItems.length === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                No items are currently in {activeOption.label}.
+              </Typography>
+            ) : (
+              <>
+                <Typography variant="body2" color="text.secondary">
+                  {activeItems.length} order{activeItems.length === 1 ? '' : 's'} in {activeOption.label}
+                </Typography>
+                <Stack spacing={1.25} sx={{ flex: 1, minHeight: 0, overflowY: 'auto', pr: 0.5 }}>
+                  {activeItems.slice(0, visibleCount).map((item) => renderStaticOrderCard(item))}
+                  {remainingCount > 0 && (
+                    <Button
+                      size="small"
+                      onClick={() => handleLoadMoreOrders(activeOption.id)}
+                      sx={{ alignSelf: 'center', fontSize: '0.75rem', fontWeight: 700, textTransform: 'none' }}
+                    >
+                      +{remainingCount} more
+                    </Button>
+                  )}
+                </Stack>
+              </>
+            )}
+          </Stack>
+        </DialogContent>
+      </Dialog>
+    );
+  };
 
   const renderColumnViewSelect = (label, value, options, onChange) => {
     const selected = options.find((option) => option.id === value) || options[0];
@@ -7103,6 +7420,7 @@ function ComplianceBoardPage() {
       )}
 
       {selectedCategory !== 'issue_hub' && renderAlertPreviewDialog(getAlertsForCurrentBoard())}
+      {renderStatusOverviewDialog()}
 
       {/* Pagination */}
       {!loading && pagination.totalPages > 1 && (
