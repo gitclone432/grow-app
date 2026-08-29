@@ -41,6 +41,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import InfoIcon from '@mui/icons-material/Info';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import api from '../../lib/api';
+import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import ChatModal from '../../components/ChatModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
@@ -447,6 +448,31 @@ export default function AmazonArrivalsPage() {
 
   const handleOpenMessageDialog = (order) => {
     setSelectedOrderForMessage(order);
+  };
+
+  const handleMessageSent = (messageData) => {
+    const payloadOrderId = String(messageData?.orderId || '').trim();
+    const payloadBuyer = String(messageData?.buyerUsername || '').trim();
+    const payloadItemId = String(messageData?.itemId || '').trim();
+    const sentAt = new Date().toISOString();
+
+    const patchOrder = (order) => {
+      const rowOrderIds = [order?.orderId, order?.legacyOrderId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      const rowBuyer = String(order?.buyer?.username || order?.buyerUsername || '').trim();
+      const rowItem = String(order?.itemNumber || order?.lineItems?.[0]?.legacyItemId || order?.lineItems?.[0]?.itemId || '').trim();
+      const isMatch = payloadOrderId
+        ? rowOrderIds.includes(payloadOrderId)
+        : Boolean(payloadBuyer && payloadItemId && rowBuyer === payloadBuyer && rowItem === payloadItemId);
+
+      return isMatch
+        ? { ...order, hasUnreadBuyerMessage: false, messageUnreadCount: 0, lastSellerMessageAt: sentAt }
+        : order;
+    };
+
+    setOrders((prev) => prev.map(patchOrder));
+    setSelectedOrderForMessage((prev) => (prev ? patchOrder(prev) : prev));
   };
 
   const handleCloseMessageDialog = () => {
@@ -1144,17 +1170,20 @@ export default function AmazonArrivalsPage() {
                         </FormControl>
                       </TableCell>
                       <TableCell align="center">
-                        <Tooltip title="Open conversation">
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            startIcon={<ChatIcon fontSize="small" />}
-                            onClick={() => handleOpenMessageDialog(order)}
-                            sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
-                          >
-                            Open
-                          </Button>
-                        </Tooltip>
+                        <Stack direction="row" spacing={0.5} alignItems="center" justifyContent="center">
+                          <Tooltip title="Open conversation">
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              startIcon={<ChatIcon fontSize="small" />}
+                              onClick={() => handleOpenMessageDialog(order)}
+                              sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
+                            >
+                              Open
+                            </Button>
+                          </Tooltip>
+                          <BuyerMessageSentIndicator item={order} size={16} />
+                        </Stack>
                       </TableCell>
                       <TableCell>
                         {(() => {
@@ -1236,6 +1265,7 @@ export default function AmazonArrivalsPage() {
           sellerName={selectedOrderForMessage.seller?.user?.username || ''}
           title="Chat"
           showManageCase={false}
+          onMessageSent={handleMessageSent}
         />
       )}
 

@@ -73,6 +73,126 @@ function stripHtml(html) {
     .trim();
 }
 
+function normalizeMessageMatchValue(value) {
+  if (value == null) return '';
+  return String(value).trim();
+}
+
+function emptyBuyerReplyState() {
+  return {
+    lastBuyerMessageAt: null,
+    lastSellerMessageAt: null,
+  };
+}
+
+function appendBuyerReplyState(stateMap, key, message) {
+  if (!key) return;
+
+  const current = stateMap.get(key) || emptyBuyerReplyState();
+  const when = message?.messageDate ? new Date(message.messageDate) : null;
+  const isValidDate = when && !Number.isNaN(when.getTime());
+
+  if (message?.sender === 'BUYER' && isValidDate) {
+    if (!current.lastBuyerMessageAt || when > current.lastBuyerMessageAt) {
+      current.lastBuyerMessageAt = when;
+    }
+  }
+
+  if (message?.sender === 'SELLER' && isValidDate) {
+    if (!current.lastSellerMessageAt || when > current.lastSellerMessageAt) {
+      current.lastSellerMessageAt = when;
+    }
+  }
+
+  stateMap.set(key, current);
+}
+
+async function enrichThreadsWithBuyerReplyState(threads = []) {
+  if (!Array.isArray(threads) || threads.length === 0) return threads;
+
+  const orderIds = new Set();
+  const fallbackMatches = [];
+
+  threads.forEach((thread) => {
+    const orderId = normalizeMessageMatchValue(thread?.orderId);
+    if (orderId) {
+      orderIds.add(orderId);
+      return;
+    }
+
+    const sellerId = normalizeMessageMatchValue(thread?.sellerId);
+    const buyerUsername = normalizeMessageMatchValue(thread?.buyerUsername);
+    const itemId = normalizeMessageMatchValue(thread?.itemId);
+    if (sellerId && buyerUsername && itemId) {
+      fallbackMatches.push({ sellerId, buyerUsername, itemId });
+    }
+  });
+
+  const queryOr = [];
+  if (orderIds.size > 0) {
+    queryOr.push({ orderId: { $in: [...orderIds] } });
+  }
+
+  fallbackMatches.forEach(({ sellerId, buyerUsername, itemId }) => {
+    const clause = { buyerUsername, itemId };
+    clause.seller = mongoose.Types.ObjectId.isValid(sellerId)
+      ? new mongoose.Types.ObjectId(sellerId)
+      : sellerId;
+    queryOr.push(clause);
+  });
+
+  if (queryOr.length === 0) return threads;
+
+  const messages = await Message.find({ $or: queryOr })
+    .select('seller orderId buyerUsername itemId sender messageDate')
+    .lean();
+
+  const bySellerOrder = new Map();
+  const byOrder = new Map();
+  const bySellerBuyerItem = new Map();
+
+  messages.forEach((message) => {
+    const sellerId = normalizeMessageMatchValue(message?.seller);
+    const orderId = normalizeMessageMatchValue(message?.orderId);
+    const buyerUsername = normalizeMessageMatchValue(message?.buyerUsername);
+    const itemId = normalizeMessageMatchValue(message?.itemId);
+
+    if (orderId) {
+      appendBuyerReplyState(byOrder, orderId, message);
+      if (sellerId) {
+        appendBuyerReplyState(bySellerOrder, `${sellerId}::${orderId}`, message);
+      }
+    }
+
+    if (sellerId && buyerUsername && itemId) {
+      appendBuyerReplyState(bySellerBuyerItem, `${sellerId}::${buyerUsername}::${itemId}`, message);
+    }
+  });
+
+  return threads.map((thread) => {
+    const sellerId = normalizeMessageMatchValue(thread?.sellerId);
+    const orderId = normalizeMessageMatchValue(thread?.orderId);
+    const buyerUsername = normalizeMessageMatchValue(thread?.buyerUsername);
+    const itemId = normalizeMessageMatchValue(thread?.itemId);
+
+    const replyState =
+      (orderId
+        ? ((sellerId ? bySellerOrder.get(`${sellerId}::${orderId}`) : null) || byOrder.get(orderId) || null)
+        : null)
+      || (sellerId && buyerUsername && itemId
+        ? bySellerBuyerItem.get(`${sellerId}::${buyerUsername}::${itemId}`) || null
+        : null);
+
+    return replyState
+      ? {
+          ...thread,
+          lastBuyerMessageAt: replyState.lastBuyerMessageAt || null,
+          lastSellerMessageAt: replyState.lastSellerMessageAt || null,
+        }
+      : thread;
+  });
+}
+
 function getSellerIdentityNames(seller, extraNames = []) {
   return [
     seller?.user?.username,
@@ -823,8 +943,10 @@ export async function listBuyerChatThreadsFromCommerce(query = {}) {
   const total = threads.length;
   const pageThreads = threads.slice(skip, skip + limitNum);
 
+  const enrichedThreads = await enrichThreadsWithBuyerReplyState(pageThreads);
+
   return {
-    threads: pageThreads,
+    threads: enrichedThreads,
     total,
     poolCount: poolCount === null ? total : poolCount,
     page: pageNum,
@@ -1259,8 +1381,10 @@ export async function listBuyerChatThreadsFromCommerceV2(query = {}) {
     }
   }
 
+  const enrichedThreads = await enrichThreadsWithBuyerReplyState(pageThreads);
+
   return {
-    threads: pageThreads,
+    threads: enrichedThreads,
     total,
     // Number of cached conversations for this scope ignoring the Type filter.
     // null for ALL (no separate pool needed). The route uses this so ALL and
