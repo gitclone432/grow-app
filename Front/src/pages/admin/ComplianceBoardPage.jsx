@@ -42,6 +42,7 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import { format } from 'date-fns';
 import api from '../../lib/api';
+import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import ChatModal from '../../components/ChatModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 
@@ -4791,24 +4792,65 @@ function ComplianceBoardPage() {
     
     // Immediately update the specific message in local state
     const { orderId, buyerUsername, itemId } = messageData;
-    
-    if (selectedCategory === 'order_communication') {
-      setMessages(prevMessages => {
-        const updated = { ...prevMessages };
-        Object.keys(updated).forEach(category => {
-          updated[category] = updated[category].map(item => {
-            const isMatch = (item.orderId && item.orderId === orderId) ||
-                          (item.buyerUsername === buyerUsername && item.itemId === itemId);
-            if (isMatch) {
-              console.log('[COMPLIANCE-BOARD] Message sent - Setting unreadCount to 0 for:', item.buyerUsername);
-              return { ...item, unreadCount: 0 };
-            }
-            return item;
-          });
-        });
-        return updated;
+    const sentAt = new Date().toISOString();
+    const matchesMessageTarget = (item) => {
+      const itemOrderIds = [item?.orderId, item?.originalOrderId, item?.caseOrderId, item?.legacyOrderId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      const itemBuyer = String(item?.buyerUsername || item?.buyer?.username || '').trim();
+      const itemItemId = String(item?.itemId || item?.itemNumber || item?.lineItems?.[0]?.legacyItemId || '').trim();
+      return orderId
+        ? itemOrderIds.includes(String(orderId).trim())
+        : Boolean(buyerUsername && itemId && itemBuyer === String(buyerUsername).trim() && itemItemId === String(itemId).trim());
+    };
+
+    setOrders((prevOrders) => {
+      const updated = {};
+      Object.keys(prevOrders).forEach((columnId) => {
+        updated[columnId] = (prevOrders[columnId] || []).map((item) => (
+          matchesMessageTarget(item)
+            ? {
+                ...item,
+                hasUnreadBuyerMessage: false,
+                messageUnreadCount: 0,
+                unreadCount: 0,
+                lastSellerMessageAt: sentAt,
+              }
+            : item
+        ));
       });
-    }
+      return updated;
+    });
+
+    setMessages(prevMessages => {
+      const updated = { ...prevMessages };
+      Object.keys(updated).forEach(category => {
+        updated[category] = (updated[category] || []).map(item => {
+          if (!matchesMessageTarget(item)) return item;
+          console.log('[COMPLIANCE-BOARD] Message sent - Setting unreadCount to 0 for:', item.buyerUsername);
+          return {
+            ...item,
+            unreadCount: 0,
+            messageUnreadCount: 0,
+            hasUnreadBuyerMessage: false,
+            lastSellerMessageAt: sentAt,
+          };
+        });
+      });
+      return updated;
+    });
+
+    setSelectedOrderForMessage((prev) => (
+      prev && matchesMessageTarget(prev)
+        ? {
+            ...prev,
+            unreadCount: 0,
+            messageUnreadCount: 0,
+            hasUnreadBuyerMessage: false,
+            lastSellerMessageAt: sentAt,
+          }
+        : prev
+    ));
   };
 
   const handleOpenActivityLogs = async (order) => {
@@ -5420,7 +5462,7 @@ function ComplianceBoardPage() {
                   />
                 )}
               </Stack>
-              <Stack direction="row" spacing={0.5}>
+              <Stack direction="row" spacing={0.5} alignItems="center">
                 <Tooltip title="Copy Order ID">
                   <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleCopyOrderId(order.orderId); }} sx={{ p: 0.5 }}>
                     <ContentCopyIcon sx={{ fontSize: 16 }} />
@@ -5431,6 +5473,7 @@ function ComplianceBoardPage() {
                     <ChatIcon sx={{ fontSize: 16 }} />
                   </IconButton>
                 </Tooltip>
+                <BuyerMessageSentIndicator item={order} size={16} />
                 <Tooltip title="View Activity Logs">
                   <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleOpenActivityLogs(order); }} sx={{ color: '#8b5cf6', p: 0.5 }}>
                     <HistoryIcon sx={{ fontSize: 16 }} />
@@ -5949,7 +5992,7 @@ function ComplianceBoardPage() {
                   {orderId}
                 </Typography>
               </Stack>
-              <Stack direction="row" spacing={0.5}>
+              <Stack direction="row" spacing={0.5} alignItems="center">
                 {item.orderId && (
                   <Tooltip title="Copy Order ID">
                     <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleCopyOrderId(orderId); }} sx={{ p: 0.5 }}>
@@ -5962,6 +6005,7 @@ function ComplianceBoardPage() {
                     <ChatIcon sx={{ fontSize: 16 }} />
                   </IconButton>
                 </Tooltip>
+                <BuyerMessageSentIndicator item={item} size={16} />
               </Stack>
             </Stack>
 
@@ -6151,13 +6195,14 @@ function ComplianceBoardPage() {
               >
                 {order.orderId || order.legacyOrderId || '-'}
               </Typography>
-              <Stack direction="row" spacing={0.5}>
+              <Stack direction="row" spacing={0.5} alignItems="center">
                 <IconButton size="small" onClick={() => handleCopyOrderId(order.orderId)} sx={{ p: 0.25 }}>
                   <ContentCopyIcon sx={{ fontSize: 14 }} />
                 </IconButton>
                 <IconButton size="small" onClick={() => handleOpenMessageDialog({ ...order, orderId: order.originalOrderId || order.orderId })} sx={{ color: BRAND_BLUE, p: 0.25 }}>
                   <ChatIcon sx={{ fontSize: 14 }} />
                 </IconButton>
+                <BuyerMessageSentIndicator item={order} size={14} />
                 <IconButton size="small" onClick={() => handleOpenActivityLogs(order)} sx={{ color: '#8b5cf6', p: 0.25 }}>
                   <HistoryIcon sx={{ fontSize: 14 }} />
                 </IconButton>

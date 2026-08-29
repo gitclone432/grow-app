@@ -25,6 +25,7 @@ import PeopleIcon from '@mui/icons-material/People';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import InboxOutlinedIcon from '@mui/icons-material/InboxOutlined';
 import api from '../../lib/api';
+import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import { CHAT_TEMPLATES, personalizeTemplate } from '../../constants/chatTemplates';
 import ColumnSelector from '../../components/ColumnSelector';
 import AdminPageShell from '../../components/AdminPageShell.jsx';
@@ -322,6 +323,7 @@ function ResolutionDialog({ open, onClose, metaItem, onSave, chatAgents = [] }) 
     if (!newMessage.trim() && attachments.length === 0) return;
     setSendingMsg(true);
     try {
+      const sentAt = new Date().toISOString();
       const { data } = await api.post('/ebay/send-message', {
         orderId: metaItem.orderId,
         buyerUsername: metaItem.buyerUsername,
@@ -333,6 +335,7 @@ function ResolutionDialog({ open, onClose, metaItem, onSave, chatAgents = [] }) 
       setMessages((previous) => [...previous, data.message]);
       setNewMessage('');
       setAttachments([]);
+      onSave();
     } catch (e) {
       alert("Failed to send: " + e.message);
     } finally {
@@ -1884,17 +1887,20 @@ export default function ConversationManagementPage() {
                       )}
                       {visibleColumns.includes('action') && (
                         <TableCell align="center" sx={tableBodyCellSx}>
-                          <Tooltip title="Open conversation">
-                            <Button
-                              size="small"
-                              variant="outlined"
-                              startIcon={<ChatIcon fontSize="small" />}
-                              onClick={() => setSelectedItem(item)}
-                              sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
-                            >
-                              Open
-                            </Button>
-                          </Tooltip>
+                          <Stack direction="row" spacing={0.5} alignItems="center" justifyContent="center">
+                            <Tooltip title="Open conversation">
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                startIcon={<ChatIcon fontSize="small" />}
+                                onClick={() => setSelectedItem(item)}
+                                sx={{ ...yellowOutlinedButtonSx, minHeight: 32, px: 1.25, fontSize: '0.75rem' }}
+                              >
+                                Open
+                              </Button>
+                            </Tooltip>
+                            <BuyerMessageSentIndicator item={item} size={16} />
+                          </Stack>
                         </TableCell>
                       )}
                     </TableRow>

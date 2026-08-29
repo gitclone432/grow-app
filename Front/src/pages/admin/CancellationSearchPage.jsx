@@ -41,6 +41,7 @@ import AttachFileIcon from '@mui/icons-material/AttachFile';
 import SendIcon from '@mui/icons-material/Send';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import api from '../../lib/api';
+import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ChatModal from '../../components/ChatModal';
 import ColumnSelector from '../../components/ColumnSelector';
@@ -1228,19 +1229,22 @@ export default function CancellationSearchPage({
                               </Tooltip>
                             </>
                           )}
-                          <Tooltip title="Open chat / manage">
-                            <IconButton size="small" onClick={() => setSelectedRow(row)}>
-                              <Badge
-                                color="error"
-                                variant="dot"
-                                overlap="circular"
-                                invisible={!hasUnreadBuyerMessage(row)}
-                                sx={{ '& .MuiBadge-badge': { boxShadow: '0 0 0 2px #fff' } }}
-                              >
-                                <ChatIcon fontSize="small" />
-                              </Badge>
-                            </IconButton>
-                          </Tooltip>
+                          <Stack direction="row" spacing={0.5} alignItems="center">
+                            <Tooltip title="Open chat / manage">
+                              <IconButton size="small" onClick={() => setSelectedRow(row)}>
+                                <Badge
+                                  color="error"
+                                  variant="dot"
+                                  overlap="circular"
+                                  invisible={!hasUnreadBuyerMessage(row)}
+                                  sx={{ '& .MuiBadge-badge': { boxShadow: '0 0 0 2px #fff' } }}
+                                >
+                                  <ChatIcon fontSize="small" />
+                                </Badge>
+                              </IconButton>
+                            </Tooltip>
+                            <BuyerMessageSentIndicator item={row} size={16} />
+                          </Stack>
                         </Stack>
                       </TableCell>
                     )}

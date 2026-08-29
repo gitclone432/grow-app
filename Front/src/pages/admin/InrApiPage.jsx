@@ -43,6 +43,7 @@ import AttachFileIcon from '@mui/icons-material/AttachFile';
 import InfoIcon from '@mui/icons-material/Info';
 import SendIcon from '@mui/icons-material/Send';
 import api from '../../lib/api';
+import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import {
   tableBodyCellSx,
   tableBodyRowSx,
@@ -2664,19 +2665,22 @@ export default function InrApiPage({
                           </Tooltip>
                         </>
                       ) : null}
-                      <Tooltip title="Open chat / manage">
-                        <IconButton size="small" onClick={() => setSelectedCase(row)} sx={{ p: 0.4 }}>
-                          <Badge
-                            color="error"
-                            variant="dot"
-                            overlap="circular"
-                            invisible={!hasUnreadBuyerMessage(row)}
-                            sx={{ '& .MuiBadge-badge': { boxShadow: '0 0 0 2px #fff' } }}
-                          >
-                            <ChatIcon sx={{ fontSize: 18 }} />
-                          </Badge>
-                        </IconButton>
-                      </Tooltip>
+                      <Stack direction="row" spacing={0.5} alignItems="center">
+                        <Tooltip title="Open chat / manage">
+                          <IconButton size="small" onClick={() => setSelectedCase(row)} sx={{ p: 0.4 }}>
+                            <Badge
+                              color="error"
+                              variant="dot"
+                              overlap="circular"
+                              invisible={!hasUnreadBuyerMessage(row)}
+                              sx={{ '& .MuiBadge-badge': { boxShadow: '0 0 0 2px #fff' } }}
+                            >
+                              <ChatIcon sx={{ fontSize: 18 }} />
+                            </Badge>
+                          </IconButton>
+                        </Tooltip>
+                        <BuyerMessageSentIndicator item={row} size={16} />
+                      </Stack>
                     </Stack>
                   </TableCell>
                 </TableRow>

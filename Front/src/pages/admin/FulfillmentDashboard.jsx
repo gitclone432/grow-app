@@ -87,6 +87,7 @@ import { publishOrderSyncEvent, subscribeOrderSyncEvent } from '../../lib/orderS
 import { getTodayPtDateString } from '../../lib/pacificDate.js';
 import { sortSellersByName } from '../../lib/sellersSort';
 import ChatModal from '../../components/ChatModal';
+import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
 import ResolutionOptionsModal from '../../components/ResolutionOptionsModal';
 import {
@@ -197,27 +198,26 @@ function ImageDialog({ open, onClose, images }) {
                   </IconButton>
                 </>
               )}
-            </Box>
+              {images.length > 1 && !isMobileDialog && (
+                <Stack direction="row" justifyContent="space-between" sx={{ mb: 2 }}>
+                  <Button
+                    onClick={handlePrev}
+                    startIcon={<NavigateBeforeIcon />}
+                    variant="outlined"
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    onClick={handleNext}
+                    endIcon={<NavigateNextIcon />}
+                    variant="outlined"
+                  >
+                    Next
+                  </Button>
+                </Stack>
+              )}
 
-            {/* Navigation Buttons - Desktop only */}
-            {images.length > 1 && !isMobileDialog && (
-              <Stack direction="row" justifyContent="space-between" sx={{ mb: 2 }}>
-                <Button
-                  onClick={handlePrev}
-                  startIcon={<NavigateBeforeIcon />}
-                  variant="outlined"
-                >
-                  Previous
-                </Button>
-                <Button
-                  onClick={handleNext}
-                  endIcon={<NavigateNextIcon />}
-                  variant="outlined"
-                >
-                  Next
-                </Button>
-              </Stack>
-            )}
+            </Box>
 
             {/* Thumbnail Gallery */}
             {images.length > 1 && (

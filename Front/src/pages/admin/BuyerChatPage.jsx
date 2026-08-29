@@ -27,6 +27,7 @@ import HistoryIcon from '@mui/icons-material/History';
 import KeyboardArrowLeftIcon from '@mui/icons-material/KeyboardArrowLeft';
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
 import api from '../../lib/api';
+import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import { sortSellersByName } from '../../lib/sellersSort';
 import TemplateManagementModal from '../../components/TemplateManagementModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
@@ -332,9 +333,12 @@ const ThreadListItem = memo(function ThreadListItem({
           disableTypography
           primary={
             <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.5}>
-              <Typography variant="body2" noWrap sx={{ fontWeight: thread.unreadCount > 0 ? 700 : 600, flex: 1 }}>
-                {displayName}
-              </Typography>
+              <Stack direction="row" spacing={0.5} alignItems="center" sx={{ flex: 1, minWidth: 0 }}>
+                <Typography variant="body2" noWrap sx={{ fontWeight: thread.unreadCount > 0 ? 700 : 600, flex: 1 }}>
+                  {displayName}
+                </Typography>
+                <BuyerMessageSentIndicator item={thread} size={14} sx={{ flexShrink: 0 }} />
+              </Stack>
               <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
                 {formatThreadListTime(thread.lastDate)}
               </Typography>
@@ -1160,6 +1164,8 @@ export default function BuyerChatPage() {
     if (!newMessage.trim()) return;
     setSending(true);
     try {
+      const sentAt = new Date().toISOString();
+      const sentPreview = newMessage.trim();
       const res = await api.post('/ebay/send-message', {
         orderId: selectedThread.orderId,
         itemId: selectedThread.itemId,
@@ -1201,12 +1207,24 @@ export default function BuyerChatPage() {
               : (t.buyerUsername === selectedThread.buyerUsername && t.itemId === selectedThread.itemId);
 
             if (isMatch) {
-              return { ...t, unreadCount: 0 };
+              return {
+                ...t,
+                unreadCount: 0,
+                lastSellerMessageAt: sentAt,
+                lastDate: sentAt,
+                lastMessage: sentPreview || t.lastMessage,
+                sender: 'SELLER',
+              };
             }
             return t;
           })
         );
-        setSelectedThread(prev => prev ? { ...prev, unreadCount: 0 } : prev);
+        setSelectedThread(prev => prev ? {
+          ...prev,
+          unreadCount: 0,
+          lastSellerMessageAt: sentAt,
+          lastDate: sentAt,
+        } : prev);
 
         console.log('[AUTO-MARK-READ] Conversation marked as read after seller reply:', {
           orderId: selectedThread.orderId,
