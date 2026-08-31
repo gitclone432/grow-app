@@ -1993,11 +1993,20 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
 
       const [returnRequests, returnConversations, assignedOrders] = await Promise.all([
         Return.find(returnQuery)
+            .select({
+              rawData: 0,
+              rawDetail: 0,
+              rawTracking: 0,
+              files: 0,
+              trackingInfo: 0,
+              trackingScanHistory: 0,
+            })
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
           .sort({ updatedAt: -1, creationDate: -1 })
           .limit(1000) // Limit to most recent 1000 Returns to avoid memory issues
           .lean(),
         ConversationMeta.find(conversationQuery)
+            .select('orderId itemId buyerUsername buyerName seller itemTitle productName category caseStatus status pickedUpBy updatedAt createdAt')
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
           .sort({ updatedAt: -1 })
           .lean(),
@@ -2369,7 +2378,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         statusCounts,
         overdueCounts,
         sourceCounts: {
-          caseOpenedReturnRequests: returnRequests.length
+          caseOpenedReturnRequests: uniqueReturnRequests.length
         },
         pagination: {
           total,
