@@ -261,9 +261,48 @@ const LOAD_MORE_STEP = 8;
 const MESSAGE_THREAD_LIMIT = 500;
 const MESSAGE_THREAD_MAX_AGE_DAYS = 45;
 const BOARD_REQUEST_TIMEOUT_MS = 30000;
+const HEAVY_BOARD_REQUEST_TIMEOUT_MS = 60000;
 const ALERT_REQUEST_TIMEOUT_MS = 12000;
+const HEAVY_BOARD_CATEGORIES = new Set(['return_refund', 'cancellation', 'inr']);
 
 const ensureArray = (value) => (Array.isArray(value) ? value : []);
+
+const getBoardRequestTimeout = (category) => (
+  HEAVY_BOARD_CATEGORIES.has(category)
+    ? HEAVY_BOARD_REQUEST_TIMEOUT_MS
+    : BOARD_REQUEST_TIMEOUT_MS
+);
+
+const isRetryableBoardError = (err) => {
+  const status = Number(err?.response?.status) || 0;
+  return err?.code === 'ECONNABORTED' || err?.code === 'ERR_NETWORK' || status >= 500;
+};
+
+const fetchComplianceBoardPage = async (params) => {
+  const timeout = getBoardRequestTimeout(params?.category);
+
+  try {
+    return await api.get('/orders/compliance-board', {
+      params,
+      timeout,
+    });
+  } catch (err) {
+    if (!HEAVY_BOARD_CATEGORIES.has(params?.category) || !isRetryableBoardError(err)) {
+      throw err;
+    }
+
+    console.warn('[BOARD-API] Retrying compliance board request after transient failure:', {
+      category: params?.category,
+      code: err?.code,
+      status: err?.response?.status,
+    });
+
+    return api.get('/orders/compliance-board', {
+      params,
+      timeout,
+    });
+  }
+};
 
 const toDraggableId = (prefix, item, fallback = '') => {
   // For special case types (return, cancelled, inr, dispute), prepend the prefix to the ID
@@ -1172,23 +1211,12 @@ function ComplianceBoardPage() {
       console.log(`[BOARD-API-CALL] Calling /orders/compliance-board with params:`, JSON.stringify(params));
       
       const [response, inrCasesResult, returnCasesResult, cancellationCasesResult, cancelledOrdersResult] = await Promise.all([
-        api.get('/orders/compliance-board', {
-          params,
-          timeout: BOARD_REQUEST_TIMEOUT_MS,
-        }),
+        fetchComplianceBoardPage(params),
         selectedCategory === 'inr'
           ? fetchINRCasesForBoard()
           : Promise.resolve(null),
-        // Fetch stored return cases for 'return_refund' board
-        // This brings in the actual return cases from Issues & Resolutions
-        selectedCategory === 'return_refund'
-          ? fetchStoredReturnCasesForBoard()
-          : Promise.resolve(null),
-        // Fetch stored cancellation cases for 'cancellation' board
-        // This brings in the actual cancellation cases from Issues & Resolutions
-        selectedCategory === 'cancellation'
-          ? fetchStoredCancellationCasesForBoard()
-          : Promise.resolve(null),
+          Promise.resolve(null),
+          Promise.resolve(null),
         // Fetch cancelled orders for both 'cancellation' and 'order_fulfillment' boards
         // This allows users to search for cancelled orders in Order Fulfillment board
         ['cancellation', 'order_fulfillment'].includes(selectedCategory)
@@ -1201,20 +1229,6 @@ function ComplianceBoardPage() {
         console.log(`[BOARD-API] Main compliance-board API returned ${ensureArray(response.data?.orders).length} orders`);
         const mainMatches = ensureArray(response.data?.orders).filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
         mainMatches.forEach(o => console.log(`  - Main API: orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
-        
-        const returnCases = ensureArray(returnCasesResult);
-        if (returnCases.length > 0) {
-          console.log(`[BOARD-API] fetchStoredReturnCasesForBoard returned ${returnCases.length} cases`);
-          const returnMatches = returnCases.filter(o => o.orderId?.toString().includes(searchOrderId.trim()) || o.returnId?.toString().includes(searchOrderId.trim()));
-          returnMatches.forEach(o => console.log(`  - Return Cases API: returnId ${o.returnId}, orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
-        }
-        
-        const cancellationCases = ensureArray(cancellationCasesResult);
-        if (cancellationCases.length > 0) {
-          console.log(`[BOARD-API] fetchStoredCancellationCasesForBoard returned ${cancellationCases.length} cases`);
-          const cancellationMatches = cancellationCases.filter(o => o.orderId?.toString().includes(searchOrderId.trim()) || o.cancelId?.toString().includes(searchOrderId.trim()));
-          cancellationMatches.forEach(o => console.log(`  - Cancellation Cases API: cancelId ${o.cancelId}, orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
-        }
         
         const cancelledOrders = ensureArray(cancelledOrdersResult);
         if (cancelledOrders.length > 0) {
@@ -2327,6 +2341,8 @@ function ComplianceBoardPage() {
         buyerConfirmation: grouped[COLUMN_STATUS.BUYER_CONFIRMATION].length
       });
 
+      setError('');
+
       // Fetch alert messages separately so order boards render even if the
       // message thread source is slow or temporarily unavailable.
       fetchMessagesForAlerts();
@@ -3131,10 +3147,7 @@ function ComplianceBoardPage() {
         params.statusFilter = alertId;
       }
 
-      const { data } = await api.get('/orders/compliance-board', {
-        params,
-        timeout: BOARD_REQUEST_TIMEOUT_MS,
-      });
+      const { data } = await fetchComplianceBoardPage(params);
       setAlertPreviewItems(ensureArray(data?.orders));
     } catch (err) {
       console.error('Failed to load alert preview items:', err);
@@ -3692,10 +3705,7 @@ function ComplianceBoardPage() {
             };
             Object.assign(params, buildDateParams());
             
-            const response = await api.get('/orders/compliance-board', {
-              params,
-              timeout: BOARD_REQUEST_TIMEOUT_MS,
-            });
+            const response = await fetchComplianceBoardPage(params);
             
             return { pageNum, orders: response.data?.orders || [] };
           } catch (err) {
@@ -3798,10 +3808,7 @@ function ComplianceBoardPage() {
             };
             Object.assign(params, buildDateParams());
             
-            const response = await api.get('/orders/compliance-board', {
-              params,
-              timeout: BOARD_REQUEST_TIMEOUT_MS,
-            });
+            const response = await fetchComplianceBoardPage(params);
             
             return { pageNum, orders: response.data?.orders || [] };
           } catch (err) {
