@@ -50,6 +50,7 @@ import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import api from '../../lib/api';
 import ColumnSelector from '../../components/ColumnSelector';
+import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import ChatModal from '../../components/ChatModal';
 import SectionCard from '../../components/SectionCard.jsx';
 import { tableContainerSx, tableHeaderCellSx, tableBodyRowSx, yellowOutlinedButtonSx, yellowFilledButtonSx } from '../../theme/tableStyles.js';
@@ -830,6 +831,31 @@ export default function AwaitingShipmentPage() {
     setSelectedOrderForMessage(order);
   };
 
+  const handleMessageSent = (messageData) => {
+    const payloadOrderId = String(messageData?.orderId || '').trim();
+    const payloadBuyer = String(messageData?.buyerUsername || '').trim();
+    const payloadItemId = String(messageData?.itemId || '').trim();
+    const sentAt = new Date().toISOString();
+
+    const patchOrder = (order) => {
+      const rowOrderIds = [order?.orderId, order?.legacyOrderId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      const rowBuyer = String(order?.buyer?.username || order?.buyerUsername || '').trim();
+      const rowItem = String(order?.itemNumber || order?.lineItems?.[0]?.legacyItemId || '').trim();
+      const isMatch = payloadOrderId
+        ? rowOrderIds.includes(payloadOrderId)
+        : Boolean(payloadBuyer && payloadItemId && rowBuyer === payloadBuyer && rowItem === payloadItemId);
+
+      return isMatch
+        ? { ...order, hasUnreadBuyerMessage: false, messageUnreadCount: 0, lastSellerMessageAt: sentAt }
+        : order;
+    };
+
+    setOrders((prev) => prev.map(patchOrder));
+    setSelectedOrderForMessage((prev) => (prev ? patchOrder(prev) : prev));
+  };
+
   const handleCloseMessageDialog = () => {
     setSelectedOrderForMessage(null);
   };
@@ -1409,7 +1435,7 @@ export default function AwaitingShipmentPage() {
         );
       case 'messagingStatus':
         return (
-          <Box sx={{ textAlign: 'center' }}>
+          <Stack direction="row" spacing={0.5} alignItems="center" justifyContent="center">
             <Tooltip title="Message Buyer">
               <IconButton
                 color="primary"
@@ -1419,7 +1445,8 @@ export default function AwaitingShipmentPage() {
                 <ChatIcon />
               </IconButton>
             </Tooltip>
-          </Box>
+            <BuyerMessageSentIndicator item={order} size={16} />
+          </Stack>
         );
       case 'buyerSla': {
         const buyerSla = getBuyerSlaLabel(order, nowMs);
@@ -1887,6 +1914,7 @@ export default function AwaitingShipmentPage() {
             title="Awaiting Shipment Chat"
             category="Awaiting Shipment"
             caseStatus={selectedOrderForMessage.messagingStatus || 'Open'}
+            onMessageSent={handleMessageSent}
           />
         )}
 

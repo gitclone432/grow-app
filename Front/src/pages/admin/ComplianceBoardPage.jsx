@@ -42,6 +42,7 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import { format } from 'date-fns';
 import api from '../../lib/api';
+import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import ChatModal from '../../components/ChatModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 
@@ -260,9 +261,48 @@ const LOAD_MORE_STEP = 8;
 const MESSAGE_THREAD_LIMIT = 500;
 const MESSAGE_THREAD_MAX_AGE_DAYS = 45;
 const BOARD_REQUEST_TIMEOUT_MS = 30000;
+const HEAVY_BOARD_REQUEST_TIMEOUT_MS = 60000;
 const ALERT_REQUEST_TIMEOUT_MS = 12000;
+const HEAVY_BOARD_CATEGORIES = new Set(['return_refund', 'cancellation', 'inr']);
 
 const ensureArray = (value) => (Array.isArray(value) ? value : []);
+
+const getBoardRequestTimeout = (category) => (
+  HEAVY_BOARD_CATEGORIES.has(category)
+    ? HEAVY_BOARD_REQUEST_TIMEOUT_MS
+    : BOARD_REQUEST_TIMEOUT_MS
+);
+
+const isRetryableBoardError = (err) => {
+  const status = Number(err?.response?.status) || 0;
+  return err?.code === 'ECONNABORTED' || err?.code === 'ERR_NETWORK' || status >= 500;
+};
+
+const fetchComplianceBoardPage = async (params) => {
+  const timeout = getBoardRequestTimeout(params?.category);
+
+  try {
+    return await api.get('/orders/compliance-board', {
+      params,
+      timeout,
+    });
+  } catch (err) {
+    if (!HEAVY_BOARD_CATEGORIES.has(params?.category) || !isRetryableBoardError(err)) {
+      throw err;
+    }
+
+    console.warn('[BOARD-API] Retrying compliance board request after transient failure:', {
+      category: params?.category,
+      code: err?.code,
+      status: err?.response?.status,
+    });
+
+    return api.get('/orders/compliance-board', {
+      params,
+      timeout,
+    });
+  }
+};
 
 const toDraggableId = (prefix, item, fallback = '') => {
   // For special case types (return, cancelled, inr, dispute), prepend the prefix to the ID
@@ -1171,23 +1211,12 @@ function ComplianceBoardPage() {
       console.log(`[BOARD-API-CALL] Calling /orders/compliance-board with params:`, JSON.stringify(params));
       
       const [response, inrCasesResult, returnCasesResult, cancellationCasesResult, cancelledOrdersResult] = await Promise.all([
-        api.get('/orders/compliance-board', {
-          params,
-          timeout: BOARD_REQUEST_TIMEOUT_MS,
-        }),
+        fetchComplianceBoardPage(params),
         selectedCategory === 'inr'
           ? fetchINRCasesForBoard()
           : Promise.resolve(null),
-        // Fetch stored return cases for 'return_refund' board
-        // This brings in the actual return cases from Issues & Resolutions
-        selectedCategory === 'return_refund'
-          ? fetchStoredReturnCasesForBoard()
-          : Promise.resolve(null),
-        // Fetch stored cancellation cases for 'cancellation' board
-        // This brings in the actual cancellation cases from Issues & Resolutions
-        selectedCategory === 'cancellation'
-          ? fetchStoredCancellationCasesForBoard()
-          : Promise.resolve(null),
+          Promise.resolve(null),
+          Promise.resolve(null),
         // Fetch cancelled orders for both 'cancellation' and 'order_fulfillment' boards
         // This allows users to search for cancelled orders in Order Fulfillment board
         ['cancellation', 'order_fulfillment'].includes(selectedCategory)
@@ -1200,20 +1229,6 @@ function ComplianceBoardPage() {
         console.log(`[BOARD-API] Main compliance-board API returned ${ensureArray(response.data?.orders).length} orders`);
         const mainMatches = ensureArray(response.data?.orders).filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
         mainMatches.forEach(o => console.log(`  - Main API: orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
-        
-        const returnCases = ensureArray(returnCasesResult);
-        if (returnCases.length > 0) {
-          console.log(`[BOARD-API] fetchStoredReturnCasesForBoard returned ${returnCases.length} cases`);
-          const returnMatches = returnCases.filter(o => o.orderId?.toString().includes(searchOrderId.trim()) || o.returnId?.toString().includes(searchOrderId.trim()));
-          returnMatches.forEach(o => console.log(`  - Return Cases API: returnId ${o.returnId}, orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
-        }
-        
-        const cancellationCases = ensureArray(cancellationCasesResult);
-        if (cancellationCases.length > 0) {
-          console.log(`[BOARD-API] fetchStoredCancellationCasesForBoard returned ${cancellationCases.length} cases`);
-          const cancellationMatches = cancellationCases.filter(o => o.orderId?.toString().includes(searchOrderId.trim()) || o.cancelId?.toString().includes(searchOrderId.trim()));
-          cancellationMatches.forEach(o => console.log(`  - Cancellation Cases API: cancelId ${o.cancelId}, orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
-        }
         
         const cancelledOrders = ensureArray(cancelledOrdersResult);
         if (cancelledOrders.length > 0) {
@@ -2326,6 +2341,8 @@ function ComplianceBoardPage() {
         buyerConfirmation: grouped[COLUMN_STATUS.BUYER_CONFIRMATION].length
       });
 
+      setError('');
+
       // Fetch alert messages separately so order boards render even if the
       // message thread source is slow or temporarily unavailable.
       fetchMessagesForAlerts();
@@ -3130,10 +3147,7 @@ function ComplianceBoardPage() {
         params.statusFilter = alertId;
       }
 
-      const { data } = await api.get('/orders/compliance-board', {
-        params,
-        timeout: BOARD_REQUEST_TIMEOUT_MS,
-      });
+      const { data } = await fetchComplianceBoardPage(params);
       setAlertPreviewItems(ensureArray(data?.orders));
     } catch (err) {
       console.error('Failed to load alert preview items:', err);
@@ -3691,10 +3705,7 @@ function ComplianceBoardPage() {
             };
             Object.assign(params, buildDateParams());
             
-            const response = await api.get('/orders/compliance-board', {
-              params,
-              timeout: BOARD_REQUEST_TIMEOUT_MS,
-            });
+            const response = await fetchComplianceBoardPage(params);
             
             return { pageNum, orders: response.data?.orders || [] };
           } catch (err) {
@@ -3797,10 +3808,7 @@ function ComplianceBoardPage() {
             };
             Object.assign(params, buildDateParams());
             
-            const response = await api.get('/orders/compliance-board', {
-              params,
-              timeout: BOARD_REQUEST_TIMEOUT_MS,
-            });
+            const response = await fetchComplianceBoardPage(params);
             
             return { pageNum, orders: response.data?.orders || [] };
           } catch (err) {
@@ -4791,24 +4799,65 @@ function ComplianceBoardPage() {
     
     // Immediately update the specific message in local state
     const { orderId, buyerUsername, itemId } = messageData;
-    
-    if (selectedCategory === 'order_communication') {
-      setMessages(prevMessages => {
-        const updated = { ...prevMessages };
-        Object.keys(updated).forEach(category => {
-          updated[category] = updated[category].map(item => {
-            const isMatch = (item.orderId && item.orderId === orderId) ||
-                          (item.buyerUsername === buyerUsername && item.itemId === itemId);
-            if (isMatch) {
-              console.log('[COMPLIANCE-BOARD] Message sent - Setting unreadCount to 0 for:', item.buyerUsername);
-              return { ...item, unreadCount: 0 };
-            }
-            return item;
-          });
-        });
-        return updated;
+    const sentAt = new Date().toISOString();
+    const matchesMessageTarget = (item) => {
+      const itemOrderIds = [item?.orderId, item?.originalOrderId, item?.caseOrderId, item?.legacyOrderId]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      const itemBuyer = String(item?.buyerUsername || item?.buyer?.username || '').trim();
+      const itemItemId = String(item?.itemId || item?.itemNumber || item?.lineItems?.[0]?.legacyItemId || '').trim();
+      return orderId
+        ? itemOrderIds.includes(String(orderId).trim())
+        : Boolean(buyerUsername && itemId && itemBuyer === String(buyerUsername).trim() && itemItemId === String(itemId).trim());
+    };
+
+    setOrders((prevOrders) => {
+      const updated = {};
+      Object.keys(prevOrders).forEach((columnId) => {
+        updated[columnId] = (prevOrders[columnId] || []).map((item) => (
+          matchesMessageTarget(item)
+            ? {
+                ...item,
+                hasUnreadBuyerMessage: false,
+                messageUnreadCount: 0,
+                unreadCount: 0,
+                lastSellerMessageAt: sentAt,
+              }
+            : item
+        ));
       });
-    }
+      return updated;
+    });
+
+    setMessages(prevMessages => {
+      const updated = { ...prevMessages };
+      Object.keys(updated).forEach(category => {
+        updated[category] = (updated[category] || []).map(item => {
+          if (!matchesMessageTarget(item)) return item;
+          console.log('[COMPLIANCE-BOARD] Message sent - Setting unreadCount to 0 for:', item.buyerUsername);
+          return {
+            ...item,
+            unreadCount: 0,
+            messageUnreadCount: 0,
+            hasUnreadBuyerMessage: false,
+            lastSellerMessageAt: sentAt,
+          };
+        });
+      });
+      return updated;
+    });
+
+    setSelectedOrderForMessage((prev) => (
+      prev && matchesMessageTarget(prev)
+        ? {
+            ...prev,
+            unreadCount: 0,
+            messageUnreadCount: 0,
+            hasUnreadBuyerMessage: false,
+            lastSellerMessageAt: sentAt,
+          }
+        : prev
+    ));
   };
 
   const handleOpenActivityLogs = async (order) => {
@@ -5420,7 +5469,7 @@ function ComplianceBoardPage() {
                   />
                 )}
               </Stack>
-              <Stack direction="row" spacing={0.5}>
+              <Stack direction="row" spacing={0.5} alignItems="center">
                 <Tooltip title="Copy Order ID">
                   <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleCopyOrderId(order.orderId); }} sx={{ p: 0.5 }}>
                     <ContentCopyIcon sx={{ fontSize: 16 }} />
@@ -5431,6 +5480,7 @@ function ComplianceBoardPage() {
                     <ChatIcon sx={{ fontSize: 16 }} />
                   </IconButton>
                 </Tooltip>
+                <BuyerMessageSentIndicator item={order} size={16} />
                 <Tooltip title="View Activity Logs">
                   <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleOpenActivityLogs(order); }} sx={{ color: '#8b5cf6', p: 0.5 }}>
                     <HistoryIcon sx={{ fontSize: 16 }} />
@@ -5949,7 +5999,7 @@ function ComplianceBoardPage() {
                   {orderId}
                 </Typography>
               </Stack>
-              <Stack direction="row" spacing={0.5}>
+              <Stack direction="row" spacing={0.5} alignItems="center">
                 {item.orderId && (
                   <Tooltip title="Copy Order ID">
                     <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleCopyOrderId(orderId); }} sx={{ p: 0.5 }}>
@@ -5962,6 +6012,7 @@ function ComplianceBoardPage() {
                     <ChatIcon sx={{ fontSize: 16 }} />
                   </IconButton>
                 </Tooltip>
+                <BuyerMessageSentIndicator item={item} size={16} />
               </Stack>
             </Stack>
 
@@ -6151,13 +6202,14 @@ function ComplianceBoardPage() {
               >
                 {order.orderId || order.legacyOrderId || '-'}
               </Typography>
-              <Stack direction="row" spacing={0.5}>
+              <Stack direction="row" spacing={0.5} alignItems="center">
                 <IconButton size="small" onClick={() => handleCopyOrderId(order.orderId)} sx={{ p: 0.25 }}>
                   <ContentCopyIcon sx={{ fontSize: 14 }} />
                 </IconButton>
                 <IconButton size="small" onClick={() => handleOpenMessageDialog({ ...order, orderId: order.originalOrderId || order.orderId })} sx={{ color: BRAND_BLUE, p: 0.25 }}>
                   <ChatIcon sx={{ fontSize: 14 }} />
                 </IconButton>
+                <BuyerMessageSentIndicator item={order} size={14} />
                 <IconButton size="small" onClick={() => handleOpenActivityLogs(order)} sx={{ color: '#8b5cf6', p: 0.25 }}>
                   <HistoryIcon sx={{ fontSize: 14 }} />
                 </IconButton>

@@ -15413,7 +15413,9 @@ router.get('/chat/threads', requireAuth, async (req, res) => {
     // Rewrite buyerUsername when legacy sync stored the store eBay id as the buyer
     await enrichLegacyThreadsBuyerUsername(threads, { persist: true });
 
-    res.json({ threads, total, page: pageNum, pages: Math.ceil(total / limitNum), source: 'legacy' });
+    const enrichedThreads = await enrichRowsWithBuyerReplyState(threads);
+
+    res.json({ threads: enrichedThreads, total, page: pageNum, pages: Math.ceil(total / limitNum), source: 'legacy' });
 
   } catch (err) {
     console.error(err);
