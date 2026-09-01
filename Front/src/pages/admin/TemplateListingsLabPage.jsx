@@ -971,6 +971,45 @@ export default function TemplateListingsLabPage({ embedded = false }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, sellerId, templateId]);
 
+  // Handoff from an automated Sourcing Rule batch (Sourcing Rules page /
+  // asinSourcingAutomation cron) → fill ASIN box and start bulk autofill,
+  // mirroring the manual ASIN Precheck handoff above but backed by the
+  // AsinSourcingBatch API instead of sessionStorage.
+  useEffect(() => {
+    const batchId = searchParams.get('fromSourcingBatch');
+    if (!batchId || !sellerId || !templateId) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get(`/sourcing-rules/batches/${batchId}`);
+        const batch = res.data;
+        if (cancelled || !batch) return;
+
+        const batchSellerId = typeof batch.seller === 'string' ? batch.seller : batch.seller?._id;
+        const batchTemplateId = typeof batch.template === 'string' ? batch.template : batch.template?._id;
+        const batchAsins = Array.isArray(batch.asins) ? batch.asins : [];
+
+        if (batchSellerId !== sellerId || batchTemplateId !== templateId || batchAsins.length === 0) return;
+
+        setAsinInput(batchAsins.join('\n'));
+        if (batch.region) setRegion(batch.region);
+        handleBulkAutofill(batchAsins, batch.region || null);
+
+        if (batch.status === 'ready') {
+          api.post(`/sourcing-rules/batches/${batchId}/consume`).catch((err) => {
+            console.error('Failed to mark sourcing batch consumed:', err);
+          });
+        }
+      } catch (handoffError) {
+        console.error('Failed to load sourcing batch handoff:', handoffError);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, sellerId, templateId]);
+
   const handleRemoveBulkResult = (asin) => {
     setBulkResults(bulkResults.filter(r => r.asin !== asin));
   };

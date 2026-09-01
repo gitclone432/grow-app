@@ -194,6 +194,41 @@ const listingTemplateSchema = new mongoose.Schema({
     type: String,
     default: '*Action(SiteID=US|Country=US|Currency=USD|Version=1193)'
   },
+  /**
+   * Amazon sourcing config for the "Template + Account" scraping flow:
+   * pick this template, it searches Amazon for `searchKeyword` within
+   * `priceMin`/`priceMax`, and the found ASINs get sent to /admin/asin-precheck
+   * pre-scoped to `defaultSellerId`.
+   */
+  sourcing: {
+    enabled: {
+      type: Boolean,
+      default: false,
+    },
+    searchKeyword: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    priceMin: {
+      type: Number,
+      default: null,
+    },
+    priceMax: {
+      type: Number,
+      default: null,
+    },
+    region: {
+      type: String,
+      enum: ['US', 'UK', 'CA', 'AU'],
+      default: 'US',
+    },
+    defaultSellerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Seller',
+      default: null,
+    },
+  },
   // Assignment to the hierarchy: Range (required for directory page) + Product (optional sub-link)
   rangeId: {
     type: mongoose.Schema.Types.ObjectId,

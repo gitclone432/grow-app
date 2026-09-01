@@ -116,6 +116,8 @@ export const TemplateListingAnalyticsPage = lazy(() => import('../pages/admin/Te
 export const SelectSellerLabPage = lazy(() => import('../pages/admin/SelectSellerLabPage.jsx'));
 export const SellerTemplatesLabPage = lazy(() => import('../pages/admin/SellerTemplatesLabPage.jsx'));
 export const AsinPrecheckPage = lazy(() => import('../pages/admin/AsinPrecheckPage.jsx'));
+export const AsinSourcingPage = lazy(() => import('../pages/admin/AsinSourcingPage.jsx'));
+export const SourcingRulesPage = lazy(() => import('../pages/admin/SourcingRulesPage.jsx'));
 export const AsinPrecheckStatsPage = lazy(() => import('../pages/admin/AsinPrecheckStatsPage.jsx'));
 export const ListingDirectoryPage = lazy(() => import('../pages/admin/ListingDirectoryPage.jsx'));
 export const TemplateDirectoryPage = lazy(() => import('../pages/admin/TemplateDirectoryPage.jsx'));

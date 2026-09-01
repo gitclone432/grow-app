@@ -510,6 +510,11 @@ export default function AsinReviewModal({
   const [skuToast, setSkuToast] = useState({ open: false, message: '' });
   const [skuStatus, setSkuStatus] = useState({}); // { [itemId]: { status: 'loading'|'active'|'inactive'|null, count: number } }
   const [autoPriceAdjustments, setAutoPriceAdjustments] = useState({}); // { [itemId]: { from, to } }
+  const [autoRephrasingIds, setAutoRephrasingIds] = useState(new Set()); // items currently mid auto-rephrase call
+  const [autoRephraseQueueSize, setAutoRephraseQueueSize] = useState(0); // remaining items waiting their turn
+  const autoRephraseAttemptedRef = useRef(new Set()); // item IDs already auto-rephrased (or attempted) this run
+  const autoRephraseQueueRef = useRef([]);
+  const autoRephraseProcessingRef = useRef(false);
 
   // Filter out dismissed items
   const dismissedItemsSet = new Set(dismissedItems);
@@ -645,6 +650,11 @@ export default function AsinReviewModal({
     setSkuStatus({});
     setAutoPriceAdjustments({});
     checkedSkuIdsRef.current = new Set();
+    autoRephraseAttemptedRef.current = new Set();
+    autoRephraseQueueRef.current = [];
+    autoRephraseProcessingRef.current = false;
+    setAutoRephrasingIds(new Set());
+    setAutoRephraseQueueSize(0);
   }, [open, previewItems]);
 
   // Check each SKU as soon as its customLabel becomes available (items generate via SSE stream).
@@ -725,6 +735,81 @@ export default function AsinReviewModal({
       }));
       setHasUnsavedChanges(true);
     }
+  }, [open, previewItems, skuStatus, editedItems]);
+
+  // Auto-rephrase the title, one item at a time, for any ASIN whose title matches
+  // an already-synced listing (same SKU) elsewhere — this is what "Title matches"
+  // on the cross-seller banner flags. Runs quietly in the background across the
+  // whole batch as SKU checks land; once every flagged item has been attempted
+  // it stops on its own so the user can review + Save All manually.
+  const processAutoRephraseQueue = async () => {
+    if (autoRephraseProcessingRef.current) return;
+    autoRephraseProcessingRef.current = true;
+
+    while (autoRephraseQueueRef.current.length > 0) {
+      const job = autoRephraseQueueRef.current.shift();
+      setAutoRephraseQueueSize(autoRephraseQueueRef.current.length);
+      setAutoRephrasingIds(prev => new Set(prev).add(job.itemId));
+
+      try {
+        const { data } = await api.post('/ai/rephrase-title', {
+          currentTitle: job.title,
+          sourceTitle: job.sourceTitle,
+          brand: job.brand,
+          color: job.color,
+          compatibility: job.compatibility
+        });
+        if (data?.rephrasedTitle) {
+          setEditedItems(prev => ({
+            ...prev,
+            [job.itemId]: { ...(prev[job.itemId] || job.listingData), title: data.rephrasedTitle }
+          }));
+          setHasUnsavedChanges(true);
+        }
+      } catch (error) {
+        console.error('[Auto Rephrase Title] Error for item', job.itemId, error);
+      } finally {
+        setAutoRephrasingIds(prev => {
+          const next = new Set(prev);
+          next.delete(job.itemId);
+          return next;
+        });
+      }
+    }
+
+    autoRephraseProcessingRef.current = false;
+  };
+
+  useEffect(() => {
+    if (!open) return;
+
+    previewItems.forEach(item => {
+      if (autoRephraseAttemptedRef.current.has(item.id)) return;
+
+      const status = skuStatus[item.id];
+      if (!status || status.status === 'loading') return; // wait for this item's SKU check to finish
+
+      const listingData = editedItems[item.id] || item.generatedListing || {};
+      if (!listingData.title) return;
+
+      const summary = getCrossSellerMatchSummary(status, listingData);
+      if (!summary.hasTitleMatch) return;
+
+      autoRephraseAttemptedRef.current.add(item.id);
+      autoRephraseQueueRef.current.push({
+        itemId: item.id,
+        listingData,
+        title: listingData.title,
+        sourceTitle: item.sourceData?.title || '',
+        brand: item.sourceData?.brand || '',
+        color: item.sourceData?.color || '',
+        compatibility: item.sourceData?.compatibility || ''
+      });
+    });
+
+    setAutoRephraseQueueSize(autoRephraseQueueRef.current.length);
+    processAutoRephraseQueue();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, previewItems, skuStatus, editedItems]);
 
   // Sync Amazon preview window when navigating
@@ -1185,11 +1270,19 @@ export default function AsinReviewModal({
               size="small"
             />
             {dismissedItems.length > 0 && (
-              <Chip 
+              <Chip
                 label={`${dismissedItems.length} dismissed`}
                 color="default"
                 size="small"
                 variant="outlined"
+              />
+            )}
+            {(autoRephrasingIds.size > 0 || autoRephraseQueueSize > 0) && (
+              <Chip
+                icon={<CircularProgress size={12} sx={{ color: 'inherit', ml: 1 }} />}
+                label={`Auto-rephrasing duplicate titles… ${autoRephraseQueueSize + autoRephrasingIds.size} left`}
+                color="warning"
+                size="small"
               />
             )}
             <Chip
@@ -1971,15 +2064,15 @@ export default function AsinReviewModal({
                           helperText={`${(itemData.title || '').length}/80`}
                           sx={{ flex: 1 }}
                         />
-                        <Tooltip title="Rephrase title">
+                        <Tooltip title={autoRephrasingIds.has(currentItem.id) ? 'Auto-rephrasing (duplicate title detected)…' : 'Rephrase title'}>
                           <span>
                             <IconButton
                               onClick={handleRephrase}
-                              disabled={!itemData.title || !!rephrasing[currentItem.id]}
+                              disabled={!itemData.title || !!rephrasing[currentItem.id] || autoRephrasingIds.has(currentItem.id)}
                               size="small"
                               sx={{ mt: 0.5 }}
                             >
-                              {rephrasing[currentItem.id]
+                              {rephrasing[currentItem.id] || autoRephrasingIds.has(currentItem.id)
                                 ? <CircularProgress size={18} />
                                 : <AutorenewIcon fontSize="small" />}
                             </IconButton>

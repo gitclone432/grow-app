@@ -47,6 +47,8 @@ import { dashboardSignatureTokens } from '../../theme/appTheme.js';
 import { tableHeaderCellSx, tableContainerSx, yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 import { parseAsins, getParsingStats } from '../../utils/asinParser.js';
 
+const ASIN_SOURCING_HANDOFF_KEY = 'asinSourcingHandoff';
+
 const MARKETPLACE_OPTIONS = [
   { value: 'US', label: 'Amazon.com (US)' },
   { value: 'UK', label: 'Amazon.co.uk (UK)' },
@@ -161,6 +163,7 @@ export default function AsinPrecheckPage() {
   const [filters, setFilters] = useState(savedPreferences.filters);
   const [keywordDraft, setKeywordDraft] = useState(savedPreferences.filters.keyword || '');
   const [keywordIntent, setKeywordIntent] = useState('included');
+  const [pendingAutoRun, setPendingAutoRun] = useState(null);
 
   const surfaceSx = {
     borderRadius: `${dashboardTheme.radius.card}px`,
@@ -186,10 +189,41 @@ export default function AsinPrecheckPage() {
         const templateList = templateRes.data || [];
         setSellers(sellerList);
         setTemplates(templateList);
-        const savedSellerExists = sellerList.some(seller => seller._id === savedPreferences.sellerId);
-        const savedTemplateExists = templateList.some(template => template._id === savedPreferences.templateId);
-        setSellerId(savedSellerExists ? savedPreferences.sellerId : sellerList[0]?._id || '');
-        setTemplateId(savedTemplateExists ? savedPreferences.templateId : templateList[0]?._id || '');
+
+        // Handoff from the "Template + Account" sourcing page (/admin/asin-sourcing):
+        // it stashes {sellerId, templateId, region, asins, filters} in sessionStorage
+        // right before navigating here, so we can prefill + auto-run the precheck.
+        let handoff = null;
+        try {
+          const raw = window.sessionStorage.getItem(ASIN_SOURCING_HANDOFF_KEY);
+          if (raw) {
+            handoff = JSON.parse(raw);
+            window.sessionStorage.removeItem(ASIN_SOURCING_HANDOFF_KEY);
+          }
+        } catch {
+          handoff = null;
+        }
+
+        const handoffSellerExists = handoff && sellerList.some(seller => seller._id === handoff.sellerId);
+        const handoffTemplateExists = handoff && templateList.some(template => template._id === handoff.templateId);
+
+        if (handoff && handoffSellerExists && handoffTemplateExists && Array.isArray(handoff.asins) && handoff.asins.length > 0) {
+          setSellerId(handoff.sellerId);
+          setTemplateId(handoff.templateId);
+          if (handoff.region) setRegion(handoff.region);
+          if (handoff.filters) setFilters(prev => ({ ...prev, ...handoff.filters }));
+          setAsinInput(handoff.asins.join('\n'));
+          setPendingAutoRun({
+            sellerId: handoff.sellerId,
+            templateId: handoff.templateId,
+            asinsJoined: handoff.asins.join('\n')
+          });
+        } else {
+          const savedSellerExists = sellerList.some(seller => seller._id === savedPreferences.sellerId);
+          const savedTemplateExists = templateList.some(template => template._id === savedPreferences.templateId);
+          setSellerId(savedSellerExists ? savedPreferences.sellerId : sellerList[0]?._id || '');
+          setTemplateId(savedTemplateExists ? savedPreferences.templateId : templateList[0]?._id || '');
+        }
       } catch (err) {
         console.error('Failed to load ASIN precheck setup data:', err);
         if (mounted) setError('Failed to load sellers or templates');
@@ -224,6 +258,21 @@ export default function AsinPrecheckPage() {
       // Local storage is a convenience only; the precheck flow can continue without it.
     }
   }, [sellerId, templateId, region, ebayMotorsMode, filters, loadingSetup]);
+
+  // Fires the auto-run queued by a sourcing-page handoff, once state has
+  // actually caught up to the values it prefilled (sellerId/templateId/asinInput
+  // are set via separate calls above, so we wait for all three to land).
+  useEffect(() => {
+    if (!pendingAutoRun || loadingSetup) return;
+    if (sellerId !== pendingAutoRun.sellerId) return;
+    if (templateId !== pendingAutoRun.templateId) return;
+    if (asinInput !== pendingAutoRun.asinsJoined) return;
+
+    setPendingAutoRun(null);
+    setSetupOpen(false);
+    runPrecheck();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAutoRun, loadingSetup, sellerId, templateId, asinInput]);
 
   const getFilteredRows = (sourceRows, options = {}) => {
     const keyword = (options.keyword ?? filters.keyword).trim().toLowerCase();

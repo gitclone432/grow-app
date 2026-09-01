@@ -30,7 +30,7 @@ export const SUBMENUS = {
     id: 'templateListing',
     name: 'Template Listing',
     category: 'listingResearch',
-    pages: ['ManageTemplates', 'SelectSellerLab', 'AsinPrecheck', 'AsinPrecheckStats', 'AmazonPiSourceColumns', 'ListingsDatabase', 'ListingDirectory', 'TemplateDirectory'],
+    pages: ['ManageTemplates', 'AsinSourcing', 'SourcingRules', 'SelectSellerLab', 'AsinPrecheck', 'AsinPrecheckStats', 'AmazonPiSourceColumns', 'ListingsDatabase', 'ListingDirectory', 'TemplateDirectory'],
   },
   asinImporter: {
     id: 'asinImporter',
@@ -77,6 +77,8 @@ export const PAGE_REGISTRY = [
   // ====== LISTING & RESEARCH ======
   // Template Listing submenu
   { id: 'ManageTemplates', name: 'Manage Templates', path: '/manage-templates', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin'] },
+  { id: 'AsinSourcing', name: 'ASIN Sourcing', path: '/asin-sourcing', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'lister', 'advancelister'] },
+  { id: 'SourcingRules', name: 'Sourcing Rules', path: '/sourcing-rules', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'AmazonPiSourceColumns', name: 'Amazon Product Info Columns', path: '/amazon-product-info-columns', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ListingsDatabase', name: 'Listings Database', path: '/listings-database', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin'] },
   { id: 'SelectSellerLab', name: 'CSV Listings', path: '/select-seller-lab', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'lister', 'advancelister', 'trainee'] },

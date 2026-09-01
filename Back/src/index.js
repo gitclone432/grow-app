@@ -70,6 +70,7 @@ import cardBalanceRecordsRoutes from './routes/cardBalanceRecords.js';
 import exchangeRateRoutes from './routes/exchangeRate.js';
 import orderQtyExcludeLegacyRoutes from './routes/orderQtyExcludeLegacy.js';
 import cronJobsRoutes from './routes/cronJobs.js';
+import sourcingRulesRoutes from './routes/sourcingRules.js';
 import scraperTestRoutes from './routes/scraperTest.js';
 import imageOverlaySettingsRoutes from './routes/imageOverlaySettings.js';
 import gmailTestRoutes from './routes/gmailTest.js';
@@ -229,6 +230,7 @@ app.use('/api/card-balance-records', cardBalanceRecordsRoutes);
 app.use('/api/exchange-rate', exchangeRateRoutes);
 app.use('/api/order-qty-exclude-legacy', orderQtyExcludeLegacyRoutes);
 app.use('/api/cron-jobs', cronJobsRoutes);
+app.use('/api/sourcing-rules', sourcingRulesRoutes);
 // Intentionally not named *scraper* — some browser extensions block those URLs as false positives.
 app.use('/api/amazon-debug-scrape', scraperTestRoutes);
 app.use('/api/image-overlay-settings', imageOverlaySettingsRoutes);

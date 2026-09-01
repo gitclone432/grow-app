@@ -576,6 +576,38 @@ router.put('/:id', requireAuth, async (req, res) => {
   }
 });
 
+// Update a template's Amazon sourcing config (search keyword / price range / default account)
+// used by the "Template + Account" scraping flow on /admin/asin-sourcing.
+router.patch('/:id/sourcing', requireAuth, async (req, res) => {
+  try {
+    const { enabled, searchKeyword, priceMin, priceMax, region, defaultSellerId } = req.body;
+
+    const sourcing = {
+      enabled: Boolean(enabled),
+      searchKeyword: String(searchKeyword || '').trim(),
+      priceMin: priceMin === '' || priceMin == null ? null : Number(priceMin),
+      priceMax: priceMax === '' || priceMax == null ? null : Number(priceMax),
+      region: ['US', 'UK', 'CA', 'AU'].includes(region) ? region : 'US',
+      defaultSellerId: defaultSellerId || null,
+    };
+
+    const template = await ListingTemplate.findByIdAndUpdate(
+      req.params.id,
+      { sourcing, updatedAt: Date.now() },
+      { new: true, runValidators: true }
+    );
+
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    res.json(template);
+  } catch (error) {
+    console.error('Error updating template sourcing config:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Delete template
 router.delete('/:id', requireAuth, async (req, res) => {
   try {

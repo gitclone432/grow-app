@@ -18,6 +18,7 @@ import { refreshDiscountAlertsCache } from './routes/discounts.js';
 import { scheduledSkuIndexSyncAllSellers } from './lib/skuIndexSync.js';
 import { importTransactionsFromGmail } from './utils/gmailTransactionImporter.js';
 import { runScheduledDirectListJobs } from './lib/directListJobRunner.js';
+import { runAllDueSourcingRules, resetStuckSourcingRuns } from './lib/sourcingRuleRunQueue.js';
 
 const scheduledTaskMap = new Map();
 
@@ -133,6 +134,14 @@ export const CRON_JOB_DEFINITIONS = [
     label: 'Discount alerts cache refresh',
     description: 'Refresh the header bell\'s cache of active coupons/sale events (ending-soon alerts) from eBay every 12 hours. User activity never triggers eBay calls — only this job, server boot, or an explicit "Refresh now" click.',
     cronExpr: '0 */12 * * *',
+    timezone: '',
+    enabled: true,
+  },
+  {
+    jobKey: 'asinSourcingAutomation',
+    label: 'ASIN sourcing automation',
+    description: 'Run every enabled Sourcing Rule: search Amazon, precheck-enrich, apply filters, and save a ready-to-review ASIN batch per template/account.',
+    cronExpr: '*/30 * * * *',
     timezone: '',
     enabled: true,
   },
@@ -321,6 +330,16 @@ async function runDiscountAlertsCacheRefresh() {
   await refreshDiscountAlertsCache();
 }
 
+async function runAsinSourcingAutomation() {
+  console.log('[CRON] ASIN sourcing automation: enqueuing due rules...');
+  const results = await runAllDueSourcingRules();
+  const ok = results.filter((r) => r.ok).length;
+  const failed = results.length - ok;
+  // Enqueued, not necessarily finished — lib/sourcingRuleRunQueue.js runs
+  // up to SOURCING_MAX_CONCURRENT_RUNS at a time and drains the rest itself.
+  console.log(`[CRON] ASIN sourcing automation: rules=${results.length}, enqueued=${ok}, failed=${failed}`);
+}
+
 async function runBuyerMessagesAutoSync() {
   console.log('[CRON] Buyer Messages auto-sync starting…');
   const result = await scheduledSyncBuyerInbox({ mode: 'full', waitForTrading: false });
@@ -353,6 +372,7 @@ const CRON_JOB_HANDLERS = {
   skuIndexSyncAllSellers: runSkuIndexSyncAllSellers,
   discountAlertsCacheRefresh: runDiscountAlertsCacheRefresh,
   buyerMessagesAutoSync: runBuyerMessagesAutoSync,
+  asinSourcingAutomation: runAsinSourcingAutomation,
 };
 
 function scheduleJob(config) {
@@ -396,5 +416,12 @@ export async function initializeScheduledJobs() {
   // keeps it fresh afterwards).
   refreshDiscountAlertsCache().catch((error) =>
     console.error('[CRON] Initial discount alerts cache warm failed:', error.message)
+  );
+
+  // Any SourcingRuleRun left 'processing' from before a crash/restart can
+  // never finish on its own (the in-memory concurrency counter reset to 0)
+  // — fail it instead of leaving it stuck forever.
+  resetStuckSourcingRuns().catch((error) =>
+    console.error('[CRON] Failed to reset stuck sourcing runs:', error.message)
   );
 }
