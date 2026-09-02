@@ -432,6 +432,16 @@ const getOrderBoardCategories = (order) => (
     : (order?.complianceBoardCategory ? [order.complianceBoardCategory] : [])
 );
 
+// An order is treated as "cancelled" (and hidden from Order Fulfillment) only
+// when it's actually cancelled - either eBay's cancel state says so, or it has
+// been tagged with the Cancellation category. Being tagged Return/Refund or
+// INR must NOT hide an order from Order Fulfillment.
+const isOrderCancelledForFulfillment = (order) => {
+  const cancelState = order?.cancelState || order?.cancelStatus?.cancelState;
+  if (cancelState === 'CANCELED' || cancelState === 'CANCELLED') return true;
+  return getOrderBoardCategories(order).includes('cancellation');
+};
+
 function ComplianceBoardPage() {
   const [snackbar, setSnackbar] = useState({ open: false, message: '' });
   const [selectedCategory, setSelectedCategory] = useState('order_fulfillment');
@@ -1200,8 +1210,12 @@ function ComplianceBoardPage() {
         category: selectedCategory,
         page: currentPage,
         // Mixed boards need a broader fetch because one response is later split
-        // into multiple columns and small pages can hide "Case Not Opened".
-        limit: ['return_refund', 'inr', 'cancellation'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT,
+        // into multiple columns and small pages can hide items (e.g. "Case Not
+        // Opened", or - for order_fulfillment - orders that fell back into To
+        // Do). Without this, a single 50-item API page gets sliced across
+        // columns, so a column's real count ends up spread across several
+        // "pages" of Previous/Next instead of showing together.
+        limit: ['return_refund', 'inr', 'cancellation', 'order_fulfillment'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT,
         ...buildBoardFilterParams()
       };
       
@@ -1322,11 +1336,33 @@ function ComplianceBoardPage() {
         }
       }
 
+      const ORDER_FULFILLMENT_STATUSES = new Set([
+        COLUMN_STATUS.TODO,
+        COLUMN_STATUS.OUT_OF_STOCK,
+        COLUMN_STATUS.CANCELLATION,
+        COLUMN_STATUS.ADDRESS_ISSUE,
+        COLUMN_STATUS.LATE_DELIVERY,
+        COLUMN_STATUS.NOT_FULFILLED,
+        COLUMN_STATUS.FULFILLED,
+        COLUMN_STATUS.BUYER_CONFIRMATION,
+      ]);
+
       boardOrders.forEach((order) => {
         const rawStatus = order.complianceBoardStatus || COLUMN_STATUS.TODO;
-        const status = rawStatus === 'inr_case_closed'
+        let status = rawStatus === 'inr_case_closed'
           ? COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED
           : rawStatus;
+        // Order Fulfillment board must keep showing orders that have also been
+        // tagged Return/INR/Cancellation elsewhere - only an actually cancelled
+        // order should disappear from this board. A specialized status (e.g.
+        // 'case_not_opened', 'inr_case_opened') from those boards doesn't map to
+        // any Order Fulfillment column, so fall back to its own To Do bucket
+        // instead of silently dropping the order. This only applies when
+        // viewing the order_fulfillment board itself - Return/INR/Cancellation
+        // boards keep grouping by their own real statuses untouched.
+        if (selectedCategory === 'order_fulfillment' && !ORDER_FULFILLMENT_STATUSES.has(status)) {
+          status = COLUMN_STATUS.TODO;
+        }
         if (grouped[status]) {
           grouped[status].push(order);
         }
@@ -3365,6 +3401,13 @@ function ComplianceBoardPage() {
       return order.updatedAt || order.openDate || null;
     }
 
+    // Order Fulfillment board should always show the order's own date, never
+    // a "dragged"/last-changed timestamp - that indicator is specific to the
+    // Return/Cancellation/INR boards handled above.
+    if (selectedCategory === 'order_fulfillment') {
+      return null;
+    }
+
     return order.updatedAt || null;
   };
 
@@ -3555,9 +3598,10 @@ function ComplianceBoardPage() {
       statusOrders = statusOrders.filter(order => getUnreadMessageCountForOrder(order) > 0);
     }
     
-    // Filter out CANCELED orders from order_fulfillment board
+    // Only actually cancelled orders are removed from order_fulfillment board;
+    // Return/INR-tagged orders stay visible.
     if (selectedCategory === 'order_fulfillment') {
-      statusOrders = statusOrders.filter(order => order.cancelState !== 'CANCELED');
+      statusOrders = statusOrders.filter(order => !isOrderCancelledForFulfillment(order));
     }
     
     if (selectedCategory === 'return_refund' && status === COLUMN_STATUS.CASE_OPENED) {
@@ -3670,7 +3714,7 @@ function ComplianceBoardPage() {
   // Smart per-column refill from next pages respecting stats counts
   const refillColumnsFromNextPages = async (columnsNeedingRefill) => {
     try {
-      const expectedPageSize = ['return_refund', 'inr', 'cancellation'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT;
+      const expectedPageSize = ['return_refund', 'inr', 'cancellation', 'order_fulfillment'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT;
       
       // Track how many we need for each status
       const statusQuotas = {};
@@ -3773,7 +3817,7 @@ function ComplianceBoardPage() {
   // Refetch from next pages if current page is under-filled after orders are moved
   const refillCurrentPageFromNextPages = async () => {
     try {
-      const expectedPageSize = ['return_refund', 'inr', 'cancellation'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT;
+      const expectedPageSize = ['return_refund', 'inr', 'cancellation', 'order_fulfillment'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT;
       const currentOrderCount = Object.values(orders).reduce((sum, col) => sum + col.length, 0);
       
       console.log(`[REFILL-PAGE] Starting refill: page ${currentPage} has ${currentOrderCount}/${expectedPageSize} orders, totalPages: ${pagination.totalPages}`);
@@ -5503,12 +5547,17 @@ function ComplianceBoardPage() {
                   )}
                   {/* Show "Last Changed" date if it exists, otherwise show Order Date */}
                   {(() => {
-                    const lastChangedDate = 
+                    // Order Fulfillment board always shows the order's own date -
+                    // the "Last changed" indicator (including the conversation
+                    // fallback below) is specific to the Return/Cancellation/INR
+                    // boards and must never apply here.
+                    const lastChangedDate = selectedCategory === 'order_fulfillment' ? null : (
                       (selectedCategory === 'return_refund' && order.returnCaseNotOpenedAssignedAt) ||
                       (selectedCategory === 'cancellation' && order.cancellationCaseNotOpenedAssignedAt) ||
                       (selectedCategory === 'inr' && order.inrCaseNotOpenedAssignedAt) ||
                       order.conversationInfo?.updatedAt ||
-                      null;
+                      null
+                    );
                     
                     return lastChangedDate ? (
                       <Stack direction="row" alignItems="center" spacing={0.5}>
@@ -5853,9 +5902,10 @@ function ComplianceBoardPage() {
       statusOrders = statusOrders.filter(order => getUnreadMessageCountForOrder(order) > 0);
     }
 
-    // Filter out CANCELED orders from order_fulfillment board
+    // Only actually cancelled orders are removed from order_fulfillment board;
+    // Return/INR-tagged orders stay visible.
     if (selectedCategory === 'order_fulfillment') {
-      statusOrders = statusOrders.filter(order => order.cancelState !== 'CANCELED');
+      statusOrders = statusOrders.filter(order => !isOrderCancelledForFulfillment(order));
     }
 
     const visibleCount = getVisibleOrderCount(status);
@@ -7181,7 +7231,15 @@ function ComplianceBoardPage() {
 
               <Button
                 variant="contained"
-                onClick={() => setStatsDateFilter(draftStatsDateFilter)}
+                onClick={() => {
+                  // Keep the Stats panel's date in sync with the main board
+                  // filter - otherwise the board columns (To Do, Out of
+                  // Stock, etc.) keep showing whatever date was previously
+                  // applied while only the Stats tile counts update.
+                  setStatsDateFilter(draftStatsDateFilter);
+                  setDateFilter(draftStatsDateFilter);
+                  setDraftDateFilter(draftStatsDateFilter);
+                }}
                 sx={{
                   ...FILTER_ACTION_SX,
                   bgcolor: BRAND_YELLOW_DARK,
