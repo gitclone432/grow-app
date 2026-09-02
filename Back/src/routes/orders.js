@@ -2613,6 +2613,28 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       cancellationStatusCountRows = cancellationStatusRows || [];
     }
 
+    // Sidebar status counts for Order Fulfillment must match what the board
+    // actually shows: only truly cancelled orders excluded, and a specialized
+    // status from another board (e.g. 'case_not_opened') folded into 'todo'
+    // instead of counted under its own key. Only applies to order_fulfillment
+    // - other boards' per-status counts (case_not_opened, etc.) stay exactly
+    // as before.
+    const ORDER_FULFILLMENT_STATUSES = ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'];
+    let statusCountQuery = detailQuery;
+    if (category === 'order_fulfillment') {
+      statusCountQuery = {
+        $and: [
+          detailQuery,
+          {
+            complianceBoardCategories: { $ne: 'cancellation' },
+            complianceBoardCategory: { $ne: 'cancellation' },
+            cancelState: { $nin: ['CANCELED', 'CANCELLED'] },
+            'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] }
+          }
+        ]
+      };
+    }
+
     const [
       total,
       statusCountRows,
@@ -2620,14 +2642,22 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       overdueCancellationCount,
       overdueAddressIssueCount
     ] = await Promise.all([
-      isCancellationBoard 
+      isCancellationBoard
         ? Promise.resolve(0)  // Don't count Order collection for cancellation board
         : Order.countDocuments(detailQuery),
       Order.aggregate([
-        { $match: detailQuery },
+        { $match: statusCountQuery },
         {
           $group: {
-            _id: { $ifNull: ['$complianceBoardStatus', 'todo'] },
+            _id: category === 'order_fulfillment'
+              ? {
+                  $cond: [
+                    { $in: [{ $ifNull: ['$complianceBoardStatus', 'todo'] }, ORDER_FULFILLMENT_STATUSES] },
+                    { $ifNull: ['$complianceBoardStatus', 'todo'] },
+                    'todo'
+                  ]
+                }
+              : { $ifNull: ['$complianceBoardStatus', 'todo'] },
             count: { $sum: 1 }
           }
         }
@@ -2636,7 +2666,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       Order.countDocuments(timedStatusQuery(query, 'cancellation', 'cancellationAssignedAt')),
       Order.countDocuments(timedStatusQuery(query, 'address_issue', 'addressIssueAssignedAt'))
     ]);
-    
+
     // Merge status counts from Order and Cancellation collections
     const statusCounts = {};
     
@@ -4356,6 +4386,27 @@ router.get('/stats', requireAuth, requirePageAccess('ComplianceBoard'), async (r
       });
     }
 
+    // Order Fulfillment must only drop orders that are actually cancelled -
+    // being also tagged Return/Refund or INR must NOT remove an order from
+    // these counts (only the Cancellation category / cancel state does).
+    if (category === 'order_fulfillment') {
+      baseQuery.$and = baseQuery.$and || [];
+      baseQuery.$and.push({
+        complianceBoardCategories: { $ne: 'cancellation' },
+        complianceBoardCategory: { $ne: 'cancellation' },
+        cancelState: { $nin: ['CANCELED', 'CANCELLED'] },
+        'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] }
+      });
+    }
+
+    // Statuses that Order Fulfillment's own columns understand. Orders whose
+    // complianceBoardStatus was set by a specialized board (Return/INR/etc.,
+    // e.g. 'case_not_opened') fall back into 'todo' instead of vanishing. This
+    // only applies for category='order_fulfillment' - other boards (inr,
+    // cancellation, return_refund) keep their original per-status counts
+    // (case_not_opened, cancellation_request, etc.) untouched.
+    const ORDER_FULFILLMENT_STATUSES = ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'];
+
     // Use aggregation to count and deduplicate by orderId at the same time
     // This prevents duplicate orders from being counted multiple times
     const statusCounts = await Order.aggregate([
@@ -4365,7 +4416,18 @@ router.get('/stats', requireAuth, requirePageAccess('ComplianceBoard'), async (r
       // Group by orderId to get only the most recent version
       {
         $group: {
-          _id: { orderId: '$orderId', status: { $ifNull: ['$complianceBoardStatus', 'todo'] } },
+          _id: {
+            orderId: '$orderId',
+            status: category === 'order_fulfillment'
+              ? {
+                  $cond: [
+                    { $in: [{ $ifNull: ['$complianceBoardStatus', 'todo'] }, ORDER_FULFILLMENT_STATUSES] },
+                    { $ifNull: ['$complianceBoardStatus', 'todo'] },
+                    'todo'
+                  ]
+                }
+              : { $ifNull: ['$complianceBoardStatus', 'todo'] }
+          },
           _firstId: { $first: '$_id' },
           updatedAt: { $first: '$updatedAt' }
         }
@@ -4699,6 +4761,13 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
     query.$and = query.$and || [];
     query.$and.push({ $or: categoryFilters });
     
+    // Statuses that Order Fulfillment's own columns understand. A specialized
+    // board status (e.g. 'case_not_opened' from Return/INR) falls back into
+    // 'todo' here too, matching the stats count and the board's own grouping.
+    // Only applies when category='order_fulfillment' - other boards' status
+    // lookups (case_not_opened, cancellation_request, etc.) are untouched.
+    const ORDER_FULFILLMENT_STATUSES = ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'];
+
     // Match by complianceBoardStatus (handle 'todo' as missing/null status)
     const statusCriteria = [];
     if (status === 'todo') {
@@ -4707,11 +4776,25 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
         { complianceBoardStatus: null },
         { complianceBoardStatus: 'todo' }
       );
+      if (category === 'order_fulfillment') {
+        statusCriteria.push({ complianceBoardStatus: { $nin: ORDER_FULFILLMENT_STATUSES } });
+      }
     } else {
       statusCriteria.push({ complianceBoardStatus: status });
     }
-    
+
     query.$and.push({ $or: statusCriteria });
+
+    // Order Fulfillment must only drop orders that are actually cancelled -
+    // being also tagged Return/Refund or INR must NOT remove an order here.
+    if (category === 'order_fulfillment') {
+      query.$and.push({
+        complianceBoardCategories: { $ne: 'cancellation' },
+        complianceBoardCategory: { $ne: 'cancellation' },
+        cancelState: { $nin: ['CANCELED', 'CANCELLED'] },
+        'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] }
+      });
+    }
 
     if (sellerObjectId) {
       query.$and.push({ seller: sellerObjectId });
