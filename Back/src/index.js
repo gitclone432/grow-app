@@ -136,6 +136,8 @@ import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
 import imageCache from './lib/imageCache.js';
+import http from 'http';
+import { initSocket } from './lib/socket.js';
 
 const app = express();
 
@@ -357,8 +359,11 @@ connectToDatabase()
     // Start image cache auto-cleanup (removes expired entries every 10 minutes)
     imageCache.startAutoCleanup();
 
-    app.listen(port, () => {
-      console.log(`API listening on :${port}`);
+    const server = http.createServer(app);
+    initSocket(server, ALLOWED_ORIGINS);
+
+    server.listen(port, () => {
+      console.log(`API listening on :${port} (Socket.IO attached)`);
 
       // Resume any auto-compat batches that were left 'running' due to a previous server crash/restart
       resumeRunningAutoCompatibilityBatches()

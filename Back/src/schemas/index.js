@@ -195,9 +195,28 @@ export const updateMeetingSchema = createMeetingSchema.partial();
 // ── Internal messages ─────────────────────────────────────────────────────────
 
 export const sendMessageSchema = z.object({
-  recipientId: z.string().min(1, 'Recipient is required'),
+  conversationId: z.string().min(1, 'Conversation is required'),
   body: z.string().min(1, 'Message body is required'),
   mediaUrls: z.array(z.string()).optional(),
+  mentions: z.array(z.string()).optional(),
+});
+
+export const createDmSchema = z.object({
+  recipientId: z.string().min(1, 'Recipient is required'),
+});
+
+export const createGroupSchema = z.object({
+  name: z.string().trim().min(1, 'Group name is required'),
+  participantIds: z.array(z.string().min(1)).min(1, 'At least one member is required'),
+});
+
+export const updateConversationSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  avatarUrl: z.string().optional(),
+});
+
+export const addParticipantsSchema = z.object({
+  userIds: z.array(z.string().min(1)).min(1, 'At least one user is required'),
 });
 
 // ── Ideas ─────────────────────────────────────────────────────────────────────

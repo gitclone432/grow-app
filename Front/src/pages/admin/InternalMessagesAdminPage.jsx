@@ -8,9 +8,17 @@ import {
 import SearchIcon from '@mui/icons-material/Search';
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings';
 import PeopleIcon from '@mui/icons-material/People';
+import GroupIcon from '@mui/icons-material/Group';
 import MessageIcon from '@mui/icons-material/Message';
 import CloseIcon from '@mui/icons-material/Close';
 import api from '../../lib/api.js';
+
+// Distinct colors per sender so group threads with >2 participants stay legible
+const SENDER_COLORS = ['#e3f2fd', '#f3e5f5', '#e8f5e9', '#fff3e0', '#fce4ec', '#ede7f6'];
+function colorForSender(senderId, participants) {
+  const idx = (participants || []).findIndex((p) => p._id === senderId);
+  return SENDER_COLORS[idx % SENDER_COLORS.length] || '#eeeeee';
+}
 
 export default function InternalMessagesAdminPage() {
   const [conversations, setConversations] = useState([]);
@@ -195,27 +203,34 @@ export default function InternalMessagesAdminPage() {
                     alignItems="flex-start"
                   >
                     <ListItemAvatar>
-                      <Avatar sx={{ bgcolor: 'secondary.main' }}>
-                        <PeopleIcon />
+                      <Avatar sx={{ bgcolor: conv.type === 'group' ? 'primary.main' : 'secondary.main' }}>
+                        {conv.type === 'group' ? <GroupIcon /> : <PeopleIcon />}
                       </Avatar>
                     </ListItemAvatar>
                     <ListItemText
                       primary={
-                        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+                        conv.type === 'group' ? (
                           <Typography variant="subtitle2" fontWeight="bold">
-                            {conv.user1.username}
+                            {conv.name} <Typography component="span" variant="caption" color="text.secondary">({conv.participants.length} members)</Typography>
                           </Typography>
-                          <Typography variant="body2" color="text.secondary">↔</Typography>
-                          <Typography variant="subtitle2" fontWeight="bold">
-                            {conv.user2.username}
-                          </Typography>
-                        </Stack>
+                        ) : (
+                          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+                            <Typography variant="subtitle2" fontWeight="bold">
+                              {conv.participants[0]?.username}
+                            </Typography>
+                            <Typography variant="body2" color="text.secondary">↔</Typography>
+                            <Typography variant="subtitle2" fontWeight="bold">
+                              {conv.participants[1]?.username}
+                            </Typography>
+                          </Stack>
+                        )
                       }
                       secondary={
                         <Stack spacing={0.5}>
-                          <Stack direction="row" spacing={0.5}>
-                            <Chip label={conv.user1.role} size="small" sx={{ height: 18, fontSize: '0.65rem' }} />
-                            <Chip label={conv.user2.role} size="small" sx={{ height: 18, fontSize: '0.65rem' }} />
+                          <Stack direction="row" spacing={0.5} flexWrap="wrap">
+                            {conv.participants.map((p) => (
+                              <Chip key={p._id} label={`${p.username} (${p.role})`} size="small" sx={{ height: 18, fontSize: '0.65rem' }} />
+                            ))}
                           </Stack>
                           <Stack direction="row" justifyContent="space-between">
                             <Typography variant="caption" color="text.secondary">
@@ -278,39 +293,59 @@ export default function InternalMessagesAdminPage() {
                       <CloseIcon />
                     </IconButton>
                   )}
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Avatar sx={{ bgcolor: 'primary.main', width: 32, height: 32 }}>
-                      {selectedConversation.user1.username[0].toUpperCase()}
-                    </Avatar>
-                    <Box>
-                      <Typography variant="subtitle2" fontWeight="bold">
-                        {selectedConversation.user1.username}
-                      </Typography>
-                      <Chip 
-                        label={selectedConversation.user1.role} 
-                        size="small" 
-                        sx={{ height: 18, fontSize: '0.65rem' }} 
-                      />
-                    </Box>
-                  </Stack>
+                  {selectedConversation.type === 'group' ? (
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Avatar sx={{ bgcolor: 'primary.main', width: 32, height: 32 }}>
+                        <GroupIcon fontSize="small" />
+                      </Avatar>
+                      <Box>
+                        <Typography variant="subtitle2" fontWeight="bold">
+                          {selectedConversation.name}
+                        </Typography>
+                        <Stack direction="row" spacing={0.5} flexWrap="wrap">
+                          {selectedConversation.participants.map((p) => (
+                            <Chip key={p._id} label={p.username} size="small" sx={{ height: 18, fontSize: '0.65rem' }} />
+                          ))}
+                        </Stack>
+                      </Box>
+                    </Stack>
+                  ) : (
+                    <>
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <Avatar sx={{ bgcolor: 'primary.main', width: 32, height: 32 }}>
+                          {selectedConversation.participants[0]?.username[0].toUpperCase()}
+                        </Avatar>
+                        <Box>
+                          <Typography variant="subtitle2" fontWeight="bold">
+                            {selectedConversation.participants[0]?.username}
+                          </Typography>
+                          <Chip
+                            label={selectedConversation.participants[0]?.role}
+                            size="small"
+                            sx={{ height: 18, fontSize: '0.65rem' }}
+                          />
+                        </Box>
+                      </Stack>
 
-                  <Typography variant="h6" color="text.secondary">↔</Typography>
+                      <Typography variant="h6" color="text.secondary">↔</Typography>
 
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Avatar sx={{ bgcolor: 'secondary.main', width: 32, height: 32 }}>
-                      {selectedConversation.user2.username[0].toUpperCase()}
-                    </Avatar>
-                    <Box>
-                      <Typography variant="subtitle2" fontWeight="bold">
-                        {selectedConversation.user2.username}
-                      </Typography>
-                      <Chip 
-                        label={selectedConversation.user2.role} 
-                        size="small" 
-                        sx={{ height: 18, fontSize: '0.65rem' }} 
-                      />
-                    </Box>
-                  </Stack>
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <Avatar sx={{ bgcolor: 'secondary.main', width: 32, height: 32 }}>
+                          {selectedConversation.participants[1]?.username[0].toUpperCase()}
+                        </Avatar>
+                        <Box>
+                          <Typography variant="subtitle2" fontWeight="bold">
+                            {selectedConversation.participants[1]?.username}
+                          </Typography>
+                          <Chip
+                            label={selectedConversation.participants[1]?.role}
+                            size="small"
+                            sx={{ height: 18, fontSize: '0.65rem' }}
+                          />
+                        </Box>
+                      </Stack>
+                    </>
+                  )}
 
                   <Box sx={{ flex: 1 }} />
 
@@ -335,7 +370,7 @@ export default function InternalMessagesAdminPage() {
                     )}
 
                     {messages.map((msg) => {
-                      const isUser1 = msg.sender._id === selectedConversation.user1._id;
+                      const isUser1 = msg.sender._id === selectedConversation.participants[0]?._id;
                       return (
                         <Box
                           key={msg._id}
@@ -352,7 +387,9 @@ export default function InternalMessagesAdminPage() {
                               elevation={1}
                               sx={{
                                 p: 1.5,
-                                bgcolor: isUser1 ? '#e3f2fd' : '#f3e5f5',
+                                bgcolor: selectedConversation.type === 'group'
+                                  ? colorForSender(msg.sender._id, selectedConversation.participants)
+                                  : (isUser1 ? '#e3f2fd' : '#f3e5f5'),
                                 color: 'text.primary',
                                 borderRadius: 2
                               }}
