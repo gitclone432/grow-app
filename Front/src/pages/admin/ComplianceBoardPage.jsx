@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Box,
   Paper,
@@ -262,6 +262,8 @@ const MESSAGE_THREAD_LIMIT = 500;
 const MESSAGE_THREAD_MAX_AGE_DAYS = 45;
 const BOARD_REQUEST_TIMEOUT_MS = 30000;
 const HEAVY_BOARD_REQUEST_TIMEOUT_MS = 60000;
+// How long a cached board-fetch snapshot stays valid for instant tab switch-back.
+const BOARD_CACHE_TTL_MS = 60000;
 const ALERT_REQUEST_TIMEOUT_MS = 12000;
 const HEAVY_BOARD_CATEGORIES = new Set(['return_refund', 'cancellation', 'inr']);
 
@@ -322,6 +324,53 @@ const toDraggableId = (prefix, item, fallback = '') => {
   return String(item?._id || item?.orderObjectId || item?.orderId || item?.caseId || item?.returnId || fallback || `${prefix}-${Date.now()}`);
 };
 
+// Builds the same composite key server-side (routes/ebay.js POST /conversation-meta/batch)
+// uses to key its results: orderId when present, else buyerUsername+itemId.
+const conversationMetaKey = (thread) => (
+  thread.orderId ? `o:${thread.orderId}` : `b:${thread.buyerUsername}|${thread.itemId}`
+);
+
+// Looks up ConversationMeta for many message threads in a single request
+// instead of one request per thread (previously up to MESSAGE_THREAD_LIMIT=500
+// round trips per board load). Threads that already carry a cached
+// `_conversationMeta` are skipped. Returns { thread, meta } pairs in the same
+// shape the old per-thread Promise.all produced, so callers are unchanged.
+const fetchConversationMetaForThreads = async (threads, timeout) => {
+  const alreadyCached = [];
+  const needsLookup = [];
+  threads.forEach((thread) => {
+    if (thread._conversationMeta) {
+      alreadyCached.push({ thread, meta: thread._conversationMeta });
+    } else {
+      needsLookup.push(thread);
+    }
+  });
+
+  if (needsLookup.length === 0) {
+    return alreadyCached;
+  }
+
+  const keys = needsLookup.map((thread) => ({
+    sellerId: thread.sellerId,
+    buyerUsername: thread.buyerUsername,
+    itemId: thread.itemId,
+    orderId: thread.orderId || '',
+  }));
+
+  try {
+    const { data } = await api.post('/ebay/conversation-meta/batch', { keys }, { timeout });
+    const results = data?.results || {};
+    const lookedUp = needsLookup.map((thread) => ({
+      thread,
+      meta: results[conversationMetaKey(thread)] || null,
+    }));
+    return [...alreadyCached, ...lookedUp];
+  } catch (err) {
+    console.warn('Batch conversation-meta lookup failed:', err);
+    return [...alreadyCached, ...needsLookup.map((thread) => ({ thread, meta: null }))];
+  }
+};
+
 const formatDateSoldPT = (dateValue) => {
   if (!dateValue) return '';
   try {
@@ -333,6 +382,25 @@ const formatDateSoldPT = (dateValue) => {
     }).format(new Date(dateValue));
   } catch {
     return '';
+  }
+};
+
+// PT calendar-day key ("YYYY-MM-DD"), matching the day boundaries the board's
+// date badges/labels display in (formatDateSoldPT above) and the backend's
+// getPTDayBoundsUTC — so a date-filter comparison never disagrees with what
+// the user sees printed on the card.
+const getPTDateKey = (dateValue) => {
+  if (!dateValue) return null;
+  try {
+    // en-CA formats as YYYY-MM-DD, which also sorts/compares correctly as a string.
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(dateValue));
+  } catch {
+    return null;
   }
 };
 
@@ -538,6 +606,12 @@ function ComplianceBoardPage() {
   });
   const [copiedText, setCopiedText] = useState('');
   const [sellers, setSellers] = useState([]);
+  // Short-lived per-category+filters snapshot of the general board fetch
+  // (order_fulfillment/return_refund/cancellation/inr - the expensive,
+  // populate-heavy /orders/compliance-board path). Switching category and
+  // back within BOARD_CACHE_TTL_MS reuses this instead of re-fetching.
+  // Cleared whenever a board mutation lands (see applyOrderColumn/applyMessageColumn).
+  const boardCacheRef = useRef({});
   const [pendingOrderMoves, setPendingOrderMoves] = useState({});
   const [pendingMessageMoves, setPendingMessageMoves] = useState({});
   const [applyingColumns, setApplyingColumns] = useState({});
@@ -626,6 +700,12 @@ function ComplianceBoardPage() {
 
   // Fetch stats based on date filter
   const fetchStats = useCallback(async () => {
+    // statsCounts (todo/outOfStock/cancellation/addressIssue/lateDelivery/
+    // notFulfilled/fulfilled/buyerConfirmation) is only ever rendered on the
+    // order_fulfillment board's stat tiles - skip the network call entirely
+    // for every other category instead of fetching and discarding it.
+    if (selectedCategory !== 'order_fulfillment') return;
+
     setStatsLoading(true);
     try {
       const params = new URLSearchParams();
@@ -1132,25 +1212,7 @@ function ComplianceBoardPage() {
     };
 
     const threads = ensureArray(messagesResponse.data?.threads);
-    const metaPromises = threads.map(async (thread) => {
-      try {
-        const params = {
-          sellerId: thread.sellerId,
-          buyerUsername: thread.buyerUsername,
-          itemId: thread.itemId,
-          orderId: thread.orderId || ''
-        };
-        const { data } = await api.get('/ebay/conversation-meta/single', {
-          params,
-          timeout: ALERT_REQUEST_TIMEOUT_MS,
-        });
-        return { thread, meta: data };
-      } catch (err) {
-        return { thread, meta: null };
-      }
-    });
-
-    const threadMetaResults = await Promise.all(metaPromises);
+    const threadMetaResults = await fetchConversationMetaForThreads(threads, ALERT_REQUEST_TIMEOUT_MS);
     const enrichedThreads = [];
     threadMetaResults.forEach(({ thread, meta }) => {
       const enrichedThread = {
@@ -1203,6 +1265,30 @@ function ComplianceBoardPage() {
       return;
     }
 
+    // Reuse a fresh cached snapshot for this exact category+filter combo
+    // instead of re-hitting the (populate-heavy) /orders/compliance-board
+    // endpoint - covers the common "switch board, switch back" case.
+    const boardCacheKey = JSON.stringify([
+      selectedCategory, currentPage, dateFilter, selectedSeller,
+      searchOrderId, searchBuyerName, excludeClient, excludeLowValue,
+    ]);
+    const cached = boardCacheRef.current[boardCacheKey];
+    if (cached && Date.now() - cached.fetchedAt < BOARD_CACHE_TTL_MS) {
+      setOrders(cached.grouped);
+      setPendingOrderMoves({});
+      setBoardSourceCounts(cached.sourceCounts);
+      setStatusCounts(cached.statusCounts);
+      setOverdueCounts(cached.overdueCounts);
+      setVisibleOrderCounts(cached.visibleOrderCounts);
+      if (cached.pagination) setPagination(cached.pagination);
+      setSummary(cached.summary);
+      setError('');
+      // Message-based alerts are cheap (single request) and can change
+      // independently of board data, so still refresh those on a cache hit.
+      fetchMessagesForAlerts();
+      return;
+    }
+
     setLoading(true);
     setError('');
     try {
@@ -1218,10 +1304,10 @@ function ComplianceBoardPage() {
         limit: ['return_refund', 'inr', 'cancellation', 'order_fulfillment'].includes(selectedCategory) ? 500 : INITIAL_LOAD_LIMIT,
         ...buildBoardFilterParams()
       };
-      
+
       // Only add dates based on filter mode
       Object.assign(params, buildDateParams());
-      
+
       console.log(`[BOARD-API-CALL] Calling /orders/compliance-board with params:`, JSON.stringify(params));
       
       const [response, inrCasesResult, returnCasesResult, cancellationCasesResult, cancelledOrdersResult] = await Promise.all([
@@ -1229,8 +1315,12 @@ function ComplianceBoardPage() {
         selectedCategory === 'inr'
           ? fetchINRCasesForBoard()
           : Promise.resolve(null),
-          Promise.resolve(null),
-          Promise.resolve(null),
+        selectedCategory === 'return_refund'
+          ? fetchStoredReturnCasesForBoard()
+          : Promise.resolve(null),
+        selectedCategory === 'cancellation'
+          ? fetchStoredCancellationCasesForBoard()
+          : Promise.resolve(null),
         // Fetch cancelled orders for both 'cancellation' and 'order_fulfillment' boards
         // This allows users to search for cancelled orders in Order Fulfillment board
         ['cancellation', 'order_fulfillment'].includes(selectedCategory)
@@ -1238,12 +1328,14 @@ function ComplianceBoardPage() {
           : Promise.resolve(null)
       ]);
 
-      // Log search results from both main and special board calls
-      if (searchOrderId.trim()) {
+      // Log search results from both main and special board calls.
+      // Debug-only: these re-scan/re-filter the full order array purely to
+      // print console.log output, so they're skipped outside dev builds.
+      if (import.meta.env.DEV && searchOrderId.trim()) {
         console.log(`[BOARD-API] Main compliance-board API returned ${ensureArray(response.data?.orders).length} orders`);
         const mainMatches = ensureArray(response.data?.orders).filter(o => o.orderId?.toString().includes(searchOrderId.trim()));
         mainMatches.forEach(o => console.log(`  - Main API: orderId ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`));
-        
+
         const cancelledOrders = ensureArray(cancelledOrdersResult);
         if (cancelledOrders.length > 0) {
           console.log(`[BOARD-API] fetchCancelledOrdersForBoard returned ${cancelledOrders.length} orders`);
@@ -2355,18 +2447,12 @@ function ComplianceBoardPage() {
         }
       });
       
-      setOrders(grouped);
-      setPendingOrderMoves({});
-      setBoardSourceCounts(response.data?.sourceCounts || {});
-      setStatusCounts(response.data?.statusCounts || {});
-      setOverdueCounts(response.data?.overdueCounts || {});
-      setVisibleOrderCounts(buildVisibleCountMap(grouped));
-      if (response.data?.pagination) {
-        setPagination(response.data.pagination);
-      }
-
-      // Calculate summary
-      setSummary({
+      const sourceCounts = response.data?.sourceCounts || {};
+      const statusCountsResult = response.data?.statusCounts || {};
+      const overdueCountsResult = response.data?.overdueCounts || {};
+      const visibleOrderCountsResult = buildVisibleCountMap(grouped);
+      const paginationResult = response.data?.pagination || null;
+      const summaryResult = {
         total: response.data?.pagination?.total || boardOrders.length,
         todo: grouped[COLUMN_STATUS.TODO].length,
         outOfStock: grouped[COLUMN_STATUS.OUT_OF_STOCK].length,
@@ -2375,9 +2461,30 @@ function ComplianceBoardPage() {
         notFulfilled: grouped[COLUMN_STATUS.NOT_FULFILLED].length,
         fulfilled: grouped[COLUMN_STATUS.FULFILLED].length,
         buyerConfirmation: grouped[COLUMN_STATUS.BUYER_CONFIRMATION].length
-      });
+      };
 
+      setOrders(grouped);
+      setPendingOrderMoves({});
+      setBoardSourceCounts(sourceCounts);
+      setStatusCounts(statusCountsResult);
+      setOverdueCounts(overdueCountsResult);
+      setVisibleOrderCounts(visibleOrderCountsResult);
+      if (paginationResult) {
+        setPagination(paginationResult);
+      }
+      setSummary(summaryResult);
       setError('');
+
+      boardCacheRef.current[boardCacheKey] = {
+        grouped,
+        sourceCounts,
+        statusCounts: statusCountsResult,
+        overdueCounts: overdueCountsResult,
+        visibleOrderCounts: visibleOrderCountsResult,
+        pagination: paginationResult,
+        summary: summaryResult,
+        fetchedAt: Date.now(),
+      };
 
       // Fetch alert messages separately so order boards render even if the
       // message thread source is slow or temporarily unavailable.
@@ -2530,29 +2637,9 @@ function ComplianceBoardPage() {
         [MESSAGE_CATEGORIES.INQUIRY]: [],
       };
 
-      // Fetch meta for each thread to get category
-      const metaPromises = threads.map(async (thread) => {
-        if (thread._conversationMeta) {
-          return { thread, meta: thread._conversationMeta };
-        }
-        try {
-          const params = {
-            sellerId: thread.sellerId,
-            buyerUsername: thread.buyerUsername,
-            itemId: thread.itemId,
-            orderId: thread.orderId || ''
-          };
-          const { data } = await api.get('/ebay/conversation-meta/single', {
-            params,
-            timeout: ALERT_REQUEST_TIMEOUT_MS,
-          });
-          return { thread, meta: data };
-        } catch (err) {
-          return { thread, meta: null };
-        }
-      });
-
-      const threadMetaResults = await Promise.all(metaPromises);
+      // Fetch meta for each thread to get category (one batch request instead
+      // of one request per thread - see fetchConversationMetaForThreads).
+      const threadMetaResults = await fetchConversationMetaForThreads(threads, ALERT_REQUEST_TIMEOUT_MS);
 
       const enrichedThreads = [];
       threadMetaResults.forEach(({ thread, meta }) => {
@@ -2703,12 +2790,17 @@ function ComplianceBoardPage() {
     showOnlyUnreadMessages,
   ]);
 
+  // Sellers/chat agents are reference data that don't depend on category or
+  // filters - fetch once on mount instead of re-fetching before every board
+  // load (every category switch, date-filter change, or search keystroke
+  // used to re-trigger both of these unnecessarily).
   useEffect(() => {
-    const init = async () => {
-      await Promise.all([fetchSellers(), fetchChatAgents()]); // Ensure sellers/agents load first
-      fetchOrders();
-    };
-    init();
+    fetchSellers();
+    fetchChatAgents();
+  }, []);
+
+  useEffect(() => {
+    fetchOrders();
   }, [fetchOrders]);
 
   // Auto-refill empty/under-filled columns from next pages
@@ -3164,6 +3256,18 @@ function ComplianceBoardPage() {
       return;
     }
 
+    // Cancellation Accepted/Declined already merge Order-Communication-sourced
+    // cards client-side (see getColumnCount) that the backend's persisted
+    // complianceBoardStatus query below doesn't know about. Re-fetching here
+    // would silently overwrite the correct, already-loaded orders[alertId]
+    // list (matching the box/Stats count) with a smaller backend-only count.
+    if (
+      selectedCategory === 'cancellation' &&
+      (alertId === COLUMN_STATUS.ACCEPTED || alertId === COLUMN_STATUS.DECLINED)
+    ) {
+      return;
+    }
+
     setAlertPreviewLoading(true);
     try {
       const params = {
@@ -3341,6 +3445,8 @@ function ComplianceBoardPage() {
   const getBoardStatusOverviewOptions = () => {
     if (selectedCategory === 'return_refund') {
       return [
+        { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: BRAND_RED },
+        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE },
         { id: COLUMN_STATUS.RETURN_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6' },
         { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: BRAND_BLUE },
         { id: COLUMN_STATUS.BUYER_DROP_OFF, label: 'Buyer Drop Off', color: '#a855f7' },
@@ -3353,6 +3459,8 @@ function ComplianceBoardPage() {
 
     if (selectedCategory === 'cancellation') {
       return [
+        { id: COLUMN_STATUS.CANCELLATION_REQUEST, label: 'Case Opened', color: BRAND_RED },
+        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE },
         { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN },
         { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE },
       ];
@@ -3360,6 +3468,8 @@ function ComplianceBoardPage() {
 
     if (selectedCategory === 'inr') {
       return [
+        { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: BRAND_RED },
+        { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE },
         { id: COLUMN_STATUS.INR_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6' },
         { id: COLUMN_STATUS.INR_TRACKING_ID_UPLOAD, label: 'Tracking ID Upload', color: '#06b6d4' },
         { id: COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN, label: 'Case Open (Ebay Step In)', color: BRAND_RED },
@@ -3431,29 +3541,25 @@ function ComplianceBoardPage() {
     const draggedDate = getBoardStatusDraggedDate(item);
     if (!draggedDate) return statusOverviewDateFilter.mode === 'none';
 
-    const draggedTime = new Date(draggedDate).getTime();
-    if (Number.isNaN(draggedTime)) return false;
+    // Compare PT calendar days as "YYYY-MM-DD" strings (matches the <input
+    // type="date"> value's format) instead of Date-object math, which used
+    // to build day boundaries in the browser's local timezone — off from the
+    // PT-based "Dragged: ..." date the card actually displays, so a date the
+    // user picked to match a visible card could silently exclude it.
+    const draggedDayKey = getPTDateKey(draggedDate);
+    if (!draggedDayKey) return false;
 
     if (statusOverviewDateFilter.mode === 'single' && statusOverviewDateFilter.single) {
-      const selectedDate = new Date(statusOverviewDateFilter.single);
-      selectedDate.setHours(0, 0, 0, 0);
-      const nextDate = new Date(selectedDate);
-      nextDate.setDate(nextDate.getDate() + 1);
-      return draggedTime >= selectedDate.getTime() && draggedTime < nextDate.getTime();
+      return draggedDayKey === statusOverviewDateFilter.single;
     }
 
     if (statusOverviewDateFilter.mode === 'range') {
       let matches = true;
       if (statusOverviewDateFilter.from) {
-        const fromDate = new Date(statusOverviewDateFilter.from);
-        fromDate.setHours(0, 0, 0, 0);
-        matches = matches && draggedTime >= fromDate.getTime();
+        matches = matches && draggedDayKey >= statusOverviewDateFilter.from;
       }
       if (statusOverviewDateFilter.to) {
-        const toDate = new Date(statusOverviewDateFilter.to);
-        toDate.setHours(0, 0, 0, 0);
-        toDate.setDate(toDate.getDate() + 1);
-        matches = matches && draggedTime < toDate.getTime();
+        matches = matches && draggedDayKey <= statusOverviewDateFilter.to;
       }
       return matches;
     }
@@ -3528,8 +3634,14 @@ function ComplianceBoardPage() {
       return [
         { id: COLUMN_STATUS.CANCELLATION_REQUEST, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.CANCELLATION_REQUEST), type: 'stat' },
         { id: COLUMN_STATUS.CASE_NOT_OPENED, label: 'Case Not Opened', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.CASE_NOT_OPENED), type: 'stat' },
-        { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN, count: getStatusCount(COLUMN_STATUS.ACCEPTED), type: 'stat' },
-        { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.DECLINED), type: 'stat' },
+        // Accepted/Declined use getColumnCount (client-side, post-merge) rather than
+        // getStatusCount (raw backend statusCounts) because the board's Accepted/Declined
+        // box also merges in Order-Communication-sourced "CANCELED" cards that were never
+        // persisted with complianceBoardStatus accepted/declined — the backend count misses
+        // those, which is what made the Stats tile disagree with the number of cards actually
+        // shown in the box.
+        { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN, count: getColumnCount(COLUMN_STATUS.ACCEPTED), type: 'stat' },
+        { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE, count: getColumnCount(COLUMN_STATUS.DECLINED), type: 'stat' },
         { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadCancellationMessages, type: 'alert' },
         { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
       ];
@@ -3989,6 +4101,11 @@ function ComplianceBoardPage() {
           });
       }));
 
+      // A board mutation just landed - the per-category fetch cache (see
+      // fetchOrders) could now be showing stale columns, so drop it rather
+      // than trying to patch it in place.
+      boardCacheRef.current = {};
+
       setOrders((prev) => {
         const appliedIds = new Set(moves.map((order) => order._id));
         const appliedAt = new Date().toISOString();
@@ -4147,6 +4264,8 @@ function ComplianceBoardPage() {
           }
         }
       }));
+
+      boardCacheRef.current = {};
 
       // Update messages state locally to move them to the applied category
       setMessages((prev) => {
@@ -6669,7 +6788,7 @@ function ComplianceBoardPage() {
                 >
                   <span>{option.label}</span>
                   <Chip
-                    label={getStatusCount(option.id)}
+                    label={getColumnCount(option.id)}
                     size="small"
                     sx={{
                       ml: 1,
@@ -6953,7 +7072,15 @@ function ComplianceBoardPage() {
             Compliance & Support Board
           </Typography>
           <Tooltip title="Refresh">
-            <IconButton onClick={fetchOrders} disabled={loading}>
+            <IconButton
+              onClick={() => {
+                // A manual refresh should always hit the network, not serve
+                // a cached snapshot.
+                boardCacheRef.current = {};
+                fetchOrders();
+              }}
+              disabled={loading}
+            >
               <RefreshIcon />
             </IconButton>
           </Tooltip>

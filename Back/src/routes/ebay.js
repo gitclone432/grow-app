@@ -19326,6 +19326,55 @@ router.get('/conversation-meta/single', requireAuth, async (req, res) => {
   }
 });
 
+// Batch version of /conversation-meta/single — the Order Communication and
+// Issue Hub boards used to look up meta for each message thread one request
+// at a time (up to MESSAGE_THREAD_LIMIT=500 round trips per load). This does
+// the same lookup for every thread in a single query.
+router.post('/conversation-meta/batch', requireAuth, async (req, res) => {
+  const { keys } = req.body;
+
+  if (!Array.isArray(keys) || keys.length === 0) {
+    return res.json({ results: {} });
+  }
+
+  try {
+    // Same two query shapes as /conversation-meta/single, just OR'd together.
+    const clauses = [];
+    const seen = new Set();
+    keys.forEach(({ sellerId, buyerUsername, orderId, itemId }) => {
+      if (!sellerId) return;
+      const compositeKey = orderId ? `o:${orderId}` : `b:${buyerUsername}|${itemId}`;
+      if (seen.has(compositeKey)) return;
+      seen.add(compositeKey);
+
+      if (orderId) {
+        clauses.push({ seller: sellerId, orderId });
+      } else {
+        clauses.push({ seller: sellerId, buyerUsername, itemId, orderId: null });
+      }
+    });
+
+    if (clauses.length === 0) {
+      return res.json({ results: {} });
+    }
+
+    const metas = await ConversationMeta.find({ $or: clauses }).lean();
+
+    // Key the response the same way the frontend keys its lookup: by orderId
+    // when present, else buyerUsername+itemId.
+    const results = {};
+    metas.forEach((meta) => {
+      const compositeKey = meta.orderId ? `o:${meta.orderId}` : `b:${meta.buyerUsername}|${meta.itemId}`;
+      results[compositeKey] = meta;
+    });
+
+    res.json({ results });
+  } catch (err) {
+    console.error('Conversation meta batch error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Assigned compliance-board conversations that may be outside the live inbox window.
 router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) => {
   try {
