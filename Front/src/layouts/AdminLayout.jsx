@@ -23,6 +23,8 @@ import {
 import { useTheme } from '@mui/material/styles';
 import { fetchSellersAll } from '../lib/sellersAllCache.js';
 import DiscountAlertsBell from '../components/DiscountAlertsBell.jsx';
+import TeamChatButton from '../components/TeamChatButton.jsx';
+import { connectSocket, disconnectSocket } from '../lib/socket.js';
 import MenuIcon from '@mui/icons-material/Menu';
 import Inventory2Icon from '@mui/icons-material/Inventory2';
 import AddCircleIcon from '@mui/icons-material/AddCircle';
@@ -448,6 +450,12 @@ export default function AdminLayout({ user, onLogout }) {
     void fetchSellersAll(null).catch(() => {});
   }, []);
 
+  // Team Chat real-time connection: lives for as long as the admin session does.
+  useEffect(() => {
+    connectSocket();
+    return () => disconnectSocket();
+  }, []);
+
   // Use the page access hook
   const { hasAccess, hasCategoryAccess, accessibleCategories, getAccessiblePages, getSubmenuPages, hasSubmenuAccess, isSuper } = usePageAccess(user);
 
@@ -870,28 +878,7 @@ export default function AdminLayout({ user, onLogout }) {
             </Typography>
           </Box>
           <DiscountAlertsBell />
-          <Button
-            startIcon={<ChatIcon />}
-            onClick={() => navigate('/admin/internal-messages')}
-            sx={{
-              mr: 1,
-              px: 1.8,
-              minHeight: 40,
-              borderRadius: 2.5,
-              fontSize: '0.875rem',
-              fontWeight: 600,
-              letterSpacing: '0.02em',
-              color: BRAND_YELLOW,
-              border: '1px solid rgba(245, 200, 66, 0.22)',
-              backgroundColor: 'rgba(245, 200, 66, 0.08)',
-              '&:hover': {
-                backgroundColor: 'rgba(245, 200, 66, 0.16)',
-                borderColor: 'rgba(245, 200, 66, 0.34)'
-              }
-            }}
-          >
-            Team Chat
-          </Button>
+          <TeamChatButton />
           <Box
             sx={{
               mr: 1,
