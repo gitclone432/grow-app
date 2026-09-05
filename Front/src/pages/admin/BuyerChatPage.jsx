@@ -1818,6 +1818,8 @@ export default function BuyerChatPage() {
                       <MenuItem value="Replace">Replace</MenuItem>
                       <MenuItem value="Out of Stock">Out of Stock</MenuItem>
                       <MenuItem value="Issue with Product">Issue with Product</MenuItem>
+                      <MenuItem value="Issue with Delivery">Issue with Delivery</MenuItem>
+                      <MenuItem value="Payment Dispute">Payment Dispute</MenuItem>
                       <MenuItem value="Inquiry">Inquiry</MenuItem>
                     </Select>
                   </FormControl>
