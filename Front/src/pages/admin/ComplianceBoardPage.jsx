@@ -1546,6 +1546,19 @@ function ComplianceBoardPage() {
         };
         console.log(`[BOARD-GROUP] INR: Type breakdown: ${JSON.stringify(typeBreakdown)}`);
         
+        // Snapshot the type-filtered (Inquiry/Dispute) list BEFORE the date
+        // filter below narrows it down. The board's per-column date filter is
+        // keyed off the case/dispute's OWN creationDate, which can easily
+        // diverge from the order's own date fields (e.g. a case opened days
+        // after the order's last conversation update) - the same class of
+        // date-field mismatch already seen on the Return board. Whether an
+        // order still deserves to sit under "Case Not Opened"/"Follow Up"
+        // must NOT depend on that date filter: if a real case/dispute exists
+        // for the order AT ALL, it always takes priority, regardless of
+        // which day its own record happens to be filed under. This
+        // undated snapshot is used to build that priority check below.
+        const inrCasesTypeFilteredUndated = [...inrCasesForBoard];
+
         // Apply date filter based on case creationDate or first changed date for Case Not Opened items
         if (dateFilter.mode === 'single' && dateFilter.single) {
           const selectedDate = new Date(dateFilter.single);
@@ -1601,46 +1614,48 @@ function ComplianceBoardPage() {
           });
         }
         
-        // Deduplicate inrCasesForBoard by orderId
-        // Keep only one INR case per order, preferring the one with inr_case_opened status or most recent
-        // NOTE: Disputes (sourceType='inr-dispute') are NOT deduplicated - they appear separately
-        const inrByOrderId = new Map();
-        const disputes = [];
-        
-        inrCasesForBoard.forEach((caseItem) => {
-          // Separate disputes - they won't be deduplicated
-          if (caseItem.sourceType === 'inr-dispute') {
-            disputes.push(caseItem);
-            return;
-          }
-          
-          const orderId = String(caseItem.orderId || caseItem.caseOrderId || '').toLowerCase();
-          if (!orderId) return;
-          
-          const status = caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
-          const existing = inrByOrderId.get(orderId);
-          
-          // Keep this case if:
-          // - No existing entry, OR
-          // - This one has inr_case_opened status and existing doesn't, OR
-          // - This one is more recent (newer creationDate)
-          if (!existing) {
-            inrByOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
-          } else if (status === COLUMN_STATUS.INR_CASE_OPENED && existing.status !== COLUMN_STATUS.INR_CASE_OPENED) {
-            // Prefer inr_case_opened status
-            inrByOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
-          } else if (new Date(caseItem.creationDate) > new Date(existing.creationDate)) {
-            // Keep the more recent one
-            inrByOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
-          }
-        });
-        
-        // Extract deduplicated cases and build Set of orderIds for deduplication
+        // Deduplicate a list of case/dispute items by orderId - keep only one
+        // INR case per order, preferring the one with inr_case_opened status
+        // or most recent. Disputes are NOT deduplicated - they appear
+        // separately. Factored out so it can run both on the date-filtered
+        // list (for what actually renders in each column) and on the
+        // undated snapshot (for the priority-over-case-not-opened check,
+        // which must not depend on the board's date filter - see comment
+        // above inrCasesTypeFilteredUndated).
+        const dedupeInrCasesByOrderId = (list) => {
+          const byOrderId = new Map();
+          const disputeItems = [];
+          list.forEach((caseItem) => {
+            if (caseItem.sourceType === 'inr-dispute') {
+              disputeItems.push(caseItem);
+              return;
+            }
+            const orderId = String(caseItem.orderId || caseItem.caseOrderId || '').toLowerCase();
+            if (!orderId) return;
+            const status = caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
+            const existing = byOrderId.get(orderId);
+            if (!existing) {
+              byOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
+            } else if (status === COLUMN_STATUS.INR_CASE_OPENED && existing.status !== COLUMN_STATUS.INR_CASE_OPENED) {
+              byOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
+            } else if (new Date(caseItem.creationDate) > new Date(existing.creationDate)) {
+              byOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
+            }
+          });
+          return { byOrderId, disputes: disputeItems };
+        };
+
+        const { byOrderId: inrByOrderId, disputes } = dedupeInrCasesByOrderId(inrCasesForBoard);
         const dedupInrCases = Array.from(inrByOrderId.values()).map(item => item.caseItem);
-        const inrCaseSourceOrderIds = new Set(
-          Object.values(inrByOrderId).map(item => String(item.caseItem.orderId || item.caseItem.caseOrderId || '').toLowerCase()).filter(Boolean)
-        );
-        
+
+        // Undated version - used only to decide "does a real case/dispute
+        // exist for this order at all", never for what's actually displayed.
+        const { byOrderId: inrByOrderIdUndated, disputes: disputesUndated } = dedupeInrCasesByOrderId(inrCasesTypeFilteredUndated);
+        const inrCaseSourceOrderIds = new Set([
+          ...inrByOrderIdUndated.keys(),
+          ...disputesUndated.map(d => String(d.orderId || d.caseOrderId || '').toLowerCase()).filter(Boolean)
+        ]);
+
         console.log(`[BOARD-GROUP] INR: Found ${dedupInrCases.length} deduplicated Inquiry cases and ${disputes.length} disputes`);
         dedupInrCases.slice(0, 5).forEach((item, idx) => {
           console.log(`[BOARD-GROUP-DEDUP-STATUS] Item ${idx}: orderId=${item.orderId}, status='${item.status}', complianceBoardStatus='${item.complianceBoardStatus}'`);
@@ -1648,7 +1663,13 @@ function ComplianceBoardPage() {
         console.log(`[BOARD-GROUP] INR: Order IDs already in stored INR cases: ${Array.from(inrCaseSourceOrderIds).join(', ')}`);
         
         // Group deduplicated INR cases by their complianceBoardStatus
-        // FINAL DEFENSE: Exclude Case Management cases before adding to columns
+        // FINAL DEFENSE: Exclude Case Management cases before adding to columns.
+        // Track which orderIds actually made it into `grouped` here (i.e.
+        // passed the date filter) so that below, an order excluded from
+        // Case-Not-Opened/Follow-Up for having a real case - but whose case
+        // didn't pass THIS date filter - can still be backfilled with its
+        // real case card instead of just vanishing from the board.
+        const inrCasePushedOrderIds = new Set();
         dedupInrCases.forEach((caseItem) => {
           // Multi-level exclusion to ensure NO Case Management cases slip through
           if (caseItem.sourceType === 'inr-case' || caseItem.__t === 'CaseManagement' || caseItem._type === 'CaseManagement' || caseItem.caseManagementId) {
@@ -1658,9 +1679,10 @@ function ComplianceBoardPage() {
           const status = caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
           if (grouped[status]) {
             grouped[status].push(caseItem);
+            inrCasePushedOrderIds.add(String(caseItem.orderId || caseItem.caseOrderId || '').toLowerCase());
           }
         });
-        
+
         // Add disputes to their respective columns (also based on complianceBoardStatus)
         // FINAL DEFENSE: Exclude Case Management cases from disputes as well
         const disputesByColumn = {};
@@ -1674,6 +1696,7 @@ function ComplianceBoardPage() {
           disputesByColumn[status] = (disputesByColumn[status] || 0) + 1;
           if (grouped[status]) {
             grouped[status].push(disputeItem);
+            inrCasePushedOrderIds.add(String(disputeItem.orderId || disputeItem.caseOrderId || '').toLowerCase());
           }
         });
         console.log(`[BOARD-GROUP] INR: Added ${disputes.length} disputes to columns. Breakdown:`, disputesByColumn);
@@ -1744,55 +1767,108 @@ function ComplianceBoardPage() {
           return true;
         };
         
-        // Case Not Opened: Order Communication items with case_not_opened status
-        const inrCaseNotOpenedItems = boardOrders.filter((order) => {
+        // Case Not Opened: Order Communication items with case_not_opened status.
+        // Split into "candidates" (matches this column by source/category/status,
+        // before the has-a-real-case check) vs the final re-add list (candidates
+        // minus ones that now have a real case). The removal step below must key
+        // off the CANDIDATE set, not the final filtered one - otherwise an order
+        // that gets excluded here (because it now has a real INR case/dispute)
+        // was still sitting in `grouped[CASE_NOT_OPENED]` from the earlier
+        // generic per-status grouping pass, its orderId no longer appears in the
+        // final list's removal Set, and it never gets cleared out - so it stays
+        // stuck showing as a plain "Case Not Opened" order card forever instead
+        // of being replaced by its real, correctly-styled "Case Opened" card.
+        // For an order excluded from Case-Not-Opened/Follow-Up because a real
+        // case/dispute now exists for it, but whose case didn't pass this
+        // date filter (so it was never pushed to `grouped` above): pull it
+        // from the undated lookup and push it in anyway. The order itself
+        // was deemed relevant for the current view (it's a "candidate"), so
+        // its real, up-to-date case card should be visible here too, not
+        // silently dropped just because the case's own creationDate differs
+        // from whatever date field placed the order into this view.
+        const backfillRealCaseCards = (excludedOrders) => {
+          excludedOrders.forEach((order) => {
+            const orderId = String(order.orderId || order.caseOrderId || '').toLowerCase();
+            if (!orderId || inrCasePushedOrderIds.has(orderId)) return;
+            const caseEntry = inrByOrderIdUndated.get(orderId);
+            const disputeEntry = !caseEntry
+              ? disputesUndated.find(d => String(d.orderId || d.caseOrderId || '').toLowerCase() === orderId)
+              : null;
+            const item = caseEntry?.caseItem || disputeEntry;
+            if (!item) return;
+            if (item.sourceType === 'inr-case' || item.__t === 'CaseManagement' || item._type === 'CaseManagement' || item.caseManagementId) return;
+            const status = item.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
+            if (grouped[status]) {
+              grouped[status].push(item);
+              inrCasePushedOrderIds.add(orderId);
+            }
+          });
+        };
+
+        const inrCaseNotOpenedCandidates = boardOrders.filter((order) => {
           const isOrderComm = order.complianceBoardSource === 'order_communication';
           const hasCategory = order.complianceBoardCategories?.includes('inr') || order.complianceBoardCategory === 'inr';
           const correctStatus = order.complianceBoardStatus === COLUMN_STATUS.CASE_NOT_OPENED;
+          return isOrderComm && hasCategory && correctStatus;
+        });
+        const inrCaseNotOpenedItems = inrCaseNotOpenedCandidates.filter((order) => {
           const notDuplicate = !inrCaseSourceOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase());
           const matchesDate = matchesDateFilter(order);
-          
-          if (hasCategory) {
-            console.log(`[FILTER-DETAIL-INR] orderId=${order.orderId}, isOrderComm=${isOrderComm}, hasCategory=${hasCategory}, correctStatus=${correctStatus} (status='${order.complianceBoardStatus}'), notDuplicate=${notDuplicate}, matchesDate=${matchesDate}`);
-          }
-          
-          return isOrderComm && hasCategory && correctStatus && notDuplicate && matchesDate;
+          console.log(`[FILTER-DETAIL-INR] orderId=${order.orderId}, notDuplicate=${notDuplicate}, matchesDate=${matchesDate}`);
+          return notDuplicate && matchesDate;
         });
-        
-        // Remove any existing items with same orderId to avoid duplicates before re-adding
-        const inrCaseNotOpenedOrderIds = new Set(inrCaseNotOpenedItems.map(o => String(o.orderId || o.caseOrderId || '').toLowerCase()).filter(Boolean));
-        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = (grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).filter(order => 
-          !inrCaseNotOpenedOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase())
+
+        // Remove ALL candidates (not just the ones being re-added) to avoid
+        // leaving stale/excluded entries behind, then re-add only the final list.
+        const inrCaseNotOpenedCandidateOrderIds = new Set(inrCaseNotOpenedCandidates.map(o => String(o.orderId || o.caseOrderId || '').toLowerCase()).filter(Boolean));
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = (grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).filter(order =>
+          !inrCaseNotOpenedCandidateOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase())
         );
-        
+
         grouped[COLUMN_STATUS.CASE_NOT_OPENED] = [
           ...(grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []),
           ...inrCaseNotOpenedItems
         ];
-        
+
+        // Backfill: candidates dropped specifically because they now have a
+        // real case (not because of the date filter) must still show that
+        // real case's card somewhere on the board.
+        backfillRealCaseCards(inrCaseNotOpenedCandidates.filter((order) =>
+          inrCaseSourceOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase())
+        ));
+
         // Case Opened: Only show Inquiry-type stored cases here (the deduplicated ones)
         // Don't re-add Order Communication items to Case Opened - they should stay in their mapped status column
-        
-        // Follow Up: Order Communication items with follow_up status
-        const inrFollowUpItems = boardOrders.filter((order) => 
+
+        // Follow Up: Order Communication items with follow_up status. Same
+        // candidate/final split as Case Not Opened above, and for the same reason.
+        const inrFollowUpCandidates = boardOrders.filter((order) =>
           order.complianceBoardSource === 'order_communication' &&
           (order.complianceBoardCategories?.includes('inr') || order.complianceBoardCategory === 'inr') &&
-          (order.complianceBoardStatus === COLUMN_STATUS.FOLLOW_UP || order.complianceBoardStatus === COLUMN_STATUS.INR_FOLLOW_UP) &&
+          (order.complianceBoardStatus === COLUMN_STATUS.FOLLOW_UP || order.complianceBoardStatus === COLUMN_STATUS.INR_FOLLOW_UP)
+        );
+        const inrFollowUpItems = inrFollowUpCandidates.filter((order) =>
           !inrCaseSourceOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase()) &&
           matchesDateFilter(order)
         );
-        
-        // Remove any existing items with same orderId to avoid duplicates before re-adding
-        const inrFollowUpOrderIds = new Set(inrFollowUpItems.map(o => String(o.orderId || o.caseOrderId || '').toLowerCase()).filter(Boolean));
-        grouped[COLUMN_STATUS.INR_FOLLOW_UP] = (grouped[COLUMN_STATUS.INR_FOLLOW_UP] || []).filter(order => 
-          !inrFollowUpOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase())
+
+        // Remove ALL candidates (not just the ones being re-added) to avoid
+        // leaving stale/excluded entries behind, then re-add only the final list.
+        const inrFollowUpCandidateOrderIds = new Set(inrFollowUpCandidates.map(o => String(o.orderId || o.caseOrderId || '').toLowerCase()).filter(Boolean));
+        grouped[COLUMN_STATUS.INR_FOLLOW_UP] = (grouped[COLUMN_STATUS.INR_FOLLOW_UP] || []).filter(order =>
+          !inrFollowUpCandidateOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase())
         );
-        
+
         grouped[COLUMN_STATUS.INR_FOLLOW_UP] = [
           ...(grouped[COLUMN_STATUS.INR_FOLLOW_UP] || []),
           ...inrFollowUpItems
         ];
-        
+
+        // Backfill: same reasoning as Case Not Opened above.
+        backfillRealCaseCards(inrFollowUpCandidates.filter((order) =>
+          inrCaseSourceOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase())
+        ));
+
         console.log(`[BOARD-GROUP] INR board: CASE_NOT_OPENED=${inrCaseNotOpenedItems.length}, INR_CASE_OPENED (stored Inquiry)=${(grouped[COLUMN_STATUS.INR_CASE_OPENED] || []).length}, INR_FOLLOW_UP=${inrFollowUpItems.length}`);
         console.log(`[BOARD-GROUP] Final CASE_NOT_OPENED total: ${grouped[COLUMN_STATUS.CASE_NOT_OPENED].length}`);
         console.log(`[BOARD-GROUP] ===== INR BOARD GROUPING END =====`);
@@ -4456,12 +4532,31 @@ function ComplianceBoardPage() {
       }
     }
 
+    // `source.index`/`destination.index` are positions in the RENDERED list
+    // (orders[column] after the unread-only filter, the order_fulfillment
+    // cancelled-orders filter, and the "load more" pagination slice are all
+    // applied - see renderDroppableColumn). `orders[column]` itself is the
+    // raw, unfiltered/unpaginated array. Whenever any of those filters hides
+    // a card, the two arrays diverge and `source.index` no longer points to
+    // the card the user actually dragged - it points to whatever card sits
+    // at that position in the raw array instead, silently moving the wrong
+    // card (and running the Fulfilled-completeness check against it too,
+    // producing a "missing fields" error for a card that was actually
+    // complete). `draggableId` is the dragged card's real, stable `_id`
+    // (see the Draggable key/draggableId in renderDroppableColumn) - always
+    // resolve the moved item through that instead of trusting either index
+    // against the raw array.
+    const sourceRawItems = orders[sourceColumn] || [];
+    const movedOrder = sourceRawItems.find((o) => o._id === draggableId);
+    if (!movedOrder) {
+      console.warn(`[DRAG-END] Could not find dragged order ${draggableId} in column ${sourceColumn}`);
+      return;
+    }
+
     // Check if trying to move incomplete order to Fulfilled box in order_fulfillment category
     if (selectedCategory === 'order_fulfillment' && destColumn === COLUMN_STATUS.FULFILLED) {
-      const sourceItems = orders[sourceColumn];
-      const movedOrder = sourceItems[source.index];
       const isComplete = isOrderFulfillmentComplete(movedOrder);
-      
+
       if (!isComplete) {
         const missingFields = getMissingFulfillmentFields(movedOrder);
         setSnackbar({
@@ -4473,14 +4568,12 @@ function ComplianceBoardPage() {
     }
 
     // Check if trying to move Return Follow Up to Provide Return Label without compliance board tracking ID
-    if (selectedCategory === 'return_refund' && 
-        sourceColumn === COLUMN_STATUS.RETURN_FOLLOW_UP && 
+    if (selectedCategory === 'return_refund' &&
+        sourceColumn === COLUMN_STATUS.RETURN_FOLLOW_UP &&
         destColumn === COLUMN_STATUS.PROVIDE_RETURN_LABEL) {
-      const sourceItems = orders[sourceColumn];
-      const movedItem = sourceItems[source.index];
-      const requiresTrackingBeforeProvideReturnLabel = movedItem?.returnBoardSource === 'conversation';
-      
-      if (requiresTrackingBeforeProvideReturnLabel && !movedItem.complianceBoardTracking) {
+      const requiresTrackingBeforeProvideReturnLabel = movedOrder?.returnBoardSource === 'conversation';
+
+      if (requiresTrackingBeforeProvideReturnLabel && !movedOrder.complianceBoardTracking) {
         setSnackbar({
           open: true,
           message: `❌ Cannot move: Tracking ID is required. Please fill in the tracking number in Follow Up first.`
@@ -4494,11 +4587,16 @@ function ComplianceBoardPage() {
     const sourceItems = Array.from(newOrders[sourceColumn]);
     const destItems = sourceColumn === destColumn ? sourceItems : Array.from(newOrders[destColumn]);
 
-    // Remove from source
-    const [movedItem] = sourceItems.splice(source.index, 1);
+    // Remove from source by the same stable id (not source.index - see above)
+    const sourceRealIndex = sourceItems.findIndex((o) => o._id === draggableId);
+    const [movedItem] = sourceItems.splice(sourceRealIndex, 1);
 
-    // Add to destination
-    destItems.splice(destination.index, 0, movedItem);
+    // destination.index has the same rendered-vs-raw mismatch problem on the
+    // destination column, so it's not a reliable insert position either -
+    // put the moved card at the front of the raw destination array so it's
+    // easy to spot right after the drop rather than risking it landing at
+    // an arbitrary/wrong position.
+    destItems.unshift(movedItem);
 
     // Update state
     newOrders[sourceColumn] = sourceItems;
