@@ -501,13 +501,25 @@ const getOrderBoardCategories = (order) => (
 );
 
 // An order is treated as "cancelled" (and hidden from Order Fulfillment) only
-// when it's actually cancelled - either eBay's cancel state says so, or it has
-// been tagged with the Cancellation category. Being tagged Return/Refund or
-// INR must NOT hide an order from Order Fulfillment.
+// when it's actually cancelled per eBay's own cancel state. We intentionally
+// do NOT also check for a 'cancellation' entry in complianceBoardCategories:
+// that array is a soft label (a conversation can be briefly tagged
+// "Cancellation" then retagged "Return"/etc. without the old tag ever being
+// pulled) and goes stale independently of whether the order is still
+// cancelled. Relying on it here hid orders that were never actually
+// cancelled - e.g. an order tagged both 'return_refund' and a leftover
+// 'cancellation' entry, with cancelState still NONE_REQUESTED, would vanish
+// from Order Fulfillment entirely. cancelState is the real source of truth.
+// Being tagged Return/Refund or INR must NOT hide an order from Order
+// Fulfillment either way.
 const isOrderCancelledForFulfillment = (order) => {
   const cancelState = order?.cancelState || order?.cancelStatus?.cancelState;
-  if (cancelState === 'CANCELED' || cancelState === 'CANCELLED') return true;
-  return getOrderBoardCategories(order).includes('cancellation');
+  return cancelState === 'CANCELED'
+    || cancelState === 'CANCELLED'
+    || cancelState === 'CANCEL_CLOSED'
+    || cancelState === 'CANCEL_CLOSED_WITH_REFUND'
+    || cancelState === 'CANCEL_CLOSED_WITHOUT_REFUND'
+    || cancelState === 'CANCEL_CLOSED_NO_REFUND';
 };
 
 function ComplianceBoardPage() {

@@ -20,6 +20,7 @@ import { applyActiveSellerScope } from '../utils/activeSellerScope.js';
 import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
 import { postEbayTradingApi } from '../utils/ebayTradingApi.js';
 import Order from '../models/Order.js';
+import { FINAL_CANCELLED_STATES } from '../constants/cancelStates.js';
 import Return from '../models/Return.js';
 import Cancellation from '../models/Cancellation.js';
 import Case from '../models/Case.js';
@@ -4067,7 +4068,7 @@ router.get('/stored-orders', async (req, res) => {
     // Cancel Status Filter
     if (cancelStatus && cancelStatus !== '') {
       if (cancelStatus === 'CANCELED') {
-        query.cancelState = { $in: ['CANCELED', 'CANCELLED'] };
+        query.cancelState = { $in: FINAL_CANCELLED_STATES };
       } else if (cancelStatus === 'NONE_REQUESTED') {
         query.$and = query.$and || [];
         query.$and.push({
@@ -4213,14 +4214,14 @@ router.get('/stored-orders', async (req, res) => {
         $or: [
           { cancelState: { $exists: false } },
           { cancelState: null },
-          { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+          { cancelState: { $nin: FINAL_CANCELLED_STATES } }
         ]
       });
       query.$and.push({
         $or: [
           { 'cancelStatus.cancelState': { $exists: false } },
           { 'cancelStatus.cancelState': null },
-          { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+          { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
         ]
       });
       // Exclude orders with refunds when this filter is active
@@ -4464,14 +4465,14 @@ router.get('/all-orders-usd/account-profit', async (req, res) => {
           $or: [
             { cancelState: { $exists: false } },
             { cancelState: null },
-            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+            { cancelState: { $nin: FINAL_CANCELLED_STATES } }
           ]
         },
         {
           $or: [
             { 'cancelStatus.cancelState': { $exists: false } },
             { 'cancelStatus.cancelState': null },
-            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+            { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
           ]
         }
       );
@@ -4543,14 +4544,14 @@ router.get('/all-orders-usd/account-profit', async (req, res) => {
           $or: [
             { cancelState: { $exists: false } },
             { cancelState: null },
-            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+            { cancelState: { $nin: FINAL_CANCELLED_STATES } }
           ]
         },
         {
           $or: [
             { 'cancelStatus.cancelState': { $exists: false } },
             { 'cancelStatus.cancelState': null },
-            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+            { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
           ]
         },
         {
@@ -4691,14 +4692,14 @@ router.get('/all-orders-usd', async (req, res) => {
           $or: [
             { cancelState: { $exists: false } },
             { cancelState: null },
-            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+            { cancelState: { $nin: FINAL_CANCELLED_STATES } }
           ]
         },
         {
           $or: [
             { 'cancelStatus.cancelState': { $exists: false } },
             { 'cancelStatus.cancelState': null },
-            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+            { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
           ]
         }
       );
@@ -4817,14 +4818,14 @@ router.get('/all-orders-usd', async (req, res) => {
         $or: [
           { cancelState: { $exists: false } },
           { cancelState: null },
-          { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+          { cancelState: { $nin: FINAL_CANCELLED_STATES } }
         ]
       });
       query.$and.push({
         $or: [
           { 'cancelStatus.cancelState': { $exists: false } },
           { 'cancelStatus.cancelState': null },
-          { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+          { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
         ]
       });
       // Exclude orders with refunds when this filter is active
@@ -4959,8 +4960,8 @@ router.get('/all-orders-usd', async (req, res) => {
       Order.countDocuments({
         ...rawQuery,
         $or: [
-          { cancelState: { $in: ['CANCELED', 'CANCELLED'] } },
-          { 'cancelStatus.cancelState': { $in: ['CANCELED', 'CANCELLED'] } },
+          { cancelState: { $in: FINAL_CANCELLED_STATES } },
+          { 'cancelStatus.cancelState': { $in: FINAL_CANCELLED_STATES } },
         ],
       }),
       Order.countDocuments({
@@ -20242,14 +20243,14 @@ router.get('/seller-analytics', requireAuth, requirePageAccess('SellerAnalytics'
           $or: [
             { cancelState: { $exists: false } },
             { cancelState: null },
-            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+            { cancelState: { $nin: FINAL_CANCELLED_STATES } }
           ]
         },
         {
           $or: [
             { 'cancelStatus.cancelState': { $exists: false } },
             { 'cancelStatus.cancelState': null },
-            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+            { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
           ]
         }
       ]
@@ -23084,7 +23085,7 @@ function getPolicyMessageQuery(now = new Date()) {
     $or: [
       { cancelState: { $exists: false } },
       { cancelState: null },
-      { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+      { cancelState: { $nin: FINAL_CANCELLED_STATES } }
     ]
   };
 }

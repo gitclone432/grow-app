@@ -1701,6 +1701,7 @@ export default function AwaitingShipmentPage() {
                   <MenuItem value="Not yet shipped">Not yet shipped</MenuItem>
                   <MenuItem value="Processing">Processing</MenuItem>
                   <MenuItem value="Delayed">Delayed</MenuItem>
+                  <MenuItem value="Alternative cancellation message">Alternative cancellation message</MenuItem>
                   <MenuItem value="__NO_REMARK__">No Remark</MenuItem>
                 </Select>
               </FormControl>
