@@ -1751,6 +1751,8 @@ function FulfillmentDashboard() {
   const [pollTdsLoading, setPollTdsLoading] = useState(false);
   const [fetchingAdFeeGeneral, setFetchingAdFeeGeneral] = useState({});
   const [fetchingCancelStatus, setFetchingCancelStatus] = useState({});
+  const [bulkRefreshingCancelStatus, setBulkRefreshingCancelStatus] = useState(false);
+  const [bulkRefreshProgress, setBulkRefreshProgress] = useState({ done: 0, total: 0 });
 
   // Auto-message state
   const [autoMessageLoading, setAutoMessageLoading] = useState(false);
@@ -3336,24 +3338,35 @@ function FulfillmentDashboard() {
     }
   }, []);
 
+  // Shared worker: hits the same single-order eBay live-status endpoint the
+  // per-row refresh icon uses, and merges the result into `orders` state.
+  // Used directly by the per-row button, and in parallel batches by the
+  // "Refresh All" bulk action below - so both paths stay consistent and we
+  // never duplicate the eBay-call/merge logic.
+  const fetchCancelStatusForOrder = useCallback(async (order) => {
+    const { data } = await api.post(`/ebay/orders/${order._id}/fetch-cancel-status`);
+
+    setOrders(prev => prev.map(existingOrder => (
+      existingOrder._id === order._id
+        ? {
+          ...existingOrder,
+          cancelState: data.cancelState ?? data.order?.cancelState,
+          cancelStatus: data.order?.cancelStatus ?? existingOrder.cancelStatus,
+          orderPaymentStatus: data.orderPaymentStatus ?? data.order?.orderPaymentStatus ?? existingOrder.orderPaymentStatus,
+          refunds: data.order?.refunds ?? existingOrder.refunds,
+          lastModifiedDate: data.order?.lastModifiedDate ?? existingOrder.lastModifiedDate,
+        }
+        : existingOrder
+    )));
+
+    return data;
+  }, []);
+
   const handleFetchCancelStatus = useCallback(async (order) => {
     try {
       setFetchingCancelStatus(prev => ({ ...prev, [order._id]: true }));
 
-      const { data } = await api.post(`/ebay/orders/${order._id}/fetch-cancel-status`);
-
-      setOrders(prev => prev.map(existingOrder => (
-        existingOrder._id === order._id
-          ? {
-            ...existingOrder,
-            cancelState: data.cancelState ?? data.order?.cancelState,
-            cancelStatus: data.order?.cancelStatus ?? existingOrder.cancelStatus,
-            orderPaymentStatus: data.orderPaymentStatus ?? data.order?.orderPaymentStatus ?? existingOrder.orderPaymentStatus,
-            refunds: data.order?.refunds ?? existingOrder.refunds,
-            lastModifiedDate: data.order?.lastModifiedDate ?? existingOrder.lastModifiedDate,
-          }
-          : existingOrder
-      )));
+      const data = await fetchCancelStatusForOrder(order);
 
       const next = data.cancelState || 'NONE_REQUESTED';
       const prev = data.previousCancelState || order.cancelState || 'NONE_REQUESTED';
@@ -3371,7 +3384,52 @@ function FulfillmentDashboard() {
     } finally {
       setFetchingCancelStatus(prev => ({ ...prev, [order._id]: false }));
     }
-  }, []);
+  }, [fetchCancelStatusForOrder]);
+
+  // Bulk "Refresh All" for the Cancel Status column - re-checks every order
+  // currently loaded (i.e. matching the active filters) against eBay live,
+  // instead of requiring a click per row. Runs with bounded concurrency so
+  // we don't fire hundreds of simultaneous eBay API calls at once.
+  const handleBulkRefreshCancelStatus = useCallback(async () => {
+    if (bulkRefreshingCancelStatus || orders.length === 0) return;
+
+    const targets = orders.filter((order) => order?._id);
+    setBulkRefreshingCancelStatus(true);
+    setBulkRefreshProgress({ done: 0, total: targets.length });
+
+    const CONCURRENCY = 5;
+    let cursor = 0;
+    let changedCount = 0;
+    let errorCount = 0;
+
+    const runNext = async () => {
+      while (cursor < targets.length) {
+        const order = targets[cursor];
+        cursor += 1;
+        setFetchingCancelStatus(prev => ({ ...prev, [order._id]: true }));
+        try {
+          const data = await fetchCancelStatusForOrder(order);
+          if (data.changed) changedCount += 1;
+        } catch (e) {
+          errorCount += 1;
+        } finally {
+          setFetchingCancelStatus(prev => ({ ...prev, [order._id]: false }));
+          setBulkRefreshProgress(prev => ({ ...prev, done: prev.done + 1 }));
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, runNext));
+
+    setBulkRefreshingCancelStatus(false);
+    setSnackbarMsg(
+      errorCount > 0
+        ? `Refreshed ${targets.length} orders: ${changedCount} updated, ${errorCount} failed`
+        : `Refreshed ${targets.length} orders: ${changedCount} updated`
+    );
+    setSnackbarSeverity(errorCount > 0 ? 'warning' : 'success');
+    setSnackbarOpen(true);
+  }, [orders, bulkRefreshingCancelStatus, fetchCancelStatusForOrder]);
 
   // Recalculate Earnings for all orders of selected seller
   const recalculateEarnings = async () => {
@@ -4674,7 +4732,39 @@ function FulfillmentDashboard() {
                       {visibleColumnsSet.has('transactionFees') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Transaction Fees</TableCell>}
                       {visibleColumnsSet.has('adFeeGeneral') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Ad Fee General</TableCell>}
                       {visibleColumnsSet.has('tds') && <TableCell sx={HEADER_CELL_RIGHT_SX}>TDS</TableCell>}
-                      {visibleColumnsSet.has('cancelStatus') && <TableCell sx={HEADER_CELL_SX}>Cancel Status</TableCell>}
+                      {visibleColumnsSet.has('cancelStatus') && (
+                        <TableCell sx={HEADER_CELL_SX}>
+                          <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                            Cancel Status
+                            <Tooltip
+                              title={
+                                bulkRefreshingCancelStatus
+                                  ? `Refreshing ${bulkRefreshProgress.done}/${bulkRefreshProgress.total}...`
+                                  : 'Refresh cancel status for all loaded orders from eBay'
+                              }
+                            >
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  onClick={handleBulkRefreshCancelStatus}
+                                  disabled={bulkRefreshingCancelStatus || orders.length === 0}
+                                  aria-label="refresh all cancel statuses"
+                                  sx={{
+                                    p: 0.35,
+                                    color: '#fff',
+                                    '&:hover': { color: '#fff', backgroundColor: 'rgba(255,255,255,0.15)' },
+                                    '&.Mui-disabled': { color: 'rgba(255,255,255,0.4)' },
+                                  }}
+                                >
+                                  {bulkRefreshingCancelStatus
+                                    ? <CircularProgress size={14} sx={{ color: '#fff' }} />
+                                    : <SyncIcon sx={{ fontSize: 16 }} />}
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                          </Box>
+                        </TableCell>
+                      )}
                       {visibleColumnsSet.has('refunds') && <TableCell sx={HEADER_CELL_SX}>Refunds</TableCell>}
                       {visibleColumnsSet.has('reviewedRefund') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Reviewed Refund</TableCell>}
                       {visibleColumnsSet.has('refundItemAmount') && <TableCell sx={HEADER_CELL_RIGHT_SX}>Refund Item</TableCell>}

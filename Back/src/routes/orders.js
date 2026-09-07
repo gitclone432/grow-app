@@ -13,10 +13,10 @@ import TemplateListing from '../models/TemplateListing.js';
 import ConversationMeta from '../models/ConversationMeta.js';
 import OrderActivityLog from '../models/OrderActivityLog.js';
 import User from '../models/User.js';
+import { FINAL_CANCELLED_STATES } from '../constants/cancelStates.js';
 
 const router = Router();
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
-const FINAL_CANCELLED_STATES = ['CANCELED', 'CANCELLED'];
 
 async function enrichOrdersWithConversationMeta(orders = []) {
   const orderIds = [...new Set(
@@ -2471,14 +2471,14 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
           $or: [
             { cancelState: { $exists: false } },
             { cancelState: null },
-            { cancelState: { $nin: ['CANCELED', 'CANCELLED'] } }
+            { cancelState: { $nin: FINAL_CANCELLED_STATES } }
           ]
         },
         {
           $or: [
             { 'cancelStatus.cancelState': { $exists: false } },
             { 'cancelStatus.cancelState': null },
-            { 'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] } }
+            { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }
           ]
         }
       );
@@ -2622,14 +2622,18 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     const ORDER_FULFILLMENT_STATUSES = ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'];
     let statusCountQuery = detailQuery;
     if (category === 'order_fulfillment') {
+      // Only exclude by cancelState (the real source of truth), not by a
+      // 'cancellation' entry in complianceBoardCategories - that array is a
+      // soft label that can go stale (e.g. left over from a conversation
+      // briefly tagged Cancellation before being retagged Return) independent
+      // of whether the order is actually still cancelled, and excluding on it
+      // was hiding orders from Order Fulfillment that were never cancelled.
       statusCountQuery = {
         $and: [
           detailQuery,
           {
-            complianceBoardCategories: { $ne: 'cancellation' },
-            complianceBoardCategory: { $ne: 'cancellation' },
-            cancelState: { $nin: ['CANCELED', 'CANCELLED'] },
-            'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] }
+            cancelState: { $nin: FINAL_CANCELLED_STATES },
+            'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES }
           }
         ]
       };
@@ -2843,24 +2847,23 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     const shouldAutoAssign = (category === 'order_fulfillment' || category === 'order_communication');
     
     if (shouldAutoAssign) {
+      // Only orders that don't already carry `category` in either the plural
+      // array or the legacy singular field need updating. Previously this
+      // only checked "is complianceBoardCategories empty / complianceBoardCategory
+      // unset", which stayed true forever for orders that only ever had the
+      // plural field populated (no legacy singular value) - so every board
+      // page load re-pushed a duplicate `category` entry into the array via
+      // $push, causing unbounded array growth (documents with 400+ duplicate
+      // entries). Guard on whether `category` is already present, and use
+      // $addToSet so a duplicate can never be written even if this races.
       const orderIdsToUpdate = orders
-        .filter(o => {
-          // New format: empty array or doesn't exist
-          if (!o.complianceBoardCategories || o.complianceBoardCategories.length === 0) {
-            return true;
-          }
-          // Old format: null or doesn't exist
-          if (!o.complianceBoardCategory) {
-            return true;
-          }
-          return false;
-        })
+        .filter(o => !Array.isArray(o.complianceBoardCategories) || !o.complianceBoardCategories.includes(category))
         .map(o => o._id);
 
       if (orderIdsToUpdate.length > 0) {
         await Order.updateMany(
           { _id: { $in: orderIdsToUpdate } },
-          { $push: { complianceBoardCategories: category } }
+          { $addToSet: { complianceBoardCategories: category } }
         );
       }
     }
@@ -4388,14 +4391,16 @@ router.get('/stats', requireAuth, requirePageAccess('ComplianceBoard'), async (r
 
     // Order Fulfillment must only drop orders that are actually cancelled -
     // being also tagged Return/Refund or INR must NOT remove an order from
-    // these counts (only the Cancellation category / cancel state does).
+    // these counts. Excluded solely by cancelState (the real source of
+    // truth) - NOT by a 'cancellation' entry in complianceBoardCategories,
+    // which is a soft label that can go stale (left over from a conversation
+    // briefly tagged Cancellation before being retagged) independent of
+    // whether the order is actually still cancelled.
     if (category === 'order_fulfillment') {
       baseQuery.$and = baseQuery.$and || [];
       baseQuery.$and.push({
-        complianceBoardCategories: { $ne: 'cancellation' },
-        complianceBoardCategory: { $ne: 'cancellation' },
-        cancelState: { $nin: ['CANCELED', 'CANCELLED'] },
-        'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] }
+        cancelState: { $nin: FINAL_CANCELLED_STATES },
+        'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES }
       });
     }
 
@@ -4787,12 +4792,14 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
 
     // Order Fulfillment must only drop orders that are actually cancelled -
     // being also tagged Return/Refund or INR must NOT remove an order here.
+    // Excluded solely by cancelState (the real source of truth) - NOT by a
+    // 'cancellation' entry in complianceBoardCategories, which is a soft
+    // label that can go stale independent of whether the order is actually
+    // still cancelled.
     if (category === 'order_fulfillment') {
       query.$and.push({
-        complianceBoardCategories: { $ne: 'cancellation' },
-        complianceBoardCategory: { $ne: 'cancellation' },
-        cancelState: { $nin: ['CANCELED', 'CANCELLED'] },
-        'cancelStatus.cancelState': { $nin: ['CANCELED', 'CANCELLED'] }
+        cancelState: { $nin: FINAL_CANCELLED_STATES },
+        'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES }
       });
     }
 

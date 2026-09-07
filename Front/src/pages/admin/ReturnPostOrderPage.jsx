@@ -382,6 +382,7 @@ export default function ReturnPostOrderPage({
   const [sellerFilter, setSellerFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [orderIdFilter, setOrderIdFilter] = useState('');
+  const [dueFilter, setDueFilter] = useState(''); // '' = all, 'due' = due soon, 'not_due' = not due
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -461,11 +462,11 @@ export default function ReturnPostOrderPage({
 
   useEffect(() => {
     loadStored();
-  }, [dateFilter, sellerFilter, statusFilter, orderIdFilter, page]);
+  }, [dateFilter, sellerFilter, statusFilter, orderIdFilter, dueFilter, page]);
 
   useEffect(() => {
     setPage(1);
-  }, [dateFilter.mode, dateFilter.single, dateFilter.from, dateFilter.to, sellerFilter, statusFilter, orderIdFilter]);
+  }, [dateFilter.mode, dateFilter.single, dateFilter.from, dateFilter.to, sellerFilter, statusFilter, orderIdFilter, dueFilter]);
 
   async function loadStored() {
     setLoading(true);
@@ -483,7 +484,16 @@ export default function ReturnPostOrderPage({
         if (dateFilter.to) params.endDate = dateFilter.to;
       }
       const res = await api.get('/ebay/stored-returns', { params, timeout: 60000 });
-      setRows(res.data.returns || []);
+      let returns = res.data.returns || [];
+      
+      // Apply due filter on client side
+      if (dueFilter === 'due') {
+        returns = returns.filter(row => row.returnStatus !== 'CLOSED' && isResponseDue(row.responseDate));
+      } else if (dueFilter === 'not_due') {
+        returns = returns.filter(row => row.returnStatus === 'CLOSED' || !isResponseDue(row.responseDate));
+      }
+      
+      setRows(returns);
       setTotalPages(res.data.pagination?.totalPages || 1);
       setTotalCount(res.data.pagination?.totalReturns || res.data.totalReturns || 0);
     } catch (e) {
@@ -657,6 +667,15 @@ export default function ReturnPostOrderPage({
     if (s.includes('REQUEST')) return 'warning';
     if (s.includes('SHIP') || s.includes('LABEL')) return 'info';
     return 'primary';
+  };
+
+  // Check if response due date is within next 24 hours (for DUE badge)
+  const isResponseDue = (responseDate) => {
+    if (!responseDate) return false;
+    const dueDate = new Date(responseDate);
+    const now = new Date();
+    const diff = dueDate.getTime() - now.getTime();
+    return diff > 0 && diff < 24 * 60 * 60 * 1000;
   };
 
   // Check if response due date is within next 24 hours
@@ -1193,6 +1212,19 @@ export default function ReturnPostOrderPage({
             </Select>
           </FormControl>
 
+          <FormControl size="small" sx={{ minWidth: 140 }}>
+            <InputLabel>Urgent</InputLabel>
+            <Select
+              value={dueFilter}
+              label="Urgent"
+              onChange={(e) => setDueFilter(e.target.value)}
+            >
+              <MenuItem value="">All</MenuItem>
+              <MenuItem value="due">Urgent (within 24h)</MenuItem>
+              <MenuItem value="not_due">Not Urgent</MenuItem>
+            </Select>
+          </FormControl>
+
           <TextField
             size="small"
             placeholder="Order ID"
@@ -1434,7 +1466,7 @@ export default function ReturnPostOrderPage({
                             variant="body2"
                             fontSize="0.75rem"
                             color={row.returnStatus !== 'CLOSED' && isResponseOverdue(row.responseDate) ? 'error' : 'inherit'}
-                            fontWeight={row.returnStatus !== 'CLOSED' && (isResponseOverdue(row.responseDate) || isResponseUrgent(row.responseDate)) ? 'bold' : 'normal'}
+                            fontWeight={row.returnStatus !== 'CLOSED' && (isResponseOverdue(row.responseDate) || isResponseUrgent(row.responseDate) || isResponseDue(row.responseDate)) ? 'bold' : 'normal'}
                           >
                             {formatDate(row.responseDate)}
                           </Typography>
@@ -1446,7 +1478,15 @@ export default function ReturnPostOrderPage({
                               sx={{ fontSize: '0.6rem', height: 16 }}
                             />
                           )}
-                          {row.returnStatus !== 'CLOSED' && !isResponseOverdue(row.responseDate) && isResponseUrgent(row.responseDate) && (
+                          {row.returnStatus !== 'CLOSED' && !isResponseOverdue(row.responseDate) && isResponseDue(row.responseDate) && (
+                            <Chip
+                              label="DUE"
+                              size="small"
+                              color="error"
+                              sx={{ fontSize: '0.6rem', height: 16 }}
+                            />
+                          )}
+                          {row.returnStatus !== 'CLOSED' && !isResponseOverdue(row.responseDate) && !isResponseDue(row.responseDate) && isResponseUrgent(row.responseDate) && (
                             <Chip
                               label="URGENT"
                               size="small"
