@@ -19128,6 +19128,21 @@ function buildMetaChangeEntries(existing, updates, changedBy) {
   return entries;
 }
 
+// complianceBoardStatus values that represent a human's manual placement on
+// the Order Fulfillment board (via drag-and-drop). These must never be
+// silently overwritten by syncConversationMetaAssignmentToOrder just because
+// the same order's conversation gets tagged into another board's category -
+// see the isManualOrderFulfillmentStatus guard below.
+const ORDER_FULFILLMENT_MANUAL_STATUSES = new Set([
+  'out_of_stock',
+  'cancellation',
+  'address_issue',
+  'late_delivery',
+  'not_fulfilled',
+  'fulfilled',
+  'buyer_confirmation',
+]);
+
 const SPECIALIZED_CONVERSATION_CATEGORY_TO_BOARD = Object.freeze({
   INR: { boardCategory: 'inr', boardStatus: 'case_not_opened', assignedAtField: 'inrCaseNotOpenedAssignedAt' },
   Cancellation: { boardCategory: 'cancellation', boardStatus: 'case_not_opened', assignedAtField: 'cancellationCaseNotOpenedAssignedAt' },
@@ -19193,11 +19208,24 @@ async function syncConversationMetaAssignmentToOrder({
   if (nextAssignment) {
     const changedBoardCategory = previousAssignment?.boardCategory !== nextAssignment.boardCategory;
     const missingTargetCategory = !existingCategories.has(nextAssignment.boardCategory);
+    // An order's Order Fulfillment placement is a separate concern from
+    // Return/INR/Cancellation case tracking - a human manually dragging a
+    // card to e.g. "Fulfilled" must not get silently reverted just because
+    // a support conversation for the same order gets (re)tagged into one of
+    // those other categories elsewhere. Without this guard,
+    // missingTargetCategory/changedBoardCategory go true the moment the
+    // order is first tagged into a new category, unconditionally
+    // overwriting complianceBoardStatus with that category's own status
+    // (e.g. 'case_not_opened') - which the Order Fulfillment board doesn't
+    // recognize, so it falls back to "To Do", making a manually-fulfilled
+    // order look unfulfilled again.
+    const isManualOrderFulfillmentStatus = ORDER_FULFILLMENT_MANUAL_STATUSES.has(order.complianceBoardStatus);
     const shouldSetCaseNotOpened =
-      changedBoardCategory ||
+      !isManualOrderFulfillmentStatus &&
+      (changedBoardCategory ||
       missingTargetCategory ||
       !order.complianceBoardStatus ||
-      order.complianceBoardStatus === 'todo';
+      order.complianceBoardStatus === 'todo');
 
     nextCategories.add(nextAssignment.boardCategory);
     setObj.complianceBoardCategory = nextAssignment.boardCategory;
