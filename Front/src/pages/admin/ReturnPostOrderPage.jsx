@@ -382,7 +382,8 @@ export default function ReturnPostOrderPage({
   const [sellerFilter, setSellerFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [orderIdFilter, setOrderIdFilter] = useState('');
-  const [dueFilter, setDueFilter] = useState(''); // '' = all, 'due' = due soon, 'not_due' = not due
+  const [dueFilter, setDueFilter] = useState(''); // '' = all, 'due' = urgent (within 24h), 'not_due' = not urgent
+  const [responseDueDateFilter, setResponseDueDateFilter] = useState(''); // Single day filter for response due date
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -462,11 +463,11 @@ export default function ReturnPostOrderPage({
 
   useEffect(() => {
     loadStored();
-  }, [dateFilter, sellerFilter, statusFilter, orderIdFilter, dueFilter, page]);
+  }, [dateFilter, sellerFilter, statusFilter, orderIdFilter, dueFilter, responseDueDateFilter, page]);
 
   useEffect(() => {
     setPage(1);
-  }, [dateFilter.mode, dateFilter.single, dateFilter.from, dateFilter.to, sellerFilter, statusFilter, orderIdFilter, dueFilter]);
+  }, [dateFilter.mode, dateFilter.single, dateFilter.from, dateFilter.to, sellerFilter, statusFilter, orderIdFilter, dueFilter, responseDueDateFilter]);
 
   async function loadStored() {
     setLoading(true);
@@ -476,6 +477,17 @@ export default function ReturnPostOrderPage({
       if (sellerFilter) params.sellerId = sellerFilter;
       if (statusFilter) params.status = statusFilter;
       if (orderIdFilter) params.orderId = orderIdFilter;
+      
+      // Send urgent filter to backend
+      if (dueFilter === 'due') {
+        params.urgentOnly = 'true';
+      }
+      
+      // Send response due date filter to backend
+      if (responseDueDateFilter) {
+        params.responseDueDate = responseDueDateFilter;
+      }
+      
       if (dateFilter.mode === 'single' && dateFilter.single) {
         params.startDate = dateFilter.single;
         params.endDate = dateFilter.single;
@@ -485,13 +497,6 @@ export default function ReturnPostOrderPage({
       }
       const res = await api.get('/ebay/stored-returns', { params, timeout: 60000 });
       let returns = res.data.returns || [];
-      
-      // Apply due filter on client side
-      if (dueFilter === 'due') {
-        returns = returns.filter(row => row.returnStatus !== 'CLOSED' && isResponseDue(row.responseDate));
-      } else if (dueFilter === 'not_due') {
-        returns = returns.filter(row => row.returnStatus === 'CLOSED' || !isResponseDue(row.responseDate));
-      }
       
       setRows(returns);
       setTotalPages(res.data.pagination?.totalPages || 1);
@@ -1224,6 +1229,16 @@ export default function ReturnPostOrderPage({
               <MenuItem value="not_due">Not Urgent</MenuItem>
             </Select>
           </FormControl>
+
+          <TextField
+            size="small"
+            type="date"
+            label="Response Due Date"
+            value={responseDueDateFilter}
+            onChange={(e) => setResponseDueDateFilter(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+            sx={{ minWidth: 140 }}
+          />
 
           <TextField
             size="small"

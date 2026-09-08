@@ -11507,7 +11507,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
 // Get stored returns from database
 
 router.get('/stored-returns', async (req, res) => {
-  const { sellerId, status, reason, orderId, startDate, endDate, urgentOnly, page = 1, limit = 50 } = req.query;
+  const { sellerId, status, reason, orderId, startDate, endDate, urgentOnly, responseDueDate, page = 1, limit = 50 } = req.query;
 
   try {
     let query = {};
@@ -11536,18 +11536,27 @@ router.get('/stored-returns', async (req, res) => {
       if (endDate) query.creationDate.$lte = getPTDayBoundsUTC(endDate).end;
     }
 
-    // Urgent filter - response due within next 2 days (48 hours) to match the URGENT chip
+    // Urgent filter - response due within next 2 days (48 hours), excluding overdue
+    // Matches the isResponseUrgent logic from frontend that displays URGENT badge
     if (urgentOnly === 'true') {
       const now = new Date();
-      // Calculate 48 hours (2 days) from now - matches isResponseUrgent in frontend
       const in48Hours = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
-      // Show entries where response is due between now and 48 hours from now
-      // Also include entries that are already overdue (responseDate < now)
+      // Show entries where response is due between now and 48 hours from now (NOT including overdue)
       query.responseDate = {
-        $lte: in48Hours
+        $gt: now,           // Greater than now (exclude overdue)
+        $lte: in48Hours     // Within next 48 hours
       };
-      // Exclude CLOSED returns since they don't show URGENT chip
+      // Exclude CLOSED returns since they don't show urgent indicator
       query.returnStatus = { $ne: 'CLOSED' };
+    }
+
+    // Response due date filter - filter by a single day for response due date
+    if (responseDueDate) {
+      const { start, end } = getPTDayBoundsUTC(responseDueDate);
+      query.responseDate = {
+        $gte: start,
+        $lte: end
+      };
     }
 
     const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
@@ -12029,6 +12038,40 @@ function fillMissingIssueReasonOnRow(row, persistModel, { mapInquiry = false } =
   return row;
 }
 
+// When a real eBay case (INR/SNAD/OTHER) is synced in for an orderId, the
+// Compliance Board / Buyer Messages "case status" for that order can be stuck
+// on the manually-set 'Case Not Opened' value from before the case existed
+// (set via POST /conversation-meta, e.g. from the Buyer Messages page).
+// Nothing else in the app re-derives that value from the Case collection, so
+// without this the card/tag keeps showing "Case Not Opened" forever even
+// though a case is genuinely open. This only ever promotes
+// not-opened -> opened; it never touches a status a human has since moved
+// further along (e.g. inr_fully_refunded), and it is a no-op when there is
+// nothing to promote.
+async function promoteConversationAndOrderToCaseOpened(orderId) {
+  const normalizedOrderId = String(orderId || '').trim();
+  if (!normalizedOrderId) return;
+  try {
+    await ConversationMeta.updateMany(
+      { orderId: normalizedOrderId, caseStatus: { $ne: 'Case Opened' } },
+      { $set: { caseStatus: 'Case Opened' } }
+    );
+    await Order.updateOne(
+      {
+        orderId: normalizedOrderId,
+        complianceBoardStatus: 'case_not_opened',
+        $or: [
+          { complianceBoardCategories: 'inr' },
+          { complianceBoardCategory: 'inr' }
+        ]
+      },
+      { $set: { complianceBoardStatus: 'inr_case_opened' } }
+    );
+  } catch (err) {
+    console.error(`[Case Sync] Failed to promote order ${normalizedOrderId} to Case Opened:`, err.message);
+  }
+}
+
 // Fetch INR cases from eBay Post-Order API and store in DB
 router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
@@ -12196,6 +12239,12 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
               await Case.create(caseData);
               newCases++;
             }
+
+            // Run on every sync pass (not only when the Case doc itself
+            // changed) so an order stuck showing "Case Not Opened" from a
+            // stale manual tag gets corrected even once its Case record is
+            // no longer changing.
+            if (caseData.orderId) await promoteConversationAndOrderToCaseOpened(caseData.orderId);
           }
 
           return {
@@ -12744,9 +12793,11 @@ router.post('/fetch-inr-api', requireAuth, requirePageAccess('Disputes'), async 
             existing.set(payload);
             await existing.save();
             updatedInquiries += 1;
+            if (payload.orderId) await promoteConversationAndOrderToCaseOpened(payload.orderId);
           } else {
             await Case.create(payload);
             newInquiries += 1;
+            if (payload.orderId) await promoteConversationAndOrderToCaseOpened(payload.orderId);
           }
         }
 
@@ -13864,10 +13915,11 @@ router.get('/issues-by-order', requireAuth, async (req, res) => {
       return res.json({ index: issuesByOrderCache.index, cached: true });
     }
 
-    const [cases, returns, disputes, conversationMeta] = await Promise.all([
+    const [cases, returns, disputes, cancellations, conversationMeta] = await Promise.all([
       Case.find({}, { orderId: 1, caseType: 1, status: 1, _id: 0 }).lean(),
       Return.find({}, { orderId: 1, returnStatus: 1, _id: 0 }).lean(),
       PaymentDispute.find({}, { orderId: 1, paymentDisputeStatus: 1, reason: 1, _id: 0 }).lean(),
+      Cancellation.find({}, { orderId: 1, cancelState: 1, cancelStatus: 1, cancelReason: 1, _id: 0 }).lean(),
       ConversationMeta.find({}, { orderId: 1, caseStatus: 1, _id: 0 }).lean()
     ]);
 
@@ -13898,6 +13950,10 @@ router.get('/issues-by-order', requireAuth, async (req, res) => {
 
     disputes.forEach(d => {
       addIssue(d.orderId, { type: 'Dispute', status: d.paymentDisputeStatus, reason: d.reason });
+    });
+
+    cancellations.forEach(c => {
+      addIssue(c.orderId, { type: 'Cancellation', status: c.cancelStatus || c.cancelState, reason: c.cancelReason });
     });
 
     issuesByOrderCache = { at: Date.now(), index };

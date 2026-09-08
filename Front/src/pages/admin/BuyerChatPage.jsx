@@ -431,6 +431,7 @@ export default function BuyerChatPage() {
 
   // Order details modal
   const [selectedOrderId, setSelectedOrderId] = useState(null);
+  const [issuesIndex, setIssuesIndex] = useState({});
 
   // Thread thumbnail image
   const [threadThumbnail, setThreadThumbnail] = useState(null);
@@ -550,6 +551,21 @@ export default function BuyerChatPage() {
     } catch (e) {
       /* ignore */
     }
+  }, []);
+
+  // Fetch order-issue index once (Return/INR/Cancellation cases) so opened
+  // messages can show a lightweight "Case Opened" tag without visiting the
+  // Issues & Resolutions page. Read-only lookup — does not affect any workflow.
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/ebay/issues-by-order')
+      .then(({ data }) => {
+        if (!cancelled) setIssuesIndex(data?.index || {});
+      })
+      .catch(() => {
+        /* non-critical — tag simply won't show if this fails */
+      });
+    return () => { cancelled = true; };
   }, []);
 
   // No conversation selected → never keep stale/cached messages in the pane
@@ -2023,13 +2039,30 @@ export default function BuyerChatPage() {
                   )}
 
                   {selectedThread.orderId ? (
-                    <Chip
-                      label={`#${selectedThread.orderId}`}
-                      size="small"
-                      variant="outlined"
-                      onClick={() => setSelectedOrderId(selectedThread.orderId)}
-                      sx={{ height: 24, fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer' }}
-                    />
+                    <>
+                      <Chip
+                        label={`#${selectedThread.orderId}`}
+                        size="small"
+                        variant="outlined"
+                        onClick={() => setSelectedOrderId(selectedThread.orderId)}
+                        sx={{ height: 24, fontSize: '0.7rem', fontWeight: 600, cursor: 'pointer' }}
+                      />
+                      {(issuesIndex[selectedThread.orderId] || issuesIndex[selectedThread.legacyOrderId] || []).length > 0 && (
+                        <Tooltip
+                          title={(issuesIndex[selectedThread.orderId] || issuesIndex[selectedThread.legacyOrderId] || [])
+                            .map(i => `${i.type}: ${i.status || i.caseStatus || 'Case Opened'}`)
+                            .join(', ')}
+                        >
+                          <Chip
+                            label="Case Opened"
+                            size="small"
+                            color="error"
+                            variant="outlined"
+                            sx={{ height: 24, fontSize: '0.7rem', fontWeight: 600 }}
+                          />
+                        </Tooltip>
+                      )}
+                    </>
                   ) : (
                     selectedThread.itemId && selectedThread.itemId !== 'DIRECT_MESSAGE' && (
                       <Button
