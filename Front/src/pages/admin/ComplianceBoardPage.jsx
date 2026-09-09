@@ -2239,16 +2239,30 @@ function ComplianceBoardPage() {
           !mainOrderIds.has(String(o.orderId).toLowerCase())
         );
         
-        // Merge cancelled orders into the groupedTodo
-        // Cancelled orders go into "To Do" column (they need action)
+        // Merge cancelled orders into the board, keeping each one in whatever
+        // column a user last placed it in (its own persisted
+        // complianceBoardStatus), and only defaulting to "To Do" when it has
+        // no recognized Order Fulfillment status yet. Previously this always
+        // pushed every deduped cancelled order straight into TODO regardless
+        // of complianceBoardStatus - so an order a user had manually dragged
+        // into e.g. "Cancellation" would reappear in "To Do" on the next
+        // board refresh whenever it happened to fall outside the main
+        // boardOrders fetch (different pagination/filtering than
+        // /ebay/cancelled-orders), making it look like the card moved itself
+        // without anyone dragging it.
         if (dedupedCancelledOrders.length > 0) {
-          if (!grouped[COLUMN_STATUS.TODO]) {
-            grouped[COLUMN_STATUS.TODO] = [];
-          }
-          grouped[COLUMN_STATUS.TODO].push(...dedupedCancelledOrders);
-          
+          dedupedCancelledOrders.forEach((order) => {
+            const status = ORDER_FULFILLMENT_STATUSES.has(order.complianceBoardStatus)
+              ? order.complianceBoardStatus
+              : COLUMN_STATUS.TODO;
+            if (!grouped[status]) {
+              grouped[status] = [];
+            }
+            grouped[status].push(order);
+          });
+
           if (searchOrderId.trim()) {
-            console.log(`[BOARD-GROUP] After dedup, adding ${dedupedCancelledOrders.length} cancelled orders to TODO`);
+            console.log(`[BOARD-GROUP] After dedup, added ${dedupedCancelledOrders.length} cancelled orders, each to its own persisted status column`);
           }
         }
       }
