@@ -2673,17 +2673,42 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         : Order.countDocuments(detailQuery),
       Order.aggregate([
         { $match: statusCountQuery },
+        // Dedup by orderId FIRST - this sidebar/expanded stats count must
+        // count unique orders, not raw documents. The same orderId can exist
+        // as more than one Order document (a known scenario in this DB); with
+        // no dedup here, each duplicate document was counted separately,
+        // inflating a status's count above what the board (which is grouped
+        // per-orderId) actually shows.
+        // IMPORTANT: this used to precede the $group with a collection-wide
+        // $sort to pick the most-recently-updated duplicate via $first. This
+        // cluster is a shared/free MongoDB Atlas tier that rejects any sort
+        // needing to spill to disk (even with allowDiskUse) once the result
+        // set is large enough - "Sort exceeded memory limit ... did not opt
+        // in to external sorting" even though we *did* opt in. $top sorts
+        // only within each per-orderId group (a handful of documents at
+        // most), never the whole matched set, so it can't hit that limit.
         {
           $group: {
-            _id: category === 'order_fulfillment'
-              ? {
-                  $cond: [
-                    { $in: [{ $ifNull: ['$complianceBoardStatus', 'todo'] }, ORDER_FULFILLMENT_STATUSES] },
-                    { $ifNull: ['$complianceBoardStatus', 'todo'] },
-                    'todo'
-                  ]
-                }
-              : { $ifNull: ['$complianceBoardStatus', 'todo'] },
+            _id: '$orderId',
+            status: {
+              $top: {
+                sortBy: { updatedAt: -1 },
+                output: category === 'order_fulfillment'
+                  ? {
+                      $cond: [
+                        { $in: [{ $ifNull: ['$complianceBoardStatus', 'todo'] }, ORDER_FULFILLMENT_STATUSES] },
+                        { $ifNull: ['$complianceBoardStatus', 'todo'] },
+                        'todo'
+                      ]
+                    }
+                  : { $ifNull: ['$complianceBoardStatus', 'todo'] }
+              }
+            }
+          }
+        },
+        {
+          $group: {
+            _id: '$status',
             count: { $sum: 1 }
           }
         }
@@ -4434,35 +4459,45 @@ router.get('/stats', requireAuth, requirePageAccess('ComplianceBoard'), async (r
     // (case_not_opened, cancellation_request, etc.) untouched.
     const ORDER_FULFILLMENT_STATUSES = ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'];
 
-    // Use aggregation to count and deduplicate by orderId at the same time
-    // This prevents duplicate orders from being counted multiple times
+    // Use aggregation to count and deduplicate by orderId at the same time.
+    // This prevents duplicate orders from being counted multiple times: the
+    // same orderId can exist as more than one Order document that disagree
+    // on complianceBoardStatus, so grouping straight by status without
+    // deduping first double-counts that order under two buckets.
+    // IMPORTANT: pick the most-recently-updated duplicate via $top's
+    // per-group sortBy, NOT a preceding collection-wide $sort stage. This
+    // cluster is a shared/free MongoDB Atlas tier that rejects any sort
+    // needing to spill to disk (even with allowDiskUse) once the matched set
+    // is large enough - "Sort exceeded memory limit ... did not opt in to
+    // external sorting" even though we did opt in. $top only sorts within
+    // each per-orderId group (a handful of documents at most), so it can't
+    // hit that collection-wide limit.
     const statusCounts = await Order.aggregate([
       { $match: baseQuery },
-      // Sort by updatedAt desc to prefer the most recent version of each order
-      { $sort: { orderId: 1, updatedAt: -1 } },
-      // Group by orderId to get only the most recent version
+      // Group by orderId only, keeping the most recent version's status
       {
         $group: {
-          _id: {
-            orderId: '$orderId',
-            status: category === 'order_fulfillment'
-              ? {
-                  $cond: [
-                    { $in: [{ $ifNull: ['$complianceBoardStatus', 'todo'] }, ORDER_FULFILLMENT_STATUSES] },
-                    { $ifNull: ['$complianceBoardStatus', 'todo'] },
-                    'todo'
-                  ]
-                }
-              : { $ifNull: ['$complianceBoardStatus', 'todo'] }
-          },
-          _firstId: { $first: '$_id' },
-          updatedAt: { $first: '$updatedAt' }
+          _id: '$orderId',
+          status: {
+            $top: {
+              sortBy: { updatedAt: -1 },
+              output: category === 'order_fulfillment'
+                ? {
+                    $cond: [
+                      { $in: [{ $ifNull: ['$complianceBoardStatus', 'todo'] }, ORDER_FULFILLMENT_STATUSES] },
+                      { $ifNull: ['$complianceBoardStatus', 'todo'] },
+                      'todo'
+                    ]
+                  }
+                : { $ifNull: ['$complianceBoardStatus', 'todo'] }
+            }
+          }
         }
       },
       // Now group by status to count unique orders per status
       {
         $group: {
-          _id: '$_id.status',
+          _id: '$status',
           count: { $sum: 1 }
         }
       }

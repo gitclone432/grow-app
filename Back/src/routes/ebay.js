@@ -3973,10 +3973,17 @@ router.get('/stored-orders', async (req, res) => {
         { trackingNumber: '' }
       ];
 
-      // Condition 2: Include orders with no cancellation OR with IN_PROGRESS cancellation
-      // IN_PROGRESS means buyer requested cancel but seller hasn't responded yet
-      // These still need attention (either ship or cancel)
-      query.cancelState = { $in: ['NONE_REQUESTED', 'IN_PROGRESS', null, ''] };
+      // Condition 2: Include orders with no cancellation OR with a non-final
+      // cancellation state (IN_PROGRESS, APPROVAL_PENDING, etc.) — anything
+      // short of a fully closed/cancelled state still needs attention
+      // (either ship or cancel). Previously this only whitelisted
+      // NONE_REQUESTED/IN_PROGRESS, so orders sitting in APPROVAL_PENDING
+      // (buyer requested cancel, awaiting eBay/seller resolution) were
+      // silently hidden here until their state happened to flip to
+      // IN_PROGRESS on a later sync. Using the same FINAL_CANCELLED_STATES
+      // exclusion the rest of this file uses keeps this consistent and
+      // future-proof for any other non-final state eBay introduces.
+      query.cancelState = { $nin: FINAL_CANCELLED_STATES };
     }
 
     // --- Has Fulfillment Notes Filter ---
