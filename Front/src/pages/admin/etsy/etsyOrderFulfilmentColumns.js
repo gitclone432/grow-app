@@ -66,9 +66,9 @@ export const ETSY_ORDER_FULFILMENT_COLUMNS = [
   { key: 'rowNum', label: '#', minWidth: 76, align: 'center', section: 'index', editable: false },
   { key: 'storeName', label: 'Store', minWidth: 88, section: 'index', editable: false },
   { key: 'dateSold', label: 'Date of Sold', minWidth: 104, align: 'center', section: 'etsy', inputType: 'date' },
-  { key: 'etsyOrdersReceivedTime', label: 'Received Time', minWidth: 108, align: 'center', section: 'etsy', inputType: 'text' },
+  { key: 'etsyOrdersReceivedTime', label: 'Etsy Orders Recived Time', minWidth: 148, align: 'center', section: 'etsy', inputType: 'text' },
   { key: 'shipBy', label: 'Ship By', minWidth: 104, align: 'center', section: 'etsy', inputType: 'date' },
-  { key: 'estimateEtsyDelivery', label: 'Est. Delivery', minWidth: 112, align: 'center', section: 'etsy', inputType: 'date' },
+  { key: 'estimateEtsyDelivery', label: 'Estimate ETSY Delivery', minWidth: 148, align: 'center', section: 'etsy', inputType: 'date' },
   { key: 'productName', label: 'Product Name', minWidth: 200, section: 'etsy', inputType: 'text', multiline: true },
   { key: 'sku', label: 'SKU', minWidth: 96, section: 'etsy', inputType: 'text' },
   { key: 'address', label: 'Address', minWidth: 280, section: 'etsy', inputType: 'text', multiline: true },
@@ -77,7 +77,7 @@ export const ETSY_ORDER_FULFILMENT_COLUMNS = [
   { key: 'qty', label: 'Qty', minWidth: 72, align: 'center', section: 'etsy', inputType: 'number' },
   { key: 'note', label: 'Note', minWidth: 160, section: 'etsy', inputType: 'text', multiline: true },
   { key: 'messageUpdate', label: 'Message Update', minWidth: 260, section: 'etsy', inputType: 'select', options: ['', ...MESSAGE_UPDATE_OPTIONS], optionStyles: MESSAGE_UPDATE_STYLES },
-  { key: 'soldFor', label: 'Sold For', minWidth: 100, align: 'right', section: 'etsy', inputType: 'text' },
+  { key: 'soldFor', label: 'Etsy Price Details', minWidth: 132, align: 'right', section: 'etsy', inputType: 'text' },
   { key: 'tax', label: 'Tax (₹)', minWidth: 96, align: 'right', section: 'etsy', inputType: 'text' },
   { key: 'total', label: 'Total (₹)', minWidth: 96, align: 'right', section: 'etsy', inputType: 'text' },
   { key: 'etsyFee', label: 'Etsy fee (₹)', minWidth: 108, align: 'right', section: 'etsy', inputType: 'text' },
@@ -89,9 +89,10 @@ export const ETSY_ORDER_FULFILMENT_COLUMNS = [
   { key: 'coupons', label: 'Coupons (₹)', minWidth: 108, align: 'right', section: 'etsy', inputType: 'text' },
   { key: 'relistFee', label: 'Relist Fee (₹)', minWidth: 108, align: 'right', section: 'etsy', computed: true },
   { key: 'tId', label: 'T.Id (₹)', minWidth: 120, align: 'right', section: 'etsy', computed: true },
+  { key: 'additionalFees', label: 'Additional Fees', minWidth: 132, align: 'right', section: 'etsy', inputType: 'text' },
   { key: 'net', label: 'Net (₹)', minWidth: 96, align: 'right', section: 'etsy', computed: true },
   { key: 'estimateAmazonDelivery', label: 'Estimate Amazon Delivery', minWidth: 188, section: 'amazon', inputType: 'date' },
-  { key: 'itemCost', label: 'Item Cost', minWidth: 120, align: 'right', section: 'amazon', inputType: 'text' },
+  { key: 'itemCost', label: 'Amazon Price', minWidth: 120, align: 'right', section: 'amazon', inputType: 'text' },
   { key: 'shipCost', label: 'Ship Cost', minWidth: 100, align: 'right', section: 'amazon', inputType: 'text' },
   { key: 'amazonTax', label: 'Tax', minWidth: 88, align: 'right', section: 'amazon', inputType: 'text' },
   { key: 'totalInUsd', label: 'Total in (USD)', minWidth: 112, align: 'right', section: 'amazon', computed: true },
@@ -101,6 +102,7 @@ export const ETSY_ORDER_FULFILMENT_COLUMNS = [
   { key: 'amazonTotal', label: 'Total', minWidth: 88, align: 'right', section: 'amazon', computed: true },
   { key: 'exRate', label: 'Ex. Rate (₹)', minWidth: 108, align: 'right', section: 'amazon', inputType: 'text' },
   { key: 'inHand', label: 'In Hand', minWidth: 96, align: 'right', section: 'amazon', computed: true },
+  { key: 'customerName', label: 'Customers Name', minWidth: 160, section: 'amazon', inputType: 'text' },
   { key: 'amazonAccount', label: 'Amazon Acc.', minWidth: 160, section: 'amazon', inputType: 'select', options: [''] },
   { key: 'cardNo', label: 'Card No.', minWidth: 110, section: 'amazon', inputType: 'text' },
   { key: 'issuesIfAny', label: 'Issues If Any', minWidth: 180, section: 'fulfilment', inputType: 'select', options: ['', ...ISSUES_IF_ANY_OPTIONS], optionStyles: ISSUES_IF_ANY_STYLES },
@@ -114,6 +116,28 @@ export const ETSY_ORDER_FULFILMENT_COLUMNS = [
 
 export const LOCKED_ETSY_COLUMNS = new Set(['rowNum']);
 
+/** Fee / profit columns hidden on Order Fulfilment only. Profit Sheet still shows them. */
+export const ETSY_ORDER_FULFILMENT_HIDDEN_COLUMNS = new Set([
+  'etsyFee',
+  'processingFee',
+  'regulatoryOperatingFee',
+  'tds',
+  'tcs',
+  'offsiteAds',
+  'coupons',
+  'additionalFees',
+  'relistFee',
+  'tId',
+  'net',
+  'totalInRs',
+  'markUpFee',
+  'igst',
+  'amazonTotal',
+  'exRate',
+  'inHand',
+  'customerName',
+]);
+
 export const DEFAULT_VISIBLE_ETSY_COLUMNS = ETSY_ORDER_FULFILMENT_COLUMNS.map((column) => column.key);
 
 export const ETSY_COLUMN_SELECTOR_OPTIONS = ETSY_ORDER_FULFILMENT_COLUMNS
@@ -122,17 +146,20 @@ export const ETSY_COLUMN_SELECTOR_OPTIONS = ETSY_ORDER_FULFILMENT_COLUMNS
 
 export const ETSY_VISIBLE_COLUMNS_STORAGE_KEY = 'etsyOrderFulfilment.visibleColumns';
 
-export function loadVisibleEtsyColumns() {
-  const allKeys = DEFAULT_VISIBLE_ETSY_COLUMNS;
+export function loadVisibleEtsyColumns(
+  storageKey = ETSY_VISIBLE_COLUMNS_STORAGE_KEY,
+  hiddenKeys = new Set(),
+) {
+  const allKeys = DEFAULT_VISIBLE_ETSY_COLUMNS.filter((key) => !hiddenKeys.has(key));
 
   try {
-    const raw = localStorage.getItem(ETSY_VISIBLE_COLUMNS_STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (!raw) return [...allKeys];
 
     const stored = JSON.parse(raw);
     if (!Array.isArray(stored)) return [...allKeys];
 
-    const valid = stored.filter((key) => allKeys.includes(key));
+    const valid = stored.filter((key) => allKeys.includes(key) && !hiddenKeys.has(key));
     if (!valid.includes('rowNum')) valid.unshift('rowNum');
 
     const missing = allKeys.filter((key) => !valid.includes(key));
@@ -142,9 +169,9 @@ export function loadVisibleEtsyColumns() {
   }
 }
 
-export function saveVisibleEtsyColumns(columns) {
+export function saveVisibleEtsyColumns(columns, storageKey = ETSY_VISIBLE_COLUMNS_STORAGE_KEY) {
   try {
-    localStorage.setItem(ETSY_VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(columns));
+    localStorage.setItem(storageKey, JSON.stringify(columns));
   } catch {
     // ignore quota / private mode errors
   }
@@ -203,10 +230,12 @@ export function createEmptyEtsyOrderRow() {
     tcs: '',
     offsiteAds: '',
     coupons: '',
+    additionalFees: '',
     relistFee: '',
     tId: '',
     net: '',
     estimateAmazonDelivery: '',
+    customerName: '',
     amazonAccount: '',
     cardNo: '',
     itemCost: '',

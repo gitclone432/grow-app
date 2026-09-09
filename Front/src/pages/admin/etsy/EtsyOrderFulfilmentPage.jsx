@@ -9,6 +9,10 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   FormControl,
   InputLabel,
@@ -25,6 +29,7 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TableSortLabel,
   TextField,
   Typography,
   useMediaQuery,
@@ -39,6 +44,7 @@ import {
   ETSY_COLUMN_SELECTOR_OPTIONS,
   DEFAULT_VISIBLE_ETSY_COLUMNS,
   ETSY_REGION_OPTIONS,
+  ETSY_ORDER_FULFILMENT_HIDDEN_COLUMNS,
   loadVisibleEtsyColumns,
   saveVisibleEtsyColumns,
   orderVisibleEtsyColumnKeys,
@@ -50,6 +56,7 @@ import {
   enrichOrderWithAmazonPricing,
   formatExRate,
   formatRupeeField,
+  parseMoney,
   ETSY_RUPEE_INPUT_FIELDS,
   ETSY_COMPUTED_FIELDS,
   AMAZON_PRICING_COMPUTED_FIELDS,
@@ -61,6 +68,13 @@ const EtsyOrderFulfilmentImportDialog = lazy(
 
 const ROWS_PER_PAGE = 25;
 const ALL_STORES_VALUE = '__all__';
+
+function parseSortableDate(value) {
+  const text = String(value || '').trim();
+  if (!text) return 0;
+  const timestamp = Date.parse(text);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
 
 function toDateKey(value) {
   const timestamp = parseSortableDate(value);
@@ -83,11 +97,70 @@ function matchesRegionFilter(order, regionFilter) {
   return String(order.region || '').trim().toUpperCase() === regionFilter.toUpperCase();
 }
 
-function parseSortableDate(value) {
+function parseSortableTime(value) {
   const text = String(value || '').trim();
-  if (!text) return 0;
-  const timestamp = Date.parse(text);
-  return Number.isNaN(timestamp) ? 0 : timestamp;
+  if (!text) return null;
+  const ampm = text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)?$/i);
+  if (ampm) {
+    let hours = Number(ampm[1]);
+    const minutes = Number(ampm[2]);
+    const seconds = Number(ampm[3] || 0);
+    const mer = (ampm[4] || '').toUpperCase();
+    if (mer === 'PM' && hours < 12) hours += 12;
+    if (mer === 'AM' && hours === 12) hours = 0;
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+  return null;
+}
+
+function getOrderSortValue(order, column, storeNameById) {
+  if (column.key === 'rowNum') {
+    return order.rowOrder ?? Date.parse(order.createdAt || 0) ?? 0;
+  }
+  if (column.key === 'storeName') {
+    return String(order.storeName || storeNameById[String(order.store)] || '').toLowerCase();
+  }
+
+  const value = order[column.key];
+  if (value == null || value === '' || value === '-') return null;
+
+  if (column.inputType === 'date') {
+    const ts = parseSortableDate(value);
+    return ts || null;
+  }
+  if (column.inputType === 'number') {
+    const num = Number(String(value).replace(/[^\d.-]/g, ''));
+    return Number.isFinite(num) ? num : null;
+  }
+  if (column.key === 'etsyOrdersReceivedTime') {
+    return parseSortableTime(value);
+  }
+  if (column.align === 'right' || ETSY_RUPEE_INPUT_FIELDS.has(column.key)) {
+    return parseMoney(value);
+  }
+
+  return String(value).toLowerCase();
+}
+
+function compareSortValues(a, b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function sortOrdersByColumn(orders, column, direction, storeNameById) {
+  if (!column) return orders;
+  const dir = direction === 'desc' ? -1 : 1;
+  return [...orders].sort((left, right) => {
+    const cmp = compareSortValues(
+      getOrderSortValue(left, column, storeNameById),
+      getOrderSortValue(right, column, storeNameById),
+    );
+    if (cmp !== 0) return cmp * dir;
+    return String(left._id).localeCompare(String(right._id));
+  });
 }
 
 function sortOrdersNewestFirst(orders = []) {
@@ -202,7 +275,14 @@ const TABLE_SCROLL_SX = {
   },
 };
 
-export default function EtsyOrderFulfilmentPage() {
+export default function EtsyOrderFulfilmentPage({
+  title = 'Order Fulfilment',
+  columnSelectorPage = 'etsy-order-fulfilment',
+  columnStorageKey = 'etsyOrderFulfilment.visibleColumns',
+  hiddenColumnKeys = ETSY_ORDER_FULFILMENT_HIDDEN_COLUMNS,
+  columnLabelOverrides = {},
+  apiBasePath = '/etsy/order-fulfilment',
+} = {}) {
   const theme = useTheme();
   const isSmallMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
@@ -211,9 +291,13 @@ export default function EtsyOrderFulfilmentPage() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1);
+  const [sortBy, setSortBy] = useState('rowNum');
+  const [sortDir, setSortDir] = useState('desc');
   const [storesLoading, setStoresLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [addRowStoreOpen, setAddRowStoreOpen] = useState(false);
+  const [addRowStoreId, setAddRowStoreId] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [selectedRegion, setSelectedRegion] = useState('');
@@ -222,7 +306,25 @@ export default function EtsyOrderFulfilmentPage() {
   const [savingCells, setSavingCells] = useState({});
   const [deletingIds, setDeletingIds] = useState({});
   const [supplierAccounts, setSupplierAccounts] = useState([]);
-  const [visibleColumns, setVisibleColumns] = useState(() => loadVisibleEtsyColumns());
+  const hiddenKeys = useMemo(
+    () => (hiddenColumnKeys instanceof Set ? hiddenColumnKeys : new Set(hiddenColumnKeys || [])),
+    [hiddenColumnKeys]
+  );
+
+  const [visibleColumns, setVisibleColumns] = useState(
+    () => loadVisibleEtsyColumns(columnStorageKey, hiddenKeys)
+  );
+
+  const selectorColumnOptions = useMemo(
+    () => ETSY_COLUMN_SELECTOR_OPTIONS
+      .filter((column) => !hiddenKeys.has(column.id))
+      .map((column) => (
+        columnLabelOverrides[column.id]
+          ? { ...column, label: columnLabelOverrides[column.id] }
+          : column
+      )),
+    [hiddenKeys, columnLabelOverrides]
+  );
 
   const supplierAccountNames = useMemo(
     () => supplierAccounts
@@ -233,12 +335,17 @@ export default function EtsyOrderFulfilmentPage() {
   );
 
   const fulfilmentColumns = useMemo(
-    () => ETSY_ORDER_FULFILMENT_COLUMNS.map((column) => (
-      column.key === 'amazonAccount'
-        ? { ...column, options: ['', ...supplierAccountNames] }
-        : column
-    )),
-    [supplierAccountNames]
+    () => ETSY_ORDER_FULFILMENT_COLUMNS
+      .filter((column) => !hiddenKeys.has(column.key))
+      .map((column) => {
+        const labeled = columnLabelOverrides[column.key]
+          ? { ...column, label: columnLabelOverrides[column.key] }
+          : column;
+        return labeled.key === 'amazonAccount'
+          ? { ...labeled, options: ['', ...supplierAccountNames] }
+          : labeled;
+      }),
+    [supplierAccountNames, hiddenKeys, columnLabelOverrides]
   );
 
   const visibleColumnsSet = useMemo(() => new Set(visibleColumns), [visibleColumns]);
@@ -249,21 +356,21 @@ export default function EtsyOrderFulfilmentPage() {
   );
 
   const visibleSectionHeaders = useMemo(
-    () => buildVisibleEtsySectionHeaders(visibleColumns),
-    [visibleColumns]
+    () => buildVisibleEtsySectionHeaders(visibleColumns.filter((key) => !hiddenKeys.has(key))),
+    [visibleColumns, hiddenKeys]
   );
 
   const handleVisibleColumnsChange = useCallback((nextColumns) => {
-    const ordered = orderVisibleEtsyColumnKeys(nextColumns);
+    const ordered = orderVisibleEtsyColumnKeys(nextColumns).filter((key) => !hiddenKeys.has(key));
     setVisibleColumns(ordered);
-    saveVisibleEtsyColumns(ordered);
-  }, []);
+    saveVisibleEtsyColumns(ordered, columnStorageKey);
+  }, [columnStorageKey, hiddenKeys]);
 
   const handleResetVisibleColumns = useCallback(() => {
-    const defaults = [...DEFAULT_VISIBLE_ETSY_COLUMNS];
+    const defaults = DEFAULT_VISIBLE_ETSY_COLUMNS.filter((key) => !hiddenKeys.has(key));
     setVisibleColumns(defaults);
-    saveVisibleEtsyColumns(defaults);
-  }, []);
+    saveVisibleEtsyColumns(defaults, columnStorageKey);
+  }, [columnStorageKey, hiddenKeys]);
 
   const isAllStoresSelected = selectedStoreId === ALL_STORES_VALUE;
   const isSingleStoreSelected = Boolean(selectedStoreId) && !isAllStoresSelected;
@@ -312,7 +419,7 @@ export default function EtsyOrderFulfilmentPage() {
     setError('');
     try {
       const params = storeId === ALL_STORES_VALUE ? {} : { storeId };
-      const { data } = await api.get('/etsy/order-fulfilment', {
+      const { data } = await api.get(apiBasePath, {
         params,
         timeout: 30000,
       });
@@ -322,7 +429,7 @@ export default function EtsyOrderFulfilmentPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedStoreId, stores.length]);
+  }, [selectedStoreId, stores.length, apiBasePath]);
 
   useEffect(() => {
     loadStores();
@@ -355,11 +462,32 @@ export default function EtsyOrderFulfilmentPage() {
     [orders, dateFrom, dateTo, selectedRegion]
   );
 
+  const sortColumn = useMemo(
+    () => fulfilmentColumns.find((column) => column.key === sortBy) || null,
+    [fulfilmentColumns, sortBy]
+  );
+
+  const sortedOrders = useMemo(
+    () => sortOrdersByColumn(filteredOrders, sortColumn, sortDir, storeNameById),
+    [filteredOrders, sortColumn, sortDir, storeNameById]
+  );
+
+  const handleSort = (columnKey) => {
+    setPage(1);
+    if (sortBy === columnKey) {
+      setSortDir((dir) => (dir === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+    const column = fulfilmentColumns.find((item) => item.key === columnKey);
+    setSortBy(columnKey);
+    setSortDir(column?.inputType === 'date' || columnKey === 'rowNum' ? 'desc' : 'asc');
+  };
+
   useEffect(() => {
     setPage(1);
   }, [dateFrom, dateTo, selectedRegion]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredOrders.length / ROWS_PER_PAGE));
+  const totalPages = Math.max(1, Math.ceil(sortedOrders.length / ROWS_PER_PAGE));
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -367,8 +495,8 @@ export default function EtsyOrderFulfilmentPage() {
 
   const paginatedOrders = useMemo(() => {
     const start = (page - 1) * ROWS_PER_PAGE;
-    return filteredOrders.slice(start, start + ROWS_PER_PAGE);
-  }, [filteredOrders, page]);
+    return sortedOrders.slice(start, start + ROWS_PER_PAGE);
+  }, [sortedOrders, page]);
 
   const setCellSaving = (orderId, field, isSaving) => {
     const key = `${orderId}:${field}`;
@@ -387,26 +515,26 @@ export default function EtsyOrderFulfilmentPage() {
     await loadOrders(selectedStoreId);
   }, [loadStores, loadOrders, selectedStoreId]);
 
-  const handleAddRow = async () => {
-    if (!isSingleStoreSelected) {
+  const createOrderRow = async (storeId) => {
+    if (!storeId || storeId === ALL_STORES_VALUE) {
       setSnackbar({
         open: true,
-        message: isAllStoresSelected
-          ? 'Select a single store to add a row'
-          : 'Select an Etsy store first (add stores in Settings → Etsy Stores)',
+        message: 'Select an Etsy store first (add stores in Settings → Etsy Stores)',
         severity: 'warning',
       });
       return;
     }
 
+    const store = stores.find((s) => String(s._id) === String(storeId));
     setCreating(true);
     try {
-      const { data } = await api.post('/etsy/order-fulfilment', { storeId: selectedStoreId });
+      const { data } = await api.post(apiBasePath, { storeId });
       setOrders((prev) => [{
         ...data.order,
-        storeName: data.order.storeName || storeNameById[String(data.order.store)] || selectedStore?.name || '',
+        storeName: data.order.storeName || storeNameById[String(data.order.store)] || store?.name || '',
       }, ...prev]);
       setPage(1);
+      setAddRowStoreOpen(false);
       setSnackbar({ open: true, message: 'Row added', severity: 'success' });
     } catch (err) {
       setSnackbar({
@@ -419,12 +547,29 @@ export default function EtsyOrderFulfilmentPage() {
     }
   };
 
+  const handleAddRow = () => {
+    if (stores.length === 0) {
+      setSnackbar({
+        open: true,
+        message: 'Select an Etsy store first (add stores in Settings → Etsy Stores)',
+        severity: 'warning',
+      });
+      return;
+    }
+    if (isSingleStoreSelected) {
+      createOrderRow(selectedStoreId);
+      return;
+    }
+    setAddRowStoreId(stores[0]?._id || '');
+    setAddRowStoreOpen(true);
+  };
+
   const handleDeleteRow = async (orderId) => {
     if (!window.confirm('Remove this row? This cannot be undone.')) return;
 
     setDeletingIds((prev) => ({ ...prev, [orderId]: true }));
     try {
-      await api.delete(`/etsy/order-fulfilment/${orderId}`);
+      await api.delete(`${apiBasePath}/${orderId}`);
       setOrders((prev) => prev.filter((row) => row._id !== orderId));
       setSnackbar({ open: true, message: 'Row removed', severity: 'success' });
     } catch (err) {
@@ -467,7 +612,7 @@ export default function EtsyOrderFulfilmentPage() {
         patch.region = merged.region;
       }
 
-      const { data } = await api.patch(`/etsy/order-fulfilment/${orderId}`, patch);
+      const { data } = await api.patch(`${apiBasePath}/${orderId}`, patch);
       setOrders((prev) => prev.map((row) => (
         row._id === orderId
           ? enrichOrderWithAmazonPricing({
@@ -545,7 +690,7 @@ export default function EtsyOrderFulfilmentPage() {
                 fontWeight="bold"
                 sx={{ fontSize: { xs: '1.1rem', sm: '1.25rem', md: '1.5rem' } }}
               >
-                Order Fulfilment
+                {title}
               </Typography>
             </Stack>
             <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
@@ -577,14 +722,8 @@ export default function EtsyOrderFulfilmentPage() {
                 color="primary"
                 size="small"
                 startIcon={<UploadIcon />}
-                onClick={() => {
-                  if (isAllStoresSelected) {
-                    setSnackbar({ open: true, message: 'Select a single store to import', severity: 'warning' });
-                    return;
-                  }
-                  setImportOpen(true);
-                }}
-                disabled={!isSingleStoreSelected}
+                onClick={() => setImportOpen(true)}
+                disabled={stores.length === 0}
                 sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
               >
                 {isSmallMobile ? 'Import' : 'Import CSV'}
@@ -595,7 +734,7 @@ export default function EtsyOrderFulfilmentPage() {
                 size="small"
                 startIcon={creating ? <CircularProgress size={16} color="inherit" /> : <AddIcon />}
                 onClick={handleAddRow}
-                disabled={creating || !isSingleStoreSelected}
+                disabled={creating || stores.length === 0}
                 sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
               >
                 {isSmallMobile ? 'Add Row' : 'Add Row'}
@@ -692,11 +831,11 @@ export default function EtsyOrderFulfilmentPage() {
             )}
 
             <ColumnSelector
-              allColumns={ETSY_COLUMN_SELECTOR_OPTIONS}
+              allColumns={selectorColumnOptions}
               visibleColumns={visibleColumns.filter((key) => key !== 'rowNum')}
               onColumnChange={handleVisibleColumnsChange}
               onReset={handleResetVisibleColumns}
-              page="etsy-order-fulfilment"
+              page={columnSelectorPage}
               disabled={!selectedStoreId}
             />
 
@@ -762,21 +901,17 @@ export default function EtsyOrderFulfilmentPage() {
             <Typography variant="body1" color="text.secondary" gutterBottom>
               No rows for {isAllStoresSelected ? 'any store' : (selectedStore?.name || 'this store')}.
             </Typography>
-            {!isAllStoresSelected && (
-              <>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                  Import a CSV from your spreadsheet or add rows manually.
-                </Typography>
-                <Stack direction="row" spacing={1} justifyContent="center" flexWrap="wrap" useFlexGap>
-                  <Button variant="outlined" size="small" startIcon={<UploadIcon />} onClick={() => setImportOpen(true)}>
-                    Import CSV
-                  </Button>
-                  <Button variant="contained" size="small" startIcon={<AddIcon />} onClick={handleAddRow} disabled={creating}>
-                    Add Row
-                  </Button>
-                </Stack>
-              </>
-            )}
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Import a CSV from your spreadsheet or add rows manually.
+            </Typography>
+            <Stack direction="row" spacing={1} justifyContent="center" flexWrap="wrap" useFlexGap>
+              <Button variant="outlined" size="small" startIcon={<UploadIcon />} onClick={() => setImportOpen(true)}>
+                Import CSV
+              </Button>
+              <Button variant="contained" size="small" startIcon={<AddIcon />} onClick={handleAddRow} disabled={creating || stores.length === 0}>
+                Add Row
+              </Button>
+            </Stack>
           </Paper>
         ) : filteredOrders.length === 0 ? (
           <Paper sx={{ p: { xs: 2, sm: 4 }, textAlign: 'center', flexShrink: 0 }}>
@@ -838,9 +973,24 @@ export default function EtsyOrderFulfilmentPage() {
                     <TableCell
                       key={column.key}
                       align={column.align || 'left'}
+                      sortDirection={sortBy === column.key ? sortDir : false}
                       sx={getHeaderCellSx(column, theme)}
                     >
-                      {column.label}
+                      <TableSortLabel
+                        active={sortBy === column.key}
+                        direction={sortBy === column.key ? sortDir : 'asc'}
+                        onClick={() => handleSort(column.key)}
+                        sx={{
+                          color: 'inherit !important',
+                          width: '100%',
+                          '& .MuiTableSortLabel-icon': {
+                            color: 'inherit !important',
+                            opacity: sortBy === column.key ? 1 : 0.45,
+                          },
+                        }}
+                      >
+                        {column.label}
+                      </TableSortLabel>
                     </TableCell>
                   ))}
                 </TableRow>
@@ -848,7 +998,7 @@ export default function EtsyOrderFulfilmentPage() {
               <TableBody>
                 {paginatedOrders.map((row, rowIndex) => {
                   const absoluteIndex = (page - 1) * ROWS_PER_PAGE + rowIndex;
-                  const serialNumber = filteredOrders.length - absoluteIndex;
+                  const serialNumber = sortedOrders.length - absoluteIndex;
                   const rowSaving = isRowSaving(row._id);
                   const rowDeleting = Boolean(deletingIds[row._id]);
                   const storeLabel = row.storeName || storeNameById[String(row.store)] || '-';
@@ -917,13 +1067,52 @@ export default function EtsyOrderFulfilmentPage() {
             <EtsyOrderFulfilmentImportDialog
               open={importOpen}
               onClose={() => setImportOpen(false)}
+              apiBasePath={apiBasePath}
               stores={stores}
-              selectedStoreId={selectedStoreId}
+              selectedStoreId={isSingleStoreSelected ? selectedStoreId : ''}
               onStoreChange={setSelectedStoreId}
               onImported={handleImported}
             />
           </Suspense>
         )}
+
+        <Dialog
+          open={addRowStoreOpen}
+          onClose={creating ? undefined : () => setAddRowStoreOpen(false)}
+          maxWidth="xs"
+          fullWidth
+        >
+          <DialogTitle>Add Row</DialogTitle>
+          <DialogContent>
+            <TextField
+              select
+              label="Etsy Store"
+              value={addRowStoreId}
+              onChange={(e) => setAddRowStoreId(e.target.value)}
+              fullWidth
+              size="small"
+              sx={{ mt: 1 }}
+              disabled={creating}
+            >
+              {stores.map((store) => (
+                <MenuItem key={store._id} value={store._id}>
+                  {store.name}
+                </MenuItem>
+              ))}
+            </TextField>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setAddRowStoreOpen(false)} disabled={creating}>Cancel</Button>
+            <Button
+              variant="contained"
+              onClick={() => createOrderRow(addRowStoreId)}
+              disabled={creating || !addRowStoreId}
+              startIcon={creating ? <CircularProgress size={16} color="inherit" /> : <AddIcon />}
+            >
+              Add Row
+            </Button>
+          </DialogActions>
+        </Dialog>
 
         <Snackbar
           open={snackbar.open}

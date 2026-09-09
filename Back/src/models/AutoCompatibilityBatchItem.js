@@ -11,10 +11,18 @@ const AutoCompatibilityBatchItemSchema = new mongoose.Schema({
     model: String,
     startYear: String,
     endYear: String,
+    suggestedTrims: [String],
+    excludedTrims: [String],
+    suggestedEngines: [String],
+    excludedEngines: [String],
     allFitments: [mongoose.Schema.Types.Mixed]
   },
+  trimsStrategy: String,
   resolvedMake: String,
   resolvedModel: String,
+  // Per-fitment outcome when the AI found multiple vehicles:
+  // [{ make, model, startYear, endYear, resolvedMake, resolvedModel, status: 'applied'|'failed', reason, entryCount }]
+  fitmentResults: [mongoose.Schema.Types.Mixed],
   failureReason: String,
   compatibilityList: [mongoose.Schema.Types.Mixed],
   ebayWarning: String,

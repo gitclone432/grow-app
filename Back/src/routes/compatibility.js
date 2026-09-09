@@ -4,6 +4,9 @@ import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import Assignment from '../models/Assignment.js';
 import CompatibilityAssignment from '../models/CompatibilityAssignment.js';
 import Range from '../models/Range.js';
+import TemplateListing from '../models/TemplateListing.js';
+import AsinDirectory from '../models/AsinDirectory.js';
+import { fetchAmazonData } from '../utils/asinAutofill.js';
 
 const router = Router();
 
@@ -367,6 +370,73 @@ router.post('/:id/complete-range', requireAuth, requirePageAccess('Compatibility
   } catch (e) {
     console.error(e);
     res.status(500).json({ message: 'Failed to update range quantity.' });
+  }
+});
+
+// GET /api/compatibility/sku-info/:sku
+// SKU → TemplateListing._asinReference → AsinDirectory or live Amazon scrape
+router.get('/sku-info/:sku', requireAuth, async (req, res) => {
+  try {
+    const sku = (req.params.sku || '').trim();
+    if (!sku) return res.status(400).json({ message: 'SKU required' });
+
+    const listing = await TemplateListing.findOne({ customLabel: sku })
+      .select('+_asinReference')
+      .lean();
+
+    if (!listing || !listing._asinReference) {
+      return res.json({ asin: null, amazonTitle: null, amazonDescription: null });
+    }
+
+    const asin = listing._asinReference.trim().toUpperCase();
+    let asinDoc = await AsinDirectory.findOne({ asin })
+      .select('asin title description brand price images color material specialFeatures size compatibility model')
+      .lean();
+
+    if (!asinDoc || (!asinDoc.title && !asinDoc.brand)) {
+      try {
+        console.log(`[sku-info] ${asin} not in AsinDirectory — fetching live from scraper`);
+        const scraped = await fetchAmazonData(asin);
+        if (scraped) {
+          return res.json({
+            asin,
+            source: 'live',
+            amazonTitle: scraped.title || null,
+            amazonDescription: scraped.description || null,
+            brand: scraped.brand || null,
+            price: scraped.price || null,
+            images: scraped.images || [],
+            color: scraped.color || null,
+            material: scraped.material || null,
+            specialFeatures: scraped.specialFeatures || null,
+            size: scraped.size || null,
+            compatibility: scraped.compatibility || null,
+            model: scraped.model || null,
+          });
+        }
+      } catch (scrapeErr) {
+        console.warn(`[sku-info] Scraper fallback failed for ${asin}:`, scrapeErr.message);
+      }
+    }
+
+    return res.json({
+      asin,
+      source: 'db',
+      amazonTitle: asinDoc?.title || null,
+      amazonDescription: asinDoc?.description || null,
+      brand: asinDoc?.brand || null,
+      price: asinDoc?.price || null,
+      images: asinDoc?.images || [],
+      color: asinDoc?.color || null,
+      material: asinDoc?.material || null,
+      specialFeatures: asinDoc?.specialFeatures || null,
+      size: asinDoc?.size || null,
+      compatibility: asinDoc?.compatibility || null,
+      model: asinDoc?.model || null,
+    });
+  } catch (e) {
+    console.error('sku-info error:', e);
+    res.status(500).json({ message: 'Failed to fetch SKU info' });
   }
 });
 

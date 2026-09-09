@@ -456,8 +456,20 @@ export default function OrdersDepartmentDashboardPage() {
         >
           <KpiCard
             title="Today orders"
-            value={`${formatKpi(overview?.kpis?.todaySuccessfulOrders ?? overview?.kpis?.todayOrders)} / ${formatKpi(overview?.kpis?.todayOrders)}`}
-            hint="Successful / all"
+            value={(
+              <>
+                <Box component="span" sx={{ color: 'success.main' }}>
+                  {formatKpi(overview?.kpis?.todaySuccessfulOrders ?? overview?.kpis?.todayOrders)}
+                </Box>
+                {` / ${formatKpi(overview?.kpis?.todayOrders)}`}
+              </>
+            )}
+            hint={(
+              <>
+                <Box component="span" sx={{ color: 'success.main', fontWeight: 700 }}>Successful</Box>
+                {' / all'}
+              </>
+            )}
             to={`/admin/fulfillment?dateSold=${date}`}
           />
           <KpiCard

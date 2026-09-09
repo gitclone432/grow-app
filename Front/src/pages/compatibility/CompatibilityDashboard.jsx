@@ -68,6 +68,19 @@ const formatDate = (dateString) => {
   }).format(new Date(dateString));
 };
 
+// Bold any 4-digit year (1900–2099) in text for display
+// Bold any number (integers, decimals, fractions, measurements like 12") in text
+function boldNumbers(text) {
+  if (!text) return null;
+  // Matches: integers, decimals (3.5), measurements with unit (12"), ranges (2011-2017), percentages (100%)
+  const parts = text.split(/(\b\d+(?:[./\-]\d+)*(?:\s*(?:in|inch|inches|ft|mm|cm|oz|lb|lbs|kg|g|%|"))?\b)/gi);
+  return parts.map((part, i) =>
+    /^\d/.test(part)
+      ? <strong key={i} style={{ fontWeight: 800, color: '#111' }}>{part}</strong>
+      : part
+  );
+}
+
 export default function CompatibilityDashboard() {
   const navigate = useNavigate();
   const [sellers, setSellers] = useState([]);
@@ -118,10 +131,17 @@ export default function CompatibilityDashboard() {
   const [filterNoFitment, setFilterNoFitment] = useState(false);
   const [listedDateMode, setListedDateMode] = useState('range'); // 'single' | 'range'
   const [listedDate, setListedDate] = useState('');
+
+  // SKU → ASIN backtrack info for the edit modal
+  const [skuAsinInfo, setSkuAsinInfo] = useState(null);
+  const [skuAsinLoading, setSkuAsinLoading] = useState(false);
   const [listedFrom, setListedFrom] = useState('');
   const [listedTo, setListedTo] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
   const [trimFilterKeyword, setTrimFilterKeyword] = useState('');
+  const [aiSuggestedTrims, setAiSuggestedTrims] = useState([]);
+  const [aiExcludedTrims, setAiExcludedTrims] = useState([]);
+  const [aiAllFitments, setAiAllFitments] = useState([]); // all fitments from AI Suggest (multi make/model/year)
 
   // BULK AI SUGGEST STATE
   const [selectedIds, setSelectedIds] = useState(new Set());
@@ -589,20 +609,14 @@ export default function CompatibilityDashboard() {
     finally { setLoadingTrims(false); }
   };
 
-  // --- AI SUGGEST FITMENT ---
-  const handleAiSuggest = async () => {
+  // Load one AI fitment (make/model/year range + trim hints) into the vehicle picker.
+  // Used by "AI Suggest" (best fitment) and by the per-fitment chips so the lister can
+  // add EVERY make/model/year the AI found, one after another.
+  const applyFitmentToPicker = async (data) => {
     if (!selectedItem) return;
     setAiLoading(true);
     setLoadingModels(true);
     try {
-      const { data } = await api.post('/ai/suggest-fitment', {
-        title: selectedItem.title || '',
-        description: selectedItem.descriptionPreview || ''
-      });
-      if (!data.make) {
-        showSnackbar('AI could not extract fitment info from this listing', 'warning');
-        return;
-      }
       // Step 1: Resolve Make alias (Chevy→Chevrolet etc.) then fetch models
       const resolvedMake = resolveMake(data.make);
       const resolvedModelStep1 = resolveModel(resolvedMake, data.model); // Apply model normalization
@@ -615,6 +629,8 @@ export default function CompatibilityDashboard() {
       setTrimsByYear({});
       setSelectedTrimsByYear({});
       setExpandedYears({});
+      setAiSuggestedTrims(data.suggestedTrims || []);
+      setAiExcludedTrims(data.excludedTrims || []);
 
       const modelsRes = await api.post('/ebay/compatibility/values', {
         sellerId: currentSellerId,
@@ -679,6 +695,28 @@ export default function CompatibilityDashboard() {
     } finally {
       setLoadingModels(false);
       setAiLoading(false);
+    }
+  };
+
+  // --- AI SUGGEST FITMENT ---
+  const handleAiSuggest = async () => {
+    if (!selectedItem) return;
+    setAiLoading(true);
+    try {
+      const { data } = await api.post('/ai/suggest-fitment', {
+        title: selectedItem.title || '',
+        description: selectedItem.descriptionPreview || ''
+      });
+      if (!data.make) {
+        showSnackbar('AI could not extract fitment info from this listing', 'warning');
+        setAiLoading(false);
+        return;
+      }
+      setAiAllFitments((data.allFitments || []).filter(f => f?.make && f?.model));
+      await applyFitmentToPicker(data);
+    } catch (e) {
+      setAiLoading(false);
+      showSnackbar('AI suggestion failed: ' + (e.response?.data?.error || e.message), 'error');
     }
   };
   // --- BULK AI SUGGEST ---
@@ -1060,6 +1098,71 @@ export default function CompatibilityDashboard() {
     }
   }, [selectedYears, selectedMake, selectedModel]);
 
+  // Auto-select AI suggested trims when trims by year load
+  useEffect(() => {
+    if (Object.keys(trimsByYear).length > 0) {
+      const newSelectedTrims = { ...selectedTrimsByYear };
+      let anySelected = false;
+
+      Object.keys(trimsByYear).forEach(year => {
+        const availableTrims = trimsByYear[year] || [];
+        let matchedTrims = [];
+        
+        if (aiSuggestedTrims && aiSuggestedTrims.length > 0) {
+          matchedTrims = availableTrims.filter(t => 
+             aiSuggestedTrims.some(suggested => {
+               if (!suggested || typeof suggested !== 'string') return false;
+               const escapedSuggested = suggested.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s*');
+               const combo = `${t.trim} ${t.engine}`;
+               return new RegExp(`\\b${escapedSuggested}\\b`, 'i').test(combo);
+             })
+          );
+        } else if (aiExcludedTrims && aiExcludedTrims.length > 0) {
+          matchedTrims = availableTrims.filter(t => 
+             !aiExcludedTrims.some(excluded => {
+               if (!excluded || typeof excluded !== 'string') return false;
+               const escapedExcluded = excluded.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s*');
+               const combo = `${t.trim} ${t.engine}`;
+               return new RegExp(`\\b${escapedExcluded}\\b`, 'i').test(combo);
+             })
+          );
+        } else {
+          // If no specific inclusions or exclusions are mentioned, default to selecting all trims
+          matchedTrims = availableTrims;
+        }
+
+        if (matchedTrims.length > 0) {
+          const existing = newSelectedTrims[year] || [];
+          const existingKeys = new Set(existing.map(e => `${e.trim}|||${e.engine}`));
+          const toAdd = matchedTrims.filter(m => !existingKeys.has(`${m.trim}|||${m.engine}`));
+          
+          if (toAdd.length > 0) {
+            newSelectedTrims[year] = [...existing, ...toAdd];
+            anySelected = true;
+          }
+        }
+      });
+
+      if (anySelected) {
+        setSelectedTrimsByYear(newSelectedTrims);
+      }
+    }
+  }, [trimsByYear, aiSuggestedTrims, aiExcludedTrims]);
+
+  const fetchSkuAsinInfo = async (sku) => {
+    setSkuAsinInfo(null);
+    if (!sku) return;
+    setSkuAsinLoading(true);
+    try {
+      const { data } = await api.get(`/compatibility/sku-info/${encodeURIComponent(sku)}`);
+      setSkuAsinInfo(data);
+    } catch (e) {
+      // non-fatal
+    } finally {
+      setSkuAsinLoading(false);
+    }
+  };
+
   const handleEditClick = (item, index, prefillAiData = null) => {
     setSelectedItem(item);
     setCurrentListingIndex(index);
@@ -1074,6 +1177,9 @@ export default function CompatibilityDashboard() {
     setBulkMode(false);
     setBulkQueue([]);
     setBulkQueueIdx(0);
+
+    // Backtrack SKU → ASIN → Amazon data
+    fetchSkuAsinInfo(item.sku);
 
     if (prefillAiData && prefillAiData.make) {
       setSelectedMake(prefillAiData.make);
@@ -1111,7 +1217,10 @@ export default function CompatibilityDashboard() {
       setSelectedYears([]); setSelectedTrimsByYear({});
       setYearOptions([]); setModelOptions([]);
       setStartYear(''); setEndYear('');
+      setAiSuggestedTrims([]);
+      setAiExcludedTrims([]);
     }
+    setAiAllFitments([]);
   };
 
   // Helper to create a unique key for a trim+engine entry
@@ -1317,6 +1426,9 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
       setEndYear('');
       setNewNotes('');
       setTrimFilterKeyword('');
+      setAiSuggestedTrims([]);
+      setAiExcludedTrims([]);
+      setAiAllFitments([]);
     } else if (page > 1) {
       // Load previous page and open last item
       setPendingNavigation('last');
@@ -1340,6 +1452,9 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
       setEndYear('');
       setNewNotes('');
       setTrimFilterKeyword('');
+      setAiSuggestedTrims([]);
+      setAiExcludedTrims([]);
+      setAiAllFitments([]);
     } else if (page < totalPages) {
       // Load next page and open first item
       setPendingNavigation('first');
@@ -1671,7 +1786,8 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
             setOpenModal(false);
           }
         }}
-        maxWidth="xl"
+        maxWidth={false}
+        PaperProps={{ sx: { width: '98vw', maxWidth: '98vw' } }}
         fullWidth
       >
         <DialogTitle sx={{ borderBottom: '1px solid #eee', display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: 2 }}>
@@ -1762,6 +1878,7 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
         </DialogTitle>
         <DialogContent sx={{ p: 0, display: 'flex', height: '75vh' }}>
 
+          {/* eBay Description panel */}
           <Box sx={{ flex: 1, borderRight: '1px solid #eee', p: 2, overflowY: 'auto', bgcolor: '#fafafa' }}>
             {/* Product Image */}
             {selectedItem?.mainImageUrl && (
@@ -1783,6 +1900,94 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
             {selectedItem?.descriptionPreview ? (
               <div style={{ padding: 15, backgroundColor: '#fff', border: '1px solid #ccc', borderRadius: 4 }} dangerouslySetInnerHTML={{ __html: selectedItem.descriptionPreview }} />
             ) : <Typography variant="body2" color="textSecondary">No preview available.</Typography>}
+          </Box>
+
+          {/* Amazon Source panel */}
+          <Box sx={{ flex: 1, borderRight: '1px solid #eee', p: 2, overflowY: 'auto', bgcolor: '#fffdf0' }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 800, letterSpacing: 0.3, mb: 1.5, color: '#92400e' }}>Amazon Source</Typography>
+            {skuAsinLoading && (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <CircularProgress size={14} />
+                <Typography variant="caption" color="textSecondary">Loading Amazon data...</Typography>
+              </Box>
+            )}
+            {!skuAsinLoading && !skuAsinInfo?.asin && (
+              <Typography variant="body2" color="textSecondary">
+                {selectedItem?.sku ? 'No ASIN linked to this SKU.' : 'No SKU linked to this listing.'}
+              </Typography>
+            )}
+            {!skuAsinLoading && skuAsinInfo?.asin && (
+              <>
+                {/* ASIN header row */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5, flexWrap: 'wrap' }}>
+                  <Chip label={skuAsinInfo.asin} size="small" sx={{ bgcolor: '#fef3c7', color: '#92400e', fontWeight: 800, fontSize: '0.8rem', px: 0.5 }} />
+                  <a href={`https://www.amazon.com/dp/${skuAsinInfo.asin}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: '0.82rem', color: '#1976d2', fontWeight: 600 }}>View on Amazon ↗</a>
+                </Box>
+
+                {/* No data from DB or scraper */}
+                {!skuAsinInfo.amazonTitle && !skuAsinInfo.images?.length && !skuAsinInfo.brand && (
+                  <Alert severity="warning" sx={{ mb: 1.5, fontSize: '0.82rem' }}>
+                    Could not fetch product details for <strong>{skuAsinInfo.asin}</strong> from Amazon. The scraper may be rate-limited — try again shortly.
+                  </Alert>
+                )}
+
+                {/* Product image */}
+                {skuAsinInfo.images?.[0] && (
+                  <Box sx={{ mb: 2, textAlign: 'center', bgcolor: '#fff', borderRadius: 1, p: 1, border: '1px solid #eee' }}>
+                    <img src={skuAsinInfo.images[0]} alt="Amazon product" style={{ maxHeight: 180, maxWidth: '100%', objectFit: 'contain' }} />
+                  </Box>
+                )}
+
+                {/* Title */}
+                {skuAsinInfo.amazonTitle && (
+                  <Typography variant="subtitle2" sx={{ fontWeight: 800, color: '#111', mb: 1.5, lineHeight: 1.45, fontSize: '0.95rem' }}>
+                    {skuAsinInfo.amazonTitle}
+                  </Typography>
+                )}
+
+                <Divider sx={{ mb: 1.5 }} />
+
+                {/* Attribute rows */}
+                {[['Brand', skuAsinInfo.brand], ['Price', skuAsinInfo.price], ['Color', skuAsinInfo.color],
+                  ['Material', skuAsinInfo.material], ['Size', skuAsinInfo.size], ['Model', skuAsinInfo.model]
+                ].filter(([, v]) => v).map(([label, value]) => (
+                  <Box key={label} sx={{ display: 'flex', gap: 1, mb: 0.75, alignItems: 'flex-start' }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700, color: '#555', minWidth: 72, flexShrink: 0, fontSize: '0.83rem' }}>{label}:</Typography>
+                    <Typography variant="body2" sx={{ color: '#1a1a1a', fontSize: '0.83rem', fontWeight: 500 }}>{value}</Typography>
+                  </Box>
+                ))}
+
+                {/* Special Features */}
+                {skuAsinInfo.specialFeatures && (
+                  <Box sx={{ mt: 1.5 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700, color: '#555', mb: 0.4, fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: 0.5 }}>Special Features</Typography>
+                    <Typography variant="body2" sx={{ color: '#333', fontSize: '0.85rem', lineHeight: 1.55 }}>{skuAsinInfo.specialFeatures}</Typography>
+                  </Box>
+                )}
+
+                {/* Amazon Compatibility */}
+                {skuAsinInfo.compatibility && (
+                  <Box sx={{ mt: 1.5 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700, color: '#555', mb: 0.5, fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: 0.5 }}>Amazon Compatibility</Typography>
+                    <Typography variant="body2" sx={{ color: '#333', fontSize: '0.88rem', whiteSpace: 'pre-wrap', lineHeight: 1.65 }}>{boldNumbers(skuAsinInfo.compatibility)}</Typography>
+                  </Box>
+                )}
+
+                {/* Description */}
+                {skuAsinInfo.amazonDescription && (
+                  <Box sx={{ mt: 1.5 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700, color: '#555', mb: 0.5, fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: 0.5 }}>Description</Typography>
+                    <Box sx={{ color: '#333', fontSize: '0.9rem', lineHeight: 1.8, fontWeight: 500 }}>
+                      {skuAsinInfo.amazonDescription.split('\n').map((line, i) => line.trim() ? (
+                        <Typography key={i} variant="body2" sx={{ mb: 0.6, fontSize: '0.9rem', lineHeight: 1.75, fontWeight: 500, color: '#222' }}>
+                          {boldNumbers(line)}
+                        </Typography>
+                      ) : <Box key={i} sx={{ mb: 0.3 }} />)}
+                    </Box>
+                  </Box>
+                )}
+              </>
+            )}
           </Box>
 
           <Box sx={{ flex: 1, p: 2, display: 'flex', flexDirection: 'column' }}>
@@ -1812,6 +2017,26 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
                 Auto-fills Make, Model &amp; Year range from listing title/description
               </Typography>
             </Box>
+
+            {/* All make/model/year fitments the AI found — click one to load it, then Add Vehicle */}
+            {aiAllFitments.length > 1 && (
+              <Box sx={{ mb: 1.5, display: 'flex', flexWrap: 'wrap', gap: 0.5, p: 0.75, bgcolor: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 1 }}>
+                <Typography variant="caption" sx={{ width: '100%', color: '#7c3aed', fontWeight: 700 }}>
+                  AI found {aiAllFitments.length} vehicles — click each to load it into the picker, then press "Add Vehicle":
+                </Typography>
+                {aiAllFitments.map((f, i) => (
+                  <Chip
+                    key={i}
+                    size="small"
+                    clickable
+                    disabled={aiLoading}
+                    onClick={() => applyFitmentToPicker(f)}
+                    label={`${f.make} ${f.model}${f.startYear ? ` ${f.startYear}–${f.endYear}` : ''}`}
+                    sx={{ bgcolor: '#ede9fe', color: '#5b21b6', fontWeight: 600, '&:hover': { bgcolor: '#ddd6fe' } }}
+                  />
+                ))}
+              </Box>
+            )}
 
             <Grid container spacing={2} alignItems="flex-start" sx={{ mb: 2 }}>
               {/* MAKE */}

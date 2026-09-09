@@ -9,6 +9,10 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   FormControl,
   InputLabel,
@@ -25,6 +29,7 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TextField,
   Typography,
   useMediaQuery,
   useTheme,
@@ -172,6 +177,8 @@ export default function EtsyProductsPage() {
   const [applyingListedPrice, setApplyingListedPrice] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importStoreId, setImportStoreId] = useState('');
+  const [addRowStoreOpen, setAddRowStoreOpen] = useState(false);
+  const [addRowStoreId, setAddRowStoreId] = useState('');
 
   const isAllStoresSelected = selectedStoreId === ALL_STORES_VALUE;
   const isSingleStoreSelected = Boolean(selectedStoreId) && !isAllStoresSelected;
@@ -308,20 +315,26 @@ export default function EtsyProductsPage() {
     });
   };
 
-  const handleAddRow = async () => {
-    if (!isSingleStoreSelected) {
-      setSnackbar({ open: true, message: 'Select a single store to add a row', severity: 'warning' });
+  const createProductRow = async (storeId) => {
+    if (!storeId || storeId === ALL_STORES_VALUE) {
+      setSnackbar({
+        open: true,
+        message: 'Select an Etsy store first (add stores in Settings → Etsy Stores)',
+        severity: 'warning',
+      });
       return;
     }
 
+    const store = stores.find((s) => String(s._id) === String(storeId));
     setCreating(true);
     try {
-      const { data } = await api.post('/etsy/products', { storeId: selectedStoreId });
+      const { data } = await api.post('/etsy/products', { storeId });
       setProducts((prev) => [{
         ...data.product,
-        storeName: data.product.storeName || storeNameById[String(data.product.store)] || selectedStore?.name || '',
+        storeName: data.product.storeName || storeNameById[String(data.product.store)] || store?.name || '',
       }, ...prev]);
       setPage(1);
+      setAddRowStoreOpen(false);
       setSnackbar({ open: true, message: 'Row added', severity: 'success' });
     } catch (err) {
       setSnackbar({
@@ -332,6 +345,23 @@ export default function EtsyProductsPage() {
     } finally {
       setCreating(false);
     }
+  };
+
+  const handleAddRow = () => {
+    if (stores.length === 0) {
+      setSnackbar({
+        open: true,
+        message: 'Select an Etsy store first (add stores in Settings → Etsy Stores)',
+        severity: 'warning',
+      });
+      return;
+    }
+    if (isSingleStoreSelected) {
+      createProductRow(selectedStoreId);
+      return;
+    }
+    setAddRowStoreId(stores[0]?._id || '');
+    setAddRowStoreOpen(true);
   };
 
   const handleDeleteRow = async (productId) => {
@@ -489,7 +519,7 @@ export default function EtsyProductsPage() {
               size="small"
               startIcon={creating ? <CircularProgress size={16} color="inherit" /> : <AddIcon />}
               onClick={handleAddRow}
-              disabled={creating || !isSingleStoreSelected}
+              disabled={creating || stores.length === 0}
             >
               Add Row
             </Button>
@@ -578,11 +608,15 @@ export default function EtsyProductsPage() {
             <Button variant="outlined" size="small" startIcon={<UploadIcon />} onClick={openImportDialog} disabled={stores.length === 0}>
               Import CSV
             </Button>
-            {isSingleStoreSelected && (
-              <Button variant="contained" size="small" startIcon={<AddIcon />} onClick={handleAddRow} disabled={creating}>
-                Add Row
-              </Button>
-            )}
+            <Button
+              variant="contained"
+              size="small"
+              startIcon={<AddIcon />}
+              onClick={handleAddRow}
+              disabled={creating || stores.length === 0}
+            >
+              Add Row
+            </Button>
           </Stack>
         </Paper>
       ) : filteredProducts.length === 0 ? (
@@ -697,6 +731,44 @@ export default function EtsyProductsPage() {
         onStoreChange={setImportStoreId}
         onImported={handleImported}
       />
+
+      <Dialog
+        open={addRowStoreOpen}
+        onClose={creating ? undefined : () => setAddRowStoreOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>Add Row</DialogTitle>
+        <DialogContent>
+          <TextField
+            select
+            label="Etsy Store"
+            value={addRowStoreId}
+            onChange={(e) => setAddRowStoreId(e.target.value)}
+            fullWidth
+            size="small"
+            sx={{ mt: 1 }}
+            disabled={creating}
+          >
+            {stores.map((store) => (
+              <MenuItem key={store._id} value={store._id}>
+                {store.name}
+              </MenuItem>
+            ))}
+          </TextField>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAddRowStoreOpen(false)} disabled={creating}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => createProductRow(addRowStoreId)}
+            disabled={creating || !addRowStoreId}
+            startIcon={creating ? <CircularProgress size={16} color="inherit" /> : <AddIcon />}
+          >
+            Add Row
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar
         open={snackbar.open}

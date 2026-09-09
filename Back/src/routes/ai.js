@@ -5,6 +5,7 @@ import OpenAI from 'openai';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import AiFitmentUsage from '../models/AiFitmentUsage.js';
 import User from '../models/User.js';
+import { buildChatParams } from '../utils/openaiModel.js';
 
 const router = express.Router();
 
@@ -64,6 +65,10 @@ Return ONLY a valid JSON array (no markdown, no explanation) where each object h
 - "model": string (e.g. "Camry")
 - "startYear": string or null (e.g. "2010")
 - "endYear": string or null (same as startYear if only one year)
+- "suggestedTrims": array of strings (e.g. ["XLE", "XSE"]). Specific trim levels explicitly mentioned as COMPATIBLE in the title and description. Do NOT include trims that are explicitly excluded.
+- "excludedTrims": array of strings (e.g. ["LE", "Limited"]). Specific trim levels explicitly mentioned as NOT COMPATIBLE or EXCLUDED (e.g., using words like "except", "not", "exclude", "does not fit").
+- "suggestedEngines": array of strings (e.g. ["2.0L", "2.5L", "3.3L"]). Specific engines explicitly mentioned as COMPATIBLE in the title and description. Do NOT include engines that are explicitly excluded.
+- "excludedEngines": array of strings (e.g. ["1.6L"]). Specific engines explicitly mentioned as NOT COMPATIBLE or EXCLUDED.
 
 Rules:
 - If a year range is EXPLICITLY stated like "2008-2013", use startYear="2008" endYear="2013"
@@ -74,21 +79,27 @@ Rules:
 - Use the most specific model name mentioned (e.g. "F-150" not just "F-Series")
 - If the description lists a compatibility/fitment table, extract all entries from it
 
-Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013"},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null}]`;
+Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013","suggestedTrims":[],"excludedTrims":[],"suggestedEngines":[],"excludedEngines":[]},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null,"suggestedTrims":["XLE"],"excludedTrims":["LE"],"suggestedEngines":["2.5L"],"excludedEngines":["3.5L"]}]`;
 
-        const completion = await getOpenAI().chat.completions.create({
-            model: 'gpt-4o-mini',
+        const completion = await getOpenAI().chat.completions.create(buildChatParams({
             messages: [{ role: 'user', content: prompt }],
             temperature: 0,
-            max_tokens: 500
-        });
+            maxTokens: 3000
+        }));
 
         const raw = completion.choices[0]?.message?.content?.trim() || '[]';
 
         let allFitments = [];
         try {
             // Strip any accidental markdown code fences
-            const cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+            let cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+
+            // In case the model accidentally outputs extra characters at the end
+            const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+            if (arrayMatch) {
+                cleaned = arrayMatch[0];
+            }
+
             allFitments = JSON.parse(cleaned);
             if (!Array.isArray(allFitments)) allFitments = [];
         } catch (parseErr) {
@@ -111,7 +122,17 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
         }).catch(err => console.error('[AI Usage Track] Error:', err.message));
 
         if (allFitments.length === 0) {
-            return res.json({ make: null, model: null, startYear: null, endYear: null, allFitments: [] });
+            return res.json({
+                make: null,
+                model: null,
+                startYear: null,
+                endYear: null,
+                suggestedTrims: [],
+                excludedTrims: [],
+                suggestedEngines: [],
+                excludedEngines: [],
+                allFitments: []
+            });
         }
 
         // Pick the fitment with the longest year gap
@@ -126,6 +147,10 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
             model: best.model,
             startYear: best.startYear,
             endYear: best.endYear,
+            suggestedTrims: best.suggestedTrims || [],
+            excludedTrims: best.excludedTrims || [],
+            suggestedEngines: best.suggestedEngines || [],
+            excludedEngines: best.excludedEngines || [],
             allFitments
         });
 
@@ -190,12 +215,11 @@ Compatibility: ${compatibility}
 
 eBay title to rephrase: ${currentTitle}`;
 
-        const completion = await getOpenAI().chat.completions.create({
+        const completion = await getOpenAI().chat.completions.create(buildChatParams({
             messages: [{ role: 'user', content: prompt }],
-            model: 'gpt-4o-mini',
             temperature: 0.7,
-            max_tokens: 60,
-        });
+            maxTokens: 60,
+        }));
 
         let rephrasedTitle = completion.choices[0]?.message?.content?.trim() || '';
         // Strip any surrounding quotes the model may add

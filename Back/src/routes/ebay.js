@@ -19,6 +19,7 @@ import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.j
 import { applyActiveSellerScope } from '../utils/activeSellerScope.js';
 import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
 import { postEbayTradingApi } from '../utils/ebayTradingApi.js';
+import { buildChatParams } from '../utils/openaiModel.js';
 import Order from '../models/Order.js';
 import { FINAL_CANCELLED_STATES } from '../constants/cancelStates.js';
 import Return from '../models/Return.js';
@@ -1153,6 +1154,139 @@ async function getAutoCompatibilitySourceListings(batch) {
   return listings;
 }
 
+// eBay allows at most 3000 parts-compatibility entries per listing
+const EBAY_MAX_COMPAT_ENTRIES = 3000;
+
+// Resolve ONE AI fitment (make/model/years + trim/engine hints) into eBay compatibility
+// entries. Mirrors the original single-fitment pipeline. A fitment that can't be resolved
+// returns ok:false with a reason (instead of throwing) so the remaining fitments of the
+// same listing still get processed; genuine API errors still throw and are handled by the
+// caller's item-level catch, exactly like before.
+async function buildCompatEntriesForFitment(token, fitment) {
+  const resolvedMake = resolveMake(fitment.make);
+  const resolvedModelStep1 = resolveModel(resolvedMake, fitment.model);
+  const resolvedModelInput = resolveModelWithYear(resolvedMake, resolvedModelStep1, fitment.startYear, fitment.endYear);
+
+  const modelOpts = await fetchCompatValues(token, 'Model', [{ name: 'Make', value: resolvedMake }]);
+  const canonicalModel = fuzzyMatchModel(resolvedModelInput, modelOpts);
+  if (!canonicalModel) {
+    return {
+      ok: false, entries: [], resolvedMake, resolvedModel: resolvedModelInput, strategy: null,
+      reason: `Model "${fitment.model}" (resolved: "${resolvedModelInput}") not found in eBay DB for ${resolvedMake}`
+    };
+  }
+
+  const yearOpts = (await fetchCompatValues(token, 'Year', [
+    { name: 'Make', value: resolvedMake },
+    { name: 'Model', value: canonicalModel }
+  ])).map(y => String(y)).sort((a, b) => Number(b) - Number(a));
+
+  let resolvedYears = [];
+  if (fitment.startYear && fitment.endYear) {
+    const clamped = clampYearRange(resolvedMake, canonicalModel, fitment.startYear, fitment.endYear);
+    const min = Math.min(Number(clamped.startYear), Number(clamped.endYear));
+    const max = Math.max(Number(clamped.startYear), Number(clamped.endYear));
+    resolvedYears = yearOpts.filter(y => Number(y) >= min && Number(y) <= max);
+  }
+
+  if (resolvedYears.length === 0) {
+    return {
+      ok: false, entries: [], resolvedMake, resolvedModel: canonicalModel, strategy: null,
+      reason: `Years ${fitment.startYear}-${fitment.endYear} not found in eBay DB for ${resolvedMake} ${canonicalModel}`
+    };
+  }
+
+  const aiSuggested = fitment.suggestedTrims || [];
+  const aiExcluded = fitment.excludedTrims || [];
+  const aiSuggestedEngines = fitment.suggestedEngines || [];
+  const aiExcludedEngines = fitment.excludedEngines || [];
+  const hasSpecificTrims = aiSuggested.length > 0;
+  const hasExcludedTrims = aiExcluded.length > 0;
+  const hasSpecificEngines = aiSuggestedEngines.length > 0;
+  const hasExcludedEngines = aiExcludedEngines.length > 0;
+
+  let strategy = 'ALL_TRIMS';
+  if (hasSpecificTrims || hasSpecificEngines) strategy = 'SPECIFIC_TRIMS';
+  else if (hasExcludedTrims || hasExcludedEngines) strategy = 'EXCLUDED_TRIMS';
+
+  const matchesHint = (hint, combo) => {
+    if (!hint || typeof hint !== 'string') return false;
+    const escaped = hint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s*');
+    return new RegExp(`\\b${escaped}\\b`, 'i').test(combo);
+  };
+
+  const entries = [];
+  for (const year of resolvedYears) {
+    const trims = await fetchCompatValues(token, 'Trim', [
+      { name: 'Make', value: resolvedMake },
+      { name: 'Model', value: canonicalModel },
+      { name: 'Year', value: year }
+    ]);
+
+    if (trims.length === 0) {
+      entries.push({
+        notes: '',
+        nameValueList: [
+          { name: 'Year', value: year },
+          { name: 'Make', value: resolvedMake },
+          { name: 'Model', value: canonicalModel }
+        ]
+      });
+      continue;
+    }
+
+    let allCombinations = [];
+    for (const trim of trims) {
+      const engines = await fetchCompatValues(token, 'Engine', [
+        { name: 'Make', value: resolvedMake },
+        { name: 'Model', value: canonicalModel },
+        { name: 'Year', value: year },
+        { name: 'Trim', value: trim }
+      ]);
+
+      if (engines.length === 0) {
+        allCombinations.push({ trim, engine: '' });
+      } else {
+        for (const engine of engines) {
+          allCombinations.push({ trim, engine });
+        }
+      }
+    }
+
+    let filteredCombinations = allCombinations;
+    if (hasSpecificTrims) {
+      filteredCombinations = filteredCombinations.filter(c => aiSuggested.some(s => matchesHint(s, `${c.trim} ${c.engine}`)));
+    } else if (hasExcludedTrims) {
+      filteredCombinations = filteredCombinations.filter(c => !aiExcluded.some(x => matchesHint(x, `${c.trim} ${c.engine}`)));
+    }
+    if (hasSpecificEngines) {
+      filteredCombinations = filteredCombinations.filter(c => aiSuggestedEngines.some(s => matchesHint(s, `${c.trim} ${c.engine}`)));
+    } else if (hasExcludedEngines) {
+      filteredCombinations = filteredCombinations.filter(c => !aiExcludedEngines.some(x => matchesHint(x, `${c.trim} ${c.engine}`)));
+    }
+
+    for (const combo of filteredCombinations) {
+      const nameValueList = [
+        { name: 'Year', value: year },
+        { name: 'Make', value: resolvedMake },
+        { name: 'Model', value: canonicalModel },
+        { name: 'Trim', value: combo.trim }
+      ];
+      if (combo.engine) nameValueList.push({ name: 'Engine', value: combo.engine });
+      entries.push({ notes: '', nameValueList });
+    }
+  }
+
+  if (entries.length === 0) {
+    return {
+      ok: false, entries: [], resolvedMake, resolvedModel: canonicalModel, strategy,
+      reason: `AI suggested specific trims/engines, but none matched eBay's available options for ${resolvedMake} ${canonicalModel} (${resolvedYears.join(',')})`
+    };
+  }
+
+  return { ok: true, entries, resolvedMake, resolvedModel: canonicalModel, strategy, reason: null };
+}
+
 export async function processAutoCompatibilityBatch(batchId) {
   const batchKey = String(batchId);
   if (activeAutoCompatBatchRuns.has(batchKey)) return;
@@ -1241,6 +1375,7 @@ export async function processAutoCompatibilityBatch(batchId) {
         aiSuggestion: null,
         resolvedMake: null,
         resolvedModel: null,
+        fitmentResults: [],
         failureReason: null,
         compatibilityList: [],
         ebayWarning: null,
@@ -1271,113 +1406,89 @@ export async function processAutoCompatibilityBatch(batchId) {
           continue;
         }
 
-        const resolvedMake = resolveMake(aiData.make);
-        const resolvedModelStep1 = resolveModel(resolvedMake, aiData.model);
-        const resolvedModelInput = resolveModelWithYear(resolvedMake, resolvedModelStep1, aiData.startYear, aiData.endYear);
-        itemResult.resolvedMake = resolvedMake;
+        // Process EVERY fitment the AI extracted (all make/model/year rows),
+        // not just the single "best" one. Falls back to the top-level suggestion
+        // when allFitments is missing (old-style AI responses).
+        const rawFitments = (Array.isArray(aiData.allFitments) && aiData.allFitments.length > 0)
+          ? aiData.allFitments
+          : [aiData];
+        const seenFitmentKeys = new Set();
+        const fitments = rawFitments.filter(f => {
+          if (!f || !f.make || !f.model) return false;
+          const key = [String(f.make).trim().toLowerCase(), String(f.model).trim().toLowerCase(), f.startYear || '', f.endYear || ''].join('|');
+          if (seenFitmentKeys.has(key)) return false;
+          seenFitmentKeys.add(key);
+          return true;
+        });
 
-        await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'fetching_models' });
-
-        const modelOpts = await fetchCompatValues(token, 'Model', [{ name: 'Make', value: resolvedMake }]);
-        const canonicalModel = fuzzyMatchModel(resolvedModelInput, modelOpts);
-
-        if (!canonicalModel) {
-          itemResult.status = 'needs_manual';
-          itemResult.resolvedModel = resolvedModelInput;
-          itemResult.failureReason = `Model "${aiData.model}" (resolved: "${resolvedModelInput}") not found in eBay DB for ${resolvedMake}`;
-          counts.needsManualCount += 1;
-          counts.processedCount += 1;
-          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
-          await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
-            needsManualCount: counts.needsManualCount,
-            processedCount: counts.processedCount
-          });
-          continue;
-        }
-        itemResult.resolvedModel = canonicalModel;
-
-        await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'fetching_years' });
-
-        const yearOpts = (await fetchCompatValues(token, 'Year', [
-          { name: 'Make', value: resolvedMake },
-          { name: 'Model', value: canonicalModel }
-        ])).map(y => String(y)).sort((a, b) => Number(b) - Number(a));
-
-        let resolvedYears = [];
-        if (aiData.startYear && aiData.endYear) {
-          const clamped = clampYearRange(resolvedMake, canonicalModel, aiData.startYear, aiData.endYear);
-          const min = Math.min(Number(clamped.startYear), Number(clamped.endYear));
-          const max = Math.max(Number(clamped.startYear), Number(clamped.endYear));
-          resolvedYears = yearOpts.filter(y => Number(y) >= min && Number(y) <= max);
-        }
-
-        if (resolvedYears.length === 0) {
-          itemResult.status = 'needs_manual';
-          itemResult.failureReason = `Years ${aiData.startYear}-${aiData.endYear} not found in eBay DB for ${resolvedMake} ${canonicalModel}`;
-          counts.needsManualCount += 1;
-          counts.processedCount += 1;
-          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
-          await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
-            needsManualCount: counts.needsManualCount,
-            processedCount: counts.processedCount
-          });
-          continue;
-        }
-
-        await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'fetching_trims' });
-
+        const fitmentResults = [];
         const compatibilityList = [];
-        for (const year of resolvedYears) {
-          const trims = await fetchCompatValues(token, 'Trim', [
-            { name: 'Make', value: resolvedMake },
-            { name: 'Model', value: canonicalModel },
-            { name: 'Year', value: year }
-          ]);
+        const entryKeys = new Set();
+        let anySpecific = false;
+        let anyExcluded = false;
 
-          if (trims.length === 0) {
-            compatibilityList.push({
-              notes: '',
-              nameValueList: [
-                { name: 'Year', value: year },
-                { name: 'Make', value: resolvedMake },
-                { name: 'Model', value: canonicalModel }
-              ]
-            });
-          } else {
-            for (const trim of trims) {
-              const engines = await fetchCompatValues(token, 'Engine', [
-                { name: 'Make', value: resolvedMake },
-                { name: 'Model', value: canonicalModel },
-                { name: 'Year', value: year },
-                { name: 'Trim', value: trim }
-              ]);
+        for (let fi = 0; fi < fitments.length; fi++) {
+          const fitment = fitments[fi];
+          await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+            currentStep: fitments.length > 1 ? `fetching_trims (fitment ${fi + 1}/${fitments.length})` : 'fetching_trims'
+          });
 
-              if (engines.length === 0) {
-                compatibilityList.push({
-                  notes: '',
-                  nameValueList: [
-                    { name: 'Year', value: year },
-                    { name: 'Make', value: resolvedMake },
-                    { name: 'Model', value: canonicalModel },
-                    { name: 'Trim', value: trim }
-                  ]
-                });
-              } else {
-                for (const engine of engines) {
-                  compatibilityList.push({
-                    notes: '',
-                    nameValueList: [
-                      { name: 'Year', value: year },
-                      { name: 'Make', value: resolvedMake },
-                      { name: 'Model', value: canonicalModel },
-                      { name: 'Trim', value: trim },
-                      { name: 'Engine', value: engine }
-                    ]
-                  });
-                }
-              }
-            }
+          const fr = await buildCompatEntriesForFitment(token, fitment);
+          if (fr.strategy === 'SPECIFIC_TRIMS') anySpecific = true;
+          else if (fr.strategy === 'EXCLUDED_TRIMS') anyExcluded = true;
+
+          // Dedupe across fitments (overlapping year ranges / repeated models)
+          for (const entry of fr.entries) {
+            const key = entry.nameValueList.map(nv => `${nv.name}=${nv.value}`).join('|');
+            if (entryKeys.has(key)) continue;
+            entryKeys.add(key);
+            compatibilityList.push(entry);
           }
+
+          fitmentResults.push({
+            make: fitment.make,
+            model: fitment.model,
+            startYear: fitment.startYear || null,
+            endYear: fitment.endYear || null,
+            resolvedMake: fr.resolvedMake,
+            resolvedModel: fr.resolvedModel,
+            status: fr.ok ? 'applied' : 'failed',
+            reason: fr.reason,
+            entryCount: fr.entries.length
+          });
+        }
+
+        const appliedFitments = fitmentResults.filter(f => f.status === 'applied');
+        const failedFitments = fitmentResults.filter(f => f.status === 'failed');
+        itemResult.fitmentResults = fitmentResults;
+        itemResult.resolvedMake = (appliedFitments[0] || fitmentResults[0])?.resolvedMake || null;
+        itemResult.resolvedModel = (appliedFitments[0] || fitmentResults[0])?.resolvedModel || null;
+        itemResult.trimsStrategy = anySpecific ? 'SPECIFIC_TRIMS' : anyExcluded ? 'EXCLUDED_TRIMS' : 'ALL_TRIMS';
+
+        if (compatibilityList.length === 0) {
+          itemResult.status = 'needs_manual';
+          itemResult.failureReason = failedFitments.map(f => f.reason).filter(Boolean).join(' | ')
+            || 'No AI fitments could be resolved against eBay DB';
+          counts.needsManualCount += 1;
+          counts.processedCount += 1;
+          await AutoCompatibilityBatchItem.create({ batchId, ...itemResult });
+          await AutoCompatibilityBatch.findByIdAndUpdate(batchId, {
+            needsManualCount: counts.needsManualCount,
+            processedCount: counts.processedCount
+          });
+          continue;
+        }
+
+        // Some fitments applied, some not — surface the partial failures for manual review
+        if (failedFitments.length > 0) {
+          itemResult.failureReason = `${appliedFitments.length}/${fitmentResults.length} AI fitments applied. Failed: `
+            + failedFitments.map(f => `${f.make} ${f.model}${f.startYear ? ` (${f.startYear}-${f.endYear})` : ''}: ${f.reason}`).join('; ');
+        }
+
+        if (compatibilityList.length > EBAY_MAX_COMPAT_ENTRIES) {
+          const dropped = compatibilityList.length - EBAY_MAX_COMPAT_ENTRIES;
+          compatibilityList.length = EBAY_MAX_COMPAT_ENTRIES;
+          itemResult.ebayWarning = `Compatibility list truncated to ${EBAY_MAX_COMPAT_ENTRIES} entries (${dropped} dropped — eBay per-listing limit)`;
         }
 
         itemResult.compatibilityList = compatibilityList;
@@ -1938,7 +2049,10 @@ router.get('/feed/result/:taskId', requireAuth, async (req, res) => {
 // EBAY OAUTH SCOPES - Single source of truth for OAuth consent (authorize URL + code exchange)
 // Token refresh must NOT send this list — use buildRefreshTokenParams() instead.
 // ============================================
-const EBAY_OAUTH_SCOPES = [
+// Consent scopes for /connect. One URL that is not enabled on this app makes
+// eBay show https://auth2.ebay.com/oauth2/errorOauth?errorId=invalid_scope
+// Optional override: EBAY_OAUTH_SCOPES="scope1 scope2 ..."
+const EBAY_OAUTH_SCOPE_LIST = [
   'https://api.ebay.com/oauth/api_scope',
   'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.marketing',
@@ -1951,7 +2065,6 @@ const EBAY_OAUTH_SCOPES = [
   'https://api.ebay.com/oauth/api_scope/sell.analytics.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.payment.dispute',
   'https://api.ebay.com/oauth/api_scope/sell.finances',
-  'https://api.ebay.com/oauth/api_scope/sell.finances.earnings.read',
   'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.reputation',
   'https://api.ebay.com/oauth/api_scope/sell.reputation.readonly',
@@ -1959,13 +2072,18 @@ const EBAY_OAUTH_SCOPES = [
   'https://api.ebay.com/oauth/api_scope/commerce.notification.subscription.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.stores',
   'https://api.ebay.com/oauth/api_scope/sell.stores.readonly',
-  'https://api.ebay.com/oauth/api_scope/sell.edelivery',
-  'https://api.ebay.com/oauth/api_scope/commerce.vero',
-  'https://api.ebay.com/oauth/api_scope/sell.inventory.mapping',
   'https://api.ebay.com/oauth/api_scope/commerce.message',
   'https://api.ebay.com/oauth/api_scope/commerce.feedback',
-  'https://api.ebay.com/oauth/api_scope/commerce.shipping'
-].join(' ');
+];
+
+function getEbayOAuthScopes() {
+  const fromEnv = String(process.env.EBAY_OAUTH_SCOPES || '')
+    .trim()
+    .replace(/,/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  return (fromEnv.length ? fromEnv : EBAY_OAUTH_SCOPE_LIST).join(' ');
+}
 
 // ============================================
 // IMAGE CACHE INITIALIZATION
@@ -3497,9 +3615,10 @@ router.get('/connect', (req, res) => {
   // Pass the user's JWT as state parameter so we can identify them in callback.
   // IMPORTANT: do not URL-encode the JWT here — encodeURIComponent() below already encodes `state`.
   const state = token;
-  const redirectUrl = `https://auth.ebay.com/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(EBAY_OAUTH_SCOPES)}&state=${encodeURIComponent(state)}`;
+  const scopes = getEbayOAuthScopes();
+  const redirectUrl = `https://auth.ebay.com/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${encodeURIComponent(state)}`;
 
-  console.log('[eBay OAuth] Scopes requested:', EBAY_OAUTH_SCOPES);
+  console.log('[eBay OAuth] Scopes requested:', scopes);
   console.log('[eBay OAuth] Full redirect URL:', redirectUrl);
   res.redirect(redirectUrl);
 });
@@ -31319,6 +31438,10 @@ Return ONLY a valid JSON array (no markdown, no explanation) where each object h
 - "model": string (e.g. "Camry")
 - "startYear": string or null (e.g. "2010")
 - "endYear": string or null (same as startYear if only one year)
+- "suggestedTrims": array of strings (e.g. ["XLE", "XSE"]). Specific trim levels explicitly mentioned as COMPATIBLE in the title and description. Do NOT include trims that are explicitly excluded.
+- "excludedTrims": array of strings (e.g. ["LE", "Limited"]). Specific trim levels explicitly mentioned as NOT COMPATIBLE or EXCLUDED (e.g., using words like "except", "not", "exclude", "does not fit").
+- "suggestedEngines": array of strings (e.g. ["2.0L", "2.5L", "3.3L"]). Specific engines explicitly mentioned as COMPATIBLE in the title and description. Do NOT include engines that are explicitly excluded.
+- "excludedEngines": array of strings (e.g. ["1.6L"]). Specific engines explicitly mentioned as NOT COMPATIBLE or EXCLUDED.
 
 Rules:
 - If a year range is EXPLICITLY stated like "2008-2013", use startYear="2008" endYear="2013"
@@ -31329,29 +31452,31 @@ Rules:
 - Use the most specific model name mentioned (e.g. "F-150" not just "F-Series")
 - If the description lists a compatibility/fitment table, extract all entries from it
 
-Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013"},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null}]`;
+Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"2013","suggestedTrims":[],"excludedTrims":[],"suggestedEngines":[],"excludedEngines":[]},{"make":"Toyota","model":"Camry","startYear":null,"endYear":null,"suggestedTrims":["XLE"],"excludedTrims":["LE"],"suggestedEngines":["2.5L"],"excludedEngines":["3.5L"]}]`;
 
-  const completion = await getAutoOpenAI().chat.completions.create({
-    model: 'gpt-4o-mini',
+  const completion = await getAutoOpenAI().chat.completions.create(buildChatParams({
     messages: [{ role: 'user', content: prompt }],
     temperature: 0,
-    max_tokens: 500
-  });
+    maxTokens: 3000
+  }));
   const raw = completion.choices[0]?.message?.content?.trim() || '[]';
-  const cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+  let cleaned = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/i, '').trim();
+  const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+  if (arrayMatch) cleaned = arrayMatch[0];
+
   let allFitments = [];
   try {
     allFitments = JSON.parse(cleaned);
     if (!Array.isArray(allFitments)) allFitments = [];
   } catch { allFitments = []; }
 
-  if (allFitments.length === 0) return { make: null, model: null, startYear: null, endYear: null, allFitments: [] };
+  if (allFitments.length === 0) return { make: null, model: null, startYear: null, endYear: null, suggestedTrims: [], excludedTrims: [], suggestedEngines: [], excludedEngines: [], allFitments: [] };
   const best = allFitments.reduce((prev, curr) => {
     const prevGap = Number(prev.endYear) - Number(prev.startYear);
     const currGap = Number(curr.endYear) - Number(curr.startYear);
     return currGap > prevGap ? curr : prev;
   });
-  return { make: best.make, model: best.model, startYear: best.startYear, endYear: best.endYear, allFitments };
+  return { make: best.make, model: best.model, startYear: best.startYear, endYear: best.endYear, suggestedTrims: best.suggestedTrims || [], excludedTrims: best.excludedTrims || [], suggestedEngines: best.suggestedEngines || [], excludedEngines: best.excludedEngines || [], allFitments };
 }
 
 // Helper: fetch eBay compatibility property values (reuses the /compatibility/values logic)

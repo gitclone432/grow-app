@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import pLimit from 'p-limit';
 import { trackApiUsage } from './apiUsageTracker.js';
+import { buildChatParams, getOpenAiModel } from './openaiModel.js';
 
 // One client per API key (default key + any dedicated keys like the precheck key)
 const openaiClients = new Map();
@@ -20,7 +21,7 @@ function getOpenAIClient(apiKey) {
 }
 
 /**
- * Generate content using OpenAI API with GPT-4o-mini
+ * Generate content using the OpenAI API (model from OPENAI_MODEL)
  * @param {string} prompt - The prompt to send to OpenAI
  * @param {Object} options - Generation options
  * @param {number} options.maxTokens - Maximum tokens to generate (default: 150)
@@ -44,13 +45,13 @@ export async function generateWithGemini(prompt, options = {}) {
       ipSource,
       forwardedFor,
       userAgent,
-      model = 'gpt-4o-mini',
+      model = getOpenAiModel(),
       apiKey
     } = options;
 
     try {
       const openai = getOpenAIClient(apiKey);
-      const completion = await openai.chat.completions.create({
+      const completion = await openai.chat.completions.create(buildChatParams({
         messages: [
           {
             role: 'user',
@@ -59,8 +60,8 @@ export async function generateWithGemini(prompt, options = {}) {
         ],
         model,
         temperature: 0.3,
-        max_tokens: maxTokens,
-      });
+        maxTokens,
+      }));
       
       let content = completion.choices[0]?.message?.content?.trim() || '';
       

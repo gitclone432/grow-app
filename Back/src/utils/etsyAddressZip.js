@@ -81,11 +81,12 @@ export function normalizeEtsyRegion(value) {
 }
 
 export function applyAddressDerivedFields(row = {}) {
+  const fromAddress = extractZipFromAddress(row.address);
   const detectedRegion = extractRegionFromAddress(row.address);
   const storedRegion = normalizeEtsyRegion(row.region);
 
   return {
-    zipCode: extractZipFromAddress(row.address),
+    zipCode: fromAddress || String(row.zipCode || '').trim(),
     region: detectedRegion || storedRegion,
   };
 }

@@ -114,6 +114,7 @@ export const ManageTemplatesPage = lazy(() => import('../pages/admin/ManageTempl
 export const TemplateListingsLabPage = lazy(() => import('../pages/admin/TemplateListingsLabPage.jsx'));
 export const TemplateListingAnalyticsPage = lazy(() => import('../pages/admin/TemplateListingAnalyticsPage.jsx'));
 export const SelectSellerLabPage = lazy(() => import('../pages/admin/SelectSellerLabPage.jsx'));
+export const AmazonSearchPage = lazy(() => import('../pages/admin/AmazonSearchPage.jsx'));
 export const SellerTemplatesLabPage = lazy(() => import('../pages/admin/SellerTemplatesLabPage.jsx'));
 export const AsinPrecheckPage = lazy(() => import('../pages/admin/AsinPrecheckPage.jsx'));
 export const AsinSourcingPage = lazy(() => import('../pages/admin/AsinSourcingPage.jsx'));

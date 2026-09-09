@@ -12,9 +12,29 @@ export function matrixValueToString(value) {
   return String(value).trim();
 }
 
+function looksLikeDateOrTimeLabel(text) {
+  const w = String(text || '').trim();
+  if (!w) return false;
+  if (/^\d{1,2}:\d{2}(:\d{2})?(\s*[AP]M)?$/i.test(w)) return true;
+  if (/^[A-Za-z]{3,9}[-/.\s]\d{1,2}([-/.\s]\d{2,4})?$/.test(w)) return true;
+  if (/^\d{1,2}[-/.\s][A-Za-z]{3,9}([-/.\s]\d{2,4})?$/.test(w)) return true;
+  if (/^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$/.test(w)) return true;
+  return false;
+}
+
 export function xlsxCellToString(cell) {
   if (!cell) return '';
+  if (cell.t === 'd' && cell.v instanceof Date && !Number.isNaN(cell.v.getTime())) {
+    return cell.v.toISOString().slice(0, 10);
+  }
+  if (cell.t === 'b') {
+    return cell.v ? 'Yes' : 'No';
+  }
   if (cell.t === 'n' && Number.isFinite(cell.v)) {
+    const formatted = cell.w != null ? String(cell.w).trim() : '';
+    // Excel dates/times are numbers; use the displayed label (4-Jul, Jul-06, 3:22)
+    // instead of the serial so import can parse the intended calendar date.
+    if (looksLikeDateOrTimeLabel(formatted)) return formatted;
     return matrixValueToString(cell.v);
   }
   if (cell.w != null && String(cell.w).trim()) {

@@ -44,6 +44,7 @@ export default function EtsyOrderFulfilmentImportDialog({
   selectedStoreId,
   onStoreChange,
   onImported,
+  apiBasePath = '/etsy/order-fulfilment',
 }) {
   const rawCsvRef = useRef('');
   const [fileName, setFileName] = useState('');
@@ -115,7 +116,7 @@ export default function EtsyOrderFulfilmentImportDialog({
   };
 
   const handleImport = async () => {
-    if (!selectedStoreId) {
+    if (!selectedStoreId || selectedStoreId === '__all__') {
       setError('Select an Etsy store first (add stores in Settings → Etsy Stores)');
       return;
     }
@@ -127,7 +128,7 @@ export default function EtsyOrderFulfilmentImportDialog({
     setImporting(true);
     setError('');
     try {
-      const { data } = await api.post('/etsy/order-fulfilment/bulk-import', {
+      const { data } = await api.post(`${apiBasePath}/bulk-import`, {
         storeId: selectedStoreId,
         rows: parsed.rows,
         mode: importMode,

@@ -3,6 +3,64 @@ import { normalizeIdentifierString } from './normalizeIdentifierString.js';
 import { ETSY_ORDER_FULFILMENT_COLUMNS } from '../pages/admin/etsy/etsyOrderFulfilmentColumns.js';
 import { enrichOrderWithAmazonPricing, formatExRate, formatRupeeField, ETSY_RUPEE_INPUT_FIELDS } from './etsyOrderPricing.js';
 import { normalizeEtsyRegion } from './etsyAddressZip.js';
+
+/** Exact headers from the Order Fulfilment Google Sheet (import + template). */
+export const ETSY_FULFILMENT_SHEET_HEADERS = [
+  { header: 'Sl. No', key: null },
+  { header: 'Date of Sold', key: 'dateSold' },
+  { header: 'Etsy Orders Recived Time', key: 'etsyOrdersReceivedTime' },
+  { header: 'Ship By', key: 'shipBy' },
+  { header: 'Estimate ETSY Delivery', key: 'estimateEtsyDelivery' },
+  { header: 'Product Name', key: 'productName' },
+  { header: 'SKU', key: 'sku' },
+  { header: 'Address', key: 'address' },
+  { header: 'Zip Code', key: 'zipCode' },
+  { header: 'Qty', key: 'qty' },
+  { header: 'Note', key: 'note' },
+  { header: 'Message Update', key: 'messageUpdate' },
+  { header: 'Etsy Price Details', key: 'soldFor' },
+  { header: 'Estimate Amazon Delivery', key: 'estimateAmazonDelivery' },
+  { header: 'Amazon Acc.', key: 'amazonAccount' },
+  { header: 'Card No.', key: 'cardNo' },
+  { header: 'Amazon Price', key: 'itemCost' },
+  { header: 'Issues If Any', key: 'issuesIfAny' },
+  { header: 'Tracking Id.', key: 'trackingId' },
+  { header: 'Remark', key: 'remark' },
+  { header: 'Tracking ID Uploaded', key: 'trackingIdUploaded' },
+  { header: 'Amazon Order Number', key: 'amazonOrderNumber' },
+];
+
+/** Exact headers from the Profit Sheet Excel export (import aliases). */
+export const ETSY_PROFIT_SHEET_HEADERS = [
+  { header: 'Order Date', key: 'dateSold' },
+  { header: 'Name', key: 'productName' },
+  { header: 'Qty', key: 'qty' },
+  { header: 'Sold For', key: 'soldFor' },
+  { header: 'Sales Tax', key: 'tax' },
+  { header: 'Etsy fee', key: 'etsyFee' },
+  { header: 'Processing Fee', key: 'processingFee' },
+  { header: 'Regulatory Operating fee', key: 'regulatoryOperatingFee' },
+  { header: 'TDS', key: 'tds' },
+  { header: 'TCS', key: 'tcs' },
+  { header: 'Offsite ADS', key: 'offsiteAds' },
+  { header: 'Coupons', key: 'coupons' },
+  { header: 'Relist Fee', key: 'relistFee' },
+  { header: 'T.Id', key: 'tId' },
+  { header: 'Additional Fees', key: 'additionalFees' },
+  { header: 'Net', key: 'net' },
+  { header: 'P. Date', key: 'estimateAmazonDelivery' },
+  { header: 'Item Cost', key: 'itemCost' },
+  { header: 'Ship Cost', key: 'shipCost' },
+  { header: 'in (Rs)', key: 'totalInRs' },
+  { header: 'MarkUp Fee', key: 'markUpFee' },
+  { header: 'IGST', key: 'igst' },
+  { header: 'Ex. Rate', key: 'exRate' },
+  { header: 'In Hand', key: 'inHand' },
+  { header: 'Customers Name', key: 'customerName' },
+  { header: 'Amazon A/C', key: 'amazonAccount' },
+  { header: 'Credit Card', key: 'cardNo' },
+];
+
 const COLUMN_ALIASES = {
   '': null,
   num: null,
@@ -17,6 +75,12 @@ const COLUMN_ALIASES = {
   dateofsold: 'dateSold',
   datesold: 'dateSold',
   solddate: 'dateSold',
+  orderdate: 'dateSold',
+
+  name: 'productName',
+  customersname: 'customerName',
+  customername: 'customerName',
+  customer: 'customerName',
 
   etsyordersreceivedtime: 'etsyOrdersReceivedTime',
   etsyorderreceivedtime: 'etsyOrdersReceivedTime',
@@ -33,6 +97,7 @@ const COLUMN_ALIASES = {
   estimatedetsydelivery: 'estimateEtsyDelivery',
   etsydelivery: 'estimateEtsyDelivery',
   etsyestimateddelivery: 'estimateEtsyDelivery',
+  estdelivery: 'estimateEtsyDelivery',
 
   productname: 'productName',
   product: 'productName',
@@ -65,6 +130,12 @@ const COLUMN_ALIASES = {
   messageupdate: 'messageUpdate',
   buyermessage: 'messageUpdate',
 
+  etsypricedetails: 'soldFor',
+  etsyprice: 'soldFor',
+  pricedetails: 'soldFor',
+  etsypricedetailssoldfor: 'soldFor',
+  etsypricedetailstax: 'tax',
+  etsypricedetailstotal: 'total',
   soldfor: 'soldFor',
   sold: 'soldFor',
 
@@ -99,6 +170,9 @@ const COLUMN_ALIASES = {
   transactionid: 'tId',
   etsytransactionid: 'tId',
 
+  additionalfees: 'additionalFees',
+  additionalfee: 'additionalFees',
+
   net: 'net',
   netamount: 'net',
   ordernet: 'net',
@@ -106,17 +180,24 @@ const COLUMN_ALIASES = {
   estimateamazondelivery: 'estimateAmazonDelivery',
   estimatedamazondelivery: 'estimateAmazonDelivery',
   amazondelivery: 'estimateAmazonDelivery',
+  pdate: 'estimateAmazonDelivery',
+  purchasedate: 'estimateAmazonDelivery',
+  puchasedate: 'estimateAmazonDelivery',
 
   amazonacc: 'amazonAccount',
   amazonaccount: 'amazonAccount',
+  amazonac: 'amazonAccount',
+  amazona: 'amazonAccount',
 
   cardno: 'cardNo',
   cardnumber: 'cardNo',
   card: 'cardNo',
+  creditcard: 'cardNo',
+  creditcardno: 'cardNo',
 
+  amazonprice: 'itemCost',
   itemcost: 'itemCost',
   cost: 'itemCost',
-  amazonprice: 'itemCost',
   amazoncost: 'itemCost',
 
   shipcost: 'shipCost',
@@ -130,6 +211,8 @@ const COLUMN_ALIASES = {
   totalinrs: 'totalInRs',
   totalrs: 'totalInRs',
   totalinr: 'totalInRs',
+  inrs: 'totalInRs',
+  inrupees: 'totalInRs',
 
   markupfee: 'markUpFee',
   markup: 'markUpFee',
@@ -158,6 +241,7 @@ const COLUMN_ALIASES = {
 
   trackingiduploaded: 'trackingIdUploaded',
   trackinguploaded: 'trackingIdUploaded',
+  trackingidupload: 'trackingIdUploaded',
 
   amazonordernumber: 'amazonOrderNumber',
   amazonorderid: 'amazonOrderNumber',
@@ -173,11 +257,34 @@ const COLUMN_ALIASES = {
 /** Headers that repeat in the sheet (e.g. Etsy Tax then Amazon Tax). */
 const REPEATED_HEADER_FIELDS = {
   tax: ['tax', 'amazonTax'],
-  total: ['total', 'amazonTotal'],
+  total: ['total', 'totalInUsd', 'amazonTotal'],
+  etsypricedetails: ['soldFor', 'tax', 'total'],
 };
 
 function normalizeHeader(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+for (const { header, key } of [...ETSY_FULFILMENT_SHEET_HEADERS, ...ETSY_PROFIT_SHEET_HEADERS]) {
+  const normalized = normalizeHeader(header);
+  if (normalized && key && COLUMN_ALIASES[normalized] == null) {
+    COLUMN_ALIASES[normalized] = key;
+  }
+}
+
+function combineHeaderRows(topRow = [], bottomRow = []) {
+  const len = Math.max(topRow.length, bottomRow.length);
+  const combined = [];
+  for (let i = 0; i < len; i += 1) {
+    const top = String(topRow[i] || '').trim();
+    const bottom = String(bottomRow[i] || '').trim();
+    if (top && bottom && normalizeHeader(top) !== normalizeHeader(bottom)) {
+      combined.push(`${top} ${bottom}`);
+    } else {
+      combined.push(bottom || top);
+    }
+  }
+  return combined;
 }
 
 function parseMonthToken(token) {
@@ -200,12 +307,46 @@ function toIsoDate(year, month, day) {
   return `${year}-${pad2(month)}-${pad2(day)}`;
 }
 
+function excelSerialToIsoDate(serial) {
+  const n = Number(serial);
+  if (!Number.isFinite(n) || n < 1 || n > 80000) return null;
+  const date = new Date(Date.UTC(1899, 11, 30) + Math.round(n) * 86400000);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
+function replaceIsoYear(iso, year) {
+  if (!iso || !year) return iso;
+  return `${year}${iso.slice(4)}`;
+}
+
+function alignDateYearToSold(soldIso, otherIso) {
+  if (!soldIso || !otherIso) return otherIso;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(soldIso) || !/^\d{4}-\d{2}-\d{2}$/.test(otherIso)) return otherIso;
+  const soldY = Number(soldIso.slice(0, 4));
+  const otherY = Number(otherIso.slice(0, 4));
+  if (Math.abs(otherY - soldY) >= 2) {
+    return replaceIsoYear(otherIso, soldY);
+  }
+  return otherIso;
+}
+
 function normalizeDate(value, defaultYear = new Date().getFullYear()) {
   const raw = String(value || '').trim();
   if (!raw || raw === '-') return '';
 
   if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
     return raw.slice(0, 10);
+  }
+
+  // Raw Excel serial (e.g. 46207 = 2026-07-04). Old years are usually MMM-YY
+  // misreads like Jul-06 → 2006-07-01; keep month/day and use defaultYear.
+  if (/^\d{5}(\.\d+)?$/.test(raw)) {
+    const iso = excelSerialToIsoDate(raw);
+    if (iso) {
+      const year = Number(iso.slice(0, 4));
+      return year >= 2018 ? iso : replaceIsoYear(iso, defaultYear);
+    }
   }
 
   const slashMatch = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
@@ -264,6 +405,18 @@ function coerceValue(fieldKey, rawValue) {
     return normalizeDate(value);
   }
 
+  if (fieldKey === 'etsyOrdersReceivedTime') {
+    if (/^\d{1,2}:\d{2}/.test(value)) return value;
+    const fraction = Number(value);
+    if (Number.isFinite(fraction) && fraction > 0 && fraction < 1) {
+      const minutes = Math.round(fraction * 24 * 60);
+      const hours = Math.floor(minutes / 60) % 24;
+      const mins = minutes % 60;
+      return `${hours}:${pad2(mins)}`;
+    }
+    return value;
+  }
+
   if (IDENTIFIER_FIELDS.has(fieldKey)) {
     return normalizeIdentifierString(value);
   }
@@ -315,12 +468,14 @@ export function buildEtsyHeaderIndexMap(headers) {
 
     if (REPEATED_HEADER_FIELDS[normalized]) {
       const fields = REPEATED_HEADER_FIELDS[normalized];
-      const nextIdx = repeatIndex[normalized] || 0;
-      if (nextIdx < fields.length) {
+      let nextIdx = repeatIndex[normalized] || 0;
+      while (nextIdx < fields.length) {
         const fieldKey = fields[nextIdx];
+        nextIdx += 1;
         if (map[fieldKey] === undefined) {
           map[fieldKey] = index;
-          repeatIndex[normalized] = nextIdx + 1;
+          repeatIndex[normalized] = nextIdx;
+          break;
         }
       }
       return;
@@ -335,20 +490,27 @@ export function buildEtsyHeaderIndexMap(headers) {
   return map;
 }
 
-function findHeaderRowIndex(matrix) {
+function findHeaderRow(matrix) {
   const maxScan = Math.min(12, matrix.length);
-  let bestIndex = 0;
-  let bestScore = -1;
+  let best = { index: 0, dataStart: 1, headers: matrix[0] || [], score: -1 };
 
   for (let i = 0; i < maxScan; i += 1) {
-    const score = Object.keys(buildEtsyHeaderIndexMap(matrix[i] || [])).length;
-    if (score > bestScore) {
-      bestScore = score;
-      bestIndex = i;
+    const row = matrix[i] || [];
+    const score = Object.keys(buildEtsyHeaderIndexMap(row)).length;
+    if (score > best.score) {
+      best = { index: i, dataStart: i + 1, headers: row, score };
+    }
+
+    if (i + 1 < matrix.length) {
+      const combined = combineHeaderRows(row, matrix[i + 1] || []);
+      const combinedScore = Object.keys(buildEtsyHeaderIndexMap(combined)).length;
+      if (combinedScore > best.score) {
+        best = { index: i, dataStart: i + 2, headers: combined, score: combinedScore };
+      }
     }
   }
 
-  return bestIndex;
+  return best;
 }
 
 function collectIdentifierWarnings(rows) {
@@ -388,8 +550,8 @@ export function parseEtsyOrderFulfilmentMatrix(matrix, options = {}) {
     return { rows: [], errors: [{ row: 0, reason: 'Spreadsheet is empty' }], headerMap: {}, headers: [] };
   }
 
-  const headerRowIndex = findHeaderRowIndex(matrix);
-  const headers = matrix[headerRowIndex] || [];
+  const headerRow = findHeaderRow(matrix);
+  const headers = headerRow.headers || [];
   const headerMap = buildEtsyHeaderIndexMap(headers);
   const matchedFields = ETSY_ORDER_FULFILMENT_COLUMNS
     .filter((col) => col.key !== 'rowNum' && headerMap[col.key] !== undefined);
@@ -406,12 +568,12 @@ export function parseEtsyOrderFulfilmentMatrix(matrix, options = {}) {
   const rows = [];
   const errors = [];
 
-  for (let i = headerRowIndex + 1; i < matrix.length; i += 1) {
+  for (let i = headerRow.dataStart; i < matrix.length; i += 1) {
     const cells = matrix[i];
     const row = {};
 
     for (const column of ETSY_ORDER_FULFILMENT_COLUMNS) {
-      if (column.key === 'rowNum' || column.key === 'storeName' || column.computed) continue;
+      if (column.key === 'rowNum' || column.key === 'storeName') continue;
       if (headerMap[column.key] === undefined) continue;
       row[column.key] = DATE_FIELDS.has(column.key)
         ? normalizeDate(cells[headerMap[column.key]], defaultYear)
@@ -420,6 +582,12 @@ export function parseEtsyOrderFulfilmentMatrix(matrix, options = {}) {
 
     const hasData = Object.values(row).some((value) => String(value || '').trim());
     if (!hasData) continue;
+
+    if (row.dateSold) {
+      row.shipBy = alignDateYearToSold(row.dateSold, row.shipBy);
+      row.estimateEtsyDelivery = alignDateYearToSold(row.dateSold, row.estimateEtsyDelivery);
+      row.estimateAmazonDelivery = alignDateYearToSold(row.dateSold, row.estimateAmazonDelivery);
+    }
 
     rows.push(enrichOrderWithAmazonPricing(row));
   }
@@ -451,9 +619,7 @@ export function getEtsyDetectedColumns(headerMap) {
 }
 
 export function buildEtsyImportTemplateCsv() {
-  const headers = ETSY_ORDER_FULFILMENT_COLUMNS
-    .filter((column) => !['rowNum', 'storeName'].includes(column.key))
-    .map((column) => column.label);
+  const headers = ETSY_FULFILMENT_SHEET_HEADERS.map((column) => column.header);
   return `${headers.join(',')}\n`;
 }
 

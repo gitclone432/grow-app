@@ -30,7 +30,7 @@ export const SUBMENUS = {
     id: 'templateListing',
     name: 'Template Listing',
     category: 'listingResearch',
-    pages: ['ManageTemplates', 'AsinSourcing', 'SourcingRules', 'SelectSellerLab', 'AsinPrecheck', 'AsinPrecheckStats', 'AmazonPiSourceColumns', 'ListingsDatabase', 'ListingDirectory', 'TemplateDirectory'],
+    pages: ['ManageTemplates', 'AsinSourcing', 'SourcingRules', 'SelectSellerLab', 'AmazonSearch', 'AsinPrecheck', 'AsinPrecheckStats', 'AmazonPiSourceColumns', 'ListingsDatabase', 'ListingDirectory', 'TemplateDirectory'],
   },
   asinImporter: {
     id: 'asinImporter',
@@ -82,6 +82,7 @@ export const PAGE_REGISTRY = [
   { id: 'AmazonPiSourceColumns', name: 'Amazon Product Info Columns', path: '/amazon-product-info-columns', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ListingsDatabase', name: 'Listings Database', path: '/listings-database', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin'] },
   { id: 'SelectSellerLab', name: 'CSV Listings', path: '/select-seller-lab', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'lister', 'advancelister', 'trainee'] },
+  { id: 'AmazonSearch', name: 'Amazon Search', path: '/amazon-search', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'] },
   { id: 'AsinPrecheck', name: 'ASIN Precheck', path: '/asin-precheck', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'lister', 'advancelister', 'trainee'] },
   { id: 'AsinPrecheckStats', name: 'ASIN Precheck Stats', path: '/asin-precheck-stats', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin'] },
   { id: 'PrecheckAiUsage', name: 'Precheck AI Usage', path: '/precheck-ai-usage', category: 'listingResearch', defaultRoles: ['superadmin', 'listingadmin'] },
@@ -184,12 +185,12 @@ export const PAGE_REGISTRY = [
   { id: 'UserPerformance', name: 'User Performance Logs', path: '/user-performance', category: 'others', defaultRoles: ['superadmin'] },
 
   // ====== ETSY ======
+  { id: 'EtsyDashboard', name: 'Dashboard', path: '/etsy/dashboard', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyProducts', name: 'Products', path: '/etsy/products', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyOrderFulfilment', name: 'Order Fulfilment', path: '/etsy/order-fulfilment', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'EtsyProfitSheet', name: 'Profit Sheet', path: '/etsy/profit-sheet', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyOrderAnalytics', name: 'Etsy Order Analytics', path: '/etsy/order-analytics', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyDailyOrders', name: 'Daily Orders', path: '/etsy/daily-orders', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
-  { id: 'EtsyProfitSheet', name: 'Profit Sheet', path: '/etsy/profit-sheet', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
-  { id: 'EtsyDashboard', name: 'Dashboard', path: '/etsy/dashboard', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
 
   // ====== SETTINGS ======
   { id: 'StoresPage', name: 'eBay Stores', path: '/stores-page', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },

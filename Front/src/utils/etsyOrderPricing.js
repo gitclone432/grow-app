@@ -43,6 +43,7 @@ export const ETSY_RUPEE_INPUT_FIELDS = new Set([
   'tcs',
   'offsiteAds',
   'coupons',
+  'additionalFees',
 ]);
 
 /** @deprecated Use ETSY_RUPEE_INPUT_FIELDS for manual entry; computed fields are derived. */

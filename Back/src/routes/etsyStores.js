@@ -5,7 +5,7 @@ import EtsyStore from '../models/EtsyStore.js';
 const router = Router();
 
 // GET /api/etsy/stores
-router.get('/', requireAuth, requirePageAccess(['EtsyStoresPage', 'EtsyOrderFulfilment']), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess(['EtsyStoresPage', 'EtsyOrderFulfilment', 'EtsyProfitSheet']), async (req, res) => {
   try {
     const stores = await EtsyStore.find({}).sort({ name: 1 }).lean();
     res.json({ stores });

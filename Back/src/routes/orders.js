@@ -719,8 +719,18 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
       lowValueClause
     );
 
-    const [todayOrdersCount, awaitingCount, arrivalsCount, unreadMessagesCount, todayOrdersTable, topSellersRaw, awaitingBySellerRaw, arrivalsBySellerRaw, unreadBySellerRaw, nonCompliantSet] = await Promise.all([
+    // An order is "unsuccessful" once it is cancelled or fully refunded.
+    const unsuccessfulMatch = maybeAnd(todayOrdersMatch, {
+      $or: [
+        { cancelState: { $in: FINAL_CANCELLED_STATES } },
+        { 'cancelStatus.cancelState': { $in: FINAL_CANCELLED_STATES } },
+        { orderPaymentStatus: 'FULLY_REFUNDED' }
+      ]
+    });
+
+    const [todayOrdersCount, todayUnsuccessfulCount, awaitingCount, arrivalsCount, unreadMessagesCount, todayOrdersTable, topSellersRaw, awaitingBySellerRaw, arrivalsBySellerRaw, unreadBySellerRaw, nonCompliantSet] = await Promise.all([
       Order.countDocuments(todayOrdersMatch),
+      Order.countDocuments(unsuccessfulMatch),
       Order.countDocuments(awaitingMatch),
       Order.countDocuments(arrivalsMatch),
       Message.countDocuments({
@@ -813,16 +823,25 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
     const previousMonth = getPreviousMonth(month);
     const currentRange = getMonthUtcRange(month);
     const previousRange = getMonthUtcRange(previousMonth);
-    const [currentMonthCount, previousMonthCount] = await Promise.all([
+    const tableOrderIds = todayOrdersTable
+      .map((o) => o.orderId)
+      .filter(Boolean);
+    const [currentMonthCount, previousMonthCount, returnedOrderIds] = await Promise.all([
       Order.countDocuments(maybeAnd(sellerMatch, marketplaceClause, { dateSold: { $gte: currentRange.start, $lte: currentRange.end } }, lowValueClause)),
-      Order.countDocuments(maybeAnd(sellerMatch, marketplaceClause, { dateSold: { $gte: previousRange.start, $lte: previousRange.end } }, lowValueClause))
+      Order.countDocuments(maybeAnd(sellerMatch, marketplaceClause, { dateSold: { $gte: previousRange.start, $lte: previousRange.end } }, lowValueClause)),
+      tableOrderIds.length
+        ? Return.distinct('orderId', { orderId: { $in: tableOrderIds } })
+        : Promise.resolve([])
     ]);
+    const returnedOrderIdSet = new Set(returnedOrderIds.map((id) => String(id)));
 
     res.json({
       date,
       timezone: PT_TIMEZONE,
       kpis: {
         todayOrders: todayOrdersCount,
+        todaySuccessfulOrders: Math.max(0, todayOrdersCount - todayUnsuccessfulCount),
+        todayUnsuccessfulOrders: todayUnsuccessfulCount,
         monthlyDeltaNet: currentMonthCount - previousMonthCount,
         awaitingToday: awaitingCount,
         arrivalsToday: arrivalsCount,
@@ -838,7 +857,10 @@ router.get('/dashboard/overview', requireAuth, requirePageAccess('OrdersDashboar
         dateSold: o.dateSold,
         purchaseMarketplaceId: o.purchaseMarketplaceId,
         shipByDate: o.shipByDate,
-        trackingNumber: o.trackingNumber || o.manualTrackingNumber || ''
+        trackingNumber: o.trackingNumber || o.manualTrackingNumber || '',
+        cancelState: o.cancelState || o.cancelStatus?.cancelState || '',
+        orderPaymentStatus: o.orderPaymentStatus || '',
+        hasReturn: returnedOrderIdSet.has(String(o.orderId || ''))
       })),
       riskQueues: {
         nonCompliantSellerList,

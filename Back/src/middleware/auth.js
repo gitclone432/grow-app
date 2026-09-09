@@ -81,6 +81,7 @@ export const PAGE_DEFAULT_ROLES = {
   'AmazonPiSourceColumns': ['superadmin', 'listingadmin'],
   'ListingsDatabase': ['superadmin'],
   'SelectSellerLab': ['superadmin', 'lister', 'advancelister', 'trainee'],
+  'AmazonSearch': ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'],
   'SellerTemplatesLab': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'AsinPrecheck': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'AsinPrecheckStats': ['superadmin'],
