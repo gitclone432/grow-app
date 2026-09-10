@@ -1760,7 +1760,7 @@ export default function InrApiPage({
 
   useEffect(() => {
     loadStored();
-  }, [sellerFilter]);
+  }, [sellerFilter, _dateFilter]);
 
   // Helper function to normalize row data from backend
   function normalizeRowData(rows) {
@@ -1778,6 +1778,16 @@ export default function InrApiPage({
     setError('');
     const params = { limit: 500 };
     if (sellerFilter) params.sellerId = sellerFilter;
+    
+    // Add date filter parameters
+    if (_dateFilter?.mode === 'single' && _dateFilter?.single) {
+      params.dateFrom = _dateFilter.single;
+      params.dateTo = _dateFilter.single;
+    } else if (_dateFilter?.mode === 'range') {
+      if (_dateFilter?.from) params.dateFrom = _dateFilter.from;
+      if (_dateFilter?.to) params.dateTo = _dateFilter.to;
+    }
+    
     const inquiryParams = { ...params };
     const disputeParams = { ...params };
     const [inqRes, caseRes, disputeRes] = await Promise.allSettled([

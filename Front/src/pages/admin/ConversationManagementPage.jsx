@@ -1060,7 +1060,7 @@ export default function ConversationManagementPage() {
   const [editAgentName, setEditAgentName] = useState('');
   const [agentSaving, setAgentSaving] = useState(false);
 
-  const rowsPerPage = 25;
+  const rowsPerPage = 50;
 
   const ONE_HOUR_MS = 60 * 60 * 1000;
   const ONE_DAY_MS = 24 * ONE_HOUR_MS;
@@ -1141,6 +1141,7 @@ export default function ConversationManagementPage() {
   const [filterAbout, setFilterAbout] = useState('All');
   const [filterCase, setFilterCase] = useState('All');
   const [filterPickedUpBy, setFilterPickedUpBy] = useState('All');
+  const [filterBuyerSla, setFilterBuyerSla] = useState('All');
   const [dateFilterMode, setDateFilterMode] = useState('none');
   const [singleDate, setSingleDate] = useState('');
   const [dateFrom, setDateFrom] = useState('');
@@ -1163,13 +1164,14 @@ export default function ConversationManagementPage() {
 
   useEffect(() => {
     fetchItems();
-  }, [currentPage, debouncedSearch, filterSeller, filterAbout, filterCase, filterPickedUpBy, dateFilterMode, singleDate, dateFrom, dateTo]);
+  }, [currentPage, debouncedSearch, filterSeller, filterAbout, filterCase, filterPickedUpBy, filterBuyerSla, dateFilterMode, singleDate, dateFrom, dateTo]);
 
   function buildListParams() {
     const params = {
       status: 'Case Not Opened,Open,In Progress',
-      page: currentPage,
-      limit: rowsPerPage
+      page: filterBuyerSla !== 'All' ? 1 : currentPage,
+      // When SLA filter is active, fetch more records to get all matching results
+      limit: filterBuyerSla !== 'All' ? 1000 : rowsPerPage
     };
 
     if (debouncedSearch) params.search = debouncedSearch;
@@ -1195,6 +1197,7 @@ export default function ConversationManagementPage() {
     if (filterAbout !== 'All') count += 1;
     if (filterCase !== 'All') count += 1;
     if (filterPickedUpBy !== 'All') count += 1;
+    if (filterBuyerSla !== 'All') count += 1;
     if (dateFilterMode === 'single' && singleDate) count += 1;
     if (dateFilterMode === 'range' && (dateFrom || dateTo)) count += 1;
     return count;
@@ -1217,6 +1220,7 @@ export default function ConversationManagementPage() {
     setFilterAbout('All');
     setFilterCase('All');
     setFilterPickedUpBy('All');
+    setFilterBuyerSla('All');
     setDateFilterMode('none');
     setSingleDate('');
     setDateFrom('');
@@ -1228,9 +1232,30 @@ export default function ConversationManagementPage() {
     setLoading(true);
     try {
       const { data } = await api.get('/ebay/conversation-management/list', { params: buildListParams() });
-      setItems(data?.records || []);
-      setTotalItems(data?.total || 0);
-      setTotalPages(data?.pagination?.totalPages || 1);
+      let fetchedItems = data?.records || [];
+
+      // Apply client-side Buyer SLA filter
+      if (filterBuyerSla !== 'All') {
+        fetchedItems = fetchedItems.filter((item) => {
+          const slaLabel = getBuyerSlaLabel(item);
+          return slaLabel.color === filterBuyerSla;
+        });
+
+        // Calculate pagination for filtered results
+        const totalFiltered = fetchedItems.length;
+        const totalFilteredPages = Math.ceil(totalFiltered / rowsPerPage);
+        const startIdx = (currentPage - 1) * rowsPerPage;
+        const endIdx = startIdx + rowsPerPage;
+
+        // Show only the current page of filtered results (50 per page)
+        setItems(fetchedItems.slice(startIdx, endIdx));
+        setTotalItems(totalFiltered);
+        setTotalPages(totalFilteredPages);
+      } else {
+        setItems(fetchedItems);
+        setTotalItems(data?.total || 0);
+        setTotalPages(data?.pagination?.totalPages || 1);
+      }
     } catch (e) {
       console.error(e);
       setItems([]);
@@ -1611,6 +1636,24 @@ export default function ConversationManagementPage() {
                 {chatAgents.map((agent) => (
                   <MenuItem key={agent._id} value={agent.name}>{agent.name}</MenuItem>
                 ))}
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={12} sm={6} md={2}>
+            <FormControl fullWidth size="small" sx={filterFieldSx}>
+              <InputLabel>Buyer SLA</InputLabel>
+              <Select
+                value={filterBuyerSla}
+                label="Buyer SLA"
+                onChange={(e) => {
+                  setFilterBuyerSla(e.target.value);
+                  setCurrentPage(1);
+                }}
+              >
+                <MenuItem value="All">All SLA Status</MenuItem>
+                <MenuItem value="warning">🟠 Orange (At Risk)</MenuItem>
+                <MenuItem value="error">🔴 Red (Overdue)</MenuItem>
+                <MenuItem value="success">🟢 Green (Replied)</MenuItem>
               </Select>
             </FormControl>
           </Grid>

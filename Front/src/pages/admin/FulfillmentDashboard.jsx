@@ -1052,15 +1052,16 @@ const FulfillmentOrderRow = memo(function FulfillmentOrderRow({
   );
 });
 
-const getOrderSku = (order) => {
-  if (!order) return '';
-  if (order.sku) return String(order.sku);
-  if (Array.isArray(order.lineItems)) {
-    const skuFromLine = order.lineItems.find((item) => item?.sku)?.sku;
-    if (skuFromLine) return String(skuFromLine);
+const getOrderSkus = (order) => {
+  if (!order) return [];
+  if (Array.isArray(order.lineItems) && order.lineItems.length > 0) {
+    return order.lineItems.map((item) => (item?.sku ? String(item.sku) : ''));
   }
-  return '';
+  if (order.sku) return [String(order.sku)];
+  return [];
 };
+
+const getOrderSku = (order) => getOrderSkus(order).find(Boolean) || '';
 
 const getSupplierLink = (order) => String(order?.supplierLink || order?.affiliateLink || '').trim();
 
@@ -3970,7 +3971,7 @@ function FulfillmentDashboard() {
           accessor: (o) => formatDeliveryDate(o)
         },
         productName: { header: 'Product Name', accessor: 'productName' },
-        sku: { header: 'SKU', accessor: (o) => getOrderSku(o) },
+        sku: { header: 'SKU', accessor: (o) => getOrderSkus(o).filter(Boolean).join(' | ') },
         supplierLink: { header: 'Supplier Link', accessor: (o) => getSupplierLink(o) },
         buyerNote: { header: 'Buyer Note', accessor: 'buyerCheckoutNotes' },
         buyerName: { header: 'Buyer Name', accessor: 'shippingFullName' },
@@ -4918,19 +4919,38 @@ function FulfillmentDashboard() {
                           )}
                           {visibleColumnsSet.has('sku') && (
                             <TableCell sx={{ maxWidth: 220, pr: 1 }}>
-                              <Stack direction="row" spacing={0.5} alignItems="center">
-                                <Typography variant="body2" sx={{ wordBreak: 'break-word' }}>
-                                  {getOrderSku(order) || '-'}
-                                </Typography>
-                                {getOrderSku(order) && (
-                                  <IconButton
-                                    size="small"
-                                    onClick={() => handleCopy(getOrderSku(order))}
-                                    aria-label="copy sku"
-                                  >
-                                    <ContentCopyIcon fontSize="small" sx={{ fontSize: '1rem' }} />
-                                  </IconButton>
-                                )}
+                              <Stack spacing={0.5}>
+                                {(() => {
+                                  const skus = getOrderSkus(order);
+                                  if (skus.length === 0) {
+                                    return <Typography variant="body2">-</Typography>;
+                                  }
+                                  return skus.map((sku, i) => (
+                                    <Stack
+                                      key={i}
+                                      direction="row"
+                                      spacing={0.5}
+                                      alignItems="center"
+                                      sx={{
+                                        borderBottom: i < skus.length - 1 ? '1px dashed rgba(0,0,0,0.1)' : 'none',
+                                        pb: i < skus.length - 1 ? 0.5 : 0,
+                                      }}
+                                    >
+                                      <Typography variant="body2" sx={{ wordBreak: 'break-word' }}>
+                                        {sku || '-'}
+                                      </Typography>
+                                      {sku && (
+                                        <IconButton
+                                          size="small"
+                                          onClick={() => handleCopy(sku)}
+                                          aria-label="copy sku"
+                                        >
+                                          <ContentCopyIcon fontSize="small" sx={{ fontSize: '1rem' }} />
+                                        </IconButton>
+                                      )}
+                                    </Stack>
+                                  ));
+                                })()}
                               </Stack>
                             </TableCell>
                           )}
