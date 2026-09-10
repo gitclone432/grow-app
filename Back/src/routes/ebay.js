@@ -13080,11 +13080,32 @@ router.post('/fetch-inr-api', requireAuth, requirePageAccess('Disputes'), async 
 
 router.get('/stored-case-management', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
-    const { sellerId, status, caseType, marketplace, limit = 200 } = req.query;
+    const { sellerId, status, caseType, marketplace, limit = 200, dateFrom, dateTo } = req.query;
     const query = {};
     if (sellerId) query.seller = sellerId;
     if (status) query.status = status;
     if (caseType) query.caseType = caseType;
+    
+    // Add date filter on Case Management's creationDate
+    if (dateFrom || dateTo) {
+      const dateQuery = {};
+      if (dateFrom) {
+        const fromDate = new Date(dateFrom);
+        if (!isNaN(fromDate.getTime())) {
+          dateQuery.$gte = fromDate;
+        }
+      }
+      if (dateTo) {
+        const toDate = new Date(dateTo);
+        if (!isNaN(toDate.getTime())) {
+          toDate.setUTCHours(23, 59, 59, 999);
+          dateQuery.$lte = toDate;
+        }
+      }
+      if (Object.keys(dateQuery).length > 0) {
+        query.creationDate = dateQuery;
+      }
+    }
     if (marketplace) {
       const sellerIdsForMarket = await Seller.find({ ebayMarketplaces: marketplace }).distinct('_id');
       query.$or = [
@@ -13728,13 +13749,34 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
 
 // Get stored Payment Disputes from database
 router.get('/stored-payment-disputes', async (req, res) => {
-  const { sellerId, status, reason, marketplace, limit = 200 } = req.query;
+  const { sellerId, status, reason, marketplace, limit = 200, dateFrom, dateTo } = req.query;
 
   try {
     let query = {};
     if (sellerId) query.seller = sellerId;
     if (status) query.paymentDisputeStatus = status;
     if (reason) query.reason = reason;
+    
+    // Add date filter on Payment Dispute's openDate
+    if (dateFrom || dateTo) {
+      const dateQuery = {};
+      if (dateFrom) {
+        const fromDate = new Date(dateFrom);
+        if (!isNaN(fromDate.getTime())) {
+          dateQuery.$gte = fromDate;
+        }
+      }
+      if (dateTo) {
+        const toDate = new Date(dateTo);
+        if (!isNaN(toDate.getTime())) {
+          toDate.setUTCHours(23, 59, 59, 999);
+          dateQuery.$lte = toDate;
+        }
+      }
+      if (Object.keys(dateQuery).length > 0) {
+        query.openDate = dateQuery;
+      }
+    }
     if (marketplace) {
       const sellerIdsForMarket = await Seller.find({ ebayMarketplaces: marketplace }).distinct('_id');
       if (sellerId) {

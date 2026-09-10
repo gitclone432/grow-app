@@ -1015,56 +1015,69 @@ export default function OrderDetailsModal({ open, onClose, orderId, fulfillmentF
               />
             </Box>
 
-            {/* Item */}
-            <Section title="Item">
-              <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25 }}>
-                <ItemThumbnail order={order} itemId={itemId} />
-                <Box sx={{ flex: 1, minWidth: 0 }}>
-                  <DetailCell
-                    label="Title"
-                    value={itemTitle}
-                    fullWidth
-                  />
-                  <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, columnGap: 2 }}>
-                    <DetailCell
-                      label="Item #"
-                      value={
-                        itemId ? (
-                          <Stack direction="row" alignItems="center" spacing={0.25} sx={{ minWidth: 0 }}>
-                            <Button
-                              size="small"
-                              variant="text"
-                              onClick={() => openEbayItemPopup(itemId)}
-                              endIcon={<OpenInNewIcon sx={{ fontSize: 14 }} />}
-                              sx={{
-                                minWidth: 0,
-                                p: 0,
-                                fontSize: '0.8125rem',
-                                fontFamily: 'monospace',
-                                textTransform: 'none',
-                                justifyContent: 'flex-start'
-                              }}
-                            >
-                              {itemId}
-                            </Button>
-                            <IconButton size="small" onClick={() => handleCopy(itemId)} sx={{ p: 0.25 }}>
-                              <ContentCopyIcon sx={{ fontSize: 13 }} />
-                            </IconButton>
-                          </Stack>
-                        ) : '-'
-                      }
-                    />
-                    <DetailCell label="Qty" value={order.quantity ?? order.lineItems?.[0]?.quantity} />
-                    <DetailCell label="SKU" value={order.lineItems?.[0]?.sku} />
-                    <DetailCell
-                      label="Line Item"
-                      value={order.lineItems?.[0]?.lineItemId}
-                      copyable
-                      onCopy={handleCopy}
-                    />
-                  </Box>
-                </Box>
-              </Box>
+            {/* Items */}
+            <Section title={`Items${order.lineItems?.length > 1 ? ` (${order.lineItems.length})` : ''}`}>
+              <Stack spacing={1.5} divider={<Box sx={{ borderTop: '1px dashed', borderColor: 'divider' }} />}>
+                {(order.lineItems?.length > 0 ? order.lineItems : [{
+                  title: itemTitle,
+                  legacyItemId: itemId,
+                  quantity: order.quantity,
+                  sku: order.sku,
+                  lineItemId: order.lineItemId
+                }]).map((lineItem, idx) => {
+                  const lineItemId = lineItem.legacyItemId || (idx === 0 ? itemId : '');
+                  return (
+                    <Box key={lineItem.lineItemId || idx} sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25 }}>
+                      <ItemThumbnail order={order} itemId={lineItemId} />
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <DetailCell
+                          label="Title"
+                          value={lineItem.title || itemTitle}
+                          fullWidth
+                        />
+                        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, columnGap: 2 }}>
+                          <DetailCell
+                            label="Item #"
+                            value={
+                              lineItemId ? (
+                                <Stack direction="row" alignItems="center" spacing={0.25} sx={{ minWidth: 0 }}>
+                                  <Button
+                                    size="small"
+                                    variant="text"
+                                    onClick={() => openEbayItemPopup(lineItemId)}
+                                    endIcon={<OpenInNewIcon sx={{ fontSize: 14 }} />}
+                                    sx={{
+                                      minWidth: 0,
+                                      p: 0,
+                                      fontSize: '0.8125rem',
+                                      fontFamily: 'monospace',
+                                      textTransform: 'none',
+                                      justifyContent: 'flex-start'
+                                    }}
+                                  >
+                                    {lineItemId}
+                                  </Button>
+                                  <IconButton size="small" onClick={() => handleCopy(lineItemId)} sx={{ p: 0.25 }}>
+                                    <ContentCopyIcon sx={{ fontSize: 13 }} />
+                                  </IconButton>
+                                </Stack>
+                              ) : '-'
+                            }
+                          />
+                          <DetailCell label="Qty" value={lineItem.quantity} />
+                          <DetailCell label="SKU" value={lineItem.sku} />
+                          <DetailCell
+                            label="Line Item"
+                            value={lineItem.lineItemId}
+                            copyable
+                            onCopy={handleCopy}
+                          />
+                        </Box>
+                      </Box>
+                    </Box>
+                  );
+                })}
+              </Stack>
             </Section>
 
             {/* Pricing + Status */}
