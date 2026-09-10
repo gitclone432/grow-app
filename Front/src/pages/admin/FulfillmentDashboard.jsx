@@ -1697,6 +1697,7 @@ function FulfillmentDashboard() {
   const [searchProductName, setSearchProductName] = useState(() => getInitialState('searchProductName', ''));
   //const [searchSoldDate, setSearchSoldDate] = useState('');
   const [searchMarketplace, setSearchMarketplace] = useState(() => getInitialState('searchMarketplace', ''));
+  const [searchAmazonAccount, setSearchAmazonAccount] = useState(() => getInitialState('searchAmazonAccount', ''));
   const [searchPaymentStatus, setSearchPaymentStatus] = useState(() => getInitialState('searchPaymentStatus', ''));
   const [searchCancelStatus, setSearchCancelStatus] = useState(() => getInitialState('searchCancelStatus', ''));
   const [searchIssueType, setSearchIssueType] = useState(() => getInitialState('searchIssueType', ''));
@@ -2271,6 +2272,7 @@ function FulfillmentDashboard() {
     searchSku,
     searchProductName,
     searchMarketplace,
+    searchAmazonAccount,
     searchPaymentStatus,
     searchCancelStatus,
     searchIssueType,
@@ -2356,6 +2358,7 @@ function FulfillmentDashboard() {
       prev.searchProductName !== searchProductName ||
       prev.selectedSeller !== selectedSeller ||
       prev.searchMarketplace !== searchMarketplace ||
+      prev.searchAmazonAccount !== searchAmazonAccount ||
       prev.searchPaymentStatus !== searchPaymentStatus ||
       prev.searchCancelStatus !== searchCancelStatus ||
       prev.searchIssueType !== searchIssueType ||
@@ -2376,6 +2379,7 @@ function FulfillmentDashboard() {
       searchSku,
       searchProductName,
       searchMarketplace,
+      searchAmazonAccount,
       searchPaymentStatus,
       searchCancelStatus,
       searchIssueType,
@@ -2398,7 +2402,7 @@ function FulfillmentDashboard() {
       setCurrentPage(1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchProductName, searchMarketplace, searchPaymentStatus, searchCancelStatus, searchIssueType, searchCaseCategory, searchCaseStatus, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
+  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchProductName, searchMarketplace, searchAmazonAccount, searchPaymentStatus, searchCancelStatus, searchIssueType, searchCaseCategory, searchCaseStatus, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
 
   // orderEarnings is now read-only (auto-calculated server-side)
   // No manual editing handlers needed
@@ -2434,6 +2438,7 @@ function FulfillmentDashboard() {
     if (String(activeItemId || '').trim()) params.searchItemId = String(activeItemId).trim();
     if (String(activeSku || '').trim()) params.searchSku = String(activeSku).trim();
     if (searchMarketplace) params.searchMarketplace = searchMarketplace;
+    if (searchAmazonAccount) params.amazonAccount = searchAmazonAccount;
     if (activePaymentStatus) params.paymentStatus = activePaymentStatus;
     if (activeCancelStatus) params.cancelStatus = activeCancelStatus;
     if (activeIssueType) params.issueType = activeIssueType;
@@ -2459,6 +2464,7 @@ function FulfillmentDashboard() {
       searchSku: draft.searchSku ?? '',
       searchProductName: draft.searchProductName ?? '',
       searchMarketplace,
+      searchAmazonAccount,
       searchPaymentStatus: draft.searchPaymentStatus ?? '',
       searchCancelStatus: draft.searchCancelStatus ?? '',
       searchIssueType: draft.searchIssueType ?? '',
@@ -4360,6 +4366,25 @@ function FulfillmentDashboard() {
                     <MenuItem value="EBAY_GB">UK</MenuItem>
                   </Select>
                 </FormControl>
+
+                <FormControl size="small" fullWidth>
+                  <InputLabel id="amazon-account-filter-label">Amazon Account</InputLabel>
+                  <Select
+                    labelId="amazon-account-filter-label"
+                    value={searchAmazonAccount}
+                    label="Amazon Account"
+                    onChange={(e) => setSearchAmazonAccount(e.target.value)}
+                  >
+                    <MenuItem value="">
+                      <em>All</em>
+                    </MenuItem>
+                    {amazonAccounts.map((account) => (
+                      <MenuItem key={account._id} value={account.name}>
+                        {account.name}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
               </Stack>
 
               {/* Row 3.5: Exclude Low Value & Missing Amazon Account Toggles */}
@@ -4538,6 +4563,22 @@ function FulfillmentDashboard() {
                     <MenuItem value="EBAY_ENCA">CA</MenuItem>
                     <MenuItem value="EBAY_AU">AUS</MenuItem>
                     <MenuItem value="EBAY_GB">UK</MenuItem>
+                  </Select>
+
+                  <Select
+                    value={searchAmazonAccount}
+                    onChange={(e) => setSearchAmazonAccount(e.target.value)}
+                    displayEmpty
+                    size="small"
+                    renderValue={(val) => val ? val : 'Amazon Account'}
+                    sx={{ minWidth: 140, fontSize: '0.8rem', color: searchAmazonAccount ? 'inherit' : 'text.secondary' }}
+                  >
+                    <MenuItem value=""><em>All Accounts</em></MenuItem>
+                    {amazonAccounts.map((account) => (
+                      <MenuItem key={account._id} value={account.name}>
+                        {account.name}
+                      </MenuItem>
+                    ))}
                   </Select>
 
                   <FormControlLabel
