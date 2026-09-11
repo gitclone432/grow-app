@@ -11578,15 +11578,16 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
     const orders = orderIds.length
       ? await Order.find(
         { $or: [{ orderId: { $in: orderIds } }, { legacyOrderId: { $in: orderIds } }] },
-        { _id: 1, orderId: 1, legacyOrderId: 1, productName: 1, creationDate: 1, dateSold: 1, purchaseMarketplaceId: 1, remark: 1, fulfillmentNotes: 1, amazonAccount: 1, azOrderId: 1 }
+        { _id: 1, orderId: 1, legacyOrderId: 1, productName: 1, creationDate: 1, dateSold: 1, shipByDate: 1, purchaseMarketplaceId: 1, remark: 1, fulfillmentNotes: 1, amazonAccount: 1, azOrderId: 1 }
       ).lean()
       : [];
     const orderMap = {};
     orders.forEach((o) => {
       const payload = { 
         _id: o._id.toString(), // Include Order MongoDB _id for API calls
-        productName: o.productName, 
+        productName: o.productName,
         orderDateSold: o.dateSold || o.creationDate, // dateSold from order (actual order sale date)
+        shipByDate: o.shipByDate || null, // Ship By date from Order (same field as FulfillmentDashboard)
         purchaseMarketplaceId: o.purchaseMarketplaceId,
         remark: o.remark || '', // Get remark from Order (same field as FulfillmentDashboard)
         notes: o.fulfillmentNotes || '', // Get notes from Order (same field as FulfillmentDashboard)
@@ -11604,6 +11605,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         orderDbId: orderMap[key]?._id, // Include Order._id for consistency with FulfillmentDashboard endpoint
         productName: orderMap[key]?.productName || c.itemTitle || null,
         dateSold: orderMap[key]?.orderDateSold || c.dateSold || null, // Order's date sold, not cancellation request date
+        shipByDate: orderMap[key]?.shipByDate || null, // Ship By date from Order (same field as FulfillmentDashboard)
         purchaseMarketplaceId: orderMap[key]?.purchaseMarketplaceId || c.marketplaceId || 'EBAY_US',
         remark: orderMap[key]?.remark || '', // Use remark from Order (same field as FulfillmentDashboard)
         notes: orderMap[key]?.notes || '', // Use notes from Order (same field as FulfillmentDashboard)
