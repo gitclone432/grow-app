@@ -46,6 +46,7 @@ export const EbayApiUsagePage = lazy(() => import('../pages/admin/EbayApiUsagePa
 export const EbayAnalyticsHubPage = lazy(() => import('../pages/admin/EbayAnalyticsHubPage.jsx'));
 export const EbayFeedbackPage = lazy(() => import('../pages/admin/EbayFeedbackPage.jsx'));
 export const EbayApiTesterPage = lazy(() => import('../pages/admin/EbayApiTesterPage.jsx'));
+export const EbayInventoryManagerPage = lazy(() => import('../pages/admin/EbayInventoryManagerPage.jsx'));
 export const GetOrdersApiPage = lazy(() => import('../pages/admin/GetOrdersApiPage.jsx'));
 export const SkuIndexSyncPage = lazy(() => import('../pages/admin/SkuIndexSyncPage.jsx'));
 export const DuplicateSkusPage = lazy(() => import('../pages/admin/DuplicateSkusPage.jsx'));
