@@ -138,6 +138,7 @@ export const PAGE_DEFAULT_ROLES = {
   'EbayAnalyticsHub': ['superadmin', 'listingadmin'],
   'EbayFeedback': ['superadmin', 'listingadmin'],
   'EbayApiTester': ['superadmin', 'listingadmin'],
+  'EbayInventoryManager': ['superadmin', 'listingadmin'],
   'SkuIndexSync': ['superadmin', 'listingadmin'],
   'DuplicateSkus': ['superadmin', 'listingadmin'],
   'SkuIndexDashboard': ['superadmin', 'listingadmin'],

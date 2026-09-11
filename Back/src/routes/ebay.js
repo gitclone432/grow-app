@@ -20858,6 +20858,197 @@ router.get('/analytics/listing-lookup', requireAuth, requirePageAccess(['Analyti
   }
 });
 
+// ============================================
+// INVENTORY MANAGER — look up a single item by ID and adjust its live quantity
+// ============================================
+
+/** Fetch live Quantity/QuantityAvailable/QuantitySold/etc for one ItemID via Trading API GetItem. */
+async function fetchEbayItemInventory(accessToken, itemId) {
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${accessToken}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <ItemID>${escapeXml(itemId)}</ItemID>
+  <IncludeItemSpecifics>false</IncludeItemSpecifics>
+  <OutputSelector>Item.Title</OutputSelector>
+  <OutputSelector>Item.SKU</OutputSelector>
+  <OutputSelector>Item.Quantity</OutputSelector>
+  <OutputSelector>Item.QuantityAvailable</OutputSelector>
+  <OutputSelector>Item.PictureDetails.GalleryURL</OutputSelector>
+  <OutputSelector>Item.ListingDetails.ViewItemURL</OutputSelector>
+  <OutputSelector>Item.SellingStatus.ListingStatus</OutputSelector>
+  <OutputSelector>Item.SellingStatus.QuantitySold</OutputSelector>
+  <OutputSelector>Item.Variations</OutputSelector>
+</GetItemRequest>`;
+
+  const response = await postEbayTradingApi(xmlRequest, {
+    'X-EBAY-API-SITEID': '0',
+    'X-EBAY-API-COMPATIBILITY-LEVEL': '1271',
+    'X-EBAY-API-CALL-NAME': 'GetItem',
+    'X-EBAY-API-IAF-TOKEN': accessToken,
+    'Content-Type': 'text/xml',
+  }, { logLabel: 'Inventory GetItem', maxRetries: 2 });
+
+  const parsed = await parseStringPromise(response.data, { explicitArray: false });
+  const body = parsed?.GetItemResponse;
+  const ack = body?.Ack;
+  if (ack !== 'Success' && ack !== 'Warning') {
+    const err = body?.Errors;
+    const errNode = Array.isArray(err) ? err[0] : err;
+    const error = new Error(errNode?.LongMessage || errNode?.ShortMessage || 'GetItem failed');
+    error.ebayErrorCode = errNode?.ErrorCode || null;
+    throw error;
+  }
+
+  const item = body?.Item;
+  if (!item) throw new Error('GetItem returned no item payload');
+
+  const hasVariations = !!item.Variations;
+  // NOTE: eBay's <Quantity> is the total ever listed and does not decrease as units sell —
+  // it is NOT current stock. <QuantityAvailable> is the real-time remaining stock, but eBay
+  // sometimes omits it under a restricted OutputSelector, so fall back to Quantity-QuantitySold.
+  const totalQuantity = item.Quantity != null ? parseInt(item.Quantity, 10) || 0 : null;
+  const quantityAvailable = item.QuantityAvailable != null ? parseInt(item.QuantityAvailable, 10) || 0 : null;
+  const quantitySold = item.SellingStatus?.QuantitySold != null
+    ? parseInt(item.SellingStatus.QuantitySold, 10) || 0
+    : 0;
+  const stockQuantity = quantityAvailable != null
+    ? quantityAvailable
+    : (totalQuantity != null ? Math.max(0, totalQuantity - quantitySold) : null);
+
+  return {
+    itemId: String(itemId),
+    title: item.Title || null,
+    sku: item.SKU || null,
+    quantity: stockQuantity,
+    totalQuantity,
+    quantitySold,
+    listingStatus: item.SellingStatus?.ListingStatus || null,
+    galleryUrl: item.PictureDetails?.GalleryURL || null,
+    viewItemUrl: item.ListingDetails?.ViewItemURL || `https://www.ebay.com/itm/${itemId}`,
+    hasVariations,
+  };
+}
+
+// Resolve the seller/store that owns an ItemID: local DB lookup first (fast, no eBay call),
+// falling back to a requested sellerId when the item isn't in our own listings tables
+// (e.g. not synced yet, or belongs to a store this DB doesn't track).
+async function resolveInventorySeller(itemId, requestedSellerId) {
+  if (requestedSellerId) {
+    const seller = await findSellerByIdOrUsername(requestedSellerId, { populate: 'user' });
+    if (!seller) throw Object.assign(new Error('Seller not found'), { status: 404 });
+    return seller;
+  }
+  const dbListing = await lookupListingInDatabase(itemId);
+  const seller = dbListing?.listing?.seller;
+  if (!seller?._id) return null;
+  return Seller.findById(seller._id).populate('user');
+}
+
+// Look up an item by ID and return its live quantity from eBay (real-time, not cached).
+router.get('/inventory/lookup', requireAuth, requirePageAccess('EbayInventoryManager'), async (req, res) => {
+  try {
+    const itemId = String(req.query.itemId || '').trim();
+    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+
+    const sellerId = String(req.query.sellerId || '').trim() || null;
+    const seller = await resolveInventorySeller(itemId, sellerId);
+    if (!seller) {
+      return res.json({
+        success: true,
+        found: false,
+        needsSeller: true,
+        itemId,
+        message: 'This item isn\'t in our local listings database. Pick the store it belongs to and search again.',
+      });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+    const inventory = await fetchEbayItemInventory(accessToken, itemId);
+
+    return res.json({
+      success: true,
+      found: true,
+      ...inventory,
+      sellerId: String(seller._id),
+      sellerName: seller.user?.username || seller.user?.email || seller.ebayUserId || null,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    if (err?.status === 404) return res.status(404).json({ success: false, error: err.message });
+    console.error('[Inventory Lookup] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Item lookup failed' });
+  }
+});
+
+// Set an item's live quantity (increase or decrease) via Trading API ReviseInventoryStatus.
+router.post('/inventory/:itemId/quantity', requireAuth, requirePageAccess('EbayInventoryManager'), async (req, res) => {
+  try {
+    const itemId = String(req.params.itemId || '').trim();
+    if (!itemId) return res.status(400).json({ error: 'itemId is required' });
+
+    const sellerId = String(req.body.sellerId || '').trim();
+    if (!sellerId) return res.status(400).json({ error: 'sellerId is required' });
+
+    // The number the caller sends is exactly the stock quantity to set on eBay — no adjustment.
+    const desiredStock = Number(req.body.quantity);
+    if (!Number.isFinite(desiredStock) || desiredStock < 0 || !Number.isInteger(desiredStock)) {
+      return res.status(400).json({ error: 'quantity must be a non-negative whole number' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerId, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const accessToken = await ensureValidToken(seller);
+
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${accessToken}</eBayAuthToken></RequesterCredentials>
+  <InventoryStatus>
+    <ItemID>${escapeXml(itemId)}</ItemID>
+    <Quantity>${desiredStock}</Quantity>
+  </InventoryStatus>
+</ReviseInventoryStatusRequest>`;
+
+    const response = await postEbayTradingApi(xmlRequest, {
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1271',
+      'X-EBAY-API-CALL-NAME': 'ReviseInventoryStatus',
+      'X-EBAY-API-IAF-TOKEN': accessToken,
+      'Content-Type': 'text/xml',
+    }, { logLabel: 'Inventory ReviseInventoryStatus', maxRetries: 2 });
+
+    const parsed = await parseStringPromise(response.data, { explicitArray: false });
+    const body = parsed?.ReviseInventoryStatusResponse;
+    const ack = body?.Ack;
+
+    if (ack !== 'Success' && ack !== 'Warning') {
+      const err = body?.Errors;
+      const errNode = Array.isArray(err) ? err[0] : err;
+      return res.status(422).json({
+        success: false,
+        error: errNode?.LongMessage || errNode?.ShortMessage || 'ReviseInventoryStatus failed',
+        errorCode: errNode?.ErrorCode || null,
+      });
+    }
+
+    // Re-fetch so the UI reflects exactly what eBay accepted (handles rounding/variation quirks).
+    const inventory = await fetchEbayItemInventory(accessToken, itemId);
+
+    return res.json({
+      success: true,
+      itemId,
+      quantity: inventory.quantity,
+      sellerId: String(seller._id),
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Inventory Update] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Quantity update failed' });
+  }
+});
+
 // eBay Sell Analytics — Traffic Report (getTrafficReport)
 router.get('/analytics/traffic-report', requireAuth, requirePageAccess(['Analytics', 'EbayAnalyticsHub']), async (req, res) => {
   try {
