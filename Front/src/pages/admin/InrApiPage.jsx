@@ -42,7 +42,9 @@ import ChatIcon from '@mui/icons-material/Chat';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import InfoIcon from '@mui/icons-material/Info';
 import SendIcon from '@mui/icons-material/Send';
+import DownloadIcon from '@mui/icons-material/Download';
 import api from '../../lib/api';
+import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import {
   tableBodyCellSx,
@@ -1760,7 +1762,7 @@ export default function InrApiPage({
 
   useEffect(() => {
     loadStored();
-  }, [sellerFilter, _dateFilter]);
+  }, [sellerFilter]);
 
   // Helper function to normalize row data from backend
   function normalizeRowData(rows) {
@@ -1816,6 +1818,23 @@ export default function InrApiPage({
     }
     setError(errors.join(' '));
     setLoading(false);
+  }
+
+  function handleExportCSV() {
+    const csvData = prepareCSVData(rows, {
+      'ID': 'caseId',
+      'Order ID': (r) => rowOrderId(r) || r.legacyOrderId || '-',
+      'Marketplace': marketplaceLabel,
+      'Type': (r) => rowReason(r) || '-',
+      'Status': (r) => statusShort(rowStatus(r)) || '-',
+      'Seller': (r) => r.seller?.user?.username || '-',
+      'Buyer': 'buyerUsername',
+      'Item': 'itemTitle',
+      'Created': (r) => formatDate(rowCreatedDate(r)) || '-',
+      'Outcome': rowOutcome,
+      'Notes': 'notes',
+    });
+    downloadCSV(csvData, 'INR_API_Results');
   }
 
   function clearBuyerMessageIndicator(payload = {}) {
@@ -2270,6 +2289,26 @@ export default function InrApiPage({
             sx={yellowOutlinedButtonSx}
           >
             Refresh
+          </Button>
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<SearchIcon />}
+            onClick={loadStored}
+            disabled={loading || fetching}
+            sx={yellowFilledButtonSx}
+          >
+            Search
+          </Button>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<DownloadIcon />}
+            onClick={handleExportCSV}
+            disabled={loading || fetching || rows.length === 0}
+            sx={yellowOutlinedButtonSx}
+          >
+            CSV ({rows.length})
           </Button>
           <FormControl size="small" sx={{ minWidth: 180 }}>
             <InputLabel>Seller</InputLabel>
