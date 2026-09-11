@@ -3775,15 +3775,22 @@ function ComplianceBoardPage() {
     const overdueCancellationOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.CANCELLATION);
     const overdueAddressIssueOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.ADDRESS_ISSUE);
     const overdueLateLateDeliveryOrders = getOverdueFulfillmentIssueOrders(COLUMN_STATUS.LATE_DELIVERY);
+    // Source these 8 counts from statsCounts (the same /orders/stats response
+    // that drives the top summary cards and, via fetchStatsDetails, the "View
+    // Details" popup) instead of getStatusCount's statusCounts/orders[]
+    // fallback. That second source can disagree with statsCounts (e.g. a
+    // stale board-fetch snapshot, or a duplicate Order document resolved
+    // differently), which is what made this sidebar show a "To Do" count the
+    // details popup couldn't back up with any actual orders.
     return [
-      { id: COLUMN_STATUS.TODO, label: 'To Do', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.TODO), type: 'stat' },
-      { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', color: BRAND_ORANGE, count: getStatusCount(COLUMN_STATUS.OUT_OF_STOCK), type: 'stat' },
-      { id: COLUMN_STATUS.CANCELLATION, label: 'Cancellation', color: BRAND_BLUE, count: getStatusCount(COLUMN_STATUS.CANCELLATION), type: 'stat' },
-      { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', color: '#a855f7', count: getStatusCount(COLUMN_STATUS.ADDRESS_ISSUE), type: 'stat' },
-      { id: COLUMN_STATUS.LATE_DELIVERY, label: 'Late Delivery', color: '#dc2626', count: getStatusCount(COLUMN_STATUS.LATE_DELIVERY), type: 'stat' },
-      { id: COLUMN_STATUS.NOT_FULFILLED, label: 'Not Fulfilled', color: BRAND_YELLOW_DARK, count: getStatusCount(COLUMN_STATUS.NOT_FULFILLED), type: 'stat' },
-      { id: COLUMN_STATUS.FULFILLED, label: 'Fulfilled', color: BRAND_GREEN, count: getStatusCount(COLUMN_STATUS.FULFILLED), type: 'stat' },
-      { id: COLUMN_STATUS.BUYER_CONFIRMATION, label: 'Buyer Confirmation', color: '#0f766e', count: getStatusCount(COLUMN_STATUS.BUYER_CONFIRMATION), type: 'stat' },
+      { id: COLUMN_STATUS.TODO, label: 'To Do', color: BRAND_RED, count: statsCounts.todo, type: 'stat' },
+      { id: COLUMN_STATUS.OUT_OF_STOCK, label: 'Out of Stock', color: BRAND_ORANGE, count: statsCounts.outOfStock, type: 'stat' },
+      { id: COLUMN_STATUS.CANCELLATION, label: 'Cancellation', color: BRAND_BLUE, count: statsCounts.cancellation, type: 'stat' },
+      { id: COLUMN_STATUS.ADDRESS_ISSUE, label: 'Address Issue', color: '#a855f7', count: statsCounts.addressIssue, type: 'stat' },
+      { id: COLUMN_STATUS.LATE_DELIVERY, label: 'Late Delivery', color: '#dc2626', count: statsCounts.lateDelivery, type: 'stat' },
+      { id: COLUMN_STATUS.NOT_FULFILLED, label: 'Not Fulfilled', color: BRAND_YELLOW_DARK, count: statsCounts.notFulfilled, type: 'stat' },
+      { id: COLUMN_STATUS.FULFILLED, label: 'Fulfilled', color: BRAND_GREEN, count: statsCounts.fulfilled, type: 'stat' },
+      { id: COLUMN_STATUS.BUYER_CONFIRMATION, label: 'Buyer Confirmation', color: '#0f766e', count: statsCounts.buyerConfirmation, type: 'stat' },
       { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.OUT_OF_STOCK], label: 'Out of Stock 48h+', color: '#dc2626', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.OUT_OF_STOCK], overdueOutOfStockOrders.length), type: 'alert' },
       { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.CANCELLATION], label: 'Cancellation 48h+', color: '#b91c1c', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.CANCELLATION], overdueCancellationOrders.length), type: 'alert' },
       { id: FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.ADDRESS_ISSUE], label: 'Address Issue 48h+', color: '#7f1d1d', count: getOverdueCount(FULFILLMENT_ISSUE_OVERDUE_ALERT_IDS[COLUMN_STATUS.ADDRESS_ISSUE], overdueAddressIssueOrders.length), type: 'alert' },

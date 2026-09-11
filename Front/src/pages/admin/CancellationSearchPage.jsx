@@ -239,6 +239,11 @@ export default function CancellationSearchPage({
   const [statusFilter, setStatusFilter] = useState('');
   const [stateFilter, setStateFilter] = useState('');
   const [orderIdFilter, setOrderIdFilter] = useState('');
+  // Ship By filter is intentionally decoupled from the auto-search effect below —
+  // shipByDateInput is just the date picker's draft value; shipByDateFilter is
+  // what actually gets sent to the API, and only changes on Search click.
+  const [shipByDateInput, setShipByDateInput] = useState('');
+  const [shipByDateFilter, setShipByDateFilter] = useState('');
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -326,11 +331,17 @@ export default function CancellationSearchPage({
 
   useEffect(() => {
     loadStored();
-  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, page, sortBy, sortDir]);
+    // shipByDateFilter (not shipByDateInput) is intentionally included here —
+    // it only changes when the Search button next to it is clicked.
+  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, shipByDateFilter, page, sortBy, sortDir]);
 
   useEffect(() => {
     setPage(1);
-  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, sortBy, sortDir]);
+  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, shipByDateFilter, sortBy, sortDir]);
+
+  function handleShipByDateSearch() {
+    setShipByDateFilter(shipByDateInput);
+  }
 
   async function loadStored() {
     setLoading(true);
@@ -346,6 +357,7 @@ export default function CancellationSearchPage({
       if (statusFilter) params.status = statusFilter;
       if (stateFilter) params.state = stateFilter;
       if (orderIdFilter) params.orderId = orderIdFilter;
+      if (shipByDateFilter) params.shipByDate = shipByDateFilter;
 
       if (dateFilter.mode === 'single' && dateFilter.single) {
         params.startDate = dateFilter.single;
@@ -901,6 +913,28 @@ export default function CancellationSearchPage({
             onChange={(e) => setOrderIdFilter(e.target.value)}
             sx={{ minWidth: 140 }}
           />
+
+          <TextField
+            size="small"
+            type="date"
+            label="Ship By"
+            value={shipByDateInput}
+            onChange={(e) => setShipByDateInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleShipByDateSearch();
+            }}
+            InputLabelProps={{ shrink: true }}
+            sx={{ minWidth: 160 }}
+          />
+          <Button
+            size="small"
+            variant="contained"
+            sx={yellowFilledButtonSx}
+            onClick={handleShipByDateSearch}
+            disabled={loading}
+          >
+            Search
+          </Button>
 
           <Button
             size="small"
