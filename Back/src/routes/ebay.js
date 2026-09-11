@@ -11524,19 +11524,22 @@ router.patch('/cancellations/:cancelId/remark', requireAuth, requirePageAccess('
 
 router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
-    const { sellerId, status, state, orderId, startDate, endDate, sortBy, sortDir } = req.query;
+    const { sellerId, status, state, orderId, startDate, endDate, shipByDate, sortBy, sortDir } = req.query;
     const query = {};
+    const andClauses = [];
 
     if (sellerId) query.seller = sellerId;
     if (status) query.cancelStatus = status;
     if (state) query.cancelState = state;
-    
+
     // Order ID filter - search both orderId and legacyOrderId fields
     if (orderId) {
-      query.$or = [
-        { orderId: new RegExp(orderId, 'i') },
-        { legacyOrderId: new RegExp(orderId, 'i') }
-      ];
+      andClauses.push({
+        $or: [
+          { orderId: new RegExp(orderId, 'i') },
+          { legacyOrderId: new RegExp(orderId, 'i') }
+        ]
+      });
     }
 
     // Date range filter on cancelRequestDate using PT timezone-aware parsing
@@ -11546,6 +11549,29 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
       if (startDate) query.cancelRequestDate.$gte = getPTDayBoundsUTC(startDate).start;
       if (endDate) query.cancelRequestDate.$lte = getPTDayBoundsUTC(endDate).end;
     }
+
+    // Ship By filter — Order.shipByDate lives on the Order, not the Cancellation,
+    // so resolve matching order/legacyOrder ids first, then constrain the query.
+    if (shipByDate) {
+      const { start, end } = getPTDayBoundsUTC(shipByDate);
+      const shipByOrders = await Order.find(
+        { shipByDate: { $gte: start, $lte: end } },
+        { orderId: 1, legacyOrderId: 1 }
+      ).lean();
+      const shipByIds = new Set();
+      shipByOrders.forEach((o) => {
+        if (o.orderId) shipByIds.add(o.orderId);
+        if (o.legacyOrderId) shipByIds.add(o.legacyOrderId);
+      });
+      const shipByIdList = [...shipByIds];
+      andClauses.push(
+        shipByIdList.length > 0
+          ? { $or: [{ orderId: { $in: shipByIdList } }, { legacyOrderId: { $in: shipByIdList } }] }
+          : { _id: null } // no orders ship by that date — return zero rows
+      );
+    }
+
+    if (andClauses.length > 0) query.$and = andClauses;
 
     const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
     const sortFieldMap = {
