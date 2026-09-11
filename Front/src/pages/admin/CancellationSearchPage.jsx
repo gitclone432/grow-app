@@ -286,6 +286,7 @@ export default function CancellationSearchPage({
     { id: 'cancelId', label: 'Cancel ID' },
     { id: 'orderId', label: 'Order ID' },
     { id: 'dateSold', label: 'Date Sold' },
+    { id: 'shipBy', label: 'Ship By' },
     { id: 'seller', label: 'Seller' },
     { id: 'buyerLoginName', label: 'buyerLoginName' },
     { id: 'itemId', label: 'itemId' },
@@ -925,6 +926,7 @@ export default function CancellationSearchPage({
                 'Cancel ID': 'cancelId',
                 'Order ID': (r) => r.orderId || r.legacyOrderId || '',
                 'Date Sold': (r) => formatDate(r.dateSold, r.purchaseMarketplaceId),
+                'Ship By': (r) => formatDate(r.shipByDate, r.purchaseMarketplaceId),
                 Seller: (r) => r.seller?.user?.username || '',
                 buyerLoginName: (r) => r.buyerLoginName || r.buyerUsername || '',
                 itemId: 'itemId',
@@ -986,6 +988,7 @@ export default function CancellationSearchPage({
                 {visibleColumns.includes('cancelId') && <TableCell sx={headerSx}>Cancel ID</TableCell>}
                 {visibleColumns.includes('orderId') && <TableCell sx={headerSx}>Order ID</TableCell>}
                 {visibleColumns.includes('dateSold') && <TableCell sx={headerSx}>Date Sold</TableCell>}
+                {visibleColumns.includes('shipBy') && <TableCell sx={headerSx}>Ship By</TableCell>}
                 {visibleColumns.includes('seller') && <TableCell sx={headerSx}>Seller</TableCell>}
                 {visibleColumns.includes('buyerLoginName') && <TableCell sx={headerSx}>buyerLoginName</TableCell>}
                 {visibleColumns.includes('itemId') && <TableCell sx={headerSx}>itemId</TableCell>}
@@ -1072,6 +1075,9 @@ export default function CancellationSearchPage({
                     )}
                     {visibleColumns.includes('dateSold') && (
                       <TableCell>{formatDate(row.dateSold, row.purchaseMarketplaceId)}</TableCell>
+                    )}
+                    {visibleColumns.includes('shipBy') && (
+                      <TableCell>{formatDate(row.shipByDate, row.purchaseMarketplaceId)}</TableCell>
                     )}
                     {visibleColumns.includes('seller') && (
                       <TableCell>{row.seller?.user?.username || '-'}</TableCell>

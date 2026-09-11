@@ -290,6 +290,13 @@ const ChatComposer = memo(function ChatComposer({
   );
 });
 
+/** Same composite key the backend batch meta endpoint uses to key its response. */
+function threadMetaKey(thread) {
+  return thread?.orderId
+    ? `o:${thread.orderId}`
+    : `b:${thread?.buyerUsername || ''}|${thread?.itemId || ''}`;
+}
+
 const ThreadListItem = memo(function ThreadListItem({
   thread, isSelected, imageUrl, isLoadingImage, onSelect, sellerKeys
 }) {
@@ -414,6 +421,13 @@ export default function BuyerChatPage() {
     if (saved === 'read') return 'read';
     return 'all';
   });
+  // Inbox list filter — Picked Up By, applied client-side against
+  // ConversationMeta (fetched in a batch for the loaded threads). Choosing a
+  // specific value hides threads with no meta (or a different value) for that
+  // field; "All" (default) shows every thread untouched.
+  const [filterPickedUpBy, setFilterPickedUpBy] = useState('All');
+  const [threadMetaByKey, setThreadMetaByKey] = useState({});
+
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [threadTotal, setThreadTotal] = useState(0);
@@ -897,6 +911,56 @@ export default function BuyerChatPage() {
     fetchMissingImages();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threads]);
+
+  // 5. FETCH CONVERSATION META (About/Status/Picked Up By) for the inbox
+  // filters — only for threads not already looked up, one batch call at a time.
+  useEffect(() => {
+    if (filterPickedUpBy === 'All') return;
+
+    const missing = threads.filter((t) => !(threadMetaKey(t) in threadMetaByKey));
+    if (missing.length === 0) return;
+
+    const keys = missing.map((t) => ({
+      sellerId: t.sellerId,
+      buyerUsername: t.buyerUsername,
+      orderId: t.orderId || '',
+      itemId: t.itemId
+    }));
+
+    let cancelled = false;
+    api.post('/ebay/conversation-meta/batch', { keys })
+      .then(({ data }) => {
+        if (cancelled) return;
+        const results = data?.results || {};
+        setThreadMetaByKey((prev) => {
+          const next = { ...prev };
+          missing.forEach((t) => {
+            const key = threadMetaKey(t);
+            next[key] = results[key] || null;
+          });
+          return next;
+        });
+      })
+      .catch((e) => {
+        if (e.response?.status !== 401) {
+          console.error('Failed to load conversation meta for filters', e);
+        }
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threads, filterPickedUpBy]);
+
+  // 6. AUTO-LOAD REMAINING PAGES while the Picked Up By filter is active.
+  // That filter runs client-side over whatever pages have been fetched so
+  // far, so the "N matching" count would otherwise only reflect the first
+  // page(s) until the user manually clicks Load More. Keep paging until the
+  // full server-side result set (threadTotal) is loaded so the count is exact.
+  useEffect(() => {
+    if (filterPickedUpBy === 'All') return;
+    if (!hasMore || loadingThreads) return;
+    loadThreads(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterPickedUpBy, hasMore, loadingThreads, threads]);
 
   const scrollToBottom = (behavior = 'smooth') => {
     messagesEndRef.current?.scrollIntoView({ behavior });
@@ -1487,8 +1551,9 @@ export default function BuyerChatPage() {
     filterType !== 'ALL' ||
     Boolean(filterMarketplace) ||
     showUnreadOnly === 'unread' ||
-    showUnreadOnly === 'read'
-  ), [searchQuery, selectedSeller, filterType, filterMarketplace, showUnreadOnly]);
+    showUnreadOnly === 'read' ||
+    filterPickedUpBy !== 'All'
+  ), [searchQuery, selectedSeller, filterType, filterMarketplace, showUnreadOnly, filterPickedUpBy]);
 
   const clearAllFilters = () => {
     setSearchQuery('');
@@ -1496,13 +1561,27 @@ export default function BuyerChatPage() {
     setFilterType('ALL');
     setFilterMarketplace('');
     setShowUnreadOnly('all');
+    setFilterPickedUpBy('All');
     setPage(1);
   };
 
+  // Client-side pass on top of the loaded page: hides threads with no Picked
+  // Up By meta (or a different value) once that filter is chosen. Does not
+  // touch server-side pagination/search.
+  const visibleThreads = useMemo(() => {
+    if (filterPickedUpBy === 'All') return threads;
+    return threads.filter((t) => {
+      const meta = threadMetaByKey[threadMetaKey(t)];
+      const pickedUpBy = meta?.pickedUpBy || '';
+      if (filterPickedUpBy === '__UNASSIGNED__') return !pickedUpBy;
+      return pickedUpBy === filterPickedUpBy;
+    });
+  }, [threads, threadMetaByKey, filterPickedUpBy]);
+
   const inboxStats = useMemo(() => ({
-    unreadThreads: threads.filter(t => t.unreadCount > 0).length,
-    loaded: threads.length
-  }), [threads]);
+    unreadThreads: visibleThreads.filter(t => t.unreadCount > 0).length,
+    loaded: visibleThreads.length
+  }), [visibleThreads]);
   const activeViewerImage = imageViewer.images[imageViewer.index] || null;
   const hasMultipleViewerImages = imageViewer.images.length > 1;
 
@@ -1527,7 +1606,11 @@ export default function BuyerChatPage() {
               </Button>
             }
           >
-            Showing {threadTotal.toLocaleString()} filtered conversation{threadTotal === 1 ? '' : 's'}
+            {filterPickedUpBy !== 'All'
+              ? (hasMore
+                  ? `Loading all ${threadTotal.toLocaleString()} conversations to apply the Picked Up By filter…`
+                  : `Showing ${inboxStats.loaded.toLocaleString()} of ${threadTotal.toLocaleString()} conversations matching Picked Up By`)
+              : `Showing ${threadTotal.toLocaleString()} filtered conversation${threadTotal === 1 ? '' : 's'}`}
           </Alert>
         )}
 
@@ -1590,6 +1673,16 @@ export default function BuyerChatPage() {
                 <MenuItem value="all">All</MenuItem>
                 <MenuItem value="unread">Unread Only</MenuItem>
                 <MenuItem value="read">Read Only</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', lg: 140 } }}>
+              <InputLabel>Picked Up By</InputLabel>
+              <Select value={filterPickedUpBy} label="Picked Up By" onChange={(e) => setFilterPickedUpBy(e.target.value)}>
+                <MenuItem value="All">All</MenuItem>
+                <MenuItem value="__UNASSIGNED__">Unassigned</MenuItem>
+                {chatAgents.map((agent) => (
+                  <MenuItem key={agent._id} value={agent.name}>{agent.name}</MenuItem>
+                ))}
               </Select>
             </FormControl>
             <TextField
@@ -1714,7 +1807,7 @@ export default function BuyerChatPage() {
         </Box>
 
         <List dense sx={{ overflow: 'auto', flex: 1, py: 0 }}>
-          {threads.map((thread, index) => {
+          {visibleThreads.map((thread, index) => {
             const isSelected = selectedThread && (
               selectedThread.conversationId && thread.conversationId
                 ? String(selectedThread.conversationId) === String(thread.conversationId)
@@ -1754,8 +1847,18 @@ export default function BuyerChatPage() {
             </Box>
           )}
 
+          {/* EMPTY STATE — client-side About/Status/Picked Up By filter matched nothing */}
+          {visibleThreads.length === 0 && threads.length > 0 && !loadingThreads && (
+            <Box sx={{ p: 3, textAlign: 'center' }}>
+              <QuestionAnswerIcon sx={{ fontSize: 36, color: 'text.disabled', mb: 1 }} />
+              <Typography variant="body2" color="text.secondary">
+                No conversations match the selected Picked Up By filter.
+              </Typography>
+            </Box>
+          )}
+
           {/* EMPTY STATE */}
-          {threads.length === 0 && !loadingThreads && (
+          {visibleThreads.length === 0 && threads.length === 0 && !loadingThreads && (
             <Box sx={{ p: 3, textAlign: 'center' }}>
               <QuestionAnswerIcon sx={{ fontSize: 36, color: 'text.disabled', mb: 1 }} />
               <Typography variant="body2" color="text.secondary">
