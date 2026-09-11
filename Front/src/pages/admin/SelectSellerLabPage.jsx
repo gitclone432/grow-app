@@ -12,6 +12,11 @@ import {
   Typography,
 } from '@mui/material';
 import api from '../../lib/api';
+import {
+  fetchListingTemplatesSummary,
+  filterTemplatesByName,
+  uniqueTemplatesForPicker,
+} from '../../lib/listingTemplatesCache.js';
 
 const TemplateListingsLabPage = lazy(() => import('./TemplateListingsLabPage.jsx'));
 
@@ -39,13 +44,13 @@ export default function SelectSellerLabPage() {
       setLoading(true);
       setError('');
       try {
-        const [sellersRes, templatesRes] = await Promise.all([
+        const [sellersRes, templateList] = await Promise.all([
           api.get('/sellers/all'),
-          api.get('/listing-templates'),
+          fetchListingTemplatesSummary(api),
         ]);
         if (cancelled) return;
         setSellers(Array.isArray(sellersRes.data) ? sellersRes.data : []);
-        setTemplates(Array.isArray(templatesRes.data) ? templatesRes.data : []);
+        setTemplates(Array.isArray(templateList) ? templateList : []);
       } catch (err) {
         if (!cancelled) {
           console.error(err);
@@ -68,12 +73,9 @@ export default function SelectSellerLabPage() {
     [sellers]
   );
 
-  const sortedTemplates = useMemo(
-    () =>
-      [...templates].sort((a, b) =>
-        String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
-      ),
-    [templates]
+  const templateOptions = useMemo(
+    () => uniqueTemplatesForPicker(templates, templateId),
+    [templates, templateId]
   );
 
   const setFilter = (key, value) => {
@@ -140,17 +142,27 @@ export default function SelectSellerLabPage() {
             </TextField>
 
             <Autocomplete
-              options={sortedTemplates}
-              getOptionLabel={(option) => (typeof option === 'string' ? option : option.name || option._id || '')}
-              value={sortedTemplates.find((t) => t._id === templateId) || null}
+              options={templateOptions}
+              getOptionLabel={(option) => (typeof option === 'string' ? option : option.name || '')}
+              getOptionKey={(option) => String(option?._id || option?.name || '')}
+              value={templateOptions.find((t) => String(t._id) === String(templateId)) || null}
               onChange={(_, newValue) => setFilter('templateId', newValue?._id || '')}
+              filterOptions={filterTemplatesByName}
               loading={loading}
-              disabled={!sortedTemplates.length}
+              disabled={!templateOptions.length}
               size="small"
               sx={{ minWidth: 220, flex: { sm: '1 1 240px' }, maxWidth: 360 }}
               renderInput={(params) => <TextField {...params} label="Template" placeholder="Search templates..." />}
+              renderOption={(props, option) => {
+                const { key, ...optionProps } = props;
+                return (
+                  <li key={option._id || key} {...optionProps}>
+                    {option.name}
+                  </li>
+                );
+              }}
               noOptionsText="No templates found"
-              isOptionEqualToValue={(option, value) => option._id === value._id}
+              isOptionEqualToValue={(option, value) => String(option?._id) === String(value?._id)}
             />
 
             <TextField

@@ -41,6 +41,11 @@ import {
   Search as SearchIcon
 } from '@mui/icons-material';
 import api, { getAuthToken } from '../../lib/api.js';
+import {
+  fetchListingTemplatesSummary,
+  filterTemplatesByName,
+  uniqueTemplatesForPicker,
+} from '../../lib/listingTemplatesCache.js';
 import AdminPageShell from '../../components/AdminPageShell.jsx';
 import { BRAND_DARK, BRAND_YELLOW, BRAND_YELLOW_DARK } from '../../constants/brandTheme.js';
 import { dashboardSignatureTokens } from '../../theme/appTheme.js';
@@ -179,16 +184,16 @@ export default function AsinPrecheckPage() {
     const loadSetupData = async () => {
       try {
         setLoadingSetup(true);
-        const [sellerRes, templateRes] = await Promise.all([
+        const [sellerRes, templateList] = await Promise.all([
           api.get('/sellers/all'),
-          api.get('/listing-templates')
+          fetchListingTemplatesSummary(api)
         ]);
 
         if (!mounted) return;
         const sellerList = sellerRes.data || [];
-        const templateList = templateRes.data || [];
+        const uniqueTemplateList = uniqueTemplatesForPicker(templateList);
         setSellers(sellerList);
-        setTemplates(templateList);
+        setTemplates(uniqueTemplateList);
 
         // Handoff from the "Template + Account" sourcing page (/admin/asin-sourcing):
         // it stashes {sellerId, templateId, region, asins, filters} in sessionStorage
@@ -204,8 +209,8 @@ export default function AsinPrecheckPage() {
           handoff = null;
         }
 
-        const handoffSellerExists = handoff && sellerList.some(seller => seller._id === handoff.sellerId);
-        const handoffTemplateExists = handoff && templateList.some(template => template._id === handoff.templateId);
+        const handoffSellerExists = handoff && sellerList.some(seller => String(seller._id) === String(handoff.sellerId));
+        const handoffTemplateExists = handoff && uniqueTemplateList.some(template => String(template._id) === String(handoff.templateId));
 
         if (handoff && handoffSellerExists && handoffTemplateExists && Array.isArray(handoff.asins) && handoff.asins.length > 0) {
           setSellerId(handoff.sellerId);
@@ -219,10 +224,10 @@ export default function AsinPrecheckPage() {
             asinsJoined: handoff.asins.join('\n')
           });
         } else {
-          const savedSellerExists = sellerList.some(seller => seller._id === savedPreferences.sellerId);
-          const savedTemplateExists = templateList.some(template => template._id === savedPreferences.templateId);
+          const savedSellerExists = sellerList.some(seller => String(seller._id) === String(savedPreferences.sellerId));
+          const savedTemplateExists = uniqueTemplateList.some(template => String(template._id) === String(savedPreferences.templateId));
           setSellerId(savedSellerExists ? savedPreferences.sellerId : sellerList[0]?._id || '');
-          setTemplateId(savedTemplateExists ? savedPreferences.templateId : templateList[0]?._id || '');
+          setTemplateId(savedTemplateExists ? String(savedPreferences.templateId) : uniqueTemplateList[0]?._id || '');
         }
       } catch (err) {
         console.error('Failed to load ASIN precheck setup data:', err);
@@ -1132,10 +1137,20 @@ export default function AsinPrecheckPage() {
                   <Autocomplete
                     fullWidth
                     options={templates}
-                    value={templates.find(template => template._id === templateId) || null}
+                    value={templates.find(template => String(template._id) === String(templateId)) || null}
                     getOptionLabel={(option) => option?.name || ''}
-                    isOptionEqualToValue={(option, value) => option._id === value._id}
+                    getOptionKey={(option) => String(option?._id || option?.name || '')}
+                    isOptionEqualToValue={(option, value) => String(option?._id) === String(value?._id)}
+                    filterOptions={filterTemplatesByName}
                     onChange={(_, value) => setTemplateId(value?._id || '')}
+                    renderOption={(props, option) => {
+                      const { key, ...optionProps } = props;
+                      return (
+                        <li key={option._id || key} {...optionProps}>
+                          {option.name}
+                        </li>
+                      );
+                    }}
                     renderInput={(params) => (
                       <TextField {...params} label="Template" placeholder="Search template" />
                     )}
