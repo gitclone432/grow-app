@@ -327,7 +327,7 @@ router.get('/', requireAuth, async (req, res) => {
     const summaryMode = ['true', '1', 'yes'].includes(String(summary || '').toLowerCase());
     if (summaryMode) {
       const templates = await ListingTemplate.find(filter)
-        .select('name description rangeId listProductId createdAt updatedAt')
+        .select('name rangeId listProductId createdAt updatedAt')
         .sort({ createdAt: -1 })
         .lean();
       return res.json(templates);

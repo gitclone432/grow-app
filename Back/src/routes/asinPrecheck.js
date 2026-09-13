@@ -447,6 +447,7 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
         const scrapedAt = new Date();
         const amazonData = await fetchAmazonData(asin, region, {
           ...getTemplateOverlayFetchOptions(template),
+          requireDelivery: true,
         });
 
         // Count the missing-stock-info re-fetch (fresh fetches only — cache

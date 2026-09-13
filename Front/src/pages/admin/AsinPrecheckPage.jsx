@@ -109,10 +109,12 @@ const isRowComplete = (row) => row.status !== 'loading' && row.status !== 'error
 
 const formatDeliveryLabel = (row) => {
   if (row.status === 'loading') return 'Checking';
-  if (row.deliveryDays == null) return 'Unknown';
   if (row.deliveryDays === 0) return 'Today';
   if (row.deliveryDays === 1) return '1 day';
-  return `${row.deliveryDays} days`;
+  if (row.deliveryDays != null) return `${row.deliveryDays} days`;
+  const raw = String(row.shippingTime || row.shippingCondition || '').trim();
+  if (raw) return raw.length > 28 ? `${raw.slice(0, 28)}…` : raw;
+  return 'Unknown';
 };
 
 const getDeliveryTooltip = (row) => {
@@ -435,6 +437,8 @@ export default function AsinPrecheckPage() {
       deliveryDays: null,
       availabilityStatus: '',
       inStock: null,
+      stockQuantity: null,
+      stockLabel: '',
       ebayMotorsMode,
       ebayMotorsEligible: null,
       ebayMotorsReason: '',
@@ -881,8 +885,8 @@ export default function AsinPrecheckPage() {
           )}
         </Paper>
 
-        <TableContainer component={Paper} sx={tableContainerSx}>
-          <Table size="small" stickyHeader>
+        <TableContainer component={Paper} sx={{ ...tableContainerSx, overflowX: 'auto' }}>
+          <Table size="small" stickyHeader sx={{ minWidth: 1520, tableLayout: 'auto' }}>
             <TableHead>
               <TableRow>
                 <TableCell padding="checkbox" sx={tableHeaderCellSx}>
@@ -893,16 +897,16 @@ export default function AsinPrecheckPage() {
                     disabled={visibleCompletedRows.length === 0}
                   />
                 </TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: 130 }}>ASIN</TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: 132 }}>Amazon Image</TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: '38%' }}>Title</TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: 90 }}>Price</TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: 90 }}>Rating</TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: 120 }}>Stock</TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: 130 }}>Delivery</TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: 130 }}>SKU</TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: 110 }}>Active</TableCell>
-                <TableCell sx={{ ...tableHeaderCellSx, width: 150 }}>Include/Exclude</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 130 }}>ASIN</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 132 }}>Amazon Image</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 280 }}>Title</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 90 }}>Price</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 90 }}>Rating</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 120 }}>Stock</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 120 }}>Delivery</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 130 }}>SKU</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 110 }}>Active</TableCell>
+                <TableCell sx={{ ...tableHeaderCellSx, minWidth: 220 }}>Include/Exclude</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -980,7 +984,7 @@ export default function AsinPrecheckPage() {
                       <Typography variant="caption" color="text.secondary">No image</Typography>
                     )}
                   </TableCell>
-                  <TableCell sx={{ width: '38%', minWidth: 240, maxWidth: 520 }}>
+                  <TableCell sx={{ minWidth: 280, maxWidth: 420 }}>
                     {row.status === 'loading' ? (
                       <Typography variant="body2" color="text.secondary">Fetching...</Typography>
                     ) : row.title ? (
@@ -1032,9 +1036,20 @@ export default function AsinPrecheckPage() {
                     {row.status === 'loading' ? (
                       <Chip label="Checking" size="small" />
                     ) : row.inStock === true ? (
-                      <Chip label="In Stock" size="small" color="success" />
+                      <Tooltip title={row.availabilityStatus || 'In stock on Amazon'} arrow>
+                        <Stack spacing={0.25} alignItems="flex-start">
+                          <Chip label="In Stock" size="small" color="success" />
+                          {row.stockQuantity != null && (
+                            <Typography variant="caption" sx={{ fontWeight: 700, color: 'error.main' }}>
+                              {row.stockQuantity} Left
+                            </Typography>
+                          )}
+                        </Stack>
+                      </Tooltip>
                     ) : row.inStock === false ? (
-                      <Chip label="Out of Stock" size="small" color="error" variant="outlined" />
+                      <Tooltip title={row.availabilityStatus || 'Out of stock on Amazon'} arrow>
+                        <Chip label="Out of Stock" size="small" color="error" variant="outlined" />
+                      </Tooltip>
                     ) : (
                       <Chip label="Unknown" size="small" variant="outlined" />
                     )}
@@ -1044,13 +1059,13 @@ export default function AsinPrecheckPage() {
                       <Tooltip title={getDeliveryTooltip(row)} arrow>
                         <Chip label="Checking" size="small" />
                       </Tooltip>
-                    ) : row.deliveryDays != null ? (
+                    ) : (row.deliveryDays != null || row.shippingTime || row.shippingCondition) ? (
                       <Tooltip title={getDeliveryTooltip(row)} arrow>
                         <Chip
                           label={formatDeliveryLabel(row)}
                           size="small"
-                          color={row.deliveryDays <= 8 ? 'success' : 'warning'}
-                          variant={row.deliveryDays <= 8 ? 'filled' : 'outlined'}
+                          color={row.deliveryDays != null && row.deliveryDays <= 8 ? 'success' : 'warning'}
+                          variant={row.deliveryDays != null && row.deliveryDays <= 8 ? 'filled' : 'outlined'}
                         />
                       </Tooltip>
                     ) : (
@@ -1068,12 +1083,16 @@ export default function AsinPrecheckPage() {
                     {row.status === 'loading' ? (
                       <Chip label="Checking" size="small" />
                     ) : row.active ? (
-                      <Chip icon={<CheckCircleIcon />} label="Active" size="small" color="success" />
+                      <Tooltip title={`SKU ${row.sku || ''} is already live on this seller's eBay store`} arrow>
+                        <Chip icon={<CheckCircleIcon />} label="Active" size="small" color="success" />
+                      </Tooltip>
                     ) : (
-                      <Chip label="Inactive" size="small" color="error" variant="outlined" />
+                      <Tooltip title={`SKU ${row.sku || ''} is not an active eBay listing for this seller`} arrow>
+                        <Chip label="Inactive" size="small" color="error" variant="outlined" />
+                      </Tooltip>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell sx={{ minWidth: 220 }}>
                     <Stack spacing={0.75}>
                       <Chip
                         label={row.intent === 'included' ? 'Included' : row.intent === 'excluded' ? 'Excluded' : 'Neutral'}

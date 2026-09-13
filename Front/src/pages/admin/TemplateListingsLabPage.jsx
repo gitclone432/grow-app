@@ -33,6 +33,7 @@ import { generateSKUFromASIN } from '../../utils/skuGenerator.js';
 import { mergeDefaultCoreFieldDefaults } from '../../constants/defaultDescriptionTemplate.js';
 import { fetchDescriptionTemplateGallery } from '../../lib/descriptionTemplateGalleryApi.js';
 import { saveCsvToStorage } from '../../utils/saveCsvToStorage.js';
+import { failRemainingLoadingPreviewItems, mergePreviewStreamItem } from '../../lib/previewStream.js';
 
 const TemplateCustomizationDialog = lazy(() => import('../../components/TemplateCustomizationDialog.jsx'));
 const AsinReviewModal = lazy(() => import('../../components/AsinReviewModal.jsx'));
@@ -856,6 +857,10 @@ export default function TemplateListingsLabPage({ embedded = false }) {
         if (event.data === '[DONE]') {
           eventSource.close();
           const totalDuration = ((Date.now() - startTime) / 1000).toFixed(1);
+          setPreviewItems((prev) => failRemainingLoadingPreviewItems(
+            prev,
+            'Preview ended before this ASIN finished generating.'
+          ));
           setProcessingLog(prev => [
             ...prev,
             `🎉 Stream complete! Total time: ${totalDuration}s`
@@ -876,15 +881,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
               break;
               
             case 'item':
-              // Update preview items with completed item
-              setPreviewItems(prev => {
-                const updated = [...prev];
-                const index = updated.findIndex(i => i.asin === message.item.asin);
-                if (index !== -1) {
-                  updated[index] = message.item;
-                }
-                return updated;
-              });
+              setPreviewItems(prev => mergePreviewStreamItem(prev, message.item));
               
               // Update progress
               setBulkProgress({ current: message.progress, total: message.total });
@@ -925,6 +922,10 @@ export default function TemplateListingsLabPage({ embedded = false }) {
         console.error('SSE connection error:', error);
         eventSource.close();
         setLoadingBulk(false);
+        setPreviewItems((prev) => failRemainingLoadingPreviewItems(
+          prev,
+          'Connection lost. This ASIN did not finish generating.'
+        ));
         setProcessingLog(prev => [
           ...prev,
           `❌ Connection error - stream interrupted`
@@ -1060,7 +1061,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
           skipDuplicates: true,
           status: listingStatusFilter,
         }
-      });
+      }, { timeout: 90000 });
 
       // Update processing log with final results
       setProcessingLog(prev => [
@@ -1073,21 +1074,23 @@ export default function TemplateListingsLabPage({ embedded = false }) {
         `Bulk save completed: ${data.created} created, ${data.updated || 0} updated, ${data.reactivated || 0} reactivated, ${data.failed} failed, ${data.skipped} skipped`
       );
 
-      // Refresh listings table
-      await fetchListings(pagination.page);
-
-      // Close review modal and reset state
+      // Close review modal first so Save All does not stay on "Saving..."
       setReviewModal(false);
       setPreviewItems([]);
       setAsinInput('');
+      void fetchListings();
 
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to save listings');
+      const message = err.code === 'ECONNABORTED'
+        ? 'Save timed out. Restart the backend and try again.'
+        : (err.response?.data?.error || 'Failed to save listings');
+      setError(message);
       setProcessingLog(prev => [
         ...prev,
         `❌ Save failed: ${err.response?.data?.error || err.message}`
       ]);
       console.error(err);
+      throw err;
     } finally {
       setLoading(false);
     }

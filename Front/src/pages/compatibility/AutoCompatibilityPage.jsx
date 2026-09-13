@@ -53,6 +53,30 @@ const getTodayIST = () => {
   }).format(new Date());
 };
 
+const formatListingDate = (yyyyMmDd) => {
+  if (!yyyyMmDd) return '';
+  const [y, m, d] = String(yyyyMmDd).split('-');
+  if (!y || !m || !d) return yyyyMmDd;
+  return new Date(Number(y), Number(m) - 1, Number(d)).toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+};
+
+const shiftIsoDate = (yyyyMmDd, days) => {
+  const [y, m, d] = String(yyyyMmDd || '').split('-').map(Number);
+  if (!y || !m || !d) return yyyyMmDd;
+  const next = new Date(y, m - 1, d);
+  next.setDate(next.getDate() + days);
+  const yy = next.getFullYear();
+  const mm = String(next.getMonth() + 1).padStart(2, '0');
+  const dd = String(next.getDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+};
+
+const getYesterdayIST = () => shiftIsoDate(getTodayIST(), -1);
+
 // ======= HELPER FUNCTIONS FOR AI SUGGEST =======
 
 // Make alias resolution (Chevy → Chevrolet, etc.) - MATCHES SERVER LOGIC
@@ -349,7 +373,12 @@ export default function AutoCompatibilityPage() {
   // allBatchesData: { [batchId]: batch } — live-polled status for each batch in the run
   const [allBatchesData, setAllBatchesData] = useState({});
   const [allSellersRunning, setAllSellersRunning] = useState(false);
+  const [dateBatchesLoading, setDateBatchesLoading] = useState(false);
+  const [dateBatchesError, setDateBatchesError] = useState('');
+  const [recentBatchDates, setRecentBatchDates] = useState([]);
   const allBatchesPollRef = useRef(null);
+  const dateBatchesReqRef = useRef(0);
+  const skipNextDateLoadRef = useRef(null);
   const [endingListing, setEndingListing] = useState(false);
 
   // Active (running) batches — fetched once on page open so users know what's in progress
@@ -493,67 +522,96 @@ export default function AutoCompatibilityPage() {
 
   // ── Run-All-Sellers helpers ──────────────────────────────────────────────────
 
-  const handleRunAllSellers = async () => {
-    if (!targetDate) return;
+  const applyAllSellersRunResult = (runBatches, date) => {
+    setAllSellersRun(runBatches);
+    const initial = {};
+    runBatches.forEach((b) => {
+      if (b.batchId) initial[b.batchId] = { status: b.status, totalListings: b.totalListings };
+    });
+    setAllBatchesData(initial);
+    const runningCount = runBatches.filter((b) => b.status === 'running').length;
+    if (runBatches.length > 0) {
+      setSnackbar({
+        open: true,
+        message: runningCount > 0
+          ? `Autorun started for ${runningCount} seller(s) on ${formatListingDate(date)}`
+          : `Autorun finished immediately for ${formatListingDate(date)} (reused or no new items)`,
+        severity: runningCount > 0 ? 'info' : 'success',
+      });
+      const ids = runBatches.map((b) => b.batchId).filter(Boolean);
+      if (runningCount > 0) startAllBatchesPolling(ids);
+    } else {
+      setSnackbar({ open: true, message: `No eligible sellers for ${formatListingDate(date)}`, severity: 'warning' });
+    }
+  };
+
+  const handleAutorunForDate = async (date) => {
+    if (!date || allSellersRunning) return;
     setAllSellersRunning(true);
     setAllSellersRun(null);
     setAllBatchesData({});
-    if (allBatchesPollRef.current) clearInterval(allBatchesPollRef.current);
+    if (allBatchesPollRef.current) {
+      clearInterval(allBatchesPollRef.current);
+      allBatchesPollRef.current = null;
+    }
 
     try {
       const { data } = await api.post('/ebay/auto-compatibility/run-for-date', {
-        targetDate,
+        targetDate: date,
         itemLimit: itemLimit === '' ? 0 : Number(itemLimit),
       });
       const runBatches = data.batches || [];
-      setAllSellersRun(runBatches);
-      // Seed with initial status
-      const initial = {};
-      runBatches.forEach(b => { if (b.batchId) initial[b.batchId] = { status: b.status, totalListings: b.totalListings }; });
-      setAllBatchesData(initial);
-
-      if (runBatches.length > 0) {
-        setSnackbar({ open: true, message: `Processing ${runBatches.filter(b => b.status === 'running').length} seller(s) for ${targetDate}`, severity: 'info' });
-        startAllBatchesPolling(runBatches.map(b => b.batchId).filter(Boolean));
-      }
+      skipNextDateLoadRef.current = date;
+      if (date !== targetDate) setTargetDate(date);
+      applyAllSellersRunResult(runBatches, date);
+      fetchActiveBatches();
     } catch (e) {
-      setSnackbar({ open: true, message: 'Failed: ' + (e.response?.data?.error || e.message), severity: 'error' });
+      setSnackbar({ open: true, message: 'Autorun failed: ' + (e.response?.data?.error || e.message), severity: 'error' });
     } finally {
       setAllSellersRunning(false);
     }
   };
 
+  const handleRunAllSellers = () => handleAutorunForDate(targetDate);
+
   const startAllBatchesPolling = (batchIds) => {
     if (allBatchesPollRef.current) clearInterval(allBatchesPollRef.current);
-    // Only poll batches that are still running — drop completed ones each cycle
-    let pendingIds = [...batchIds];
-    allBatchesPollRef.current = setInterval(async () => {
+    let pendingIds = [...batchIds].filter(Boolean);
+    const poll = async () => {
       if (pendingIds.length === 0) {
-        clearInterval(allBatchesPollRef.current);
-        allBatchesPollRef.current = null;
+        if (allBatchesPollRef.current) {
+          clearInterval(allBatchesPollRef.current);
+          allBatchesPollRef.current = null;
+        }
         return;
       }
       try {
         const { data } = await api.post('/ebay/auto-compatibility-status/bulk', { batchIds: pendingIds });
         const fresh = data.batches || {};
-        // Merge into existing state (preserve completed batches already removed from pendingIds)
         setAllBatchesData(prev => ({ ...prev, ...fresh }));
-        // Stop polling batches that finished this cycle
         pendingIds = pendingIds.filter(id => fresh[id]?.status === 'running');
-        if (pendingIds.length === 0) {
+        if (pendingIds.length === 0 && allBatchesPollRef.current) {
           clearInterval(allBatchesPollRef.current);
           allBatchesPollRef.current = null;
         }
       } catch { /* ignore */ }
-    }, 120000);
+    };
+    poll();
+    allBatchesPollRef.current = setInterval(poll, 5000);
   };
 
   // Load the per-date batches when switching back to run-all mode for an existing date
   const reloadDateBatches = async (date) => {
+    if (!date) return;
+    const reqId = ++dateBatchesReqRef.current;
+    setDateBatchesLoading(true);
+    setDateBatchesError('');
     try {
+      await api.post('/ebay/auto-compatibility/resume-running', { targetDate: date }).catch(() => {});
       const { data } = await api.get('/ebay/auto-compatibility-batches-for-date', { params: { targetDate: date } });
+      if (reqId !== dateBatchesReqRef.current) return;
       const batches = data.batches || [];
-      if (batches.length === 0) return;
+      setRecentBatchDates(Array.isArray(data.recentDates) ? data.recentDates : []);
       const runRows = batches.map(b => ({
         sellerId: b.seller?._id,
         username: b.seller?.user?.username || b.seller?.user?.email,
@@ -566,10 +624,30 @@ export default function AutoCompatibilityPage() {
       const initial = {};
       batches.forEach(b => { initial[b._id] = b; });
       setAllBatchesData(initial);
+      if (allBatchesPollRef.current) {
+        clearInterval(allBatchesPollRef.current);
+        allBatchesPollRef.current = null;
+      }
       const stillRunning = batches.some(b => b.status === 'running');
       if (stillRunning) startAllBatchesPolling(batches.map(b => b._id));
-    } catch { /* ignore */ }
+    } catch (e) {
+      if (reqId !== dateBatchesReqRef.current) return;
+      setDateBatchesError(e.response?.data?.error || e.message || 'Failed to load batches');
+      setAllSellersRun([]);
+      setAllBatchesData({});
+    } finally {
+      if (reqId === dateBatchesReqRef.current) setDateBatchesLoading(false);
+    }
   };
+
+  useEffect(() => {
+    if (runMode !== 'all' || !targetDate) return;
+    if (skipNextDateLoadRef.current === targetDate) {
+      skipNextDateLoadRef.current = null;
+      return;
+    }
+    reloadDateBatches(targetDate);
+  }, [runMode, targetDate]);
 
   const handleViewHistoryBatch = async (id) => {
     setBatchId(id);
@@ -1845,8 +1923,6 @@ export default function AutoCompatibilityPage() {
                 value={targetDate}
                 onChange={e => {
                   setTargetDate(e.target.value);
-                  setAllSellersRun(null);
-                  setAllBatchesData({});
                   if (allBatchesPollRef.current) { clearInterval(allBatchesPollRef.current); allBatchesPollRef.current = null; }
                 }}
                 sx={{ minWidth: 160 }}
@@ -1869,43 +1945,131 @@ export default function AutoCompatibilityPage() {
                 helperText={itemLimit === '' || itemLimit === 0 ? 'All items' : `First ${itemLimit}`}
               />
 
-              <Button
-                variant="contained"
-                size="large"
-                startIcon={allSellersRunning ? <CircularProgress size={20} color="inherit" /> : <PlayArrowIcon />}
-                onClick={handleRunAllSellers}
-                disabled={allSellersRunning || !targetDate}
-                sx={{
-                  bgcolor: '#7c3aed', '&:hover': { bgcolor: '#6d28d9' },
-                  fontWeight: 700, px: 4, borderRadius: 2,
-                  textTransform: 'none', fontSize: '1rem'
-                }}
-              >
-                {allSellersRunning ? 'Starting...' : 'Run All Sellers for Date'}
-              </Button>
+              <Tooltip title={hasConflict ? 'A batch is already running. Wait or open it from the banner above.' : 'Same as the nightly job, for the date in the picker'}>
+                <span>
+                  <Button
+                    variant="contained"
+                    size="large"
+                    startIcon={allSellersRunning ? <CircularProgress size={20} color="inherit" /> : <PlayArrowIcon />}
+                    onClick={() => handleAutorunForDate(targetDate)}
+                    disabled={allSellersRunning || !targetDate || hasConflict}
+                    sx={{
+                      bgcolor: '#7c3aed', '&:hover': { bgcolor: '#6d28d9' },
+                      fontWeight: 700, px: 3, borderRadius: 2,
+                      textTransform: 'none', fontSize: '1rem'
+                    }}
+                  >
+                    {allSellersRunning ? 'Starting autorun...' : `Autorun ${formatListingDate(targetDate)}`}
+                  </Button>
+                </span>
+              </Tooltip>
 
-              {targetDate && !allSellersRun && (
+              <Tooltip title="Manual trigger of the 1:35 AM IST cron (previous IST listing day)">
+                <span>
+                  <Button
+                    variant="outlined"
+                    onClick={() => handleAutorunForDate(getYesterdayIST())}
+                    disabled={allSellersRunning || hasConflict}
+                    sx={{ alignSelf: 'center', textTransform: 'none', fontWeight: 700 }}
+                  >
+                    Autorun yesterday ({formatListingDate(getYesterdayIST())})
+                  </Button>
+                </span>
+              </Tooltip>
+
+              <Tooltip title="Autorun listings that started today (IST)">
+                <span>
+                  <Button
+                    variant="outlined"
+                    onClick={() => handleAutorunForDate(getTodayIST())}
+                    disabled={allSellersRunning || hasConflict || targetDate === getTodayIST()}
+                    sx={{ alignSelf: 'center', textTransform: 'none', fontWeight: 700 }}
+                  >
+                    Autorun today ({formatListingDate(getTodayIST())})
+                  </Button>
+                </span>
+              </Tooltip>
+
+              {targetDate && (
                 <Button
                   variant="outlined"
                   size="small"
                   onClick={() => reloadDateBatches(targetDate)}
+                  disabled={dateBatchesLoading}
+                  startIcon={dateBatchesLoading ? <CircularProgress size={16} /> : <RefreshIcon />}
                   sx={{ alignSelf: 'center' }}
                 >
-                  Load Existing Batches for Date
+                  {dateBatchesLoading ? 'Loading batches...' : 'Reload Batches for Date'}
                 </Button>
               )}
             </Box>
+            <Typography variant="caption" color="textSecondary">
+              These buttons start the same All-Sellers job as the nightly autorun. You do not have to wait for 1:35 AM IST.
+            </Typography>
 
 
           </Box>
         )}
       </Paper>
 
+      {runMode === 'all' && dateBatchesError && (
+        <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }}>
+          Could not load batches for {formatListingDate(targetDate)}: {dateBatchesError}
+        </Alert>
+      )}
+
+      {runMode === 'all' && dateBatchesLoading && !allSellersRun?.length && (
+        <Box display="flex" alignItems="center" gap={1.5} mb={3} py={2}>
+          <CircularProgress size={22} sx={{ color: '#7c3aed' }} />
+          <Typography variant="body2" color="textSecondary">
+            Loading batches for {formatListingDate(targetDate)}…
+          </Typography>
+        </Box>
+      )}
+
+      {runMode === 'all' && !dateBatchesLoading && !dateBatchesError && allSellersRun && allSellersRun.length === 0 && (
+        <Alert severity="info" sx={{ mb: 3, borderRadius: 2 }}>
+          <Typography variant="body2" fontWeight={700} sx={{ mb: 0.5 }}>
+            No Auto Compat run for {formatListingDate(targetDate)}
+          </Typography>
+          <Typography variant="body2" sx={{ mb: 1.5 }}>
+            The Compatibility Dashboard can still show Motors listings for this date. This box only lists dates that already have an Auto Compat <strong>batch</strong>. Click Autorun to start the same job as the nightly cron for this date.
+          </Typography>
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={allSellersRunning ? <CircularProgress size={16} color="inherit" /> : <PlayArrowIcon />}
+            onClick={() => handleAutorunForDate(targetDate)}
+            disabled={allSellersRunning || !targetDate || hasConflict}
+            sx={{ bgcolor: '#7c3aed', '&:hover': { bgcolor: '#6d28d9' }, textTransform: 'none', fontWeight: 700, mb: recentBatchDates.length ? 1.5 : 0 }}
+          >
+            Autorun {formatListingDate(targetDate)}
+          </Button>
+          {recentBatchDates.length > 0 && (
+            <Box display="flex" flexWrap="wrap" gap={0.75} alignItems="center">
+              <Typography variant="caption" color="textSecondary" sx={{ mr: 0.5 }}>
+                Previous Auto Compat runs (not all listing dates):
+              </Typography>
+              {recentBatchDates.map((d) => (
+                <Chip
+                  key={d}
+                  size="small"
+                  label={formatListingDate(d)}
+                  variant={d === targetDate ? 'filled' : 'outlined'}
+                  onClick={() => setTargetDate(d)}
+                  sx={{ cursor: 'pointer', fontWeight: 600 }}
+                />
+              ))}
+            </Box>
+          )}
+        </Alert>
+      )}
+
       {/* ALL-SELLERS DASHBOARD */}
-      {runMode === 'all' && allSellersRun && (
+      {runMode === 'all' && allSellersRun && allSellersRun.length > 0 && (
         <Box mb={3}>
           <Typography variant="h6" fontWeight={600} mb={2}>
-            📋 Sellers — {targetDate}
+            📋 Sellers — {formatListingDate(targetDate)}
           </Typography>
           <Box display="flex" gap={2} flexWrap="wrap">
             {allSellersRun.map((row) => {
@@ -1916,6 +2080,7 @@ export default function AutoCompatibilityPage() {
               const needsManual = bd?.needsManualCount ?? 0;
               const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
               const isRunning = status === 'running';
+              const isQueued = isRunning && processed === 0 && !bd?.currentStep && !bd?.lastHeartbeatAt && !bd?.currentItemTitle;
               const isComplete = status === 'completed' || status === 'failed';
               const borderColor = isRunning ? '#7c3aed' : status === 'completed' ? '#22c55e' : status === 'failed' ? '#ef4444' : '#e0e0e0';
 
@@ -1927,7 +2092,7 @@ export default function AutoCompatibilityPage() {
                         {row.username || '—'}
                       </Typography>
                       <Chip
-                        label={status === 'skipped' ? 'No items' : status}
+                        label={status === 'skipped' ? 'No items' : isQueued ? 'Queued' : status}
                         size="small"
                         color={status === 'completed' ? 'success' : status === 'running' ? 'warning' : status === 'failed' ? 'error' : 'default'}
                       />
@@ -1948,6 +2113,16 @@ export default function AutoCompatibilityPage() {
                           {bd?.ebayErrorCount > 0 && <Chip label={`❌ ${bd.ebayErrorCount}`} size="small" color="error" sx={{ height: 20, fontSize: '0.7rem' }} />}
                           {bd?.manualReviewDone && <Chip label="✓ Reviewed" size="small" color="success" variant="outlined" sx={{ height: 20, fontSize: '0.7rem' }} />}
                         </Box>
+                        {isQueued && (
+                          <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mt: 0.5 }}>
+                            Waiting for a free worker (up to 3 sellers at a time)
+                          </Typography>
+                        )}
+                        {isRunning && !isQueued && bd?.currentStep && !bd?.currentItemTitle && (
+                          <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mt: 0.5 }}>
+                            {bd.currentStep}
+                          </Typography>
+                        )}
                         {isRunning && bd?.currentItemTitle && (
                           <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mt: 0.5, fontStyle: 'italic' }} noWrap>
                             {bd.currentItemTitle}

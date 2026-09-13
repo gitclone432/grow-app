@@ -149,13 +149,17 @@ function collectSkuVariantsForOrders(orders = [], listingSkuBySellerItem = new M
     return [...variants];
 }
 
-async function fetchTemplateListingsForSupplierLookup(sellerObjectIds = [], skuVariants = []) {
+async function fetchTemplateListingsForSupplierLookup(sellerObjectIds = [], skuVariants = [], itemNumbers = []) {
     const clauses = [];
+    const sellerMatch = [];
+    if (skuVariants.length) sellerMatch.push({ customLabel: { $in: skuVariants } });
+    if (itemNumbers.length) sellerMatch.push({ ebayItemId: { $in: itemNumbers } });
 
-    if (sellerObjectIds.length) {
+    if (sellerObjectIds.length && sellerMatch.length) {
         clauses.push({
             sellerId: { $in: sellerObjectIds },
             deletedAt: null,
+            $or: sellerMatch,
         });
     }
 
@@ -164,28 +168,13 @@ async function fetchTemplateListingsForSupplierLookup(sellerObjectIds = [], skuV
             deletedAt: null,
             customLabel: { $in: skuVariants },
         });
-
-        const asinSuffixes = [...new Set(
-            skuVariants
-                .map((sku) => getBaseSku(sku))
-                .filter((sku) => sku.startsWith('GRW25') && sku.length === 10)
-                .map((sku) => sku.slice(5))
-        )];
-
-        if (asinSuffixes.length) {
-            clauses.push({
-                deletedAt: null,
-                $or: asinSuffixes.map((suffix) => ({
-                    _asinReference: new RegExp(`${suffix}$`, 'i'),
-                })),
-            });
-        }
     }
 
     if (!clauses.length) return [];
 
     const rows = await TemplateListing.find({ $or: clauses })
         .select('+_asinReference sellerId customLabel amazonLink ebayItemId status updatedAt')
+        .maxTimeMS(4000)
         .lean();
 
     const byId = new Map();
@@ -262,11 +251,15 @@ async function resolveSupplierLinksForOrders(orders = [], { writeField = 'suppli
     );
 
     const skuVariants = collectSkuVariantsForOrders(orders, listingSkuBySellerItem);
-    if (!skuVariants.length && !sellerIds.length) return orders;
+    const itemNumbers = [
+        ...new Set(orders.map((order) => extractOrderItemNumber(order)).filter(Boolean)),
+    ];
+    if (!skuVariants.length && !sellerIds.length && !itemNumbers.length) return orders;
 
     const templateListings = await fetchTemplateListingsForSupplierLookup(
         toSellerObjectIds(sellerIds),
-        skuVariants
+        skuVariants,
+        itemNumbers
     );
     if (!templateListings.length) return orders;
 

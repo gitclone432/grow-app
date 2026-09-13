@@ -9,6 +9,45 @@ import {
   Typography,
 } from '@mui/material';
 
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+
+function parseDateParts(value) {
+  const text = String(value ?? '').trim();
+  if (!text || text === '-') return null;
+
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) {
+    return { year: Number(iso[1]), month: Number(iso[2]), day: Number(iso[3]) };
+  }
+
+  const dayMonthYear = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (dayMonthYear) {
+    let year = Number(dayMonthYear[3]);
+    if (dayMonthYear[3].length === 2) year += 2000;
+    return {
+      year,
+      month: Number(dayMonthYear[2]),
+      day: Number(dayMonthYear[1]),
+    };
+  }
+
+  return null;
+}
+
+function formatDayMonthYear(value) {
+  const parts = parseDateParts(value);
+  if (!parts) return '';
+  return `${pad2(parts.day)}-${pad2(parts.month)}-${parts.year}`;
+}
+
+function formatIsoDate(value) {
+  const parts = parseDateParts(value);
+  if (!parts) return '';
+  return `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}`;
+}
+
 function normalizeDisplayValue(value) {
   if (value == null || value === '') return '';
   return String(value);
@@ -33,11 +72,22 @@ function formatUsdCellDisplay(value) {
   return `$${num.toFixed(2)}`;
 }
 
+function signedMoneyColor(value) {
+  const cleaned = String(value ?? '').replace(/[^\d.-]/g, '');
+  if (!cleaned || cleaned === '-' || cleaned === '.') return null;
+  const num = Number.parseFloat(cleaned);
+  if (!Number.isFinite(num) || num === 0) return null;
+  return num > 0 ? '#2e7d32' : '#c62828';
+}
+
 function getDisplayLabel(value, column) {
   const text = normalizeDisplayValue(value);
   if (!text) {
     if (column.emptyLabel) return column.emptyLabel;
     return '-';
+  }
+  if (column.inputType === 'date') {
+    return formatDayMonthYear(text) || text;
   }
   if (column.format === 'usd') {
     return formatUsdCellDisplay(text) || '-';
@@ -115,12 +165,17 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
 
   const commitSave = (nextValue) => {
     let normalized = normalizeDisplayValue(nextValue);
+    if (column.inputType === 'date') {
+      normalized = formatIsoDate(normalized);
+    }
     if (column.format === 'usd') {
       normalized = normalizeUsdStorage(normalized);
     }
-    const currentValue = column.format === 'usd'
-      ? normalizeUsdStorage(value)
-      : normalizeDisplayValue(value);
+    const currentValue = column.inputType === 'date'
+      ? formatIsoDate(value)
+      : column.format === 'usd'
+        ? normalizeUsdStorage(value)
+        : normalizeDisplayValue(value);
     if (normalized === currentValue) return;
     onSave(normalized);
   };
@@ -149,6 +204,7 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
     ? column.getDisplayLabel(value)
     : getDisplayLabel(localValue, column);
   const isEmptySelect = column.inputType === 'select' && !normalizeDisplayValue(value) && column.emptyLabel;
+  const signColor = column.colorBySign ? signedMoneyColor(value) : null;
   const cellAlign = column.align || 'left';
   const justifyContent = cellAlign === 'right' ? 'flex-end' : cellAlign === 'center' ? 'center' : 'flex-start';
 
@@ -244,8 +300,10 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
             minWidth: 0,
             maxWidth: '100%',
             whiteSpace: compact || !column.multiline ? 'nowrap' : 'pre-wrap',
-            overflow: 'hidden',
-            textOverflow: compact || !column.multiline ? 'ellipsis' : 'clip',
+            overflow: column.inputType === 'date' ? 'visible' : 'hidden',
+            textOverflow: column.inputType === 'date' || column.multiline
+              ? 'clip'
+              : (compact || !column.multiline ? 'ellipsis' : 'clip'),
             wordBreak: compact || !column.multiline ? 'normal' : 'break-word',
             overflowWrap: compact || !column.multiline ? 'normal' : 'anywhere',
             ...(column.computed
@@ -268,6 +326,7 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
                   : 'text.primary',
                 ...(isEmptySelect ? { fontStyle: 'italic' } : {}),
               }),
+            ...(signColor ? { color: signColor, fontWeight: 700, fontStyle: 'normal' } : {}),
           }}
         >
           {displayLabel}
@@ -387,7 +446,7 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
       minRows={column.multiline ? 1 : 1}
       maxRows={column.multiline ? (compact ? 2 : 4) : 1}
       type={column.inputType === 'date' ? 'date' : column.inputType === 'number' ? 'number' : 'text'}
-      value={localValue}
+      value={column.inputType === 'date' ? (formatIsoDate(localValue) || '') : localValue}
       disabled={disabled || saving}
       onChange={(e) => setLocalValue(e.target.value)}
       onBlur={() => finishEditing(localValue)}

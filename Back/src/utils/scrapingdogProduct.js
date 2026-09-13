@@ -453,6 +453,10 @@ export async function scrapeAmazonProductWithScrapingdog(asin, region = 'US', re
           price: price || '',
           brand: brand || 'Unbranded',
           description: description || '',
+          availabilityStatus: String(data.availability_status || data.purchase_options?.single_offer?.stock || '').trim(),
+          shippingTime: String(data.shipping_info || '').trim(),
+          averageRating: data.average_rating || info.customer_reviews?.stars || '',
+          reviewCount: data.total_reviews || data.total_ratings || info.customer_reviews?.ratings_count || '',
           // Present only when the missing-stock-info re-fetch ran — lets the
           // precheck flow count retries and their success rate.
           availabilityRetry: availabilityRetryAttempted

@@ -501,6 +501,7 @@ export default function AsinReviewModal({
   const [editedItems, setEditedItems] = useState({});
   const [dismissedItems, setDismissedItems] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [descriptionViewMode, setDescriptionViewMode] = useState('preview'); // 'code' | 'preview'
   const [amazonWindowRef, setAmazonWindowRef] = useState(null);
@@ -641,7 +642,11 @@ export default function AsinReviewModal({
   }, [previewItems, sellerId, storeTemplateHtml]);
 
 
-  // Reset transient review state for each new preview run/open
+  // Reset transient review state when the modal opens, or when a new all-loading run starts.
+  // Do not depend on every previewItems SSE patch — that pinned the view on item 1/N
+  // while the first ASIN was still scraping (Review Generated Listings stuck on loading).
+  const allPreviewItemsLoading = previewItems.length > 0
+    && previewItems.every((item) => item.status === 'loading');
   useEffect(() => {
     if (!open) return;
     setDismissedItems([]);
@@ -655,7 +660,21 @@ export default function AsinReviewModal({
     autoRephraseProcessingRef.current = false;
     setAutoRephrasingIds(new Set());
     setAutoRephraseQueueSize(0);
-  }, [open, previewItems]);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !allPreviewItemsLoading) return;
+    setCurrentIndex(0);
+    setDismissedItems([]);
+  }, [open, allPreviewItemsLoading]);
+
+  useEffect(() => {
+    if (!open) return;
+    const current = previewItems[currentIndex];
+    if (current && current.status !== 'loading') return;
+    const readyIdx = previewItems.findIndex((item) => item.status && item.status !== 'loading');
+    if (readyIdx >= 0 && readyIdx !== currentIndex) setCurrentIndex(readyIdx);
+  }, [open, previewItems, currentIndex]);
 
   // Check each SKU as soon as its customLabel becomes available (items generate via SSE stream).
   // Uses a ref to ensure each item is only checked once even as editedItems keeps changing.
@@ -943,12 +962,7 @@ export default function AsinReviewModal({
 
 
   const notifySkuReallocations = (items) => {
-    const reallocated = items.filter(
-      (item) =>
-        item.skuReallocated ||
-        (item.sku && item.baseSku && item.sku !== item.baseSku) ||
-        (Array.isArray(item.warnings) && item.warnings.some((w) => /was taken/i.test(String(w))))
-    );
+    const reallocated = items.filter((item) => item.skuReallocated);
     if (reallocated.length === 0) return;
     const sample = reallocated
       .slice(0, 3)
@@ -957,7 +971,7 @@ export default function AsinReviewModal({
     const extra = reallocated.length > 3 ? ` (+${reallocated.length - 3} more)` : '';
     setSkuToast({
       open: true,
-      message: `Base SKU was taken for ${reallocated.length} listing(s). Using counted SKUs: ${sample}${extra}`,
+      message: `${reallocated.length} of these ASINs already use this seller's base SKU, so they got a counted SKU: ${sample}${extra}`,
     });
   };
 
@@ -986,11 +1000,18 @@ export default function AsinReviewModal({
     notifySkuReallocations(savableItems);
 
     setSaving(true);
+    setSaveError('');
     try {
       await onSave(listingsToSave);
       setHasUnsavedChanges(false);
     } catch (error) {
+      const message =
+        error?.response?.data?.error
+        || error?.message
+        || 'Save failed';
       console.error('Save failed:', error);
+      setSaveError(message);
+      setSkuToast({ open: true, message });
     } finally {
       setSaving(false);
     }
@@ -1291,6 +1312,14 @@ export default function AsinReviewModal({
               color={getStatusColor(currentItem?.status)}
               size="small"
             />
+            {previewItems.some((item) => item.status === 'loading') && (
+              <Chip
+                icon={<CircularProgress size={12} sx={{ color: 'inherit', ml: 1 }} />}
+                label={`Generating ${previewItems.filter((item) => item.status !== 'loading').length}/${previewItems.length}`}
+                color="info"
+                size="small"
+              />
+            )}
             {(() => {
               const timings = currentItem?.fetchTimings;
               const formatMs = (ms) => {
@@ -1340,9 +1369,8 @@ export default function AsinReviewModal({
                 />
               </Tooltip>
             )}
-            {(currentItem?.skuReallocated ||
-              (currentItem?.sku && currentItem?.baseSku && currentItem.sku !== currentItem.baseSku)) && (
-              <Tooltip title={`Base SKU ${currentItem.baseSku || ''} was taken — using ${currentItem.sku}`}>
+            {currentItem?.skuReallocated && (
+              <Tooltip title={`This seller already has ${currentItem.baseSku || 'this base SKU'} — using ${currentItem.sku}`}>
                 <Chip
                   size="small"
                   color="warning"
@@ -1447,7 +1475,7 @@ export default function AsinReviewModal({
             {!hideSaveButton && onSave && (
             <Button
               variant="contained"
-              startIcon={showAmazonPreview ? null : <SaveIcon />}
+              startIcon={saving ? <CircularProgress size={14} color="inherit" /> : (showAmazonPreview ? null : <SaveIcon />)}
               onClick={handleSaveAll}
               size="small"
               disabled={saving || activeItems.every(i => ['error', 'loading', 'blocked'].includes(i.status))}
@@ -1469,6 +1497,11 @@ export default function AsinReviewModal({
             value={activeItems.length > 0 ? ((currentIndex + 1) / activeItems.length) * 100 : 0}
             sx={{ height: 8, borderRadius: 1 }}
           />
+          {saveError && (
+            <Alert severity="error" onClose={() => setSaveError('')} sx={{ mt: 1 }}>
+              {saveError}
+            </Alert>
+          )}
         </Box>
 
         {/* Duplicate Notification */}

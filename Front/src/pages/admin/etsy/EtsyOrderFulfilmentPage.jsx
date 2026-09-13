@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, lazy, Suspense } from 'react';
 import AddIcon from '@mui/icons-material/Add';
+import DownloadIcon from '@mui/icons-material/Download';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import StorefrontIcon from '@mui/icons-material/Storefront';
 import UploadIcon from '@mui/icons-material/Upload';
@@ -56,11 +57,16 @@ import {
   enrichOrderWithAmazonPricing,
   formatExRate,
   formatRupeeField,
+  formatUsd,
   parseMoney,
+  AMAZON_USD_INPUT_FIELDS,
   ETSY_RUPEE_INPUT_FIELDS,
+  ETSY_ZERO_AS_EMPTY_FIELDS,
   ETSY_COMPUTED_FIELDS,
   AMAZON_PRICING_COMPUTED_FIELDS,
 } from '../../../utils/etsyOrderPricing.js';
+
+import { downloadEtsySheetCsv } from '../../../utils/etsyOrderFulfilmentCsvImport.js';
 
 const EtsyOrderFulfilmentImportDialog = lazy(
   () => import('../../../components/EtsyOrderFulfilmentImportDialog.jsx')
@@ -239,7 +245,8 @@ function getBodyCellSx(column, isSaving, rowIndex, theme) {
       : {}),
     ...(column.align ? { textAlign: column.align } : {}),
     whiteSpace: 'nowrap',
-    textOverflow: 'ellipsis',
+    textOverflow: column.inputType === 'date' ? 'clip' : 'ellipsis',
+    overflow: column.inputType === 'date' ? 'visible' : 'hidden',
   };
 }
 
@@ -282,6 +289,7 @@ export default function EtsyOrderFulfilmentPage({
   hiddenColumnKeys = ETSY_ORDER_FULFILMENT_HIDDEN_COLUMNS,
   columnLabelOverrides = {},
   apiBasePath = '/etsy/order-fulfilment',
+  embedded = false,
 } = {}) {
   const theme = useTheme();
   const isSmallMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -472,6 +480,34 @@ export default function EtsyOrderFulfilmentPage({
     [filteredOrders, sortColumn, sortDir, storeNameById]
   );
 
+  const handleDownloadCsv = useCallback(() => {
+    if (sortedOrders.length === 0) {
+      setSnackbar({ open: true, message: 'No rows to download', severity: 'info' });
+      return;
+    }
+    const storeSlug = (isAllStoresSelected ? 'all-stores' : (selectedStore?.name || 'store'))
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    const sheetSlug = String(title || 'etsy-sheet')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    downloadEtsySheetCsv({
+      columns: fulfilmentColumns,
+      orders: sortedOrders,
+      storeNameById,
+      filename: `${sheetSlug}-${storeSlug}`,
+    });
+  }, [
+    fulfilmentColumns,
+    isAllStoresSelected,
+    selectedStore?.name,
+    sortedOrders,
+    storeNameById,
+    title,
+  ]);
+
   const handleSort = (columnKey) => {
     setPage(1);
     if (sortBy === columnKey) {
@@ -592,7 +628,11 @@ export default function EtsyOrderFulfilmentPage({
     try {
       const current = orders.find((row) => row._id === orderId);
       const normalizedValue = ETSY_RUPEE_INPUT_FIELDS.has(field)
-        ? formatRupeeField(value)
+        ? formatRupeeField(value, { zeroAsEmpty: ETSY_ZERO_AS_EMPTY_FIELDS.has(field) })
+        : ETSY_ZERO_AS_EMPTY_FIELDS.has(field) && parseMoney(value) === 0
+          ? ''
+        : AMAZON_USD_INPUT_FIELDS.has(field)
+          ? (String(value ?? '').trim() ? formatUsd(parseMoney(value)) : '')
         : field === 'exRate'
           ? formatExRate(value)
           : field === 'region'
@@ -602,6 +642,7 @@ export default function EtsyOrderFulfilmentPage({
       const patch = { [field]: normalizedValue };
 
       if (AMAZON_PRICING_TRIGGER_FIELDS.has(field)) {
+        patch.exRate = merged.exRate;
         for (const key of [...ETSY_COMPUTED_FIELDS, ...AMAZON_PRICING_COMPUTED_FIELDS]) {
           patch[key] = merged[key];
         }
@@ -668,7 +709,9 @@ export default function EtsyOrderFulfilmentPage({
         sx={{
           display: 'flex',
           flexDirection: 'column',
-          height: { xs: 'calc(100dvh - 56px)', sm: 'calc(100dvh - 64px)', md: 'calc(100vh - 100px)' },
+          height: embedded
+            ? '100%'
+            : { xs: 'calc(100dvh - 56px)', sm: 'calc(100dvh - 64px)', md: 'calc(100vh - 100px)' },
           overflow: 'hidden',
           width: '100%',
           maxWidth: '100%',
@@ -727,6 +770,17 @@ export default function EtsyOrderFulfilmentPage({
                 sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
               >
                 {isSmallMobile ? 'Import' : 'Import CSV'}
+              </Button>
+              <Button
+                variant="outlined"
+                color="primary"
+                size="small"
+                startIcon={<DownloadIcon />}
+                onClick={handleDownloadCsv}
+                disabled={sortedOrders.length === 0}
+                sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
+              >
+                {isSmallMobile ? 'Download' : 'Download CSV'}
               </Button>
               <Button
                 variant="contained"

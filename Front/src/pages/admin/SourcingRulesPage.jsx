@@ -674,9 +674,9 @@ export default function SourcingRulesPage() {
                 Generated listings are saved as <strong>Active</strong>, exported to CSV, saved to CSV Storage, and
                 uploaded to eBay's Feed API immediately — same pipeline as the CSV Listings page's Download CSV
                 button, with zero review. Check the Feed Upload page for final created/failed counts once eBay
-                finishes processing. Only items that failed outright or were blocked (e.g. duplicate ASIN in
-                another template) are skipped; items with minor warnings (e.g. missing description) are still
-                saved and uploaded.
+                finishes processing. Items with errors are skipped. ASINs that already exist in
+                another template get a unique title and SKU and are still saved and uploaded;
+                items with minor warnings (e.g. missing description) are also saved and uploaded.
               </Alert>
             )}
           </Stack>

@@ -318,13 +318,14 @@ export default function ListingDirectoryPage() {
 
   const handleSaveFromReview = async (listings) => {
     try {
-      await api.put('/template-listings/bulk-update', { listings });
+      await api.put('/template-listings/bulk-update', { listings }, { timeout: 90000 });
       setReviewModal(false);
       setPreviewItems([]);
       setSuccess('Listings updated successfully!');
       fetchListings(1);
     } catch (e) {
-      setError('Failed to save changes');
+      setError(e.code === 'ECONNABORTED' ? 'Save timed out. Try again.' : 'Failed to save changes');
+      throw e;
     }
   };
 

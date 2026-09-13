@@ -3,8 +3,9 @@ import mongoose from 'mongoose';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import EtsyStore from '../models/EtsyStore.js';
 import { normalizeIdentifierString } from '../utils/normalizeIdentifierString.js';
-import { applyAmazonPricingToUpdate, enrichOrderRow, formatExRate, formatRupeeField, ETSY_RUPEE_INPUT_FIELDS } from '../utils/etsyOrderPricing.js';
+import { applyAmazonPricingToUpdate, enrichOrderRow, formatExRate, formatRupeeField, parseMoney, ETSY_RUPEE_INPUT_FIELDS, ETSY_ZERO_AS_EMPTY_FIELDS } from '../utils/etsyOrderPricing.js';
 import { normalizeEtsyRegion } from '../utils/etsyAddressZip.js';
+import { correctStoredSheetDates } from '../utils/etsySheetDate.js';
 
 export const ETSY_ORDER_FULFILMENT_FIELDS = [
   'dateSold',
@@ -61,7 +62,10 @@ const IDENTIFIER_FIELDS = new Set(['trackingId', 'amazonOrderNumber']);
 function normalizeFieldValue(key, value) {
   const str = value == null ? '' : String(value);
   if (ETSY_RUPEE_INPUT_FIELDS.has(key)) {
-    return formatRupeeField(str);
+    return formatRupeeField(str, { zeroAsEmpty: ETSY_ZERO_AS_EMPTY_FIELDS.has(key) });
+  }
+  if (ETSY_ZERO_AS_EMPTY_FIELDS.has(key) && parseMoney(str) === 0) {
+    return '';
   }
   if (key === 'exRate') {
     return formatExRate(str);
@@ -178,6 +182,7 @@ export function createEtsyOrderSheetRouter({ Model, pages, logLabel }) {
       const orders = await Model.find(filter)
         .populate('store', 'name')
         .lean();
+      await correctStoredSheetDates(Model, orders);
       res.json({ orders: sortOrdersForDisplay(orders).map(normalizeOrderRow) });
     } catch (err) {
       console.error(`[${logLabel}] list failed:`, err);
@@ -197,6 +202,7 @@ export function createEtsyOrderSheetRouter({ Model, pages, logLabel }) {
         ...pickAllowedFields(req.body),
         store: store._id,
         rowOrder: (await getMaxRowOrder(store._id)) + 1,
+        ambiguousDatesSwapped: true,
       };
       const order = await Model.create(enrichOrderRow(payload));
       res.status(201).json({
@@ -243,7 +249,7 @@ export function createEtsyOrderSheetRouter({ Model, pages, logLabel }) {
       const maxRowOrder = mode === 'replace' ? -1 : await getMaxRowOrder(store._id);
 
       const docs = assignImportRowOrders(
-        prepared.map((row) => ({ ...row, store: store._id })),
+        prepared.map((row) => ({ ...row, store: store._id, ambiguousDatesSwapped: true })),
         { mode, maxRowOrder }
       );
       const chunkSize = 500;

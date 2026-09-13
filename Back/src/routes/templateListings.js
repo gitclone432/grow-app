@@ -281,7 +281,7 @@ async function buildDuplicateUpdateablePreviewItem({
   });
   // Allow keeping/reallocating around the current listing's own label
   if (existingListing.customLabel) takenSkus.delete(existingListing.customLabel);
-  const futureSKU = allocateUniqueSKU(asin, takenSkus, asinCountDoc?.listingCount || 0);
+  const futureSKU = allocateUniqueSKU(asin, takenSkus, 0);
   const warnings = [
     'This ASIN already exists in this template — fields refreshed from Amazon.',
     existingListing.duplicateCount > 0
@@ -397,30 +397,156 @@ function shouldWarnMissingDescription(mergedCoreFields = {}, amazonData = {}) {
  * Load customLabels already used for this template/seller that match the
  * GRW25… / GRW25…-N pattern for the given ASINs (or all active/draft labels if asins omitted).
  */
-async function loadTakenSkus({ templateId, sellerId, asins }) {
+async function loadTakenSkus({ templateId, sellerId, asins, sellerWide = false }) {
   const filter = {
-    templateId,
     sellerId,
     status: { $in: ['active', 'draft'] },
   };
-
+  let scopedToAsins = false;
   if (Array.isArray(asins) && asins.length > 0) {
     const bases = [...new Set(asins.map((a) => generateSKUFromASIN(a)).filter(Boolean))];
     if (bases.length > 0) {
       const escaped = bases.map((b) => b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
       filter.customLabel = { $regex: new RegExp(`^(?:${escaped.join('|')})(?:-\\d+)?$`) };
+      scopedToAsins = true;
     }
+  }
+  if (!sellerWide || !scopedToAsins) {
+    filter.templateId = templateId;
   }
 
   const rows = await TemplateListing.find(filter).select('customLabel').lean();
   return new Set(rows.map((r) => r.customLabel).filter(Boolean));
 }
 
-/** Attach counted-SKU metadata when base label was already taken. */
-function applySkuAllocationMeta(asin, allocatedSku, startCount, warnings = []) {
-  const preferred = generateSKUWithCount(asin, startCount);
+const EBAY_TITLE_MAX = 80;
+
+const TEMPLATE_LISTING_SAVE_KEYS = [
+  'action',
+  'customLabel',
+  'categoryId',
+  'categoryName',
+  'title',
+  'relationship',
+  'relationshipDetails',
+  'scheduleTime',
+  'upc',
+  'epid',
+  'startPrice',
+  'amazonScrapedPrice',
+  'quantity',
+  'itemPhotoUrl',
+  'videoId',
+  'conditionId',
+  'description',
+  'format',
+  'duration',
+  'buyItNowPrice',
+  'bestOfferEnabled',
+  'bestOfferAutoAcceptPrice',
+  'minimumBestOfferPrice',
+  'immediatePayRequired',
+  'location',
+  'shippingService1Option',
+  'shippingService1Cost',
+  'shippingService1Priority',
+  'shippingService2Option',
+  'shippingService2Cost',
+  'shippingService2Priority',
+  'maxDispatchTime',
+  'returnsAcceptedOption',
+  'returnsWithinOption',
+  'refundOption',
+  'returnShippingCostPaidBy',
+  'shippingProfileName',
+  'returnProfileName',
+  'paymentProfileName',
+  '_asinReference',
+  'amazonLink',
+  'amazonSourceSnapshot',
+  'amazonSourceRegion',
+];
+
+function toCustomFieldsMap(customFields) {
+  if (!customFields || typeof customFields !== 'object') return new Map();
+  const entries = customFields instanceof Map
+    ? [...customFields.entries()]
+    : Object.entries(customFields);
+  return new Map(entries.map(([key, value]) => [
+    String(key),
+    value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value),
+  ]));
+}
+
+function pickListingSaveFields(listingData = {}) {
+  const picked = {};
+  for (const key of TEMPLATE_LISTING_SAVE_KEYS) {
+    if (listingData[key] !== undefined) picked[key] = listingData[key];
+  }
+  if (picked.title != null) {
+    picked.title = String(picked.title).trim().slice(0, EBAY_TITLE_MAX);
+  }
+  if (picked.startPrice != null && picked.startPrice !== '') {
+    const parsed = Number(picked.startPrice);
+    if (Number.isFinite(parsed)) picked.startPrice = parsed;
+  }
+  return picked;
+}
+
+function slimBulkSaveResult(status, listingData, extra = {}) {
+  return {
+    status,
+    asin: extra.asin !== undefined ? extra.asin : listingData?._asinReference,
+    sku: extra.sku,
+    ...extra,
+  };
+}
+
+function reviseTitleToDiffer(title, otherTitle) {
+  const original = String(title || '').trim();
+  const other = String(otherTitle || '').trim();
+  if (!original || !other || original !== other) {
+    return { title: original, original, changed: false, suffix: '' };
+  }
+  for (const suffix of ['.', '..', ' ...']) {
+    const next = original.length + suffix.length <= EBAY_TITLE_MAX
+      ? original + suffix
+      : original.slice(0, Math.max(1, EBAY_TITLE_MAX - suffix.length)) + suffix;
+    if (next !== other) {
+      return { title: next, original, changed: true, suffix };
+    }
+  }
+  const suffix = ` ${Date.now().toString().slice(-4)}`;
+  const next = original.length + suffix.length <= EBAY_TITLE_MAX
+    ? original + suffix
+    : original.slice(0, Math.max(1, EBAY_TITLE_MAX - suffix.length)) + suffix;
+  return { title: next, original, changed: true, suffix };
+}
+
+/** Revise title when the ASIN already exists on another template. Mutates listingData.title. */
+function applyCrossTemplateTitleRevision(listingData, otherListing) {
+  if (!listingData) return null;
+  const next = reviseTitleToDiffer(listingData.title, otherListing?.title);
+  listingData.title = next.title;
+  listingData._titleRevision = {
+    reason: 'cross_template_asin',
+    originalTitle: next.original,
+    otherTitle: otherListing?.title || '',
+    otherSku: otherListing?.customLabel || '',
+    otherTemplateId: otherListing?.templateId || null,
+    changed: next.changed,
+  };
+  const skuNote = otherListing?.customLabel ? ` (existing SKU ${otherListing.customLabel})` : '';
+  if (next.changed) {
+    return `ASIN already exists in another template${skuNote} — title revised to stay unique. SKU will use a unique suffix if needed.`;
+  }
+  return `ASIN already exists in another template${skuNote} — SKU will use a unique suffix if needed.`;
+}
+
+/** Attach counted-SKU metadata when this seller's base label was already taken. */
+function applySkuAllocationMeta(asin, allocatedSku, _startCount, warnings = []) {
   const baseSku = generateSKUFromASIN(asin);
-  const skuReallocated = Boolean(allocatedSku && preferred && allocatedSku !== preferred);
+  const skuReallocated = Boolean(allocatedSku && baseSku && allocatedSku !== baseSku);
   if (skuReallocated) {
     warnings.push(`SKU ${baseSku} was taken — using ${allocatedSku}`);
   }
@@ -1326,32 +1452,18 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
       if (listing.templateId.toString() === templateId.toString()) {
         asinInCurrentTemplate.set(listing._asinReference, listing); // Store full listing
       } else {
-        asinInOtherTemplates.set(listing._asinReference, listing.templateId);
+        asinInOtherTemplates.set(listing._asinReference, listing);
       }
     });
     
-    // Pre-load taken SKUs (base + -N suffixes) so duplicates get GRW25…-1, -2, …
-    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins });
+    // Pre-load taken SKUs seller-wide so the same ASIN on another template gets GRW25…-N
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins, sellerWide: true });
     
     // Process ASINs in parallel and stream results as they complete
     let completed = 0;
     
     const processPromises = asins.map(async (asin) => {
       try {
-        // Check for blocking conditions
-        if (asinInOtherTemplates.has(asin)) {
-          const item = {
-            id: `preview-${asin}`,
-            asin,
-            sku: generateSKUFromASIN(asin),
-            status: 'blocked',
-            blockedReason: 'cross_template_duplicate',
-            errors: [`ASIN exists in another template`]
-          };
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
-          return;
-        }
-        
         // Check if ASIN exists in current template (duplicate_updateable case)
         // This must be checked BEFORE SKU allocation because duplicate ASINs
         // should be updateable, not create a new counted SKU row
@@ -1390,9 +1502,15 @@ router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
           warnings.push('Missing description');
         }
 
+        const otherListing = asinInOtherTemplates.get(asin);
+        if (otherListing) {
+          const crossMsg = applyCrossTemplateTitleRevision(mergedCoreFields, otherListing);
+          if (crossMsg) warnings.push(crossMsg);
+        }
+
         // Counted SKU: GRW25…, then GRW25…-1, GRW25…-2 when base is taken
         const countDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
-        const finalSKU = allocateUniqueSKU(asin, takenSkus, countDoc?.listingCount || 0);
+        const finalSKU = allocateUniqueSKU(asin, takenSkus, 0);
         const { baseSku, skuReallocated, warnings: withSkuWarnings } = applySkuAllocationMeta(
           asin,
           finalSKU,
@@ -1526,26 +1644,16 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
       if (listing.templateId.toString() === templateId.toString()) {
         asinInCurrentTemplate.set(listing._asinReference, listing);
       } else {
-        asinInOtherTemplates.set(listing._asinReference, listing.templateId);
+        asinInOtherTemplates.set(listing._asinReference, listing);
       }
     });
 
-    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins });
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins, sellerWide: true });
 
     let completed = 0;
 
     const processPromises = asins.map(async (asin) => {
       try {
-        // Existing in other template — blocked
-        if (asinInOtherTemplates.has(asin)) {
-          const item = {
-            id: `preview-${asin}`, asin, sku: generateSKUFromASIN(asin),
-            status: 'blocked', blockedReason: 'cross_template_duplicate',
-            errors: ['ASIN exists in another template']
-          };
-          res.write(`data: ${JSON.stringify({ type: 'item', item, progress: ++completed, total: asins.length })}\n\n`);
-          return;
-        }
 
         // Duplicate in current template — refresh from Amazon for review
         if (asinInCurrentTemplate.has(asin)) {
@@ -1586,8 +1694,14 @@ router.get('/bulk-preview-from-directory-stream', requireAuthSSE, async (req, re
           warnings.push('Missing description');
         }
 
+        const otherListing = asinInOtherTemplates.get(asin);
+        if (otherListing) {
+          const crossMsg = applyCrossTemplateTitleRevision(mergedCoreFields, otherListing);
+          if (crossMsg) warnings.push(crossMsg);
+        }
+
         // Counted SKU: GRW25…, then -1, -2 when taken
-        const finalSKU = allocateUniqueSKU(asin, takenSkus, doc?.listingCount || 0);
+        const finalSKU = allocateUniqueSKU(asin, takenSkus, 0);
         const { baseSku, skuReallocated, warnings: withSkuWarnings } = applySkuAllocationMeta(
           asin,
           finalSKU,
@@ -2393,16 +2507,25 @@ router.post('/', requireAuth, async (req, res) => {
 
     // Ensure unique Custom Label: base, then -1, -2, …
     if (listingData._asinReference) {
+      const otherListing = await TemplateListing.findOne({
+        sellerId: listingData.sellerId,
+        templateId: { $ne: listingData.templateId },
+        _asinReference: listingData._asinReference,
+        status: 'active',
+      }).select('+_asinReference title customLabel templateId').lean();
+      if (otherListing) applyCrossTemplateTitleRevision(listingData, otherListing);
+
       const takenSkus = await loadTakenSkus({
         templateId: listingData.templateId,
         sellerId: listingData.sellerId,
         asins: [listingData._asinReference],
+        sellerWide: true,
       });
       const countDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
       listingData.customLabel = allocateUniqueSKU(
         listingData._asinReference,
         takenSkus,
-        countDoc?.listingCount || 0
+        0
       );
     } else if (listingData.customLabel) {
       const takenSkus = await loadTakenSkus({
@@ -2881,15 +3004,15 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
       if (listing.templateId.toString() === templateId.toString()) {
         existingInCurrentTemplate.set(listing._asinReference, listing); // Store full listing
       } else {
-        existingInOtherTemplates.set(listing._asinReference, listing.templateId);
+        existingInOtherTemplates.set(listing._asinReference, listing);
       }
     });
     
     console.log(`Found ${existingInCurrentTemplate.size} ASINs in current template (will update)`);
-    console.log(`Found ${existingInOtherTemplates.size} ASINs in other templates (will block)\n`);
+    console.log(`Found ${existingInOtherTemplates.size} ASINs in other templates (will revise title/SKU)\n`);
     
-    // Pre-load taken SKUs so duplicates get counted suffixes instead of blocking
-    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins: cleanedAsins });
+    // Pre-load taken SKUs seller-wide so the same ASIN on another template gets GRW25…-N
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins: cleanedAsins, sellerWide: true });
     console.log(`Found ${takenSkus.size} existing SKUs (will allocate -N suffixes when needed)\n`);
     
     const startTime = Date.now();
@@ -2910,16 +3033,6 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
       console.log(`  ⏳ Batch ${batchNum}/${batches.length}: Starting ${batch.length} ASINs...`);
       
       const batchPromises = batch.map(async (asin) => {
-        // Check if ASIN exists in OTHER templates for this seller (block)
-        if (existingInOtherTemplates.has(asin)) {
-          return {
-            asin,
-            status: 'blocked',
-            existingTemplateId: existingInOtherTemplates.get(asin).toString(),
-            error: 'ASIN already exists for this seller in another template. Each ASIN can only be used once per seller.'
-          };
-        }
-        
         // Check if ASIN already exists in CURRENT template (duplicate_updateable)
         if (existingInCurrentTemplate.has(asin)) {
           const existingListing = existingInCurrentTemplate.get(asin);
@@ -2961,7 +3074,7 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
         
         // Allocate counted SKU when base is already taken (do not block)
         const countDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
-        const allocatedSKU = allocateUniqueSKU(asin, takenSkus, countDoc?.listingCount || 0);
+        const allocatedSKU = allocateUniqueSKU(asin, takenSkus, 0);
         
         try {
           // Fetch Amazon data
@@ -2972,10 +3085,17 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
           // Apply field configurations (reuse prior listing when ASIN exists)
           const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, asin);
           const { mergedCoreFields, customFieldsMerged, pricingCalculation } = autofill;
+
+          const warnings = [];
+          const otherListing = existingInOtherTemplates.get(asin);
+          if (otherListing) {
+            const crossMsg = applyCrossTemplateTitleRevision(mergedCoreFields, otherListing);
+            if (crossMsg) warnings.push(crossMsg);
+          }
           
           return {
             asin,
-            status: 'success',
+            status: warnings.length > 0 ? 'warning' : 'success',
             sku: allocatedSKU,
             reusedFromDatabase: Boolean(autofill.reusedFromDatabase),
             autoFilledData: {
@@ -2992,7 +3112,9 @@ router.post('/bulk-autofill-from-asins', requireAuth, async (req, res) => {
               price: amazonData.price,
               imageCount: getImageCount(amazonData.images)
             },
-            pricingCalculation: pricingCalculation || null
+            pricingCalculation: pricingCalculation || null,
+            warnings,
+            existingTemplateId: otherListing?.templateId ? String(otherListing.templateId) : undefined,
           };
         } catch (error) {
           console.error(`\n❌ ERROR processing ASIN ${asin}:`);
@@ -3163,7 +3285,16 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
     
     // Pre-load taken SKUs (including -N suffixes) — allocate instead of blocking
     const asinRefs = listings.map((l) => l._asinReference).filter(Boolean);
-    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins: asinRefs });
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins: asinRefs, sellerWide: true });
+    const otherTemplateListings = asinRefs.length
+      ? await TemplateListing.find({
+        sellerId,
+        templateId: { $ne: templateId },
+        _asinReference: { $in: asinRefs },
+        status: 'active',
+      }).select('+_asinReference title customLabel templateId').lean()
+      : [];
+    const otherListingByAsin = new Map(otherTemplateListings.map((listing) => [listing._asinReference, listing]));
     // Also mark active SKUs already in skuSet
     for (const s of skuSet) takenSkus.add(s);
     
@@ -3174,6 +3305,10 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
       try {
         if (listingData.itemPhotoUrl) {
           listingData.itemPhotoUrl = normalizeItemPhotoUrl(listingData.itemPhotoUrl);
+        }
+
+        if (listingData._asinReference && otherListingByAsin.has(listingData._asinReference)) {
+          applyCrossTemplateTitleRevision(listingData, otherListingByAsin.get(listingData._asinReference));
         }
 
         // Validate required fields
@@ -3210,7 +3345,7 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
         if (!sku && autoGenerateSKU) {
           if (listingData._asinReference) {
             const countDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
-            sku = allocateUniqueSKU(listingData._asinReference, takenSkus, countDoc?.listingCount || 0);
+            sku = allocateUniqueSKU(listingData._asinReference, takenSkus, 0);
           } else {
             sku = `SKU-${skuCounter++}`;
             while (takenSkus.has(sku) || skuSet.has(sku)) {
@@ -3222,7 +3357,7 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           // Provided SKU taken — allocate next free counted variant from ASIN when possible
           if (listingData._asinReference) {
             const countDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
-            sku = allocateUniqueSKU(listingData._asinReference, takenSkus, countDoc?.listingCount || 0);
+            sku = allocateUniqueSKU(listingData._asinReference, takenSkus, 0);
           } else {
             let n = 1;
             const base = sku;
@@ -3499,24 +3634,24 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
       sellerId,
       _asinReference: { $in: asins },
       status: 'active'
-    }).select('_asinReference templateId').lean();
+    }).select('+_asinReference title customLabel templateId').lean();
     
     // Create maps for both current template and cross-template ASIN duplicates
     const asinInCurrentTemplate = new Set();
-    const asinInOtherTemplates = new Map(); // ASIN -> templateId
+    const asinInOtherTemplates = new Map();
     
     existingAsinListings.forEach(listing => {
       if (listing.templateId.toString() === templateId.toString()) {
         asinInCurrentTemplate.add(listing._asinReference);
       } else {
-        asinInOtherTemplates.set(listing._asinReference, listing.templateId);
+        asinInOtherTemplates.set(listing._asinReference, listing);
       }
     });
     
     console.log(`🔍 ASIN Check: ${asinInCurrentTemplate.size} in current template, ${asinInOtherTemplates.size} in other templates`);
     
-    // Pre-load taken SKUs — allocate -N instead of blocking
-    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins });
+    // Pre-load taken SKUs seller-wide so the same ASIN on another template gets GRW25…-N
+    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins, sellerWide: true });
     console.log(`🔍 SKU Check: ${takenSkus.size} existing SKUs (will allocate -N when needed)`);
     
     console.log(`🚀 Processing ${asins.length} ASINs in parallel...`);
@@ -3526,33 +3661,9 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
       try {
         console.log(`📦 Processing ASIN for preview: ${asin}`);
         
-        // Check if ASIN exists in OTHER templates for this seller (blocking error)
-        if (asinInOtherTemplates.has(asin)) {
-          const otherTemplateId = asinInOtherTemplates.get(asin);
-          const errorItem = {
-            id: `preview-${asin}`,
-            asin,
-            sku: generateSKUFromASIN(asin),
-            sourceData: null,
-            generatedListing: null,
-            pricingCalculation: null,
-            warnings: [],
-            errors: [`ASIN already exists for this seller in template ${otherTemplateId}. Each ASIN can only be used once per seller.`],
-            status: 'blocked',
-            blockedReason: 'cross_template_duplicate',
-            existingTemplateId: otherTemplateId.toString()
-          };
-          
-          return {
-            success: false,
-            item: errorItem,
-            error: `ASIN exists in another template`
-          };
-        }
-        
         // Allocate counted SKU (base, then -1, -2, …)
         const countDoc = await AsinDirectory.findOne({ asin }).select('listingCount').lean();
-        const sku = allocateUniqueSKU(asin, takenSkus, countDoc?.listingCount || 0);
+        const sku = allocateUniqueSKU(asin, takenSkus, 0);
         
         // Fetch Amazon data
         const amazonData = await fetchAmazonData(asin, region, {
@@ -3597,6 +3708,12 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
         // Check if ASIN already exists in CURRENT template (warning only)
         if (asinInCurrentTemplate.has(asin)) {
           warnings.push('ASIN already exists in this template - will be skipped during save');
+        }
+
+        const otherListing = asinInOtherTemplates.get(asin);
+        if (otherListing) {
+          const crossMsg = applyCrossTemplateTitleRevision(mergedCoreFields, otherListing);
+          if (crossMsg) warnings.push(crossMsg);
         }
         
         // Check for missing important fields (only when scrape also has no usable text)
@@ -3751,49 +3868,43 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
     const listingStatus = options.status === 'draft' ? 'draft' : 'active';
     const defaultAction = listingStatus === 'draft' ? 'Draft' : 'Add';
     
-    // Get existing ACTIVE SKUs
-    const existingActiveSKUs = await TemplateListing.find({ 
-      templateId,
-      sellerId,
-      status: 'active'
-    }).distinct('customLabel');
-    
-    // Get existing INACTIVE listings for potential reactivation
-    const inactiveListings = await TemplateListing.find({
-      templateId,
-      sellerId,
-      status: 'inactive'
-    }).select('+_asinReference');
-    
-    const inactiveMap = new Map(
-      inactiveListings.map(l => [l.customLabel, l])
-    );
-    
-    const skuSet = new Set(existingActiveSKUs);
-    
-    console.log(`📊 Bulk save: ${existingActiveSKUs.length} active SKUs, ${inactiveListings.length} inactive listings`);
-    
-    // Check for cross-template ASIN duplicates
     const asinsToSave = listings
-      .map(l => l._asinReference)
-      .filter(asin => asin && asin.trim());
-    
-    const crossTemplateAsins = await TemplateListing.find({
-      sellerId,
-      templateId: { $ne: templateId }, // Different template
-      _asinReference: { $in: asinsToSave },
-      status: 'active'
-    }).select('_asinReference templateId').lean();
-    
-    const crossTemplateAsinMap = new Map(
-      crossTemplateAsins.map(l => [l._asinReference, l.templateId])
+      .map((l) => l._asinReference)
+      .filter((asin) => asin && String(asin).trim());
+
+    const [existingActiveSKUs, inactiveRows, crossTemplateAsins, takenSkus] = await Promise.all([
+      TemplateListing.distinct('customLabel', {
+        templateId,
+        sellerId,
+        status: 'active',
+      }),
+      TemplateListing.find({
+        templateId,
+        sellerId,
+        status: 'inactive',
+      }).select('_id customLabel').lean(),
+      asinsToSave.length > 0
+        ? TemplateListing.find({
+            sellerId,
+            templateId: { $ne: templateId },
+            _asinReference: { $in: asinsToSave },
+            status: 'active',
+          }).select('+_asinReference title customLabel templateId').lean()
+        : Promise.resolve([]),
+      loadTakenSkus({ templateId, sellerId, asins: asinsToSave, sellerWide: true }),
+    ]);
+
+    const inactiveIdBySku = new Map(
+      inactiveRows.filter((row) => row.customLabel).map((row) => [row.customLabel, row._id])
     );
-    
-    console.log(`🚫 Found ${crossTemplateAsinMap.size} ASINs already in other templates`);
-    
-    // Pre-load taken SKUs — allocate -N instead of blocking on conflict
-    const takenSkus = await loadTakenSkus({ templateId, sellerId, asins: asinsToSave });
-    for (const s of skuSet) takenSkus.add(s);
+    const skuSet = new Set(existingActiveSKUs);
+    const crossTemplateAsinMap = new Map(
+      crossTemplateAsins.map((listing) => [listing._asinReference, listing])
+    );
+    for (const sku of skuSet) takenSkus.add(sku);
+
+    console.log(`📊 Bulk save: ${existingActiveSKUs.length} active SKUs, ${inactiveRows.length} inactive listings`);
+    console.log(`Found ${crossTemplateAsinMap.size} ASINs already in other templates (will revise title/SKU)`);
     console.log(`🔍 SKU pre-check: ${takenSkus.size} existing SKUs (will allocate -N when needed)`);
     
     // Process each listing
@@ -3803,21 +3914,8 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           listingData.itemPhotoUrl = normalizeItemPhotoUrl(listingData.itemPhotoUrl);
         }
 
-        // Check for cross-template ASIN duplicate FIRST
         if (listingData._asinReference && crossTemplateAsinMap.has(listingData._asinReference)) {
-          const existingTemplateId = crossTemplateAsinMap.get(listingData._asinReference);
-          errors.push({
-            asin: listingData._asinReference,
-            error: `ASIN already exists in template ${existingTemplateId} for this seller`
-          });
-          results.push({
-            status: 'blocked',
-            asin: listingData._asinReference,
-            error: `ASIN already exists in another template for this seller`,
-            existingTemplateId: existingTemplateId.toString()
-          });
-          console.log(`🚫 Blocked duplicate ASIN ${listingData._asinReference} (exists in template ${existingTemplateId})`);
-          continue;
+          applyCrossTemplateTitleRevision(listingData, crossTemplateAsinMap.get(listingData._asinReference));
         }
         
         // Check if this is a duplicate update request
@@ -3837,16 +3935,13 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             continue;
           }
           
-          // Convert customFields
-          const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
-            ? new Map(Object.entries(listingData.customFields))
-            : new Map();
+          const customFieldsMap = toCustomFieldsMap(listingData.customFields);
 
           // Counted SKU — free next suffix if needed
           const dupAsinDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
           // Release current label so allocate can reuse it if still free for this row
           if (existingListing.customLabel) takenSkus.delete(existingListing.customLabel);
-          const newSKU = allocateUniqueSKU(listingData._asinReference, takenSkus, dupAsinDoc?.listingCount || 0);
+          const newSKU = allocateUniqueSKU(listingData._asinReference, takenSkus, 0);
 
           // Update existing listing with new data
           // Build update object - only overwrite fields that are explicitly provided
@@ -3863,7 +3958,9 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           const overwritableFields = ['title', 'description', 'startPrice', 'amazonScrapedPrice', 'quantity', 'itemPhotoUrl', 'conditionId', 'format', 'duration', 'location'];
           for (const field of overwritableFields) {
             if (listingData[field] !== undefined && listingData[field] !== null && listingData[field] !== '') {
-              updateData[field] = listingData[field];
+              updateData[field] = field === 'title'
+                ? String(listingData[field]).trim().slice(0, EBAY_TITLE_MAX)
+                : listingData[field];
             }
           }
           Object.assign(existingListing, updateData);
@@ -3873,13 +3970,11 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           // Increment AsinDirectory listing count
           await AsinDirectory.updateOne({ asin: listingData._asinReference }, { $inc: { listingCount: 1 } });
 
-          results.push({
-            status: 'updated',
-            listing: existingListing.toObject(),
-            asin: listingData._asinReference,
+          results.push(slimBulkSaveResult('updated', listingData, {
+            id: existingListing._id,
             sku: newSKU,
-            duplicateCount: existingListing.duplicateCount
-          });
+            duplicateCount: existingListing.duplicateCount,
+          }));
 
           console.log(`✅ Updated duplicate ASIN ${listingData._asinReference} (count: ${existingListing.duplicateCount}, newSKU: ${newSKU})`);
           continue;
@@ -3916,7 +4011,7 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
         let sku = listingData.customLabel;
         if (listingData._asinReference) {
           const newAsinDoc = await AsinDirectory.findOne({ asin: listingData._asinReference }).select('listingCount').lean();
-          sku = allocateUniqueSKU(listingData._asinReference, takenSkus, newAsinDoc?.listingCount || 0);
+          sku = allocateUniqueSKU(listingData._asinReference, takenSkus, 0);
         } else if (sku && takenSkus.has(sku)) {
           let n = 1;
           const base = sku;
@@ -3943,17 +4038,23 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
         console.log(`🔍 Saving SKU: ${sku}`);
         
         // Check if SKU exists as inactive - reactivate (Active flow only)
-        const inactiveListing = inactiveMap.get(sku);
+        const inactiveId = inactiveIdBySku.get(sku);
         
-        if (inactiveListing && listingStatus === 'active') {
-          const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
-            ? new Map(Object.entries(listingData.customFields))
-            : new Map();
-          
+        if (inactiveId && listingStatus === 'active') {
+          const inactiveListing = await TemplateListing.findById(inactiveId).select('+_asinReference');
+          if (!inactiveListing) {
+            skippedCount++;
+            results.push(slimBulkSaveResult('skipped', listingData, {
+              sku,
+              error: 'Inactive listing not found',
+            }));
+            continue;
+          }
+
           Object.assign(inactiveListing, {
-            ...attachAmazonSnapshotFromCache(listingData, region),
+            ...attachAmazonSnapshotFromCache(pickListingSaveFields(listingData), region),
             customLabel: sku,
-            customFields: customFieldsMap,
+            customFields: toCustomFieldsMap(listingData.customFields),
             templateId,
             sellerId,
             status: 'active',
@@ -3964,18 +4065,16 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           await inactiveListing.save();
           skuSet.add(sku);
           
-          results.push({
-            status: 'reactivated',
-            listing: inactiveListing.toObject(),
-            asin: listingData._asinReference,
-            sku
-          });
+          results.push(slimBulkSaveResult('reactivated', listingData, {
+            id: inactiveListing._id,
+            sku,
+          }));
           
           console.log(`✅ Reactivated: ${sku}`);
           continue;
         }
 
-        if (inactiveListing && listingStatus === 'draft') {
+        if (inactiveId && listingStatus === 'draft') {
           skippedCount++;
           results.push({
             status: 'skipped',
@@ -4009,16 +4108,10 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           }
         }
         
-        // Convert customFields object to Map
-        const customFieldsMap = listingData.customFields && typeof listingData.customFields === 'object'
-          ? new Map(Object.entries(listingData.customFields))
-          : new Map();
-        
-        // Create new listing
         const listing = new TemplateListing({
-          ...attachAmazonSnapshotFromCache(listingData, region),
+          ...attachAmazonSnapshotFromCache(pickListingSaveFields(listingData), region),
           customLabel: sku,
-          customFields: customFieldsMap,
+          customFields: toCustomFieldsMap(listingData.customFields),
           templateId,
           sellerId,
           status: listingStatus,
@@ -4034,12 +4127,10 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           await AsinDirectory.updateOne({ asin: listingData._asinReference }, { $inc: { listingCount: 1 } });
         }
 
-        results.push({
-          status: 'created',
-          listing: listing.toObject(),
-          asin: listingData._asinReference,
-          sku
-        });
+        results.push(slimBulkSaveResult('created', listingData, {
+          id: listing._id,
+          sku,
+        }));
 
         console.log(`✅ Created: ${sku}`);
 

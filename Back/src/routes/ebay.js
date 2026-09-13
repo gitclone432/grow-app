@@ -19,7 +19,7 @@ import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.j
 import { applyActiveSellerScope } from '../utils/activeSellerScope.js';
 import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
 import { postEbayTradingApi } from '../utils/ebayTradingApi.js';
-import { buildChatParams } from '../utils/openaiModel.js';
+import { buildChatParams, getFitmentApiKey } from '../utils/openaiModel.js';
 import Order from '../models/Order.js';
 import { FINAL_CANCELLED_STATES } from '../constants/cancelStates.js';
 import Return from '../models/Return.js';
@@ -91,6 +91,8 @@ import User from '../models/User.js';
 import { getSellersMatchingAllRoute, getSellersForEbayApiPicker, resolveStoreDisplayName } from '../utils/sellersAllScope.js';
 import { applySellerStandardsThresholdLabels } from '../utils/sellerStandardsThresholds.js';
 import {
+  ACTIVE_LISTING_STATUS_VALUES,
+  ENDED_LISTING_STATUS_VALUES,
   activeListingStatusFilter,
   buildStoreListingsMatch,
   endedListingStatusFilter,
@@ -1030,6 +1032,18 @@ function buildSellerListStartWindows(rangeStart, rangeEnd) {
   return windows;
 }
 
+/** YYYY-MM-DD → IST calendar day bounds (same as Store Listings DB filters). */
+function parseIstListingDayRange(startDate, endDate) {
+  const fromRaw = String(startDate || '').trim();
+  const toRaw = String(endDate || '').trim() || fromRaw;
+  const startRaw = fromRaw || toRaw;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startRaw) || !/^\d{4}-\d{2}-\d{2}$/.test(toRaw)) return null;
+  const from = new Date(`${startRaw}T00:00:00+05:30`);
+  const to = new Date(`${toRaw}T23:59:59.999+05:30`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) return null;
+  return { from, to };
+}
+
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
 let excludedClientSellerIdsCache = { at: 0, value: null };
 const EXCLUDED_CLIENT_CACHE_MS = 5 * 60 * 1000;
@@ -1125,33 +1139,98 @@ function summarizeAutoCompatItems(items = []) {
   });
 }
 
-async function getAutoCompatibilitySourceListings(batch) {
-  if (Array.isArray(batch.sourceItemIds) && batch.sourceItemIds.length > 0) {
-    const listings = await Listing.find({
-      seller: batch.seller,
-      itemId: { $in: batch.sourceItemIds }
-    }).lean();
-    const byItemId = new Map(listings.map(listing => [listing.itemId, listing]));
-    return batch.sourceItemIds.map(itemId => byItemId.get(itemId)).filter(Boolean);
+async function findListingsNeedingAutoCompatibility(sellerId, targetDate, itemLimit = 0) {
+  const sid = String(sellerId?._id || sellerId || '').trim();
+  if (!sid || !mongoose.Types.ObjectId.isValid(sid) || !targetDate) return [];
+  const oid = new mongoose.Types.ObjectId(sid);
+  const dayStart = new Date(`${targetDate}T00:00:00+05:30`);
+  const dayEnd = new Date(`${targetDate}T23:59:59.999+05:30`);
+  const dateSeller = {
+    seller: sellerIdsInMatch([oid]),
+    startTime: { $gte: dayStart, $lte: dayEnd },
+  };
+  const excluded = await getOrderQtyExcludedLegacyIdSet();
+  const endedSet = new Set(ENDED_LISTING_STATUS_VALUES.map((s) => String(s).toLowerCase()));
+  const isEnded = (status) => endedSet.has(String(status || '').trim().toLowerCase());
+
+  const listingSelect = 'itemId title sku listingStatus compatibility startTime seller descriptionPreview categoryName';
+  const activeSelect = 'itemId title sku listingStatus startTime seller descriptionPreview categoryName categoryId';
+  const [legacyRows, activeRows] = await Promise.all([
+    Listing.find(dateSeller).select(listingSelect).sort({ startTime: 1 }).lean(),
+    ActiveListing.find(dateSeller).select(activeSelect).sort({ startTime: 1 }).lean(),
+  ]);
+
+  const byId = new Map();
+  for (const row of legacyRows) {
+    const id = String(row.itemId || '').trim();
+    if (!id) continue;
+    byId.set(id, { legacy: row, active: null });
+  }
+  for (const row of activeRows) {
+    const id = String(row.itemId || '').trim();
+    if (!id) continue;
+    const prev = byId.get(id) || { legacy: null, active: null };
+    prev.active = row;
+    byId.set(id, prev);
   }
 
-  // targetDate is in IST (YYYY-MM-DD). Convert IST midnight/end-of-day to UTC for the query.
-  const dayStart = new Date(batch.targetDate + 'T00:00:00+05:30');
-  const dayEnd = new Date(batch.targetDate + 'T23:59:59.999+05:30');
-  const query = {
-    seller: batch.seller,
-    listingStatus: 'Active',
-    startTime: { $gte: dayStart, $lte: dayEnd },
-    $or: [
-      { compatibility: { $exists: false } },
-      { compatibility: { $size: 0 } },
-      { compatibility: null }
-    ]
-  };
+  const merged = [];
+  for (const [itemId, pair] of byId) {
+    if (excluded.has(itemId)) continue;
+    const { legacy, active } = pair;
+    if (isEnded(active?.listingStatus) || isEnded(legacy?.listingStatus)) continue;
+    const compatibility = Array.isArray(legacy?.compatibility) ? legacy.compatibility : [];
+    if (compatibility.length > 0) continue;
+    const title = String(active?.title || legacy?.title || '').trim();
+    const sku = String(active?.sku || legacy?.sku || '').trim();
+    if (!title && !sku) continue;
+    const categoryName = active?.categoryName || legacy?.categoryName || '';
+    const categoryId = active?.categoryId || legacy?.categoryId || '';
+    if (!isEbayMotorsCategory({ categoryName, categoryId })) continue;
+    merged.push({
+      ...(legacy || {}),
+      ...(active || {}),
+      itemId,
+      title,
+      sku,
+      descriptionPreview: legacy?.descriptionPreview || active?.descriptionPreview || '',
+      compatibility: [],
+      listingStatus: 'Active',
+      startTime: active?.startTime || legacy?.startTime,
+      seller: active?.seller || legacy?.seller,
+    });
+  }
+  merged.sort((a, b) => new Date(a.startTime || 0) - new Date(b.startTime || 0));
+  const limitNum = Number(itemLimit) || 0;
+  return limitNum > 0 ? merged.slice(0, limitNum) : merged;
+}
 
-  let listings = await Listing.find(query).sort({ startTime: 1 }).lean();
-  if (batch.itemLimit > 0) listings = listings.slice(0, batch.itemLimit);
-  return listings;
+async function getAutoCompatibilitySourceListings(batch) {
+  if (Array.isArray(batch.sourceItemIds) && batch.sourceItemIds.length > 0) {
+    const ids = [...new Set(batch.sourceItemIds.map((id) => String(id || '').trim()).filter(Boolean))];
+    const sellerMatch = sellerIdsInMatch([batch.seller]);
+    const [legacyRows, activeRows] = await Promise.all([
+      Listing.find({ seller: sellerMatch, itemId: { $in: ids } }).lean(),
+      ActiveListing.find({ seller: sellerMatch, itemId: { $in: ids } }).lean(),
+    ]);
+    const byId = new Map();
+    for (const row of legacyRows) {
+      byId.set(String(row.itemId), { ...row });
+    }
+    for (const row of activeRows) {
+      const prev = byId.get(String(row.itemId)) || {};
+      byId.set(String(row.itemId), {
+        ...prev,
+        ...row,
+        itemId: String(row.itemId),
+        descriptionPreview: prev.descriptionPreview || row.descriptionPreview || '',
+        compatibility: Array.isArray(prev.compatibility) ? prev.compatibility : [],
+      });
+    }
+    return ids.map((id) => byId.get(id)).filter(Boolean);
+  }
+
+  return findListingsNeedingAutoCompatibility(batch.seller, batch.targetDate, batch.itemLimit);
 }
 
 // eBay allows at most 3000 parts-compatibility entries per listing
@@ -1365,6 +1444,7 @@ export async function processAutoCompatibilityBatch(batchId) {
     }
 
     let token = await ensureValidToken(seller);
+    const profileCache = { xml: '' };
 
     for (const listing of pendingListings) {
       const itemResult = {
@@ -1496,24 +1576,10 @@ export async function processAutoCompatibilityBatch(batchId) {
         await AutoCompatibilityBatch.findByIdAndUpdate(batchId, { currentStep: 'sending_to_ebay' });
 
         const sanitized = sanitizeCompatibilityList(compatibilityList);
-        const compatXml = buildCompatXml(sanitized);
-        const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
-              <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-                <ErrorLanguage>en_US</ErrorLanguage>
-                <WarningLevel>High</WarningLevel>
-                <Item><ItemID>${listing.itemId}</ItemID>${compatXml}</Item>
-              </ReviseFixedPriceItemRequest>`;
-
-        const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-          headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
-        });
-        const result = await parseStringPromise(response.data);
-        const ack = result.ReviseFixedPriceItemResponse.Ack[0];
+        let { ack, result, errorMessage } = await applyCompatibilityRevise(token, listing.itemId, sanitized, { profileCache });
 
         if (ack === 'Failure') {
-          const errors = result.ReviseFixedPriceItemResponse.Errors || [];
-          const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
+          const errors = result?.ReviseFixedPriceItemResponse?.Errors || [];
 
           // 931 = hard expired (refresh token dead), 932 = soft expired (access token expired mid-batch)
           const isTokenExpired = errors.some(e =>
@@ -1530,33 +1596,23 @@ export async function processAutoCompatibilityBatch(batchId) {
             console.log(`[AutoCompat] Token expired (mid-batch) for seller ${seller._id}, force-refreshing...`);
             seller.ebayTokens.fetchedAt = new Date(0);
             token = await ensureValidToken(seller);
-            const retryXml = `<?xml version="1.0" encoding="utf-8"?>
-              <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-                <ErrorLanguage>en_US</ErrorLanguage>
-                <WarningLevel>High</WarningLevel>
-                <Item><ItemID>${listing.itemId}</ItemID>${compatXml}</Item>
-              </ReviseFixedPriceItemRequest>`;
-            const retryResp = await axios.post('https://api.ebay.com/ws/api.dll', retryXml, {
-              headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
-            });
-            const retryResult = await parseStringPromise(retryResp.data);
-            const retryAck = retryResult.ReviseFixedPriceItemResponse.Ack[0];
+            const retry = await applyCompatibilityRevise(token, listing.itemId, sanitized, { profileCache });
+            const retryAck = retry.ack;
+            const retryResult = retry.result;
             if (retryAck === 'Failure') {
-              const retryErrors = retryResult.ReviseFixedPriceItemResponse.Errors || [];
               itemResult.status = 'ebay_error';
-              itemResult.ebayError = parseInvalidCombos(retryErrors.map(e => e.LongMessage[0]).join('; '));
+              itemResult.ebayError = parseInvalidCombos(retry.errorMessage);
               counts.ebayErrorCount += 1;
             } else {
               let savedList = sanitized;
               if (retryAck === 'Warning') {
-                const meaningful = (retryResult.ReviseFixedPriceItemResponse.Errors || []).filter(e => {
-                  const msg = e.LongMessage[0];
-                  return !msg.includes('Best Offer') && !msg.includes('Funds from your sales');
+                const meaningful = ebayCompatErrors(retryResult).filter(e => {
+                  const msg = ebayCompatErrorText(e);
+                  return !isIgnorableEbayCompatWarning(msg);
                 });
                 if (meaningful.length > 0) {
-                  const rawWarning = meaningful.map(e => e.LongMessage[0]).join('; ');
-                  itemResult.ebayWarning = meaningful.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
+                  const rawWarning = meaningful.map(e => ebayCompatErrorText(e)).join('; ');
+                  itemResult.ebayWarning = meaningful.map(e => parseInvalidCombos(ebayCompatErrorText(e))).join('; ');
                   savedList = filterOutInvalidCombos(sanitized, rawWarning);
                   itemResult.strippedCount = sanitized.length - savedList.length;
                   purgeInvalidFromCache(rawWarning).catch(() => {});
@@ -1588,14 +1644,11 @@ export async function processAutoCompatibilityBatch(batchId) {
         } else {
           let savedList = sanitized;
           if (ack === 'Warning') {
-            const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
-            const meaningful = warnings.filter(err => {
-              const msg = err.LongMessage[0];
-              return !msg.includes('Best Offer') && !msg.includes('Funds from your sales');
-            });
+            const warnings = ebayCompatErrors(result);
+            const meaningful = warnings.filter(err => !isIgnorableEbayCompatWarning(ebayCompatErrorText(err)));
             if (meaningful.length > 0) {
-              const rawWarning = meaningful.map(e => e.LongMessage[0]).join('; ');
-              itemResult.ebayWarning = meaningful.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
+              const rawWarning = meaningful.map(e => ebayCompatErrorText(e)).join('; ');
+              itemResult.ebayWarning = meaningful.map(e => parseInvalidCombos(ebayCompatErrorText(e))).join('; ');
               savedList = filterOutInvalidCombos(sanitized, rawWarning);
               itemResult.strippedCount = sanitized.length - savedList.length;
               purgeInvalidFromCache(rawWarning).catch(() => {});
@@ -1611,9 +1664,16 @@ export async function processAutoCompatibilityBatch(batchId) {
           await Listing.findOneAndUpdate({ itemId: listing.itemId }, { compatibility: savedList });
         }
       } catch (itemErr) {
-        itemResult.status = 'ebay_error';
-        itemResult.ebayError = itemErr.message;
-        counts.ebayErrorCount += 1;
+        const msg = itemErr.message || String(itemErr);
+        if (/api key|authentication|401/i.test(msg)) {
+          itemResult.status = 'ai_failed';
+          itemResult.failureReason = msg;
+          counts.aiFailedCount += 1;
+        } else {
+          itemResult.status = 'ebay_error';
+          itemResult.ebayError = msg;
+          counts.ebayErrorCount += 1;
+        }
       }
 
       counts.processedCount += 1;
@@ -1661,18 +1721,39 @@ export async function resumeRunningAutoCompatibilityBatches() {
   }).select('_id runnerId').lean();
   if (runningBatches.length === 0) return 0;
 
-  // Process sequentially (same as cron path) to avoid overwhelming eBay API / AI
-  (async () => {
-    for (const batch of runningBatches) {
-      try {
-        await processAutoCompatibilityBatch(batch._id);
-      } catch (err) {
-        console.error(`[AutoCompat] Failed to resume batch ${batch._id}:`, err.message);
-      }
-    }
-  })();
+  for (const batch of runningBatches) {
+    enqueueAutoCompatBatch(batch._id);
+  }
 
   return runningBatches.length;
+}
+
+const AUTO_COMPAT_PARALLEL = 3;
+const autoCompatProcessQueue = [];
+let autoCompatProcessActive = 0;
+
+function enqueueAutoCompatBatch(batchId) {
+  if (!batchId) return;
+  const id = String(batchId);
+  if (activeAutoCompatBatchRuns.has(id) || autoCompatProcessQueue.includes(id)) return;
+  autoCompatProcessQueue.push(id);
+  pumpAutoCompatQueue();
+}
+
+function pumpAutoCompatQueue() {
+  while (autoCompatProcessActive < AUTO_COMPAT_PARALLEL && autoCompatProcessQueue.length > 0) {
+    const id = autoCompatProcessQueue.shift();
+    autoCompatProcessActive += 1;
+    Promise.resolve()
+      .then(() => processAutoCompatibilityBatch(id))
+      .catch((err) => {
+        console.error(`[AutoCompat] queued batch ${id} failed:`, err.message);
+      })
+      .finally(() => {
+        autoCompatProcessActive -= 1;
+        pumpAutoCompatQueue();
+      });
+  }
 }
 
 // ============================================
@@ -3626,6 +3707,10 @@ router.get('/connect', (req, res) => {
 // 2. OAuth Callback: Exchange code for tokens and save to seller
 router.get('/callback', async (req, res) => {
   const { code, state } = req.query;
+  if (String(state || '').startsWith('buy:')) {
+    const { completeBuyOAuthFromCallback } = await import('./ebayBuy.js');
+    return completeBuyOAuthFromCallback(req, res);
+  }
   if (!code) return res.status(400).send('Missing code');
   if (!state) return res.status(400).send('Missing state parameter');
   if (!getEbayOAuthRedirectUri()) return res.status(500).send('Missing EBAY_RU_NAME / EBAY_OAUTH_REDIRECT_URI');
@@ -3946,7 +4031,91 @@ router.get('/order/:orderId', requireAuth, requirePageAccess('Fulfillment'), asy
 
 
 // List view: omit large eBay blobs not needed for fulfillment tables (saves bandwidth + JSON parse time).
-const STORED_ORDER_LIST_OMIT = '-paymentSummary -fulfillmentStartInstructions -ebayCollectAndRemitTax -totalFeeBasisAmount -totalMarketplaceFee';
+const STORED_ORDER_LIST_OMIT = '-paymentSummary -fulfillmentStartInstructions -ebayCollectAndRemitTax -totalFeeBasisAmount -totalMarketplaceFee -pricingSummary -buyerCheckoutNotes -fulfillmentHrefs';
+
+function slimStoredOrderForList(order) {
+  if (!order) return order;
+  const lineItems = Array.isArray(order.lineItems)
+    ? order.lineItems.map((item) => ({
+        title: item?.title,
+        quantity: item?.quantity,
+        sku: item?.sku || item?.SKU || item?.sellerSku,
+        SKU: item?.SKU,
+        sellerSku: item?.sellerSku,
+        customLabel: item?.customLabel,
+        legacyItemId: item?.legacyItemId,
+        itemId: item?.itemId,
+        lineItemFulfillmentInstructions: item?.lineItemFulfillmentInstructions
+          ? {
+              minEstimatedDeliveryDate: item.lineItemFulfillmentInstructions.minEstimatedDeliveryDate,
+              maxEstimatedDeliveryDate: item.lineItemFulfillmentInstructions.maxEstimatedDeliveryDate,
+            }
+          : undefined,
+      }))
+    : order.lineItems;
+
+  const buyer = order.buyer
+    ? {
+        username: order.buyer.username,
+        buyerRegistrationAddress: order.buyer.buyerRegistrationAddress
+          ? {
+              fullName: order.buyer.buyerRegistrationAddress.fullName,
+            }
+          : undefined,
+      }
+    : order.buyer;
+
+  return { ...order, lineItems, buyer };
+}
+
+function orderItemId(order) {
+  return String(
+    order?.itemNumber || order?.lineItems?.[0]?.legacyItemId || order?.lineItems?.[0]?.itemId || ''
+  ).trim();
+}
+
+function promiseWithTimeout(promise, ms, fallback) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(timer)),
+    timeout,
+  ]);
+}
+
+async function loadItemImageMap(orders) {
+  const itemIds = [...new Set((orders || []).map(orderItemId).filter(Boolean))];
+  if (!itemIds.length) return new Map();
+  const map = new Map();
+  try {
+    const listings = await Listing.find({ itemId: { $in: itemIds } })
+      .select('itemId mainImageUrl')
+      .lean()
+      .maxTimeMS(2500);
+    for (const row of listings) {
+      if (row?.itemId && row?.mainImageUrl) map.set(String(row.itemId), row.mainImageUrl);
+    }
+  } catch {
+    // photos stay empty; UI can still fetch per-row
+  }
+  const missing = itemIds.filter((id) => !map.has(id));
+  if (missing.length) {
+    try {
+      const actives = await ActiveListing.find({ itemId: { $in: missing } })
+        .select('itemId mainImageUrl')
+        .lean()
+        .maxTimeMS(2500);
+      for (const row of actives) {
+        if (row?.itemId && row?.mainImageUrl) map.set(String(row.itemId), row.mainImageUrl);
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return map;
+}
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
@@ -4363,9 +4532,42 @@ router.get('/stored-orders', async (req, res) => {
     // Calculate pagination (max 200 rows per request)
     const { page: pageNum, limit: limitNum, skip } = parsePagination(req.query);
     const includeSupplierLinks = req.query.includeSupplierLinks !== 'false';
+    const skipCount = req.query.skipCount === '1' || req.query.skipCount === 'true';
+    const countOnly = req.query.countOnly === '1' || req.query.countOnly === 'true';
+
+    if (countOnly) {
+      let counted = 0;
+      try {
+        counted = await Order.countDocuments(query).maxTimeMS(8000);
+      } catch (countErr) {
+        console.warn('[Stored Orders] countOnly timed out:', countErr.message);
+      }
+      const totalPages = Math.ceil(counted / limitNum) || 1;
+      return res.json({
+        orders: [],
+        pagination: {
+          currentPage: pageNum,
+          totalPages,
+          totalOrders: counted,
+          ordersPerPage: limitNum,
+          hasNextPage: pageNum < totalPages,
+          hasPrevPage: pageNum > 1,
+          activeSellerCount,
+          totalIsEstimate: false,
+        },
+        meta: activeSellerCount === 0
+          ? { warning: 'No active stores found. Mark users active or enable stores in Settings → Stores.' }
+          : undefined,
+      });
+    }
 
     const [totalOrders, orders] = await Promise.all([
-      Order.countDocuments(query),
+      skipCount
+        ? Promise.resolve(null)
+        : Order.countDocuments(query).maxTimeMS(8000).catch((countErr) => {
+            console.warn('[Stored Orders] count timed out:', countErr.message);
+            return null;
+          }),
       Order.find(query)
         .select(STORED_ORDER_LIST_OMIT)
         .populate({
@@ -4426,7 +4628,13 @@ router.get('/stored-orders', async (req, res) => {
         .limit(limitNum)
         .lean(),
     ]);
-    const totalPages = Math.ceil(totalOrders / limitNum);
+    const counted = typeof totalOrders === 'number';
+    const resolvedTotal = counted
+      ? totalOrders
+      : skip + orders.length + (orders.length === limitNum ? 1 : 0);
+    const totalPages = counted
+      ? Math.ceil(totalOrders / limitNum)
+      : Math.max(pageNum, orders.length === limitNum ? pageNum + 1 : pageNum);
 
     let remarkCounts = {};
     if (amazonArriving === 'true') {
@@ -4463,25 +4671,34 @@ router.get('/stored-orders', async (req, res) => {
       .map(id => new mongoose.Types.ObjectId(id));
 
     // Run independent enrichments in parallel (was sequential — major latency on Fulfillment)
-    const [conversationMetas, slaAgg, enrichedOrders] = await Promise.all([
+    const [conversationMetas, slaAgg, enrichedOrders, itemImageMap] = await Promise.all([
       orderIds.length
-        ? ConversationMeta.find({ orderId: { $in: orderIds } }).select('orderId category caseStatus').lean()
+        ? promiseWithTimeout(
+          ConversationMeta.find({ orderId: { $in: orderIds } }).select('orderId category caseStatus').lean(),
+          1200,
+          []
+        )
         : Promise.resolve([]),
       orderIds.length > 0 && sellerIdsForSla.length > 0
-        ? Message.aggregate([
-          { $match: { orderId: { $in: orderIds }, seller: { $in: sellerIdsForSla } } },
-          {
-            $group: {
-              _id: { seller: '$seller', orderId: '$orderId' },
-              lastBuyerMessageAt: { $max: { $cond: [{ $eq: ['$sender', 'BUYER'] }, '$messageDate', null] } },
-              lastSellerMessageAt: { $max: { $cond: [{ $eq: ['$sender', 'SELLER'] }, '$messageDate', null] } }
+        ? promiseWithTimeout(
+          Message.aggregate([
+            { $match: { orderId: { $in: orderIds }, seller: { $in: sellerIdsForSla } } },
+            {
+              $group: {
+                _id: { seller: '$seller', orderId: '$orderId' },
+                lastBuyerMessageAt: { $max: { $cond: [{ $eq: ['$sender', 'BUYER'] }, '$messageDate', null] } },
+                lastSellerMessageAt: { $max: { $cond: [{ $eq: ['$sender', 'SELLER'] }, '$messageDate', null] } }
+              }
             }
-          }
-        ])
+          ]).option({ maxTimeMS: 1200 }),
+          1200,
+          []
+        )
         : Promise.resolve([]),
       includeSupplierLinks
-        ? enrichOrdersWithSupplierLinks(orders)
+        ? promiseWithTimeout(enrichOrdersWithSupplierLinks(orders).catch(() => orders), 1200, orders)
         : Promise.resolve(orders),
+      promiseWithTimeout(loadItemImageMap(orders), 1200, new Map()),
     ]);
 
     // Create a map for quick lookup
@@ -4507,7 +4724,8 @@ router.get('/stored-orders', async (req, res) => {
       const slaData = slaMap.get(`${order.seller?._id}_${order.orderId}`);
       const lastBuyerMessageAt = slaData?.lastBuyerMessageAt || null;
       const lastSellerMessageAt = slaData?.lastSellerMessageAt || null;
-      return {
+      const itemId = orderItemId(order);
+      return slimStoredOrderForList({
         ...order,
         convoCategory: convoData?.category || null,
         convoCaseStatus: convoData?.caseStatus || null,
@@ -4515,10 +4733,11 @@ router.get('/stored-orders', async (req, res) => {
         lastSellerMessageAt,
         hasUnreadBuyerMessage: Boolean(lastBuyerMessageAt)
           && (!lastSellerMessageAt || new Date(lastBuyerMessageAt) > new Date(lastSellerMessageAt)),
-      };
+        itemImageUrl: itemImageMap.get(itemId) || '',
+      });
     });
 
-    console.log(`[Stored Orders] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${totalOrders} orders`);
+    console.log(`[Stored Orders] Query: ${JSON.stringify(query)}, Page: ${pageNum}/${totalPages}, Found ${orders.length}/${counted ? totalOrders : '~'} orders`);
 
     res.json({
       orders: ordersWithConvoData,
@@ -4526,11 +4745,12 @@ router.get('/stored-orders', async (req, res) => {
       pagination: {
         currentPage: pageNum,
         totalPages,
-        totalOrders,
+        totalOrders: resolvedTotal,
         ordersPerPage: limitNum,
-        hasNextPage: pageNum < totalPages,
+        hasNextPage: counted ? pageNum < totalPages : orders.length === limitNum,
         hasPrevPage: pageNum > 1,
         activeSellerCount,
+        totalIsEstimate: !counted,
       },
       meta: activeSellerCount === 0
         ? { warning: 'No active stores found. Mark users active or enable stores in Settings → Stores.' }
@@ -16711,7 +16931,18 @@ function normalizeStoreListingsSyncMode(raw) {
 }
 
 router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
-  const mode = normalizeStoreListingsSyncMode(req.body?.mode);
+  const customRange = parseIstListingDayRange(
+    req.body?.startDate || req.body?.startDateFrom,
+    req.body?.endDate || req.body?.startDateTo
+  );
+  if ((req.body?.startDate || req.body?.endDate || req.body?.startDateFrom || req.body?.startDateTo) && !customRange) {
+    return res.status(400).json({ success: false, error: 'Invalid startDate/endDate. Use YYYY-MM-DD.' });
+  }
+  const scopedSellerId = String(req.body?.sellerId || '').trim();
+  if (scopedSellerId && !mongoose.Types.ObjectId.isValid(scopedSellerId)) {
+    return res.status(400).json({ success: false, error: 'Valid sellerId is required when filtering to one store.' });
+  }
+  const mode = customRange ? 'custom' : normalizeStoreListingsSyncMode(req.body?.mode);
   const acquired = await acquireSyncAllSellersLock();
   if (!acquired) {
     return res.status(409).json({
@@ -16721,25 +16952,36 @@ router.post('/sync-all-sellers-listings', requireAuth, async (req, res) => {
     });
   }
   try {
-    const sellersTotal = await Seller.countDocuments({
+    const sellerQuery = {
       isStoreActive: { $ne: false },
       'ebayTokens.refresh_token': { $exists: true, $nin: [null, ''] },
-    });
+    };
+    if (scopedSellerId) sellerQuery._id = new mongoose.Types.ObjectId(scopedSellerId);
+    const sellersTotal = await Seller.countDocuments(sellerQuery);
     if (sellersTotal === 0) {
       await releaseSyncAllSellersLock();
       return res.json({ success: true, message: 'No sellers with eBay tokens found', results: [] });
     }
+    const dateLabel = customRange
+      ? ` listing StartTime ${customRange.from.toISOString().slice(0, 10)} → ${customRange.to.toISOString().slice(0, 10)} (IST)`
+      : '';
     res.json({
       success: true,
-      message: mode === 'full'
-        ? `Full resync started for ${sellersTotal} seller(s) (~${EBAY_LISTINGS_BACKFILL_DAYS}d). Poll GET /ebay/sync-all-sellers-status for progress.`
-        : `Incremental sync started for ${sellersTotal} seller(s). Poll GET /ebay/sync-all-sellers-status for progress.`,
+      message: customRange
+        ? `Date fetch started for ${sellersTotal} seller(s)${dateLabel}. Poll GET /ebay/sync-all-sellers-status for progress.`
+        : mode === 'full'
+          ? `Full resync started for ${sellersTotal} seller(s) (~${EBAY_LISTINGS_BACKFILL_DAYS}d). Poll GET /ebay/sync-all-sellers-status for progress.`
+          : `Incremental sync started for ${sellersTotal} seller(s). Poll GET /ebay/sync-all-sellers-status for progress.`,
       sellersTotal,
       mode,
     });
     void (async () => {
       try {
-        await executeSyncAllSellersWork({ mode });
+        await executeSyncAllSellersWork({
+          mode: customRange ? 'incremental' : mode,
+          customRange,
+          sellerId: scopedSellerId,
+        });
       } catch (e) {
         console.error('[Sync All] Background error:', e?.message || e);
       } finally {
@@ -16850,63 +17092,431 @@ router.get('/sync-all-sellers-status', requireAuth, async (req, res) => {
   }
 });
 
-// 2. GET LISTINGS (With Search & Sort) - For Compatibility Dashboard (Uses Listing collection)
+// 2. GET LISTINGS — Compatibility Dashboard merges Store Listings (ActiveListing) + Motors (Listing)
+function summarizeListingFitment(compatibilityList) {
+  if (!Array.isArray(compatibilityList) || compatibilityList.length === 0) return [];
+  const groups = {};
+  for (const item of compatibilityList) {
+    const nvl = Array.isArray(item?.nameValueList) ? item.nameValueList : [];
+    const year = nvl.find((x) => x?.name === 'Year')?.value;
+    const make = nvl.find((x) => x?.name === 'Make')?.value;
+    const model = nvl.find((x) => x?.name === 'Model')?.value;
+    if (year && make && model) {
+      const key = `${make} ${model}`;
+      if (!groups[key]) groups[key] = new Set();
+      groups[key].add(year);
+    }
+  }
+  return Object.entries(groups).map(([title, yearSet]) => ({
+    title,
+    years: Array.from(yearSet).sort((a, b) => b - a).join(', '),
+  }));
+}
+
+function toCompatibilityDashboardRow(doc, { includeFull = false } = {}) {
+  const compatibility = Array.isArray(doc?.compatibility) ? doc.compatibility : [];
+  const row = {
+    _id: doc._id,
+    seller: doc.seller,
+    itemId: doc.itemId,
+    sku: doc.sku || '',
+    title: doc.title || '',
+    currentPrice: doc.currentPrice,
+    currency: doc.currency,
+    mainImageUrl: doc.mainImageUrl || '',
+    listingStatus: doc.listingStatus,
+    startTime: doc.startTime,
+    endTime: doc.endTime,
+    hasCompatibility: compatibility.length > 0,
+    fitmentSummary: summarizeListingFitment(compatibility),
+  };
+  if (includeFull) {
+    row.compatibility = compatibility;
+    row.descriptionPreview = doc.descriptionPreview || '';
+    row.categoryName = doc.categoryName || '';
+  }
+  return row;
+}
+
+function catalogStringExpr(field) {
+  return {
+    $convert: { input: `$${field}`, to: 'string', onNull: '', onError: '' },
+  };
+}
+
+function nonemptyCatalogExpr(field) {
+  return {
+    $cond: [
+      { $gt: [{ $strLenCP: catalogStringExpr(field) }, 0] },
+      `$${field}`,
+      '$$REMOVE',
+    ],
+  };
+}
+
+function compatibilityDashboardHasCatalogMatch() {
+  return {
+    $expr: {
+      $or: [
+        { $gt: [{ $strLenCP: catalogStringExpr('title') }, 0] },
+        { $gt: [{ $strLenCP: catalogStringExpr('sku') }, 0] },
+      ],
+    },
+  };
+}
+
+/** eBay Motors root / parts trees. Phone & electronics categories must not match. */
+const COMPAT_DASHBOARD_MOTORS_CATEGORY_IDS = ['6000', '6028', '33559'];
+
+function isEbayMotorsCategory({ categoryName, categoryId } = {}) {
+  const name = String(categoryName || '');
+  if (/ebay motors/i.test(name)) return true;
+  if (/automotive tools/i.test(name)) return true;
+  const id = String(categoryId || '').trim();
+  return COMPAT_DASHBOARD_MOTORS_CATEGORY_IDS.includes(id);
+}
+
+function compatibilityDashboardMotorsMatch() {
+  return {
+    $or: [
+      { categoryName: { $regex: 'eBay Motors', $options: 'i' } },
+      { categoryName: { $regex: 'Automotive Tools', $options: 'i' } },
+      { categoryId: { $in: COMPAT_DASHBOARD_MOTORS_CATEGORY_IDS } },
+    ],
+  };
+}
+
+function compatibilityDashboardSourcePipeline(match, { rank, includeCompatCount = false } = {}) {
+  const setStage = {
+    _rank: rank,
+    itemId: catalogStringExpr('itemId'),
+    title: nonemptyCatalogExpr('title'),
+    sku: nonemptyCatalogExpr('sku'),
+    mainImageUrl: nonemptyCatalogExpr('mainImageUrl'),
+    currency: nonemptyCatalogExpr('currency'),
+    categoryName: nonemptyCatalogExpr('categoryName'),
+    categoryId: nonemptyCatalogExpr('categoryId'),
+    _fromLegacy: rank === 0,
+  };
+  const project = {
+    itemId: 1,
+    seller: 1,
+    title: 1,
+    sku: 1,
+    currentPrice: 1,
+    currency: 1,
+    mainImageUrl: 1,
+    listingStatus: 1,
+    startTime: 1,
+    endTime: 1,
+    categoryName: 1,
+    categoryId: 1,
+    _fromLegacy: 1,
+    _rank: 1,
+  };
+  if (includeCompatCount) {
+    setStage._compatCount = { $size: { $ifNull: ['$compatibility', []] } };
+    project._compatCount = 1;
+  }
+  return [
+    { $match: match },
+    { $match: { itemId: { $exists: true, $nin: [null, ''] } } },
+    { $set: setStage },
+    { $match: { itemId: { $nin: [null, ''] } } },
+    { $project: project },
+  ];
+}
+
+function preferEndedListingStatus(...statuses) {
+  const vals = statuses.map((s) => String(s || '').trim()).filter(Boolean);
+  if (vals.some((s) => /^(ended|completed)$/i.test(s))) return 'Ended';
+  const active = vals.find((s) => /^active$/i.test(s));
+  return active || vals[0] || '';
+}
+
+function mergedListingStatusExpr() {
+  return {
+    $let: {
+      vars: {
+        endedHits: {
+          $filter: {
+            input: { $ifNull: ['$listingStatuses', []] },
+            as: 's',
+            cond: {
+              $in: [
+                { $toLower: { $ifNull: ['$$s', ''] } },
+                ['ended', 'completed'],
+              ],
+            },
+          },
+        },
+        activeHits: {
+          $filter: {
+            input: { $ifNull: ['$listingStatuses', []] },
+            as: 's',
+            cond: { $eq: [{ $toLower: { $ifNull: ['$$s', ''] } }, 'active'] },
+          },
+        },
+      },
+      in: {
+        $cond: [
+          { $gt: [{ $size: '$$endedHits' }, 0] },
+          'Ended',
+          {
+            $cond: [
+              { $gt: [{ $size: '$$activeHits' }, 0] },
+              'Active',
+              { $ifNull: [{ $arrayElemAt: ['$listingStatuses', 0] }, 'Active'] },
+            ],
+          },
+        ],
+      },
+    },
+  };
+}
+
+function mergeCompatibilityDashboardDocs(legacyDoc, activeDoc) {
+  const pick = (key) => {
+    const activeVal = activeDoc?.[key];
+    if (activeVal !== undefined && activeVal !== null && String(activeVal).trim() !== '') return activeVal;
+    return legacyDoc?.[key];
+  };
+  const base = { ...(legacyDoc || {}), ...(activeDoc || {}) };
+  return {
+    ...base,
+    title: pick('title') || '',
+    sku: pick('sku') || '',
+    mainImageUrl: pick('mainImageUrl') || '',
+    currentPrice: activeDoc?.currentPrice ?? legacyDoc?.currentPrice,
+    currency: pick('currency') || '',
+    listingStatus: preferEndedListingStatus(activeDoc?.listingStatus, legacyDoc?.listingStatus),
+    startTime: activeDoc?.startTime || legacyDoc?.startTime,
+    endTime: activeDoc?.endTime || legacyDoc?.endTime,
+    compatibility: Array.isArray(legacyDoc?.compatibility) ? legacyDoc.compatibility : (activeDoc?.compatibility || []),
+    descriptionPreview: legacyDoc?.descriptionPreview || activeDoc?.descriptionPreview || '',
+    categoryName: legacyDoc?.categoryName || activeDoc?.categoryName || '',
+  };
+}
+
+async function overlayCompatibilityOntoActiveListings(activeDocs, { includeFull = false } = {}) {
+  const itemIds = [...new Set((activeDocs || []).map((d) => String(d.itemId || '').trim()).filter(Boolean))];
+  if (!itemIds.length) return [];
+  const legacy = await Listing.find({ itemId: { $in: itemIds } })
+    .select('itemId compatibility descriptionPreview categoryName title sku mainImageUrl currentPrice currency listingStatus startTime endTime')
+    .lean();
+  const byId = new Map(legacy.map((row) => [String(row.itemId), row]));
+  return activeDocs.map((doc) => (
+    toCompatibilityDashboardRow(mergeCompatibilityDashboardDocs(byId.get(String(doc.itemId)), doc), { includeFull })
+  ));
+}
+
 router.get('/listings', requireAuth, async (req, res) => {
-  const { sellerId, page = 1, limit = 50, search, listedFrom, listedTo } = req.query;
+  const {
+    sellerId,
+    page = 1,
+    limit = 50,
+    search,
+    listedFrom,
+    listedTo,
+    noFitment,
+    listingStatus,
+    sortBy,
+    sortDir,
+  } = req.query;
   try {
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
+    const sid = String(sellerId || '').trim();
+    if (!sid || !mongoose.Types.ObjectId.isValid(sid)) {
+      return res.status(400).json({ error: 'Valid sellerId is required' });
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
     const skip = (pageNum - 1) * limitNum;
+    const oid = new mongoose.Types.ObjectId(sid);
+    const statusMode = String(listingStatus || 'active').trim().toLowerCase();
+    const wantNoFitment = String(noFitment).toLowerCase() === 'true';
+    const sortKey = String(sortBy || 'listedOn');
+    const sortAsc = String(sortDir).toLowerCase() === 'asc';
 
-    // Base Query
-    let query = { seller: sellerId, listingStatus: 'Active' };
+    const clauses = [{ seller: { $in: [oid, String(oid)] } }];
+    const excludedLegacyIds = [...await getOrderQtyExcludedLegacyIdSet()];
+    if (excludedLegacyIds.length) {
+      clauses.push({ itemId: { $nin: excludedLegacyIds } });
+    }
 
-    // --- DATE FILTER (IST-aware) ---
     if (listedFrom || listedTo) {
-      query.startTime = {};
-      if (listedFrom) query.startTime.$gte = new Date(listedFrom + 'T00:00:00+05:30');
-      if (listedTo)   query.startTime.$lte = new Date(listedTo   + 'T23:59:59.999+05:30');
+      const startTime = {};
+      if (listedFrom) startTime.$gte = new Date(`${listedFrom}T00:00:00+05:30`);
+      if (listedTo) startTime.$lte = new Date(`${listedTo}T23:59:59.999+05:30`);
+      if (Object.keys(startTime).length) clauses.push({ startTime });
     }
 
-    // --- SEARCH LOGIC ---
-    if (search && search.trim() !== '') {
-      const searchRegex = { $regex: search.trim(), $options: 'i' };
-      query.$or = [
-        { title: searchRegex },
-        { sku: searchRegex },
-        { itemId: searchRegex }
-      ];
+    if (search && String(search).trim() !== '') {
+      const searchRegex = { $regex: String(search).trim(), $options: 'i' };
+      clauses.push({
+        $or: [
+          { title: searchRegex },
+          { sku: searchRegex },
+          { itemId: searchRegex },
+        ],
+      });
     }
 
-    const totalDocs = await Listing.countDocuments(query);
+    const query = clauses.length === 1 ? clauses[0] : { $and: clauses };
+    const sortFieldMap = {
+      listedOn: 'startTime',
+      startTime: 'startTime',
+      title: 'title',
+      sku: 'sku',
+      status: 'listingStatus',
+      price: 'currentPrice',
+      currentPrice: 'currentPrice',
+    };
+    const sortField = sortFieldMap[sortKey] || 'startTime';
+    const sortSpec = sortKey === 'fitment'
+      ? { _compatCount: sortAsc ? 1 : -1, startTime: -1, itemId: 1 }
+      : { [sortField]: sortAsc ? 1 : -1, itemId: 1 };
 
-    const listings = await Listing.find(query)
-      .sort({ startTime: -1 })
-      .skip(skip)
-      .limit(limitNum);
+    const searchText = String(search || '').trim();
+    const keepIncompleteRows = Boolean(searchText);
+    const pipeline = [
+      ...compatibilityDashboardSourcePipeline(query, { rank: 1, includeCompatCount: false }),
+      {
+        $unionWith: {
+          coll: Listing.collection.name,
+          pipeline: compatibilityDashboardSourcePipeline(query, { rank: 0, includeCompatCount: true }),
+        },
+      },
+      { $sort: { itemId: 1, _rank: 1 } },
+      {
+        $group: {
+          _id: '$itemId',
+          seller: { $last: '$seller' },
+          title: { $max: '$title' },
+          sku: { $max: '$sku' },
+          mainImageUrl: { $max: '$mainImageUrl' },
+          currentPrice: { $max: '$currentPrice' },
+          currency: { $max: '$currency' },
+          listingStatuses: { $addToSet: '$listingStatus' },
+          startTime: { $max: '$startTime' },
+          endTime: { $max: '$endTime' },
+          categoryName: { $max: '$categoryName' },
+          categoryId: { $max: '$categoryId' },
+          _fromLegacy: { $max: { $ifNull: ['$_fromLegacy', false] } },
+          _compatCount: { $max: { $ifNull: ['$_compatCount', 0] } },
+          origId: { $last: '$_id' },
+        },
+      },
+      {
+        $replaceRoot: {
+          newRoot: {
+            _id: '$origId',
+            itemId: '$_id',
+            seller: '$seller',
+            title: '$title',
+            sku: '$sku',
+            mainImageUrl: '$mainImageUrl',
+            currentPrice: '$currentPrice',
+            currency: '$currency',
+            listingStatuses: '$listingStatuses',
+            startTime: '$startTime',
+            endTime: '$endTime',
+            categoryName: '$categoryName',
+            categoryId: '$categoryId',
+            _fromLegacy: '$_fromLegacy',
+            _compatCount: '$_compatCount',
+          },
+        },
+      },
+      { $set: {
+        _compatCount: { $ifNull: ['$_compatCount', 0] },
+        listingStatus: mergedListingStatusExpr(),
+      } },
+      { $unset: 'listingStatuses' },
+      { $match: compatibilityDashboardMotorsMatch() },
+      { $unset: '_fromLegacy' },
+      ...(excludedLegacyIds.length ? [{ $match: { itemId: { $nin: excludedLegacyIds } } }] : []),
+      ...(statusMode === 'ended'
+        ? [{ $match: endedListingStatusFilter() }]
+        : statusMode === 'all'
+          ? []
+          : [{ $match: activeListingStatusFilter() }]),
+      ...(wantNoFitment ? [{ $match: { _compatCount: 0 } }] : []),
+      ...(keepIncompleteRows ? [] : [{ $match: compatibilityDashboardHasCatalogMatch() }]),
+      { $sort: sortSpec },
+      {
+        $facet: {
+          total: [{ $count: 'n' }],
+          rows: [{ $skip: skip }, { $limit: limitNum }],
+        },
+      },
+    ];
+
+    const [agg] = await ActiveListing.aggregate(pipeline).allowDiskUse(true);
+    const totalDocs = Number(agg?.total?.[0]?.n || 0);
+    const listings = agg?.rows || [];
 
     res.json({
-      listings,
+      listings: await overlayCompatibilityOntoActiveListings(listings, { includeFull: false }),
+      sourceCollection: 'ActiveListing+Listing',
       pagination: {
         total: totalDocs,
         page: pageNum,
-        pages: Math.ceil(totalDocs / limitNum)
-      }
+        pages: Math.ceil(totalDocs / limitNum) || 0,
+      },
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 3. REFRESH SINGLE ITEM (GetItem)
-router.post('/refresh-item', requireAuth, async (req, res) => {
-  const { sellerId, itemId } = req.body;
-
+router.post('/listings/by-ids', requireAuth, async (req, res) => {
   try {
-    const seller = await Seller.findById(sellerId);
-    const token = await ensureValidToken(seller);
+    const sid = String(req.body?.sellerId || '').trim();
+    if (!sid || !mongoose.Types.ObjectId.isValid(sid)) {
+      return res.status(400).json({ error: 'Valid sellerId is required' });
+    }
+    const itemIds = [...new Set((Array.isArray(req.body?.itemIds) ? req.body.itemIds : [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean))]
+      .slice(0, 100);
+    if (!itemIds.length) {
+      return res.json({ listings: [] });
+    }
+    const oid = new mongoose.Types.ObjectId(sid);
+    const sellerMatch = { $in: [oid, String(oid)] };
+    const excludedLegacyIds = await getOrderQtyExcludedLegacyIdSet();
+    const allowedIds = itemIds.filter((id) => !excludedLegacyIds.has(String(id).trim()));
+    if (!allowedIds.length) {
+      return res.json({ listings: [] });
+    }
+    const [active, legacy] = await Promise.all([
+      ActiveListing.find({ seller: sellerMatch, itemId: { $in: allowedIds } }).lean(),
+      Listing.find({ seller: sellerMatch, itemId: { $in: allowedIds } }).lean(),
+    ]);
+    const merged = new Map();
+    for (const row of legacy) merged.set(String(row.itemId), { ...row, _fromLegacy: true });
+    for (const row of active) {
+      const prev = merged.get(String(row.itemId));
+      merged.set(String(row.itemId), {
+        ...mergeCompatibilityDashboardDocs(prev, row),
+        _fromLegacy: Boolean(prev),
+      });
+    }
+    res.json({
+      listings: allowedIds
+        .map((id) => merged.get(String(id)))
+        .filter((doc) => doc && isEbayMotorsCategory(doc))
+        .map((doc) => toCompatibilityDashboardRow(doc, { includeFull: true })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    const xmlRequest = `
+// 3. REFRESH SINGLE ITEM (GetItem) — fills title/SKU/description/fitment for the Compatibility modal
+async function fetchGetItemBySite(token, itemId, siteId) {
+  const xmlRequest = `
         <?xml version="1.0" encoding="utf-8"?>
         <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
           <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
@@ -16917,48 +17527,126 @@ router.post('/refresh-item', requireAuth, async (req, res) => {
           <IncludeItemSpecifics>true</IncludeItemSpecifics>
         </GetItemRequest>
       `;
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-SITEID': String(siteId),
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'GetItem',
+      'Content-Type': 'text/xml',
+    },
+    timeout: 60000,
+  });
+  return parseStringPromise(response.data);
+}
 
-    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-      headers: {
-        'X-EBAY-API-SITEID': '100',
-        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-        'X-EBAY-API-CALL-NAME': 'GetItem',
-        'Content-Type': 'text/xml'
+function parseGetItemCompatibility(item) {
+  const rawList = item?.ItemCompatibilityList?.[0]?.Compatibility;
+  if (!rawList) return [];
+  const comps = Array.isArray(rawList) ? rawList : [rawList];
+  return comps.map((comp) => {
+    const nvlRaw = comp?.NameValueList;
+    const nvl = Array.isArray(nvlRaw) ? nvlRaw : (nvlRaw ? [nvlRaw] : []);
+    return {
+      notes: comp.CompatibilityNotes?.[0] || '',
+      nameValueList: nvl.map((nv) => ({
+        name: nv?.Name?.[0] || '',
+        value: nv?.Value?.[0] || '',
+      })).filter((nv) => nv.name),
+    };
+  });
+}
+
+router.post('/refresh-item', requireAuth, async (req, res) => {
+  const { sellerId, itemId } = req.body;
+
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    const token = await ensureValidToken(seller);
+    const id = String(itemId || '').trim();
+    if (!id) return res.status(400).json({ error: 'itemId is required' });
+
+    let item = null;
+    let lastError = '';
+    for (const siteId of ['0', '100', '3']) {
+      try {
+        const result = await fetchGetItemBySite(token, id, siteId);
+        const ack = String(result?.GetItemResponse?.Ack?.[0] || '');
+        if (ack === 'Failure') {
+          lastError = (result.GetItemResponse.Errors || []).map((e) => e.LongMessage?.[0]).filter(Boolean).join('; ');
+          continue;
+        }
+        item = result?.GetItemResponse?.Item?.[0];
+        if (item) break;
+      } catch (siteErr) {
+        lastError = siteErr.message;
       }
-    });
-
-    const result = await parseStringPromise(response.data);
-    const item = result.GetItemResponse.Item[0];
+    }
+    if (!item) {
+      return res.status(502).json({ error: lastError || 'eBay GetItem returned no listing' });
+    }
 
     const rawHtml = item.Description ? item.Description[0] : '';
     const cleanHtml = extractCleanDescription(rawHtml);
+    const parsedCompatibility = parseGetItemCompatibility(item);
+    const title = item.Title?.[0] || '';
+    const sku = item.SKU?.[0] || '';
+    const mainImageUrl = item.PictureDetails?.[0]?.PictureURL?.[0] || '';
+    const priceNode = item.SellingStatus?.[0]?.CurrentPrice?.[0];
+    const currentPrice = parseFloat(priceNode?._ ?? priceNode);
+    const currency = priceNode?.$?.currencyID || item.Currency?.[0] || '';
+    const listingStatus = item.SellingStatus?.[0]?.ListingStatus?.[0] || item.ListingStatus?.[0] || '';
+    const startTime = item.ListingDetails?.[0]?.StartTime?.[0]
+      ? new Date(item.ListingDetails[0].StartTime[0])
+      : undefined;
+    const endTime = item.ListingDetails?.[0]?.EndTime?.[0]
+      ? new Date(item.ListingDetails[0].EndTime[0])
+      : undefined;
 
-    let parsedCompatibility = [];
-    if (item.ItemCompatibilityList && item.ItemCompatibilityList[0].Compatibility) {
-      parsedCompatibility = item.ItemCompatibilityList[0].Compatibility.map(comp => ({
-        notes: comp.CompatibilityNotes ? comp.CompatibilityNotes[0] : '',
-        nameValueList: comp.NameValueList.map(nv => ({
-          name: nv.Name[0],
-          value: nv.Value[0]
-        }))
-      }));
-    }
+    const listingFields = {
+      seller: seller._id,
+      title,
+      sku,
+      descriptionPreview: cleanHtml,
+      compatibility: parsedCompatibility,
+      mainImageUrl,
+      ...(Number.isFinite(currentPrice) ? { currentPrice } : {}),
+      ...(currency ? { currency } : {}),
+      ...(listingStatus ? { listingStatus } : {}),
+      ...(startTime && !Number.isNaN(startTime.getTime()) ? { startTime } : {}),
+      ...(endTime && !Number.isNaN(endTime.getTime()) ? { endTime } : {}),
+    };
 
-    const updatedListing = await Listing.findOneAndUpdate(
-      { itemId: itemId },
-      {
-        seller: seller._id,
-        title: item.Title[0],
-        sku: item.SKU ? item.SKU[0] : '',
-        descriptionPreview: cleanHtml,
-        compatibility: parsedCompatibility,
-        mainImageUrl: item.PictureDetails?.[0]?.PictureURL?.[0] || '',
-      },
-      { new: true, upsert: true }
-    );
+    const [updatedListing] = await Promise.all([
+      Listing.findOneAndUpdate(
+        { itemId: id },
+        listingFields,
+        { new: true, upsert: true }
+      ).lean(),
+      ActiveListing.findOneAndUpdate(
+        { itemId: id },
+        {
+          $set: {
+            seller: seller._id,
+            title,
+            sku,
+            descriptionPreview: cleanHtml,
+            mainImageUrl,
+            ...(Number.isFinite(currentPrice) ? { currentPrice } : {}),
+            ...(currency ? { currency } : {}),
+            ...(listingStatus ? { listingStatus } : {}),
+            ...(startTime && !Number.isNaN(startTime.getTime()) ? { startTime } : {}),
+            ...(endTime && !Number.isNaN(endTime.getTime()) ? { endTime } : {}),
+          },
+        },
+        { new: true }
+      ).lean(),
+    ]);
 
-    res.json({ success: true, listing: updatedListing });
-
+    res.json({
+      success: true,
+      listing: toCompatibilityDashboardRow(updatedListing, { includeFull: true }),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -16977,6 +17665,276 @@ const escapeXml = (unsafe) => {
     }
   });
 };
+
+const LIVE_FITMENT_RECHECK_CONCURRENCY = 2;
+
+function emptyLiveFitmentRecheckStatus() {
+  return {
+    running: false,
+    sellerId: '',
+    total: 0,
+    checked: 0,
+    withFitment: 0,
+    withoutFitment: 0,
+    ended: 0,
+    errors: 0,
+    lastError: '',
+    startedAt: null,
+    completedAt: null,
+  };
+}
+
+let liveFitmentRecheck = emptyLiveFitmentRecheckStatus();
+
+function listingStatusFromGetItem(item) {
+  return nonemptyXmlText(item?.SellingStatus?.[0]?.ListingStatus)
+    || nonemptyXmlText(item?.SellingStatus?.ListingStatus)
+    || nonemptyXmlText(item?.ListingStatus)
+    || '';
+}
+
+async function collectActiveMotorsItemIdsForLiveFitmentRecheck({
+  sellerId,
+  listedFrom,
+  listedTo,
+  search,
+  onlyNoFitment,
+  itemIds,
+}) {
+  const oid = new mongoose.Types.ObjectId(String(sellerId));
+  const clauses = [{ seller: { $in: [oid, String(oid)] } }];
+  const excludedLegacyIds = [...await getOrderQtyExcludedLegacyIdSet()];
+  if (excludedLegacyIds.length) {
+    clauses.push({ itemId: { $nin: excludedLegacyIds } });
+  }
+  if (listedFrom || listedTo) {
+    const startTime = {};
+    if (listedFrom) startTime.$gte = new Date(`${listedFrom}T00:00:00+05:30`);
+    if (listedTo) startTime.$lte = new Date(`${listedTo}T23:59:59.999+05:30`);
+    if (Object.keys(startTime).length) clauses.push({ startTime });
+  }
+  if (search && String(search).trim()) {
+    const searchRegex = { $regex: String(search).trim(), $options: 'i' };
+    clauses.push({
+      $or: [
+        { title: searchRegex },
+        { sku: searchRegex },
+        { itemId: searchRegex },
+      ],
+    });
+  }
+  const selectedIds = [...new Set((itemIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+  if (selectedIds.length) {
+    clauses.push({ itemId: { $in: selectedIds } });
+  }
+  const query = clauses.length === 1 ? clauses[0] : { $and: clauses };
+  const pipeline = [
+    ...compatibilityDashboardSourcePipeline(query, { rank: 1, includeCompatCount: false }),
+    {
+      $unionWith: {
+        coll: Listing.collection.name,
+        pipeline: compatibilityDashboardSourcePipeline(query, { rank: 0, includeCompatCount: true }),
+      },
+    },
+    { $sort: { itemId: 1, _rank: 1 } },
+    {
+      $group: {
+        _id: '$itemId',
+        listingStatuses: { $addToSet: '$listingStatus' },
+        _compatCount: { $max: { $ifNull: ['$_compatCount', 0] } },
+        categoryName: { $max: '$categoryName' },
+        categoryId: { $max: '$categoryId' },
+      },
+    },
+    {
+      $replaceRoot: {
+        newRoot: {
+          itemId: '$_id',
+          listingStatuses: '$listingStatuses',
+          _compatCount: '$_compatCount',
+          categoryName: '$categoryName',
+          categoryId: '$categoryId',
+        },
+      },
+    },
+    {
+      $set: {
+        _compatCount: { $ifNull: ['$_compatCount', 0] },
+        listingStatus: mergedListingStatusExpr(),
+      },
+    },
+    { $match: compatibilityDashboardMotorsMatch() },
+    { $match: activeListingStatusFilter() },
+    ...(onlyNoFitment ? [{ $match: { _compatCount: 0 } }] : []),
+    { $project: { itemId: 1 } },
+  ];
+  const rows = await ActiveListing.aggregate(pipeline).allowDiskUse(true);
+  return [...new Set(rows.map((r) => String(r.itemId || '').trim()).filter(Boolean))];
+}
+
+async function fetchLiveItemCompatibility(token, itemId) {
+  const id = String(itemId || '').trim();
+  let lastError = '';
+  for (const siteId of ['100', '0']) {
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+      <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+        <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+        <ErrorLanguage>en_US</ErrorLanguage>
+        <WarningLevel>High</WarningLevel>
+        <ItemID>${escapeXml(id)}</ItemID>
+        <IncludeItemCompatibilityList>true</IncludeItemCompatibilityList>
+      </GetItemRequest>`;
+    try {
+      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+        headers: {
+          'X-EBAY-API-SITEID': String(siteId),
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+          'X-EBAY-API-CALL-NAME': 'GetItem',
+          'Content-Type': 'text/xml',
+        },
+        timeout: 60000,
+      });
+      const result = await parseStringPromise(response.data);
+      const ack = String(result?.GetItemResponse?.Ack?.[0] || '');
+      if (ack === 'Failure') {
+        const errors = result?.GetItemResponse?.Errors || [];
+        const list = Array.isArray(errors) ? errors : [errors];
+        lastError = list.map((e) => e?.LongMessage?.[0] || e?.ShortMessage?.[0] || '').filter(Boolean).join('; ');
+        continue;
+      }
+      const item = result?.GetItemResponse?.Item?.[0];
+      if (!item) continue;
+      return {
+        compatibility: parseGetItemCompatibility(item),
+        listingStatus: listingStatusFromGetItem(item),
+        error: '',
+      };
+    } catch (err) {
+      lastError = err.message;
+    }
+  }
+  return { compatibility: [], listingStatus: '', error: lastError || 'GetItem failed' };
+}
+
+async function executeLiveFitmentRecheck({ seller, itemIds }) {
+  const token = await ensureValidToken(seller);
+  await runWithConcurrency(itemIds, LIVE_FITMENT_RECHECK_CONCURRENCY, async (itemId) => {
+    if (!liveFitmentRecheck.running) return;
+    try {
+      const live = await fetchLiveItemCompatibility(token, itemId);
+      if (!liveFitmentRecheck.running) return;
+      if (live.error) {
+        liveFitmentRecheck.errors += 1;
+        liveFitmentRecheck.lastError = live.error;
+        if (/exceeded usage limit|call limit/i.test(live.error)) {
+          liveFitmentRecheck.running = false;
+          throw new Error(live.error);
+        }
+      } else {
+        const compatibility = Array.isArray(live.compatibility) ? live.compatibility : [];
+        const listingStatus = live.listingStatus || 'Active';
+        await Listing.findOneAndUpdate(
+          { itemId },
+          { $set: { seller: seller._id, compatibility, listingStatus } },
+          { upsert: true }
+        );
+        if (!/^active$/i.test(listingStatus)) {
+          liveFitmentRecheck.ended += 1;
+          await ActiveListing.updateOne(
+            { itemId },
+            { $set: { listingStatus } }
+          );
+        } else if (compatibility.length > 0) {
+          liveFitmentRecheck.withFitment += 1;
+        } else {
+          liveFitmentRecheck.withoutFitment += 1;
+        }
+      }
+    } catch (err) {
+      if (/exceeded usage limit|call limit/i.test(err.message || '')) throw err;
+      liveFitmentRecheck.errors += 1;
+      liveFitmentRecheck.lastError = err.message;
+    } finally {
+      liveFitmentRecheck.checked += 1;
+    }
+  });
+}
+
+router.post('/recheck-live-compatibility', requireAuth, async (req, res) => {
+  const sellerId = String(req.body?.sellerId || '').trim();
+  if (!sellerId || !mongoose.Types.ObjectId.isValid(sellerId)) {
+    return res.status(400).json({ error: 'Valid sellerId is required' });
+  }
+  if (liveFitmentRecheck.running) {
+    return res.status(409).json({
+      success: false,
+      error: 'A live fitment recheck is already running.',
+      status: liveFitmentRecheck,
+    });
+  }
+
+  try {
+    const seller = await Seller.findById(sellerId);
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const selectedIds = Array.isArray(req.body?.itemIds) ? req.body.itemIds : [];
+    const onlyNoFitment = selectedIds.length === 0;
+    const itemIds = await collectActiveMotorsItemIdsForLiveFitmentRecheck({
+      sellerId,
+      listedFrom: req.body?.listedFrom,
+      listedTo: req.body?.listedTo,
+      search: req.body?.search,
+      onlyNoFitment,
+      itemIds: selectedIds,
+    });
+
+    if (!itemIds.length) {
+      return res.json({
+        success: true,
+        total: 0,
+        onlyNoFitment,
+        message: selectedIds.length
+          ? 'None of the selected listings are Active Motors items.'
+          : 'No Active Motors listings without saved fitment matched the current filters.',
+      });
+    }
+
+    liveFitmentRecheck = {
+      ...emptyLiveFitmentRecheckStatus(),
+      running: true,
+      sellerId,
+      total: itemIds.length,
+      startedAt: new Date().toISOString(),
+    };
+
+    res.json({
+      success: true,
+      total: itemIds.length,
+      onlyNoFitment,
+      message: `Rechecking live eBay fitment for ${itemIds.length} Active listing(s).`,
+    });
+
+    void (async () => {
+      try {
+        await executeLiveFitmentRecheck({ seller, itemIds });
+      } catch (err) {
+        liveFitmentRecheck.lastError = err.message;
+        liveFitmentRecheck.errors += 1;
+        console.error('[LiveFitmentRecheck]', err.message);
+      } finally {
+        liveFitmentRecheck.running = false;
+        liveFitmentRecheck.completedAt = new Date().toISOString();
+      }
+    })();
+  } catch (err) {
+    liveFitmentRecheck = emptyLiveFitmentRecheckStatus();
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/recheck-live-compatibility-status', requireAuth, async (_req, res) => {
+  res.json(liveFitmentRecheck);
+});
 
 // Helper: Create price change log entry
 async function createPriceChangeLog({ userId, sellerId, orderObjectId, itemId, orderId, productTitle, originalPrice, newPrice, success, errorMessage, ip, userAgent }) {
@@ -17241,6 +18199,149 @@ const buildCompatXml = (compatibilityList) => {
   return xml;
 };
 
+const COMPAT_REVISE_SITES = ['100', '0'];
+
+function isBusinessPolicyReviseError(msg) {
+  const m = String(msg || '').toLowerCase();
+  return m.includes('opted into business policies')
+    || m.includes('policy ids rather than legacy')
+    || m.includes('use policy ids')
+    || m.includes('new policies may be automatically created')
+    || m.includes('21919426');
+}
+
+function isIgnorableEbayCompatWarning(msg) {
+  const m = String(msg || '');
+  if (!m) return true;
+  if (m.includes('Best Offer')) return true;
+  if (m.includes('Funds from your sales')) return true;
+  if (isBusinessPolicyReviseError(m)) return true;
+  return false;
+}
+
+function ebayCompatErrorText(err) {
+  return nonemptyXmlText(err?.LongMessage) || nonemptyXmlText(err?.ShortMessage) || '';
+}
+
+function ebayCompatErrors(result) {
+  const raw = result?.ReviseFixedPriceItemResponse?.Errors || [];
+  return Array.isArray(raw) ? raw : [raw];
+}
+
+function parseSellerProfilesXmlFromItem(item) {
+  const root = item?.SellerProfiles?.[0] || item?.SellerProfiles;
+  if (!root) return '';
+  const shippingId = nonemptyXmlText(root.SellerShippingProfile?.[0]?.ShippingProfileID)
+    || nonemptyXmlText(root.SellerShippingProfile?.ShippingProfileID);
+  const returnId = nonemptyXmlText(root.SellerReturnProfile?.[0]?.ReturnProfileID)
+    || nonemptyXmlText(root.SellerReturnProfile?.ReturnProfileID);
+  const paymentId = nonemptyXmlText(root.SellerPaymentProfile?.[0]?.PaymentProfileID)
+    || nonemptyXmlText(root.SellerPaymentProfile?.PaymentProfileID);
+  if (!shippingId && !returnId && !paymentId) return '';
+  let xml = '<SellerProfiles>';
+  if (shippingId) xml += `<SellerShippingProfile><ShippingProfileID>${escapeXml(shippingId)}</ShippingProfileID></SellerShippingProfile>`;
+  if (returnId) xml += `<SellerReturnProfile><ReturnProfileID>${escapeXml(returnId)}</ReturnProfileID></SellerReturnProfile>`;
+  if (paymentId) xml += `<SellerPaymentProfile><PaymentProfileID>${escapeXml(paymentId)}</PaymentProfileID></SellerPaymentProfile>`;
+  xml += '</SellerProfiles>';
+  return xml;
+}
+
+async function fetchItemForCompatRevise(token, itemId) {
+  for (const siteId of ['100', '0', '3']) {
+    try {
+      const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+        <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+          <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+          <ErrorLanguage>en_US</ErrorLanguage>
+          <WarningLevel>High</WarningLevel>
+          <ItemID>${itemId}</ItemID>
+          <OutputSelector>Item.SellerProfiles</OutputSelector>
+          <OutputSelector>Item.ItemID</OutputSelector>
+        </GetItemRequest>`;
+      const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+        headers: {
+          'X-EBAY-API-SITEID': String(siteId),
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+          'X-EBAY-API-CALL-NAME': 'GetItem',
+          'Content-Type': 'text/xml',
+        },
+        timeout: 60000,
+      });
+      const result = await parseStringPromise(response.data);
+      const ack = String(result?.GetItemResponse?.Ack?.[0] || '');
+      if (ack === 'Failure') continue;
+      const item = result?.GetItemResponse?.Item?.[0];
+      if (item && parseSellerProfilesXmlFromItem(item)) return { item, siteId };
+      const full = await fetchGetItemBySite(token, itemId, siteId);
+      const fullAck = String(full?.GetItemResponse?.Ack?.[0] || '');
+      if (fullAck === 'Failure') continue;
+      const fullItem = full?.GetItemResponse?.Item?.[0];
+      if (fullItem) return { item: fullItem, siteId };
+    } catch {
+      /* try next site */
+    }
+  }
+  return null;
+}
+
+async function postReviseCompatibility(token, itemId, compatibilityList, { siteId, extraItemXml = '' } = {}) {
+  const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+    <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+      <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+      <ErrorLanguage>en_US</ErrorLanguage>
+      <WarningLevel>High</WarningLevel>
+      <Item><ItemID>${itemId}</ItemID>${extraItemXml || ''}${buildCompatXml(compatibilityList)}</Item>
+    </ReviseFixedPriceItemRequest>`;
+  const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
+    headers: {
+      'X-EBAY-API-SITEID': String(siteId),
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem',
+      'Content-Type': 'text/xml',
+    },
+  });
+  const result = await parseStringPromise(response.data);
+  const ack = result?.ReviseFixedPriceItemResponse?.Ack?.[0];
+  const errors = ebayCompatErrors(result);
+  const errorMessage = errors.map((e) => ebayCompatErrorText(e)).filter(Boolean).join('; ');
+  return { ack, result, errorMessage };
+}
+
+async function applyCompatibilityRevise(token, itemId, compatibilityList, { profileCache } = {}) {
+  const trySites = [...COMPAT_REVISE_SITES];
+  let extraItemXml = profileCache?.xml || '';
+
+  let last = await postReviseCompatibility(token, itemId, compatibilityList, {
+    siteId: '100',
+    extraItemXml,
+  });
+  if (/exceeded usage limit|call limit/i.test(last.errorMessage || '')) return last;
+
+  const needsPolicyRetry = isBusinessPolicyReviseError(last.errorMessage) && !extraItemXml;
+  if (last.ack !== 'Failure' && !needsPolicyRetry) return last;
+
+  // Fitment may already be saved on Ack=Warning; keep that if the policy retry fails.
+  const firstOk = last.ack !== 'Failure' ? last : null;
+
+  if (needsPolicyRetry) {
+    const got = await fetchItemForCompatRevise(token, itemId);
+    extraItemXml = parseSellerProfilesXmlFromItem(got?.item);
+    if (got?.siteId && !trySites.includes(got.siteId)) trySites.unshift(got.siteId);
+    if (profileCache) profileCache.xml = extraItemXml;
+    console.log(`[Compat] Business-policy revise retry for ${itemId} (profiles=${Boolean(extraItemXml)})`);
+  }
+
+  for (const siteId of trySites) {
+    last = await postReviseCompatibility(token, itemId, compatibilityList, {
+      siteId,
+      extraItemXml,
+    });
+    if (/exceeded usage limit|call limit/i.test(last.errorMessage || '')) return firstOk || last;
+    if (last.ack !== 'Failure') return last;
+  }
+  return firstOk || last;
+}
+
 // Helper: retry by differentiating the title with a period suffix + minor price bump.
 // Each attempt adds one more period to the title and $0.01 to the price.
 // Up to 5 attempts — if eBay keeps rejecting as duplicate on each attempt, we keep retrying.
@@ -17289,9 +18390,9 @@ const retryCompatWithTitleDiff = async (token, itemId, compatibilityList) => {
       throw new Error(errMsg);
     }
 
-    const warnings = (result.ReviseFixedPriceItemResponse.Errors || [])
-      .filter(e => !e.LongMessage[0].includes('Best Offer') && !e.LongMessage[0].includes('Funds from your sales'))
-      .map(e => e.LongMessage[0]).join('; ');
+    const warnings = ebayCompatErrors(result)
+      .filter(e => !isIgnorableEbayCompatWarning(ebayCompatErrorText(e)))
+      .map(e => ebayCompatErrorText(e)).join('; ');
     return { newPrice: parseFloat(newPrice), newTitle, warning: warnings || null };
   }
 
@@ -17305,68 +18406,10 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
     const token = await ensureValidToken(seller);
     const compatibilityList = sanitizeCompatibilityList(rawCompatibilityList);
 
-    let itemInnerContent = `<ItemID>${itemId}</ItemID>`;
-
-    // CASE 1: Clearing all vehicles (Send Empty List with ReplaceAll)
-    if (!compatibilityList || compatibilityList.length === 0) {
-      // This tells eBay: "Here is the list. It is empty. Replace everything with this empty list."
-      itemInnerContent += `
-                <ItemCompatibilityList>
-                    <ReplaceAll>true</ReplaceAll>
-                </ItemCompatibilityList>
-            `;
-    }
-    // CASE 2: Sending a specific list (Overwrite old list)
-    else {
-      let compatXml = '<ItemCompatibilityList>';
-
-      // --- THE FIX: This magic tag forces eBay to wipe old data first ---
-      compatXml += '<ReplaceAll>true</ReplaceAll>';
-      // -----------------------------------------------------------------
-
-      compatibilityList.forEach(c => {
-        compatXml += '<Compatibility>';
-        // Escape Notes (Fixes "&" error)
-        if (c.notes) compatXml += `<CompatibilityNotes>${escapeXml(c.notes)}</CompatibilityNotes>`;
-
-        c.nameValueList.forEach(nv => {
-          // Escape Name and Value (Fixes "Town & Country" error)
-          compatXml += `<NameValueList><Name>${escapeXml(nv.name)}</Name><Value>${escapeXml(nv.value)}</Value></NameValueList>`;
-        });
-        compatXml += '</Compatibility>';
-      });
-      compatXml += '</ItemCompatibilityList>';
-
-      itemInnerContent += compatXml;
-    }
-
-    const xmlRequest = `
-            <?xml version="1.0" encoding="utf-8"?>
-            <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-                <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-                <ErrorLanguage>en_US</ErrorLanguage>
-                <WarningLevel>High</WarningLevel>
-                
-                <Item>
-                    ${itemInnerContent}
-                </Item>
-
-            </ReviseFixedPriceItemRequest>
-        `;
-
-    const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-      headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
-    });
-
-    const result = await parseStringPromise(response.data);
-    const ack = result.ReviseFixedPriceItemResponse.Ack[0];
+    const { ack, result, errorMessage } = await applyCompatibilityRevise(token, itemId, compatibilityList);
 
     // 1. Handle Failures
     if (ack === 'Failure') {
-      const errors = result.ReviseFixedPriceItemResponse.Errors || [];
-      const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
-
-      // Check if it's a rate limit error
       const isRateLimitError = errorMessage.includes('exceeded usage limit') ||
         errorMessage.includes('call limit') ||
         errorMessage.includes('Developer Analytics API');
@@ -17419,18 +18462,13 @@ router.post('/update-compatibility', requireAuth, async (req, res) => {
     let warningMessage = null;
     let filteredCompatibilityList = compatibilityList;
     if (ack === 'Warning') {
-      const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
+      const warnings = ebayCompatErrors(result);
 
-      const meaningfulWarnings = warnings.filter(err => {
-        const msg = err.LongMessage[0];
-        if (msg.includes("If this item sells by a Best Offer")) return false;
-        if (msg.includes("Funds from your sales may be unavailable")) return false;
-        return true;
-      });
+      const meaningfulWarnings = warnings.filter(err => !isIgnorableEbayCompatWarning(ebayCompatErrorText(err)));
 
       if (meaningfulWarnings.length > 0) {
-        const rawWarning = meaningfulWarnings.map(e => e.LongMessage[0]).join('; ');
-        warningMessage = meaningfulWarnings.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
+        const rawWarning = meaningfulWarnings.map(e => ebayCompatErrorText(e)).join('; ');
+        warningMessage = meaningfulWarnings.map(e => parseInvalidCombos(ebayCompatErrorText(e))).join('; ');
         console.warn(`eBay Update Warning: ${warningMessage}`);
         // Strip entries that eBay rejected so local DB matches what eBay actually accepted
         filteredCompatibilityList = filterOutInvalidCombos(compatibilityList, rawWarning);
@@ -17482,50 +18520,16 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
     const results = [];
     let successCount = 0;
     let failureCount = 0;
+    const profileCache = { xml: '' };
 
     // Process items sequentially to respect eBay rate limits
     for (const entry of items) {
       const { itemId, title, sku, compatibilityList: rawCompatList } = entry;
       const compatibilityList = sanitizeCompatibilityList(rawCompatList);
       try {
-        let itemInnerContent = `<ItemID>${itemId}</ItemID>`;
-
-        if (!compatibilityList || compatibilityList.length === 0) {
-          itemInnerContent += `<ItemCompatibilityList><ReplaceAll>true</ReplaceAll></ItemCompatibilityList>`;
-        } else {
-          let compatXml = '<ItemCompatibilityList><ReplaceAll>true</ReplaceAll>';
-          compatibilityList.forEach(c => {
-            compatXml += '<Compatibility>';
-            if (c.notes) compatXml += `<CompatibilityNotes>${escapeXml(c.notes)}</CompatibilityNotes>`;
-            c.nameValueList.forEach(nv => {
-              compatXml += `<NameValueList><Name>${escapeXml(nv.name)}</Name><Value>${escapeXml(nv.value)}</Value></NameValueList>`;
-            });
-            compatXml += '</Compatibility>';
-          });
-          compatXml += '</ItemCompatibilityList>';
-          itemInnerContent += compatXml;
-        }
-
-        const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
-          <ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-            <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
-            <ErrorLanguage>en_US</ErrorLanguage>
-            <WarningLevel>High</WarningLevel>
-            <Item>${itemInnerContent}</Item>
-          </ReviseFixedPriceItemRequest>`;
-
-        const response = await axios.post('https://api.ebay.com/ws/api.dll', xmlRequest, {
-          headers: { 'X-EBAY-API-SITEID': '100', 'X-EBAY-API-COMPATIBILITY-LEVEL': '1423', 'X-EBAY-API-CALL-NAME': 'ReviseFixedPriceItem', 'Content-Type': 'text/xml' }
-        });
-
-        const result = await parseStringPromise(response.data);
-        const ack = result.ReviseFixedPriceItemResponse.Ack[0];
+        const { ack, result, errorMessage } = await applyCompatibilityRevise(token, itemId, compatibilityList, { profileCache });
 
         if (ack === 'Failure') {
-          const errors = result.ReviseFixedPriceItemResponse.Errors || [];
-          const errorMessage = errors.map(e => e.LongMessage[0]).join('; ');
-
-          // If rate limited, stop processing remaining items
           const isRateLimitError = errorMessage.includes('exceeded usage limit') || errorMessage.includes('call limit');
           if (isRateLimitError) {
             results.push({ itemId, title, sku, status: 'failure', error: 'Rate limit reached', compatibilityCount: compatibilityList?.length || 0 });
@@ -17565,14 +18569,11 @@ router.post('/bulk-update-compatibility', requireAuth, async (req, res) => {
           let savedList = compatibilityList;
           let warning = null;
           if (ack === 'Warning') {
-            const warnings = result.ReviseFixedPriceItemResponse.Errors || [];
-            const meaningful = warnings.filter(err => {
-              const msg = err.LongMessage[0];
-              return !msg.includes("If this item sells by a Best Offer") && !msg.includes("Funds from your sales may be unavailable");
-            });
+            const warnings = ebayCompatErrors(result);
+            const meaningful = warnings.filter(err => !isIgnorableEbayCompatWarning(ebayCompatErrorText(err)));
             if (meaningful.length > 0) {
-              const rawWarning = meaningful.map(e => e.LongMessage[0]).join('; ');
-              warning = meaningful.map(e => parseInvalidCombos(e.LongMessage[0])).join('; ');
+              const rawWarning = meaningful.map(e => ebayCompatErrorText(e)).join('; ');
+              warning = meaningful.map(e => parseInvalidCombos(ebayCompatErrorText(e))).join('; ');
               // Strip entries that eBay rejected so local DB matches what eBay actually accepted
               savedList = filterOutInvalidCombos(compatibilityList, rawWarning);
               // Also remove rejected trims/engines from FitmentCache so they don't show in dropdowns
@@ -18707,7 +19708,17 @@ router.post('/store-listings/sync-one', requireAuth, async (req, res) => {
       });
     }
 
-    const mode = normalizeStoreListingsSyncMode(req.body?.mode);
+    const catalogOnly = req.body?.catalogOnly === true || req.body?.mode === 'catalog';
+    const customRange = catalogOnly
+      ? null
+      : parseIstListingDayRange(
+        req.body?.startDate || req.body?.startDateFrom,
+        req.body?.endDate || req.body?.startDateTo
+      );
+    if ((req.body?.startDate || req.body?.endDate || req.body?.startDateFrom || req.body?.startDateTo) && !customRange && !catalogOnly) {
+      return res.status(400).json({ success: false, error: 'Invalid startDate/endDate. Use YYYY-MM-DD.' });
+    }
+    const mode = catalogOnly ? 'catalog' : customRange ? 'custom' : normalizeStoreListingsSyncMode(req.body?.mode);
     const sellerName = seller.user?.username || seller.user?.email || sellerId;
     const job = {
       running: true,
@@ -18725,11 +19736,18 @@ router.post('/store-listings/sync-one', requireAuth, async (req, res) => {
     };
     singleSellerSyncJobs.set(sellerId, job);
 
+    const dateLabel = customRange
+      ? ` (${customRange.from.toISOString().slice(0, 10)} → ${customRange.to.toISOString().slice(0, 10)} IST start)`
+      : '';
     res.json({
       success: true,
-      message: mode === 'full'
-        ? `Full resync started for ${sellerName}. Progress appears in this row.`
-        : `Sync started for ${sellerName}. Progress appears in this row.`,
+      message: catalogOnly
+        ? `Refreshing titles and prices for ${sellerName} from eBay ActiveList.`
+        : customRange
+        ? `Date fetch started for ${sellerName}${dateLabel}. Progress appears in this row.`
+        : mode === 'full'
+          ? `Full resync started for ${sellerName}. Progress appears in this row.`
+          : `Sync started for ${sellerName}. Progress appears in this row.`,
       sellerId,
       sellerName,
       mode,
@@ -18738,7 +19756,9 @@ router.post('/store-listings/sync-one', requireAuth, async (req, res) => {
     void (async () => {
       try {
         const result = await syncOneSellerActiveListings(seller, {
-          mode,
+          mode: customRange ? 'incremental' : mode,
+          customRange,
+          catalogOnly,
           onPageProgress: ({ page, totalPages, windowIndex = 0, totalWindows = 0 }) => {
             job.currentPage = page;
             job.currentTotalPages = totalPages;
@@ -31671,7 +32691,11 @@ const fuzzyMatchModel = (aiModel, options) => {
 let _autoOpenai = null;
 function getAutoOpenAI() {
   if (!_autoOpenai) {
-    _autoOpenai = new OpenAI({ apiKey: process.env.OPENAI_FITMENT_API_KEY });
+    const apiKey = getFitmentApiKey();
+    if (!apiKey) {
+      throw new Error('OpenAI API key is not configured. Set OPENAI_FITMENT_API_KEY or OPENAI_API_KEY.');
+    }
+    _autoOpenai = new OpenAI({ apiKey });
   }
   return _autoOpenai;
 }
@@ -31785,22 +32809,8 @@ router.post('/auto-compatibility', requireAuth, async (req, res) => {
     const seller = await Seller.findById(sellerId);
     if (!seller) return res.status(404).json({ error: 'Seller not found' });
 
-    // Find listings for this seller on the target date that have NO compatibility data
-    const dayStart = new Date(targetDate + 'T00:00:00Z');
-    const dayEnd = new Date(targetDate + 'T23:59:59.999Z');
-    const query = {
-      seller: sellerId,
-      listingStatus: 'Active',
-      startTime: { $gte: dayStart, $lte: dayEnd },
-      $or: [
-        { compatibility: { $exists: false } },
-        { compatibility: { $size: 0 } },
-        { compatibility: null }
-      ]
-    };
-
-    let listings = await Listing.find(query).sort({ startTime: 1 }).lean();
-    if (itemLimit > 0) listings = listings.slice(0, itemLimit);
+    // Same catalog + IST listed-on day as Compatibility Dashboard
+    let listings = await findListingsNeedingAutoCompatibility(sellerId, targetDate, itemLimit);
 
     if (listings.length === 0) {
       return res.json({ success: true, message: 'No listings without compatibility found for this date.', batchId: null });
@@ -31837,7 +32847,7 @@ router.post('/auto-compatibility-status/bulk', requireAuth, async (req, res) => 
     const { batchIds } = req.body;
     if (!Array.isArray(batchIds) || batchIds.length === 0) return res.json({ batches: {} });
     const docs = await AutoCompatibilityBatch.find({ _id: { $in: batchIds } })
-      .select('status totalListings processedCount needsManualCount successCount warningCount ebayErrorCount aiFailedCount manualReviewDone currentItemTitle')
+      .select('status totalListings processedCount needsManualCount successCount warningCount ebayErrorCount aiFailedCount manualReviewDone currentItemTitle currentStep lastHeartbeatAt')
       .lean();
     const batches = {};
     docs.forEach(b => { batches[String(b._id)] = b; });
@@ -31982,7 +32992,7 @@ router.get('/listing/:itemId', requireAuth, async (req, res) => {
 
 // POST /api/ebay/auto-compatibility/run-for-date
 // Body: { targetDate, itemLimit?, excludeSellerIds? }
-// Creates batches for every seller (except those in AUTO_COMPAT_EXCLUDED_USERNAMES) and processes them sequentially.
+// Creates batches for every seller (except those in AUTO_COMPAT_EXCLUDED_USERNAMES) and queues processing.
 router.post('/auto-compatibility/run-for-date', requireAuth, async (req, res) => {
   const { targetDate, itemLimit = 0, excludeSellerIds = [] } = req.body;
   if (!targetDate) {
@@ -32009,15 +33019,43 @@ router.get('/auto-compatibility-batches-for-date', requireAuth, async (req, res)
     const { targetDate } = req.query;
     if (!targetDate) return res.status(400).json({ error: 'targetDate is required' });
 
-    const batches = await AutoCompatibilityBatch.find({ targetDate })
-      .select('-items')
-      .sort({ createdAt: 1 })
-      .populate('triggeredBy', 'username')
-      .populate('reviewedBy', 'username')
-      .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
-      .lean();
+    const [batches, recentDates] = await Promise.all([
+      AutoCompatibilityBatch.find({ targetDate })
+        .select('-items')
+        .sort({ createdAt: 1 })
+        .populate('triggeredBy', 'username')
+        .populate('reviewedBy', 'username')
+        .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+        .lean(),
+      AutoCompatibilityBatch.distinct('targetDate'),
+    ]);
 
-    res.json({ batches });
+    res.json({
+      batches,
+      recentDates: (recentDates || []).filter(Boolean).sort().reverse(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/ebay/auto-compatibility/resume-running
+// Kick any running batches owned by this runner (stuck 0/N after create, restart, or queue delay).
+router.post('/auto-compatibility/resume-running', requireAuth, async (req, res) => {
+  try {
+    const { targetDate } = req.body || {};
+    const filter = {
+      status: 'running',
+      $or: [
+        { runnerId: null },
+        { runnerId: { $exists: false } },
+        { runnerId: RUNNER_ID },
+      ],
+    };
+    if (targetDate) filter.targetDate = String(targetDate);
+    const running = await AutoCompatibilityBatch.find(filter).select('_id').lean();
+    running.forEach((b) => enqueueAutoCompatBatch(b._id));
+    res.json({ success: true, resumed: running.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -32052,9 +33090,85 @@ const STORE_LISTINGS_MOTORS_CATEGORIES = [
 function firstXmlTextNode(node) {
   if (node == null) return null;
   if (Array.isArray(node)) return firstXmlTextNode(node[0]);
-  if (typeof node === 'object' && node._ != null) return String(node._);
-  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (typeof node === 'string' || typeof node === 'number' || typeof node === 'boolean') return String(node);
+  if (typeof node === 'object') {
+    if (node._ != null && node._ !== '') return String(node._);
+    if (node['#text'] != null && node['#text'] !== '') return String(node['#text']);
+  }
   return null;
+}
+
+function nonemptyXmlText(node) {
+  const value = firstXmlTextNode(node);
+  return value && String(value).trim() ? String(value).trim() : '';
+}
+
+function catalogFieldsForUpsert({
+  title,
+  sku,
+  currentPrice,
+  currency,
+  mainImageUrl,
+  categoryName,
+  categoryId,
+}) {
+  return {
+    ...(title ? { title } : {}),
+    ...(sku ? { sku } : {}),
+    ...(currentPrice != null && !Number.isNaN(currentPrice) ? { currentPrice } : {}),
+    ...(currency ? { currency } : {}),
+    ...(mainImageUrl ? { mainImageUrl } : {}),
+    ...(categoryName ? { categoryName } : {}),
+    ...(categoryId ? { categoryId } : {}),
+  };
+}
+
+function firstPictureUrl(pictureDetails) {
+  const pic = Array.isArray(pictureDetails) ? pictureDetails[0] : pictureDetails;
+  if (!pic || typeof pic !== 'object') return '';
+  return nonemptyXmlText(pic.GalleryURL)
+    || nonemptyXmlText(pic.PictureURL)
+    || nonemptyXmlText(pic.ExternalPictureURL);
+}
+
+/** Title / price / qty / image from GetSellerList or GetMyeBaySelling Item. */
+function extractStoreListingCatalog(item) {
+  const sellingStatus = item?.SellingStatus?.[0] || item?.SellingStatus || {};
+  const currentPriceNode = sellingStatus.CurrentPrice?.[0] || sellingStatus.CurrentPrice;
+  const buyItNowNode = item?.BuyItNowPrice?.[0] || item?.BuyItNowPrice;
+  const startPriceNode = item?.StartPrice?.[0] || item?.StartPrice;
+  const currentPrice = moneyFromEbayNode(currentPriceNode)
+    ?? moneyFromEbayNode(buyItNowNode)
+    ?? moneyFromEbayNode(startPriceNode);
+  const currency = currentPriceNode?.$?.currencyID
+    || buyItNowNode?.$?.currencyID
+    || startPriceNode?.$?.currencyID
+    || null;
+  const soldQuantity = parseInt(
+    firstXmlTextNode(sellingStatus.QuantitySold)
+    || firstXmlTextNode(item?.SellingStatus?.[0]?.QuantitySold)
+    || '0',
+    10
+  ) || 0;
+  const availRaw = firstXmlTextNode(item?.QuantityAvailable)
+    || firstXmlTextNode(sellingStatus.QuantityAvailable);
+  const listedRaw = firstXmlTextNode(item?.Quantity);
+  const avail = parseInt(availRaw || '', 10);
+  const listed = parseInt(listedRaw || '0', 10) || 0;
+  const quantity = Number.isFinite(avail) ? Math.max(0, avail) : Math.max(0, listed - soldQuantity);
+  return {
+    title: nonemptyXmlText(item?.Title),
+    sku: nonemptyXmlText(item?.SKU),
+    currentPrice: Number.isFinite(currentPrice) ? currentPrice : undefined,
+    currency,
+    quantity,
+    soldQuantity,
+    mainImageUrl: firstPictureUrl(item?.PictureDetails),
+    categoryName: nonemptyXmlText(item?.PrimaryCategory?.[0]?.CategoryName)
+      || nonemptyXmlText(item?.PrimaryCategory?.CategoryName),
+    categoryId: nonemptyXmlText(item?.PrimaryCategory?.[0]?.CategoryID)
+      || nonemptyXmlText(item?.PrimaryCategory?.CategoryID),
+  };
 }
 
 /**
@@ -32157,12 +33271,15 @@ async function paginateGetSellerListForActiveListings({
     );
 
     // Lean payload: no Description / ItemCompatibilityList (heavy HTML).
+    // GranularityLevel Fine + nested OutputSelectors — parent-only SellingStatus/PictureDetails
+    // often omits CurrentPrice / Title / GalleryURL and leaves ActiveListing stubs.
     const xmlRequest = `
         <?xml version="1.0" encoding="utf-8"?>
         <GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
           <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
           <ErrorLanguage>en_US</ErrorLanguage>
           <WarningLevel>High</WarningLevel>
+          <GranularityLevel>Fine</GranularityLevel>
           <StartTimeFrom>${rangeStart.toISOString()}</StartTimeFrom>
           <StartTimeTo>${end.toISOString()}</StartTimeTo>
           <IncludeWatchCount>true</IncludeWatchCount>
@@ -32174,13 +33291,23 @@ async function paginateGetSellerListForActiveListings({
           <OutputSelector>ItemArray.Item.Title</OutputSelector>
           <OutputSelector>ItemArray.Item.SKU</OutputSelector>
           <OutputSelector>ItemArray.Item.Quantity</OutputSelector>
+          <OutputSelector>ItemArray.Item.QuantityAvailable</OutputSelector>
+          <OutputSelector>ItemArray.Item.StartPrice</OutputSelector>
+          <OutputSelector>ItemArray.Item.BuyItNowPrice</OutputSelector>
           <OutputSelector>ItemArray.Item.SellingStatus</OutputSelector>
+          <OutputSelector>ItemArray.Item.SellingStatus.CurrentPrice</OutputSelector>
+          <OutputSelector>ItemArray.Item.SellingStatus.QuantitySold</OutputSelector>
+          <OutputSelector>ItemArray.Item.SellingStatus.ListingStatus</OutputSelector>
           <OutputSelector>ItemArray.Item.WatchCount</OutputSelector>
           <OutputSelector>ItemArray.Item.TimeLeft</OutputSelector>
           <OutputSelector>ItemArray.Item.ListingStatus</OutputSelector>
           <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
+          <OutputSelector>ItemArray.Item.PictureDetails.GalleryURL</OutputSelector>
+          <OutputSelector>ItemArray.Item.PictureDetails.PictureURL</OutputSelector>
           <OutputSelector>ItemArray.Item.PrimaryCategory</OutputSelector>
           <OutputSelector>ItemArray.Item.ListingDetails</OutputSelector>
+          <OutputSelector>ItemArray.Item.ListingDetails.StartTime</OutputSelector>
+          <OutputSelector>ItemArray.Item.ListingDetails.EndTime</OutputSelector>
           <OutputSelector>PaginationResult</OutputSelector>
         </GetSellerListRequest>
       `;
@@ -32262,27 +33389,10 @@ async function paginateGetSellerListForActiveListings({
       const endTimeRaw = firstXmlTextNode(item.ListingDetails?.[0]?.EndTime)
         || firstXmlTextNode(item.ListingDetails?.EndTime);
       const status = resolveGetSellerListStatus(item, endTimeRaw);
-      const title = firstXmlTextNode(item.Title) || '';
-      const sku = firstXmlTextNode(item.SKU) || '';
-      const priceNode = item.SellingStatus?.[0]?.CurrentPrice?.[0]
-        || item.SellingStatus?.[0]?.CurrentPrice
-        || item.SellingStatus?.CurrentPrice;
-      const currentPrice = priceNode?._ != null
-        ? parseFloat(priceNode._)
-        : (typeof priceNode === 'string' || typeof priceNode === 'number'
-          ? parseFloat(priceNode)
-          : undefined);
-      const currency = priceNode?.$?.currencyID || null;
-      const quantity = parseInt(firstXmlTextNode(item.Quantity) || '0', 10) || 0;
-      const mainImageUrl = firstXmlTextNode(item.PictureDetails?.[0]?.PictureURL)
-        || firstXmlTextNode(item.PictureDetails?.PictureURL)
-        || '';
-      const categoryName = firstXmlTextNode(item.PrimaryCategory?.[0]?.CategoryName)
-        || firstXmlTextNode(item.PrimaryCategory?.CategoryName)
-        || '';
-      const categoryId = firstXmlTextNode(item.PrimaryCategory?.[0]?.CategoryID)
-        || firstXmlTextNode(item.PrimaryCategory?.CategoryID)
-        || '';
+      const catalog = extractStoreListingCatalog(item);
+      const catalogSet = catalogFieldsForUpsert(catalog);
+      const quantity = catalog.quantity;
+      const categoryName = catalog.categoryName;
 
       // Persist ended/completed rows too — free-listing usage needs "relist then ended" inserts.
       if (!/^active$/i.test(status)) {
@@ -32293,15 +33403,9 @@ async function paginateGetSellerListForActiveListings({
             update: {
               $set: {
                 seller: seller._id,
-                title,
-                sku,
-                ...(currentPrice != null && !Number.isNaN(currentPrice) ? { currentPrice } : {}),
-                ...(currency ? { currency } : {}),
+                ...catalogSet,
                 quantity,
                 listingStatus: endedStatus,
-                mainImageUrl,
-                categoryName,
-                ...(categoryId ? { categoryId } : {}),
                 ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
                 endTime: endTimeRaw || new Date(),
               },
@@ -32315,37 +33419,26 @@ async function paginateGetSellerListForActiveListings({
       }
 
       const isMotorsItem = STORE_LISTINGS_MOTORS_CATEGORIES.some((keyword) => categoryName.includes(keyword));
-      const soldQuantity = parseInt(
-        firstXmlTextNode(item.SellingStatus?.[0]?.QuantitySold)
-          || firstXmlTextNode(item.SellingStatus?.QuantitySold)
-          || '0',
-        10
-      ) || 0;
+      const soldQuantity = catalog.soldQuantity;
       const watchCount = parseInt(firstXmlTextNode(item.WatchCount) || '0', 10) || 0;
       const timeLeft = firstXmlTextNode(item.TimeLeft) || '';
 
       activeOps.push({
         updateOne: {
           filter: { itemId },
-          update: {
-            $set: {
-              seller: seller._id,
-              title,
-              sku,
-              ...(currentPrice != null && !Number.isNaN(currentPrice) ? { currentPrice } : {}),
-              ...(currency ? { currency } : {}),
-              quantity,
-              soldQuantity,
-              watchCount,
-              timeLeft,
-              listingStatus: 'Active',
-              mainImageUrl,
-              categoryName,
-              ...(categoryId ? { categoryId } : {}),
-              ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
-              ...(endTimeRaw ? { endTime: endTimeRaw } : {}),
+            update: {
+              $set: {
+                seller: seller._id,
+                ...catalogSet,
+                quantity,
+                soldQuantity,
+                watchCount,
+                timeLeft,
+                listingStatus: 'Active',
+                ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
+                ...(endTimeRaw ? { endTime: endTimeRaw } : {}),
+              },
             },
-          },
           upsert: true,
         },
       });
@@ -32357,14 +33450,8 @@ async function paginateGetSellerListForActiveListings({
             update: {
               $set: {
                 seller: seller._id,
-                title,
-                sku,
-                ...(currentPrice != null && !Number.isNaN(currentPrice) ? { currentPrice } : {}),
-                ...(currency ? { currency } : {}),
+                ...catalogSet,
                 listingStatus: 'Active',
-                mainImageUrl,
-                categoryName,
-                ...(categoryId ? { categoryId } : {}),
                 ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
                 ...(endTimeRaw ? { endTime: endTimeRaw } : {}),
               },
@@ -32394,12 +33481,127 @@ async function paginateGetSellerListForActiveListings({
 }
 
 /**
+ * Fill title / price / qty / image on ActiveListing from GetMyeBaySelling ActiveList.
+ * GetSellerList with a lean OutputSelector often upserts ItemID-only stubs.
+ */
+async function enrichActiveListingsFromMyeBaySelling({
+  seller,
+  token,
+  sellerName,
+  onPageProgress = null,
+  bumpGlobalProcessed = null,
+  shouldCancel = null,
+  logLabel = null,
+}) {
+  const callLabel = logLabel || `Catalog ${sellerName}`;
+  const entriesPerPage = 200;
+  let page = 1;
+  let totalPages = 1;
+  let processedCount = 0;
+
+  do {
+    if (shouldCancel && await shouldCancel()) {
+      throw new SyncAllCancelledError();
+    }
+    if (onPageProgress) onPageProgress({ page, totalPages, pass: 'catalog' });
+
+    const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <ActiveList>
+    <Include>true</Include>
+    <IncludeWatchCount>true</IncludeWatchCount>
+    <Pagination>
+      <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+      <PageNumber>${page}</PageNumber>
+    </Pagination>
+  </ActiveList>
+</GetMyeBaySellingRequest>`;
+
+    const response = await postEbayTradingApi(xmlRequest, {
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
+      'Content-Type': 'text/xml',
+    }, {
+      logLabel: `${callLabel} p${page}`,
+      timeoutMs: 90000,
+      maxRetries: 4,
+    });
+
+    const result = await parseStringPromise(response.data);
+    const root = result?.GetMyeBaySellingResponse;
+    if (!root) throw new Error('Empty GetMyeBaySelling response');
+    if (root.Ack?.[0] === 'Failure') {
+      throw new Error(root.Errors?.[0]?.LongMessage?.[0] || 'GetMyeBaySelling failed');
+    }
+
+    const pagination = root.ActiveList?.[0]?.PaginationResult?.[0] || root.ActiveList?.PaginationResult;
+    totalPages = parseInt(firstXmlTextNode(pagination?.TotalNumberOfPages) || String(totalPages), 10) || 1;
+    if (onPageProgress) onPageProgress({ page, totalPages, pass: 'catalog' });
+
+    const items = root.ActiveList?.[0]?.ItemArray?.[0]?.Item
+      || root.ActiveList?.ItemArray?.Item
+      || [];
+    const list = Array.isArray(items) ? items : (items ? [items] : []);
+    const ops = [];
+
+    for (const item of list) {
+      const itemId = firstXmlTextNode(item.ItemID);
+      if (!itemId) continue;
+      const catalog = extractStoreListingCatalog(item);
+      const watchCount = parseInt(firstXmlTextNode(item.WatchCount) || '0', 10) || 0;
+      const timeLeft = firstXmlTextNode(item.TimeLeft) || '';
+      const startTimeRaw = firstXmlTextNode(item.ListingDetails?.[0]?.StartTime)
+        || firstXmlTextNode(item.ListingDetails?.StartTime);
+      const endTimeRaw = firstXmlTextNode(item.ListingDetails?.[0]?.EndTime)
+        || firstXmlTextNode(item.ListingDetails?.EndTime);
+
+      ops.push({
+        updateOne: {
+          filter: { itemId },
+          update: {
+            $set: {
+              seller: seller._id,
+              ...catalogFieldsForUpsert(catalog),
+              quantity: catalog.quantity,
+              soldQuantity: catalog.soldQuantity,
+              watchCount,
+              timeLeft,
+              listingStatus: 'Active',
+              ...(startTimeRaw ? { startTime: startTimeRaw } : {}),
+              ...(endTimeRaw ? { endTime: endTimeRaw } : {}),
+            },
+          },
+          upsert: true,
+        },
+      });
+      processedCount += 1;
+      if (bumpGlobalProcessed) bumpGlobalProcessed();
+    }
+
+    if (ops.length) {
+      await ActiveListing.bulkWrite(ops, { ordered: false });
+    }
+    page += 1;
+  } while (page <= totalPages);
+
+  console.log(`${callLabel} — enriched ${processedCount} active listing(s)`);
+  return { processedCount };
+}
+
+/**
  * Sync ActiveListing (+ Motors Listing) for one seller.
  * mode=incremental (default): since lastAllListingsPolledAt − overlap (or full if never polled).
  * mode=full: ~730d StartTime backfill in &lt;120d windows.
+ * catalogOnly: skip GetSellerList and only fill title/price/qty from GetMyeBaySelling.
  */
 async function syncOneSellerActiveListings(seller, {
   mode = 'incremental',
+  customRange = null,
+  catalogOnly = false,
   onPageProgress = null,
   bumpProcessed = null,
   shouldCancel = null,
@@ -32411,7 +33613,105 @@ async function syncOneSellerActiveListings(seller, {
   }
 
   const token = await ensureValidToken(seller);
+  if (catalogOnly) {
+    const enriched = await enrichActiveListingsFromMyeBaySelling({
+      seller,
+      token,
+      sellerName,
+      onPageProgress: onPageProgress
+        ? (p) => onPageProgress({ ...p, windowIndex: 1, totalWindows: 1, pass: 'catalog' })
+        : null,
+      bumpGlobalProcessed: bumpProcessed,
+      shouldCancel,
+      logLabel: `${logPrefix} ${sellerName} catalog`,
+    });
+    return {
+      sellerName,
+      processedCount: enriched.processedCount,
+      skippedCount: 0,
+      windows: 0,
+      mode: 'catalog',
+    };
+  }
+
   const pollFinishedAt = new Date();
+
+  if (customRange?.from && customRange?.to) {
+    const rangeStart = new Date(customRange.from);
+    const rangeEnd = new Date(customRange.to);
+    const windows = buildSellerListStartWindows(rangeStart, rangeEnd);
+    if (!windows.length) {
+      throw new Error('Invalid listing start date range for GetSellerList');
+    }
+
+    let processedCount = 0;
+    let skippedCount = 0;
+    let windowsRun = 0;
+    console.log(
+      `${logPrefix} ${sellerName} — custom StartTime ${rangeStart.toISOString()} → ${rangeEnd.toISOString()} `
+      + `(${windows.length} window(s))`
+    );
+
+    for (let i = 0; i < windows.length; i++) {
+      if (shouldCancel && await shouldCancel()) {
+        throw new SyncAllCancelledError();
+      }
+      const window = windows[i];
+      const windowResult = await paginateGetSellerListForActiveListings({
+        seller,
+        token,
+        sellerName,
+        startTimeFrom: window.from,
+        startTimeTo: window.to,
+        onPageProgress: onPageProgress
+          ? (p) => onPageProgress({
+            ...p,
+            windowIndex: i + 1,
+            totalWindows: windows.length,
+            pass: 'custom',
+          })
+          : null,
+        bumpGlobalProcessed: bumpProcessed,
+        shouldCancel,
+        logLabel: `${logPrefix} ${sellerName} custom w${i + 1}/${windows.length}`,
+      });
+      processedCount += windowResult.processedCount;
+      skippedCount += windowResult.skippedCount;
+      windowsRun++;
+    }
+
+    try {
+      const enriched = await enrichActiveListingsFromMyeBaySelling({
+        seller,
+        token,
+        sellerName,
+        onPageProgress: onPageProgress
+          ? (p) => onPageProgress({ ...p, pass: 'catalog' })
+          : null,
+        shouldCancel,
+        logLabel: `${logPrefix} ${sellerName} catalog`,
+      });
+      console.log(
+        `${logPrefix} ${sellerName} — catalog enrich wrote ${enriched.processedCount} active row(s)`
+      );
+    } catch (err) {
+      console.warn(
+        `${logPrefix} ${sellerName} — catalog enrich failed: ${err?.message || err}`
+      );
+    }
+
+    console.log(
+      `${logPrefix} ${sellerName} — Done (custom): ${processedCount} processed, ${skippedCount} skipped`
+    );
+    return {
+      sellerName,
+      processedCount,
+      skippedCount,
+      windows: windowsRun,
+      mode: 'custom',
+    };
+  }
+
   const { mode: resolvedMode, rangeStart, usedFullBackfill } = resolveStoreListingsSyncRange(
     seller,
     mode,
@@ -32553,6 +33853,26 @@ async function syncOneSellerActiveListings(seller, {
     }
   }
 
+  try {
+    const enriched = await enrichActiveListingsFromMyeBaySelling({
+      seller,
+      token,
+      sellerName,
+      onPageProgress: onPageProgress
+        ? (p) => onPageProgress({ ...p, pass: 'catalog' })
+        : null,
+      shouldCancel,
+      logLabel: `${logPrefix} ${sellerName} catalog`,
+    });
+    console.log(
+      `${logPrefix} ${sellerName} — catalog enrich wrote ${enriched.processedCount} active row(s)`
+    );
+  } catch (err) {
+    console.warn(
+      `${logPrefix} ${sellerName} — catalog enrich failed: ${err?.message || err}`
+    );
+  }
+
   seller.lastListingPolledAt = pollFinishedAt;
   seller.lastAllListingsPolledAt = new Date();
   await seller.save();
@@ -32571,15 +33891,20 @@ async function syncOneSellerActiveListings(seller, {
 
 // Core logic for "Poll All Sellers".
 // Called by: POST /sync-all-sellers-listings (background) and the 1:00 AM IST cron job.
-async function executeSyncAllSellersWork({ mode = 'incremental' } = {}) {
-  const syncMode = normalizeStoreListingsSyncMode(mode);
+async function executeSyncAllSellersWork({ mode = 'incremental', customRange = null, sellerId = '' } = {}) {
+  const syncMode = customRange ? 'custom' : normalizeStoreListingsSyncMode(mode);
   syncAllCancelRequested = false;
   syncAllRunGeneration += 1;
   const runGeneration = syncAllRunGeneration;
-  const allSellers = await Seller.find({
+  const sellerFilter = {
     isStoreActive: { $ne: false },
     'ebayTokens.refresh_token': { $exists: true, $nin: [null, ''] },
-  })
+  };
+  const scopedSellerId = String(sellerId || '').trim();
+  if (scopedSellerId && mongoose.Types.ObjectId.isValid(scopedSellerId)) {
+    sellerFilter._id = new mongoose.Types.ObjectId(scopedSellerId);
+  }
+  const allSellers = await Seller.find(sellerFilter)
     .populate('user', 'username email');
   if (allSellers.length === 0) {
     console.log('[Sync All] No sellers with eBay tokens found.');
@@ -32655,7 +33980,8 @@ async function executeSyncAllSellersWork({ mode = 'incremental' } = {}) {
           }
         };
         const result = await syncOneSellerActiveListings(seller, {
-          mode: syncMode,
+          mode: syncMode === 'custom' ? 'incremental' : syncMode,
+          customRange,
           onPageProgress,
           bumpProcessed: () => { syncAllStatus.totalProcessed++; },
           shouldCancel: async () => (
@@ -32756,8 +34082,6 @@ export async function scheduledRunAutoCompatForDate(targetDate, { triggeredBy = 
     console.log('[AutoCompat] run-for-date: no eligible sellers found.');
     return [];
   }
-  const dayStart = new Date(targetDate + 'T00:00:00Z');
-  const dayEnd   = new Date(targetDate + 'T23:59:59.999Z');
   const result   = [];
   for (const seller of eligible) {
     const existing = await AutoCompatibilityBatch.findOne({
@@ -32774,16 +34098,10 @@ export async function scheduledRunAutoCompatForDate(targetDate, { triggeredBy = 
         totalListings: existing.totalListings,
         reused: true,
       });
+      if (existing.status === 'running') enqueueAutoCompatBatch(existing._id);
       continue;
     }
-    const baseQuery = {
-      seller: seller._id,
-      listingStatus: 'Active',
-      startTime: { $gte: dayStart, $lte: dayEnd },
-      $or: [{ compatibility: { $exists: false } }, { compatibility: { $size: 0 } }, { compatibility: null }],
-    };
-    let listings = await Listing.find(baseQuery).sort({ startTime: 1 }).select('itemId').lean();
-    if (itemLimit > 0) listings = listings.slice(0, itemLimit);
+    const listings = await findListingsNeedingAutoCompatibility(seller._id, targetDate, itemLimit);
     if (listings.length === 0) {
       result.push({
         sellerId: seller._id,
@@ -32813,20 +34131,10 @@ export async function scheduledRunAutoCompatForDate(targetDate, { triggeredBy = 
       totalListings: listings.length,
       reused: false,
     });
+    enqueueAutoCompatBatch(batch._id);
   }
   const newBatchIds = result.filter(r => !r.reused && r.status === 'running').map(r => r.batchId);
   console.log(`[AutoCompat] run-for-date ${targetDate}: ${newBatchIds.length} new batch(es), ${result.filter(r => r.reused).length} reused, ${result.filter(r => r.status === 'skipped').length} skipped.`);
-  // Process new batches sequentially in the background; caller gets the result array immediately.
-  (async () => {
-    for (const bid of newBatchIds) {
-      try {
-        await processAutoCompatibilityBatch(bid);
-      } catch (err) {
-        console.error(`[AutoCompat] run-for-date: batch ${bid} failed:`, err.message);
-      }
-    }
-    console.log(`[AutoCompat] run-for-date ${targetDate}: all ${newBatchIds.length} new batch(es) finished.`);
-  })();
   return result;
 }
 

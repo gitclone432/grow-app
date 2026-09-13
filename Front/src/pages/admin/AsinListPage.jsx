@@ -38,6 +38,7 @@ import api, { getAuthToken } from '../../lib/api.js';
 import AsinReviewModal from '../../components/AsinReviewModal.jsx';
 import { useNavigate } from 'react-router-dom';
 import AsinListCreateDialog from '../../components/AsinListCreateDialog.jsx';
+import { failRemainingLoadingPreviewItems, mergePreviewStreamItem } from '../../lib/previewStream.js';
 
 export default function AsinListPage() {
   const navigate = useNavigate();
@@ -274,14 +275,16 @@ export default function AsinListPage() {
       if (event.data === '[DONE]') {
         eventSource.close();
         window._directoryEventSource = null;
+        setPreviewItems((prev) => failRemainingLoadingPreviewItems(
+          prev,
+          'Preview ended before this ASIN finished generating.'
+        ));
         return;
       }
       try {
         const payload = JSON.parse(event.data);
         if (payload.type === 'item') {
-          setPreviewItems(prev =>
-            prev.map(p => p.id === payload.item.id ? payload.item : p)
-          );
+          setPreviewItems(prev => mergePreviewStreamItem(prev, payload.item));
         }
       } catch { /* ignore parse errors */ }
     };
@@ -289,23 +292,31 @@ export default function AsinListPage() {
     eventSource.onerror = () => {
       eventSource.close();
       window._directoryEventSource = null;
+      setPreviewItems((prev) => failRemainingLoadingPreviewItems(
+        prev,
+        'Connection lost. This ASIN did not finish generating.'
+      ));
     };
   };
 
   const handleSaveFromReview = async (listings) => {
     try {
-      const { data } = await api.post('/template-listings/bulk-save', {
+      await api.post('/template-listings/bulk-save', {
         templateId: activeTemplate._id,
         sellerId: activeSellerId,
         listings,
         options: { skipDuplicates: true }
-      });
+      }, { timeout: 90000 });
       setReviewModal(false);
       setPreviewItems([]);
       setSelected([]);
       navigate(`/admin/select-seller-lab?templateId=${activeTemplate._id}&sellerId=${activeSellerId}&fromAsinList=true&status=active`);
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to save listings');
+      const message = err.code === 'ECONNABORTED'
+        ? 'Save timed out. Restart the backend and try again.'
+        : (err.response?.data?.error || 'Failed to save listings');
+      setError(message);
+      throw err;
     }
   };
 

@@ -5,7 +5,7 @@ import OpenAI from 'openai';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import AiFitmentUsage from '../models/AiFitmentUsage.js';
 import User from '../models/User.js';
-import { buildChatParams } from '../utils/openaiModel.js';
+import { buildChatParams, getFitmentApiKey } from '../utils/openaiModel.js';
 
 const router = express.Router();
 
@@ -13,8 +13,10 @@ const router = express.Router();
 let _openai = null;
 function getOpenAI() {
     if (!_openai) {
-        // Use a dedicated key for fitment AI if configured, else fall back to the default
-        const apiKey = process.env.OPENAI_FITMENT_API_KEY;
+        const apiKey = getFitmentApiKey();
+        if (!apiKey) {
+            throw new Error('OpenAI API key is not configured. Set OPENAI_FITMENT_API_KEY or OPENAI_API_KEY.');
+        }
         _openai = new OpenAI({ apiKey });
     }
     return _openai;
@@ -156,7 +158,9 @@ Example output: [{"make":"Lexus","model":"IS F","startYear":"2008","endYear":"20
 
     } catch (error) {
         console.error('[AI Suggest Fitment] Error:', error.message);
-        res.status(500).json({ error: 'AI request failed', details: error.message });
+        const details = error.message || 'Unknown error';
+        const status = /api key|authentication|401/i.test(details) ? 401 : 500;
+        res.status(status).json({ error: 'AI request failed', details });
     }
 });
 

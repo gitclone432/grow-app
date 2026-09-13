@@ -39,7 +39,6 @@ import {
   Menu,
   ListSubheader,
   Switch,
-  Fade
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
@@ -438,13 +437,30 @@ function orderHasUnreadBuyerMessage(order) {
   return lastBuyerMessageAt > lastSellerMessageAt;
 }
 
+function getLineItemSku(item) {
+  return String(item?.sku || item?.SKU || item?.sellerSku || item?.customLabel || '').trim();
+}
+
+const getOrderSkus = (order) => {
+  if (!order) return [];
+  if (Array.isArray(order.lineItems) && order.lineItems.length > 0) {
+    return order.lineItems.map((item) => getLineItemSku(item));
+  }
+  if (order.sku) return [String(order.sku)];
+  return [];
+};
+
+const getOrderSku = (order) => getOrderSkus(order).find(Boolean) || '';
+
 // --- MOBILE ORDER CARD COMPONENT ---
 const MobileOrderCard = memo(function MobileOrderCard({ order, index, onCopy, onMessage, onViewImages }) {
   const [expanded, setExpanded] = useState(false);
-  const thumbnailUrl = useOrderThumbnail(order._id);
+  const { url: fetchedThumb } = useOrderThumbnail(order._id);
+  const thumbnailUrl = fetchedThumb || order.itemImageUrl || '';
 
   const productTitle = order.lineItems?.[0]?.title || order.productName || 'Unknown Product';
   const itemId = order.lineItems?.[0]?.legacyItemId || order.itemNumber;
+  const sku = getLineItemSku(order.lineItems?.[0]) || getOrderSku(order);
   const buyerName = order.buyer?.buyerRegistrationAddress?.fullName || '-';
   const dateSold = order.dateSold ? new Date(order.dateSold).toLocaleDateString() : '-';
 
@@ -498,20 +514,21 @@ const MobileOrderCard = memo(function MobileOrderCard({ order, index, onCopy, on
 
         {/* Product with thumbnail */}
         <Stack direction="row" spacing={1.5} alignItems="flex-start">
-          {thumbnailUrl && (
-            <Box
-              onClick={() => onViewImages(order)}
-              sx={{
-                width: 60,
-                height: 60,
-                borderRadius: 1,
-                overflow: 'hidden',
-                border: '1px solid',
-                borderColor: 'grey.300',
-                flexShrink: 0,
-                cursor: 'pointer'
-              }}
-            >
+          <Box
+            onClick={() => thumbnailUrl && onViewImages(order)}
+            sx={{
+              width: 60,
+              height: 60,
+              borderRadius: 1,
+              overflow: 'hidden',
+              border: '1px solid',
+              borderColor: 'grey.300',
+              flexShrink: 0,
+              cursor: thumbnailUrl ? 'pointer' : 'default',
+              bgcolor: 'grey.100',
+            }}
+          >
+            {thumbnailUrl ? (
               <img
                 src={thumbnailUrl}
                 alt="Product"
@@ -519,8 +536,8 @@ const MobileOrderCard = memo(function MobileOrderCard({ order, index, onCopy, on
                 decoding="async"
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
-            </Box>
-          )}
+            ) : null}
+          </Box>
           <Box sx={{ flex: 1, minWidth: 0 }}>
             <Typography
               variant="body2"
@@ -544,6 +561,21 @@ const MobileOrderCard = memo(function MobileOrderCard({ order, index, onCopy, on
               >
                 ID: {itemId}
               </Link>
+            )}
+            {sku && (
+              <Stack direction="row" spacing={0.25} alignItems="center">
+                <Typography variant="caption" sx={{ fontSize: '0.7rem', color: 'text.secondary' }}>
+                  SKU: {sku}
+                </Typography>
+                <IconButton
+                  size="small"
+                  onClick={() => onCopy(sku)}
+                  aria-label="copy sku"
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 12 }} />
+                </IconButton>
+              </Stack>
             )}
           </Box>
         </Stack>
@@ -858,6 +890,36 @@ const EditableCell = memo(function EditableCell({ value, type = 'text', onSave }
 const HEADER_CELL_SX = { ...tableHeaderCellSx, position: 'sticky', top: 0, zIndex: 100 };
 const HEADER_CELL_RIGHT_SX = { ...HEADER_CELL_SX, textAlign: 'right' };
 const BODY_CELL_SX = { py: 0.5, fontSize: '0.8125rem' };
+const FULFILLMENT_ROW_SX = {
+  ...tableBodyRowSx,
+  '& > .MuiTableCell-root': BODY_CELL_SX,
+};
+const FULFILLMENT_TABLE_SX = {
+  '& td, & th': { whiteSpace: 'nowrap' },
+};
+const FULFILLMENT_TABLE_CONTAINER_SX = {
+  display: 'block',
+  flexGrow: 1,
+  overflow: 'auto',
+  overflowAnchor: 'none',
+  maxHeight: 'calc(100% - 50px)',
+  width: '100%',
+  '&::-webkit-scrollbar': {
+    width: '8px',
+    height: '8px',
+  },
+  '&::-webkit-scrollbar-track': {
+    backgroundColor: '#f1f1f1',
+    borderRadius: '10px',
+  },
+  '&::-webkit-scrollbar-thumb': {
+    backgroundColor: '#888',
+    borderRadius: '10px',
+    '&:hover': {
+      backgroundColor: '#555',
+    },
+  },
+};
 const FILTER_SWITCH_SX = {
   m: 0,
   px: 1,
@@ -873,39 +935,76 @@ const FILTER_SWITCH_SX = {
   '& .MuiSwitch-root': { transform: 'scale(0.85)' },
 };
 
+function LoadingElapsedLabel({ startedAt }) {
+  const [elapsedMs, setElapsedMs] = useState(() => Math.max(0, performance.now() - startedAt));
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setElapsedMs(Math.max(0, performance.now() - startedAt));
+    }, 100);
+    return () => window.clearInterval(id);
+  }, [startedAt]);
+  return (
+    <Typography variant="body1" color="text.secondary">
+      Loading orders… {(elapsedMs / 1000).toFixed(1)}s
+    </Typography>
+  );
+}
+
 // Thumbnail URLs live outside React state so arrivals don't re-render the whole dashboard
 const thumbnailUrlMap = new Map();
+const thumbnailCountMap = new Map();
+const thumbnailVersionMap = new Map();
 const thumbnailListeners = new Map();
 function subscribeThumbnail(orderId, onStoreChange) {
   if (!thumbnailListeners.has(orderId)) thumbnailListeners.set(orderId, new Set());
   thumbnailListeners.get(orderId).add(onStoreChange);
   return () => thumbnailListeners.get(orderId)?.delete(onStoreChange);
 }
+function bumpThumbnail(orderId) {
+  thumbnailVersionMap.set(orderId, (thumbnailVersionMap.get(orderId) || 0) + 1);
+  thumbnailListeners.get(orderId)?.forEach((listener) => listener());
+}
 function getThumbnailUrl(orderId) {
   return thumbnailUrlMap.get(orderId) || null;
+}
+function getThumbnailCount(orderId) {
+  return thumbnailCountMap.get(orderId) || 0;
+}
+function getThumbnailVersion(orderId) {
+  return thumbnailVersionMap.get(orderId) || 0;
 }
 function setThumbnailUrl(orderId, url) {
   if (thumbnailUrlMap.get(orderId) === url) return;
   thumbnailUrlMap.set(orderId, url);
-  thumbnailListeners.get(orderId)?.forEach((listener) => listener());
+  bumpThumbnail(orderId);
+}
+function setThumbnailCount(orderId, count) {
+  const next = Number(count) || 0;
+  if (thumbnailCountMap.get(orderId) === next) return;
+  thumbnailCountMap.set(orderId, next);
+  bumpThumbnail(orderId);
 }
 function useOrderThumbnail(orderId) {
-  return useSyncExternalStore(
+  useSyncExternalStore(
     (onStoreChange) => subscribeThumbnail(orderId, onStoreChange),
-    () => getThumbnailUrl(orderId),
-    () => null
+    () => getThumbnailVersion(orderId),
+    () => 0
   );
+  return {
+    url: getThumbnailUrl(orderId),
+    count: getThumbnailCount(orderId),
+  };
 }
 
 /** Memoized product column (row hot-path) — thumbnail store updates only re-render this cell */
 const FulfillmentOrderRow = memo(function FulfillmentOrderRow({
   order,
-  imageCount,
   loadingImages,
   onViewImages,
   onCopy,
 }) {
-  const thumbnailUrl = useOrderThumbnail(order._id);
+  const { url: fetchedThumb, count: imageCount } = useOrderThumbnail(order._id);
+  const thumbnailUrl = fetchedThumb || order.itemImageUrl || '';
 
   return (
     <TableCell sx={{ ...BODY_CELL_SX, minWidth: 280, maxWidth: 400, pr: 1 }}>
@@ -937,7 +1036,7 @@ const FulfillmentOrderRow = memo(function FulfillmentOrderRow({
                 }}
               />
 
-              {i === 0 && thumbnailUrl && (
+              {i === 0 && (
                 <Box
                   onClick={() => onViewImages(order)}
                   sx={{
@@ -956,13 +1055,15 @@ const FulfillmentOrderRow = memo(function FulfillmentOrderRow({
                     },
                   }}
                 >
-                  <img
-                    src={thumbnailUrl}
-                    alt="Product"
-                    loading="lazy"
-                    decoding="async"
-                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                  />
+                  {thumbnailUrl ? (
+                    <img
+                      src={thumbnailUrl}
+                      alt="Product"
+                      loading="lazy"
+                      decoding="async"
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    />
+                  ) : null}
                   {imageCount > 1 && (
                     <Chip
                       label={`+${imageCount - 1}`}
@@ -1013,19 +1114,36 @@ const FulfillmentOrderRow = memo(function FulfillmentOrderRow({
                     {item.title}
                   </Typography>
                 </Tooltip>
-                <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.25 }}>
-                  <Link
-                    href={`https://www.ebay.com/itm/${item.legacyItemId}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    underline="hover"
-                    sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}
-                  >
-                    <Typography variant="caption" color="primary.main" sx={{ fontSize: '0.65rem', fontWeight: 500 }}>
-                      ID: {item.legacyItemId}
-                    </Typography>
-                    <OpenInNewIcon sx={{ fontSize: 11, color: 'primary.main' }} />
-                  </Link>
+                <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.25 }} flexWrap="wrap" useFlexGap>
+                  {item.legacyItemId && (
+                    <Link
+                      href={`https://www.ebay.com/itm/${item.legacyItemId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      underline="hover"
+                      sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}
+                    >
+                      <Typography variant="caption" color="primary.main" sx={{ fontSize: '0.65rem', fontWeight: 500 }}>
+                        ID: {item.legacyItemId}
+                      </Typography>
+                      <OpenInNewIcon sx={{ fontSize: 11, color: 'primary.main' }} />
+                    </Link>
+                  )}
+                  {getLineItemSku(item) && (
+                    <Stack direction="row" spacing={0.15} alignItems="center">
+                      <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 500, color: 'text.secondary' }}>
+                        SKU: {getLineItemSku(item)}
+                      </Typography>
+                      <IconButton
+                        size="small"
+                        onClick={() => onCopy(getLineItemSku(item))}
+                        aria-label="copy sku"
+                        sx={{ p: 0.15 }}
+                      >
+                        <ContentCopyIcon sx={{ fontSize: 11 }} />
+                      </IconButton>
+                    </Stack>
+                  )}
                 </Stack>
               </Box>
 
@@ -1042,26 +1160,32 @@ const FulfillmentOrderRow = memo(function FulfillmentOrderRow({
         ) : (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <Chip label="x1" size="small" sx={{ height: 20 }} />
-            <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>
-              {order.productName || '-'}
-            </Typography>
+            <Box sx={{ flex: 1, overflow: 'hidden' }}>
+              <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>
+                {order.productName || '-'}
+              </Typography>
+              {getOrderSku(order) && (
+                <Stack direction="row" spacing={0.15} alignItems="center">
+                  <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 500, color: 'text.secondary' }}>
+                    SKU: {getOrderSku(order)}
+                  </Typography>
+                  <IconButton
+                    size="small"
+                    onClick={() => onCopy(getOrderSku(order))}
+                    aria-label="copy sku"
+                    sx={{ p: 0.15 }}
+                  >
+                    <ContentCopyIcon sx={{ fontSize: 11 }} />
+                  </IconButton>
+                </Stack>
+              )}
+            </Box>
           </Box>
         )}
       </Stack>
     </TableCell>
   );
 });
-
-const getOrderSkus = (order) => {
-  if (!order) return [];
-  if (Array.isArray(order.lineItems) && order.lineItems.length > 0) {
-    return order.lineItems.map((item) => (item?.sku ? String(item.sku) : ''));
-  }
-  if (order.sku) return [String(order.sku)];
-  return [];
-};
-
-const getOrderSku = (order) => getOrderSkus(order).find(Boolean) || '';
 
 const getSupplierLink = (order) => String(order?.supplierLink || order?.affiliateLink || '').trim();
 
@@ -1654,6 +1778,10 @@ function FulfillmentDashboard() {
   const [sellers, setSellers] = useState([]);
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadDurationMs, setLoadDurationMs] = useState(null);
+  const [loadStartedAt, setLoadStartedAt] = useState(null);
+  const loadRequestIdRef = useRef(0);
+  const loadStartedAtRef = useRef(null);
   const [error, setError] = useState('');
   const [pollResults, setPollResults] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -1738,7 +1866,7 @@ function FulfillmentDashboard() {
   const [currentPage, setCurrentPage] = useState(() => getInitialState('currentPage', 1));
   const [totalPages, setTotalPages] = useState(1);
   const [totalOrders, setTotalOrders] = useState(0);
-  const [ordersPerPage] = useState(50);
+  const [ordersPerPage] = useState(25);
 
   // Expanded shipping address - only one can be expanded at a time (accordion behavior)
   const [expandedShippingId, setExpandedShippingId] = useState(null);
@@ -1834,7 +1962,7 @@ function FulfillmentDashboard() {
 
   // Column visibility state - persisted in sessionStorage
   const DEFAULT_VISIBLE_COLUMNS = [
-    'seller', 'orderId', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'sku', 'supplierLink', 'itemCategory', 'buyerNote',
+    'seller', 'orderId', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'supplierLink', 'itemCategory', 'buyerNote',
     'buyerName', 'shippingAddress', 'marketplace', 'subtotal',
     'shipping', 'salesTax', 'discount', 'transactionFees',
     'adFeeGeneral', 'tds', 'cancelStatus', 'refunds', 'reviewedRefund', 'orderEarnings', 'trackingNumber',
@@ -1850,7 +1978,6 @@ function FulfillmentDashboard() {
     { id: 'shipBy', label: 'Ship By' },
     { id: 'deliveryDate', label: 'Delivery Date' },
     { id: 'productName', label: 'Product Name' },
-    { id: 'sku', label: 'SKU' },
     { id: 'supplierLink', label: 'Supplier Link' },
     { id: 'itemCategory', label: 'Category' },
     { id: 'buyerNote', label: 'Buyer Note' },
@@ -1903,6 +2030,7 @@ function FulfillmentDashboard() {
     }
     const missing = DEFAULT_VISIBLE_COLUMNS.filter(col => !next.includes(col));
     if (missing.length > 0) next = [...next, ...missing];
+    next = next.filter((col) => col !== 'sku');
     return next;
   });
 
@@ -2451,6 +2579,7 @@ function FulfillmentDashboard() {
     params.includeSupplierLinks = visibleColumnsSet.has('supplierLink') ? 'true' : 'false';
 
     applyDateFilterParams(params, activeDateFilter);
+    params.skipCount = '1';
     return params;
   }
 
@@ -2518,6 +2647,11 @@ function FulfillmentDashboard() {
   }
 
   async function loadStoredOrders(overrides = {}) {
+    const requestId = ++loadRequestIdRef.current;
+    const startedAt = performance.now();
+    loadStartedAtRef.current = startedAt;
+    setLoadStartedAt(startedAt);
+    setLoadDurationMs(null);
     setLoading(true);
     setError('');
 
@@ -2525,23 +2659,42 @@ function FulfillmentDashboard() {
       const params = buildStoredOrdersParams(overrides);
 
       const { data } = await api.get('/ebay/stored-orders', { params });
+      if (requestId !== loadRequestIdRef.current) return [];
       const loadedOrders = data?.orders || [];
       setOrders(loadedOrders);
       setScopeWarning(data?.meta?.warning || '');
+      setLoadDurationMs(Math.round(performance.now() - startedAt));
+      setLoading(false);
 
-      // Update pagination metadata
-      if (data?.pagination) {
+      if (data?.pagination && !data.pagination.totalIsEstimate) {
         setTotalPages(data.pagination.totalPages);
         setTotalOrders(data.pagination.totalOrders);
       }
+
+      const countParams = { ...params };
+      delete countParams.skipCount;
+      countParams.countOnly = '1';
+      api.get('/ebay/stored-orders', { params: countParams }).then(({ data: countData }) => {
+        if (requestId !== loadRequestIdRef.current) return;
+        if (countData?.pagination && !countData.pagination.totalIsEstimate) {
+          setTotalPages(countData.pagination.totalPages);
+          setTotalOrders(countData.pagination.totalOrders);
+        }
+      }).catch(() => {});
+
+      if (!loadedOrders.length) {
+        return [];
+      }
+
       return loadedOrders;
     } catch (e) {
+      if (requestId !== loadRequestIdRef.current) return [];
       setOrders([]);
       setScopeWarning('');
       setError(e?.response?.data?.error || 'Failed to load orders');
-      return [];
-    } finally {
+      setLoadDurationMs(Math.round(performance.now() - startedAt));
       setLoading(false);
+      return [];
     }
   }
 
@@ -2603,6 +2756,10 @@ function FulfillmentDashboard() {
     const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
     const sellerId = order.seller?._id || order.seller;
 
+    if (order.itemImageUrl) {
+      setThumbnailUrl(orderId, order.itemImageUrl);
+      return;
+    }
     if (!itemId || !sellerId || thumbnailFetchStarted.current.has(orderId)) {
       return;
     }
@@ -2610,11 +2767,10 @@ function FulfillmentDashboard() {
 
     try {
       const { data } = await api.get(`/ebay/item-images/${itemId}?sellerId=${sellerId}&thumbnail=true`);
-      if (data.images && data.images.length > 0) {
-        setThumbnailUrl(orderId, data.images[0]);
-        if (data.total > 1) {
-          setItemImages(prev => ({ ...prev, [orderId]: { count: data.total } }));
-        }
+      const url = data?.images?.[0] || data?.thumbnail || '';
+      if (url) {
+        setThumbnailUrl(orderId, url);
+        if (data.total > 1) setThumbnailCount(orderId, data.total);
       }
     } catch (error) {
       console.error('Error fetching thumbnail:', error);
@@ -2659,7 +2815,7 @@ function FulfillmentDashboard() {
       const queue = orders.filter((order) => {
         const itemId = order.itemNumber || order.lineItems?.[0]?.legacyItemId;
         const sellerId = order.seller?._id || order.seller;
-        return itemId && sellerId && !thumbnailFetchStarted.current.has(order._id);
+        return itemId && sellerId && !order.itemImageUrl && !thumbnailFetchStarted.current.has(order._id);
       });
 
       const concurrency = 3;
@@ -4128,8 +4284,7 @@ function FulfillmentDashboard() {
   if (loading && orders.length === 0) return <FulfillmentSkeleton />;
 
   return (
-    <Fade in timeout={600}>
-      <Box sx={{
+    <Box sx={{
         display: 'flex',
         flexDirection: 'column',
         height: { xs: 'calc(100dvh - 56px)', sm: 'calc(100dvh - 64px)', md: 'calc(100vh - 100px)' },
@@ -4166,9 +4321,13 @@ function FulfillmentDashboard() {
               }}
             >
               <CircularProgress size={48} />
-              <Typography variant="body1" color="text.secondary">
-                Loading orders...
-              </Typography>
+              {loadStartedAt != null ? (
+                <LoadingElapsedLabel startedAt={loadStartedAt} />
+              ) : (
+                <Typography variant="body1" color="text.secondary">
+                  Loading orders...
+                </Typography>
+              )}
             </Paper>
           </Box>
         )}
@@ -4198,6 +4357,18 @@ function FulfillmentDashboard() {
                   size="small"
                   sx={{ bgcolor: '#f5c842', color: '#1a1a2e', fontWeight: 700, height: 22, fontSize: '0.7rem' }}
                 />
+              )}
+              {loadDurationMs != null && (
+                <Tooltip title="Time until this page of orders came back from the database. Extra columns then paint in the browser.">
+                  <Chip
+                    icon={<AccessTimeIcon sx={{ fontSize: '14px !important' }} />}
+                    label={`${(loadDurationMs / 1000).toFixed(1)}s`}
+                    size="small"
+                    variant="outlined"
+                    color={loadDurationMs < 3000 ? 'success' : loadDurationMs < 10000 ? 'warning' : 'error'}
+                    sx={{ height: 22, fontSize: '0.7rem', fontWeight: 600 }}
+                  />
+                </Tooltip>
               )}
               {orders.length > 0 && totalPages > 1 && (
                 <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
@@ -4695,10 +4866,10 @@ function FulfillmentDashboard() {
             </Paper>
           ) : (
             <>
-              {/* MOBILE CARD VIEW */}
+              {isMobile ? (
               <Box
                 sx={{
-                  display: { xs: 'block', md: 'none' },
+                  display: 'block',
                   flexGrow: 1,
                   overflow: 'auto',
                   p: 1,
@@ -4719,38 +4890,12 @@ function FulfillmentDashboard() {
                   ))}
                 </Stack>
               </Box>
-
-              {/* DESKTOP TABLE VIEW */}
+              ) : (
               <TableContainer
                 component={Paper}
-                sx={{
-                  display: { xs: 'none', md: 'block' },
-                  flexGrow: 1,
-                  overflow: 'auto',
-                  maxHeight: 'calc(100% - 50px)',
-                  width: '100%',
-                  '&::-webkit-scrollbar': {
-                    width: '8px',
-                    height: '8px',
-                  },
-                  '&::-webkit-scrollbar-track': {
-                    backgroundColor: '#f1f1f1',
-                    borderRadius: '10px',
-                  },
-                  '&::-webkit-scrollbar-thumb': {
-                    backgroundColor: '#888',
-                    borderRadius: '10px',
-                    '&:hover': {
-                      backgroundColor: '#555',
-                    },
-                  },
-                }}
+                sx={FULFILLMENT_TABLE_CONTAINER_SX}
               >
-                <Table
-                  size="small"
-                  stickyHeader
-                  sx={{ '& td, & th': { whiteSpace: 'nowrap' } }}
-                >
+                <Table size="small" stickyHeader sx={FULFILLMENT_TABLE_SX}>
                   <TableHead>
                     <TableRow>
                       <TableCell sx={HEADER_CELL_SX}>SL No</TableCell>
@@ -4836,10 +4981,7 @@ function FulfillmentDashboard() {
                     {orders.map((order, idx) => (
                         <TableRow
                           key={order._id}
-                          sx={{
-                            ...tableBodyRowSx,
-                            '& > .MuiTableCell-root': BODY_CELL_SX,
-                          }}
+                          sx={FULFILLMENT_ROW_SX}
                         >
                           <TableCell>{(currentPage - 1) * ordersPerPage + idx + 1}</TableCell>
                           {visibleColumnsSet.has('seller') && (
@@ -4911,7 +5053,6 @@ function FulfillmentDashboard() {
                           {visibleColumnsSet.has('productName') && (
                             <FulfillmentOrderRow
                               order={order}
-                              imageCount={itemImages[order._id]?.count || 0}
                               loadingImages={!!loadingImages[order._id]}
                               onViewImages={handleViewImages}
                               onCopy={handleCopy}
@@ -5820,6 +5961,7 @@ function FulfillmentDashboard() {
                   </TableBody>
                 </Table>
               </TableContainer>
+              )}
             </>
           )
         }
@@ -6385,7 +6527,6 @@ function FulfillmentDashboard() {
           </MuiAlert>
         </Snackbar>
       </Box >
-    </Fade>
   );
 }
 

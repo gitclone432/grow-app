@@ -26,6 +26,7 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import LayersIcon from '@mui/icons-material/Layers';
 import Inventory2Icon from '@mui/icons-material/Inventory2';
 import StorefrontIcon from '@mui/icons-material/Storefront';
+import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
 import SettingsIcon from '@mui/icons-material/Settings';
 import usePageAccess from '../../hooks/usePageAccess';
 import { PAGE_CATEGORIES, PAGE_REGISTRY, SUBMENUS } from '../../constants/pages';
@@ -47,6 +48,7 @@ const CATEGORY_STYLES = {
   hrManagement:    { accent: '#f97316', accentLight: '#ffedd5', border: '#fed7aa', iconBg: 'linear-gradient(135deg,#f97316,#ea580c)', shadow: 'rgba(249,115,22,0.22)' },
   others:          { accent: '#64748b', accentLight: '#f1f5f9', border: '#e2e8f0', iconBg: 'linear-gradient(135deg,#64748b,#475569)', shadow: 'rgba(100,116,139,0.18)' },
   etsy:            { accent: '#f1641e', accentLight: '#ffedd5', border: '#fed7aa', iconBg: 'linear-gradient(135deg,#f1641e,#c2410c)', shadow: 'rgba(241,100,30,0.22)' },
+  ebayBuying:      { accent: '#86b817', accentLight: '#ecfccb', border: '#d9f99d', iconBg: 'linear-gradient(135deg,#86b817,#65a30d)', shadow: 'rgba(134,184,23,0.22)' },
   settingsSection: { accent: '#475569', accentLight: '#f1f5f9', border: '#e2e8f0', iconBg: 'linear-gradient(135deg,#475569,#334155)', shadow: 'rgba(71,85,105,0.18)' },
 };
 
@@ -61,6 +63,7 @@ const CATEGORY_ICONS = {
   hrManagement:    SupervisorAccountIcon,
   others:          AppsIcon,
   etsy:            StorefrontIcon,
+  ebayBuying:      ShoppingCartIcon,
   settingsSection: SettingsIcon,
 };
 

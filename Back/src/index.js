@@ -70,6 +70,7 @@ import cardBalanceRecordsRoutes from './routes/cardBalanceRecords.js';
 import exchangeRateRoutes from './routes/exchangeRate.js';
 import orderQtyExcludeLegacyRoutes from './routes/orderQtyExcludeLegacy.js';
 import cronJobsRoutes from './routes/cronJobs.js';
+import infraUsageRoutes from './routes/infraUsage.js';
 import sourcingRulesRoutes from './routes/sourcingRules.js';
 import scraperTestRoutes from './routes/scraperTest.js';
 import imageOverlaySettingsRoutes from './routes/imageOverlaySettings.js';
@@ -132,6 +133,7 @@ import etsyProfitSheetRoutes from './routes/etsyProfitSheet.js';
 import etsyProductsRoutes from './routes/etsyProducts.js';
 import etsyStoresRoutes from './routes/etsyStores.js';
 import etsyDailyOrdersRoutes from './routes/etsyDailyOrders.js';
+import ebayBuyRoutes from './routes/ebayBuy.js';
 import invoiceRoutes from './routes/invoices.js';
 import userCategoryTargetsRoutes from './routes/userCategoryTargets.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
@@ -144,7 +146,18 @@ import { initSocket } from './lib/socket.js';
 const app = express();
 
 app.use(helmet());
-app.use(compression());
+app.use(compression({
+  filter: (req, res) => {
+    // Gzip buffers the whole response, which blocks EventSource item-by-item updates
+    // and leaves Review Generated Listings stuck on "loading".
+    const accept = String(req.headers.accept || '');
+    const contentType = String(res.getHeader('Content-Type') || '');
+    if (accept.includes('text/event-stream') || contentType.includes('text/event-stream')) {
+      return false;
+    }
+    return compression.filter(req, res);
+  },
+}));
 // CORS: allowed origins are driven by CLIENT_ORIGIN env var (comma-separated) + localhost defaults
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
@@ -234,6 +247,7 @@ app.use('/api/card-balance-records', cardBalanceRecordsRoutes);
 app.use('/api/exchange-rate', exchangeRateRoutes);
 app.use('/api/order-qty-exclude-legacy', orderQtyExcludeLegacyRoutes);
 app.use('/api/cron-jobs', cronJobsRoutes);
+app.use('/api/infra', infraUsageRoutes);
 app.use('/api/sourcing-rules', sourcingRulesRoutes);
 // Intentionally not named *scraper* — some browser extensions block those URLs as false positives.
 app.use('/api/amazon-debug-scrape', scraperTestRoutes);
@@ -304,6 +318,7 @@ app.use('/api/etsy/profit-sheet', etsyProfitSheetRoutes);
 app.use('/api/etsy/products', etsyProductsRoutes);
 app.use('/api/etsy/stores', etsyStoresRoutes);
 app.use('/api/etsy', etsyDailyOrdersRoutes);
+app.use('/api/ebay-buy', ebayBuyRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/user-category-targets', userCategoryTargetsRoutes);
 

@@ -69,6 +69,8 @@ export default function EtsyOrderFulfilmentImportDialog({
     if (!open) resetState();
   }, [open, resetState]);
 
+  const swapAmbiguousOrderDate = String(apiBasePath).includes('profit-sheet');
+
   const loadSpreadsheet = useCallback(async (file) => {
     if (!file) return;
 
@@ -80,10 +82,10 @@ export default function EtsyOrderFulfilmentImportDialog({
     try {
       const result = await parseSpreadsheetFile(
         file,
-        (matrix) => parseEtsyOrderFulfilmentMatrix(matrix),
+        (matrix) => parseEtsyOrderFulfilmentMatrix(matrix, { swapAmbiguousOrderDate }),
         (text) => {
           rawCsvRef.current = text;
-          return parseEtsyOrderFulfilmentCsv(text);
+          return parseEtsyOrderFulfilmentCsv(text, { swapAmbiguousOrderDate });
         },
       );
       setParsed(result);
@@ -98,7 +100,7 @@ export default function EtsyOrderFulfilmentImportDialog({
     } finally {
       setParsing(false);
     }
-  }, []);
+  }, [swapAmbiguousOrderDate]);
 
   const handleFileSelect = async (file) => {
     if (!file) return;

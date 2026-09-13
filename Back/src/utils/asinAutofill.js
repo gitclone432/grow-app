@@ -169,6 +169,62 @@ export function getTemplateOverlayFetchOptions(template) {
   };
 }
 
+function getAmazonRawPayload(data = {}) {
+  return data.rawData?.rawData && typeof data.rawData.rawData === 'object'
+    ? data.rawData.rawData
+    : (data.rawData && typeof data.rawData === 'object' ? data.rawData : {});
+}
+
+function collectAmazonStockText(data = {}) {
+  const raw = getAmazonRawPayload(data);
+  const offer = raw.purchase_options?.single_offer || {};
+  return String(
+    raw.availability_status || data.availabilityStatus || offer.stock || raw.stock || ''
+  ).trim();
+}
+
+function collectAmazonDeliveryText(data = {}) {
+  const raw = getAmazonRawPayload(data);
+  const offer = raw.purchase_options?.single_offer || {};
+  const lines = [
+    data.shippingTime,
+    raw.shipping_info,
+    raw.shipping_time,
+    raw.shipping_condition,
+    ...(Array.isArray(raw.delivery) ? raw.delivery : []),
+    ...(Array.isArray(offer.delivery) ? offer.delivery : []),
+  ];
+  if (offer.delivery && typeof offer.delivery === 'object' && !Array.isArray(offer.delivery)) {
+    lines.push(offer.delivery.date, offer.delivery.comments);
+  }
+  return lines.map((line) => String(line || '').trim()).find(Boolean) || '';
+}
+
+function attachAvailabilityFields(data = {}) {
+  const availabilityStatus = collectAmazonStockText(data);
+  const shippingTime = collectAmazonDeliveryText(data);
+  const raw = getAmazonRawPayload(data);
+  const reviews = raw.product_information?.customer_reviews || {};
+  return {
+    ...data,
+    availabilityStatus: availabilityStatus || data.availabilityStatus || '',
+    shippingTime: shippingTime || data.shippingTime || '',
+    averageRating: data.averageRating || raw.average_rating || reviews.stars || '',
+    reviewCount: data.reviewCount || raw.total_reviews || raw.total_ratings || reviews.ratings_count || '',
+  };
+}
+
+function amazonDataHasDelivery(data = {}) {
+  return Boolean(collectAmazonDeliveryText(data));
+}
+
+function amazonDataHasAvailability(data = {}) {
+  const stockText = collectAmazonStockText(data).toLowerCase();
+  const outOfStock = stockText.includes('unavailable') || stockText.includes('out of stock');
+  if (outOfStock) return true;
+  return Boolean(stockText && amazonDataHasDelivery(data));
+}
+
 /**
  * Fetch Amazon product data by ASIN
  * Uses ScraperAPI (default) or Scrapingdog via AMAZON_PRODUCT_PROVIDER
@@ -183,6 +239,7 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
   const startTime = Date.now();
   const {
     forceRefresh = false,
+    requireDelivery = false,
     skipOverlay = false,
     templateOverlay = null,
     textOverlay = null,
@@ -223,31 +280,43 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
     // Check in-memory cache first
     if (!forceRefresh) {
       const cached = getCachedAsinData(asin, region);
-      if (cached) {
+      const cachedUsable = cached && (
+        requireDelivery ? amazonDataHasDelivery(cached) : amazonDataHasAvailability(cached)
+      );
+      if (cachedUsable) {
         const cacheTime = Date.now() - startTime;
         console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} (${region}, ${cacheTime}ms)`);
         // Cache hits made no fetch — do not re-report availabilityRetry
         // Overlay is applied after cache so each template can use its own frame.
         return withOverlayedImages(
-          { ...cached, availabilityRetry: null, scrapeSource: 'cache' },
+          attachAvailabilityFields({ ...cached, availabilityRetry: null, scrapeSource: 'cache' }),
           { scrapeMs: cacheTime, source: 'cache' }
         );
+      }
+      if (cached) {
+        console.log(`[fetchAmazonData] ⚡ Cache hit for ${asin} lacks ${requireDelivery ? 'delivery' : 'stock/delivery'} — fetching live`);
       }
 
       // Reuse Amazon scrape saved on any Listings Database row for this ASIN
       const fromListingsDb = await getAmazonDataFromListingsDatabase(asin, region);
-      if (fromListingsDb) {
-        setCachedAsinData(asin, { ...fromListingsDb, availabilityRetry: null }, region);
+      const dbUsable = fromListingsDb && (
+        requireDelivery ? amazonDataHasDelivery(fromListingsDb) : amazonDataHasAvailability(fromListingsDb)
+      );
+      if (dbUsable) {
+        const reused = attachAvailabilityFields({ ...fromListingsDb, availabilityRetry: null });
+        setCachedAsinData(asin, reused, region);
         const dbTime = Date.now() - startTime;
         console.log(`[fetchAmazonData] 📚 Listings Database reused for ${asin} (${region}, ${dbTime}ms)`);
         return withOverlayedImages(
           {
-            ...fromListingsDb,
-            availabilityRetry: null,
+            ...reused,
             scrapeSource: 'listings_db',
           },
           { scrapeMs: dbTime, source: 'listings_db' }
         );
+      }
+      if (fromListingsDb) {
+        console.log(`[fetchAmazonData] 📚 Listings Database snapshot for ${asin} lacks ${requireDelivery ? 'delivery' : 'stock/delivery'} — fetching live`);
       }
     } else {
       console.log(`[fetchAmazonData] 🔄 Force refresh enabled for ${asin} (${region})`);
@@ -336,7 +405,10 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
       productCategory: productCategory || '',
       itemDimensions: itemDimensions || '',
       waterResistanceLevel: waterResistanceLevel || '',
-      availabilityStatus: availabilityStatus || '',
+      availabilityStatus: availabilityStatus || scrapedData.availabilityStatus || '',
+      shippingTime: scrapedData.shippingTime || '',
+      averageRating: scrapedData.averageRating || '',
+      reviewCount: scrapedData.reviewCount || '',
       soldBy: soldBy || '',
       bestSellersRank: bestSellersRank || '',
       review: review || '',
@@ -351,37 +423,26 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
       rawData: scrapedData, // Store scraped data for debugging
       scrapeSource: 'live_scrape',
     };
+    const resultWithAvailability = attachAvailabilityFields(result);
     
     // Cache the result — skip if description is empty. For Scrapingdog, also
     // skip when stock/delivery info is missing so precheck columns don't pin
     // to "Unknown" for the whole cache TTL. ScraperAPI keeps the prior
     // description-only gate so the default path is unchanged.
-    const raw = scrapedData.rawData || {};
-    const stockText = String(
-      raw.availability_status || raw.purchase_options?.single_offer?.stock || availabilityStatus || ''
-    ).trim().toLowerCase();
-    const outOfStock = stockText.includes('unavailable') || stockText.includes('out of stock');
-    const hasDeliveryInfo = Boolean(
-      raw.shipping_time || raw.shipping_condition // ScraperAPI names
-      || raw.shipping_info // Scrapingdog name
-      || (Array.isArray(raw.delivery) && raw.delivery.length > 0)
-      || (Array.isArray(raw.purchase_options?.single_offer?.delivery) && raw.purchase_options.single_offer.delivery.length > 0)
-    );
-    const hasAvailabilityInfo = Boolean(stockText) && (outOfStock || hasDeliveryInfo);
-    const canCache = Boolean(result.description)
-      && (provider !== 'scrapingdog' || hasAvailabilityInfo);
+    const canCache = Boolean(resultWithAvailability.description)
+      && (provider !== 'scrapingdog' || amazonDataHasAvailability(resultWithAvailability));
     if (canCache) {
       // Strip retry marker + scrapeSource before caching (raw images, no overlay)
-      const { scrapeSource: _scrapeSource, availabilityRetry: _retry, ...toCache } = result;
+      const { scrapeSource: _scrapeSource, availabilityRetry: _retry, ...toCache } = resultWithAvailability;
       setCachedAsinData(asin, { ...toCache, availabilityRetry: null }, region);
       await rememberAmazonSourceSnapshot(asin, region, { ...toCache, availabilityRetry: null });
-    } else if (!result.description) {
+    } else if (!resultWithAvailability.description) {
       console.log(`[fetchAmazonData] ⚠️ Skipping cache for ${asin} (no description) — will retry on next request`);
     } else {
       console.log(`[fetchAmazonData] ⚠️ Skipping cache for ${asin} (no stock/delivery info) — will retry on next request`);
     }
     
-    return withOverlayedImages(result, { scrapeMs, source: 'live_scrape' });
+    return withOverlayedImages(resultWithAvailability, { scrapeMs, source: 'live_scrape' });
   } catch (error) {
     const responseTime = Date.now() - startTime;
     

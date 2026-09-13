@@ -1,11 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Box, Paper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  Button, Typography, CircularProgress, Dialog, DialogTitle, DialogContent,
+  Button, Typography, CircularProgress, LinearProgress, Dialog, DialogTitle, DialogContent,
   DialogActions, IconButton, TextField, Grid, Chip, Divider, FormControl,
   InputLabel, Select, MenuItem, Snackbar, Alert, Pagination, OutlinedInput, Checkbox, ListItemText,
   Autocomplete, InputAdornment, Tooltip, Switch, FormControlLabel, Collapse,
-  ToggleButtonGroup, ToggleButton
+  ToggleButtonGroup, ToggleButton, TableSortLabel
 } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
@@ -18,6 +18,7 @@ import AddIcon from '@mui/icons-material/Add';
 import SearchIcon from '@mui/icons-material/Search';
 import ClearIcon from '@mui/icons-material/Clear';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
+import FactCheckIcon from '@mui/icons-material/FactCheck';
 import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
 import NavigateNextIcon from '@mui/icons-material/NavigateNext';
 import api from '../../lib/api';
@@ -30,9 +31,10 @@ const groupFitmentData = (compatibilityList) => {
   const groups = {};
 
   compatibilityList.forEach(item => {
-    const year = item.nameValueList.find(x => x.name === 'Year')?.value;
-    const make = item.nameValueList.find(x => x.name === 'Make')?.value;
-    const model = item.nameValueList.find(x => x.name === 'Model')?.value;
+    const nvl = Array.isArray(item?.nameValueList) ? item.nameValueList : [];
+    const year = nvl.find(x => x.name === 'Year')?.value;
+    const make = nvl.find(x => x.name === 'Make')?.value;
+    const model = nvl.find(x => x.name === 'Model')?.value;
 
     if (year && make && model) {
       const key = `${make} ${model}`;
@@ -81,15 +83,199 @@ function boldNumbers(text) {
   );
 }
 
+function listingStatusLabel(status) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'active') return 'Active';
+  if (s === 'ended' || s === 'completed') return 'Ended';
+  return status || 'Unknown';
+}
+
+function listingStatusColor(status) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'active') return 'success';
+  if (s === 'ended' || s === 'completed') return 'default';
+  return 'warning';
+}
+
+const CompatibilityListingsTable = React.memo(function CompatibilityListingsTable({
+  listings,
+  selectedIds,
+  sortBy,
+  sortDir,
+  listedDate,
+  listedFrom,
+  listedTo,
+  listingStatusFilter,
+  onSort,
+  onEdit,
+  onToggleSelect,
+  onToggleSelectAll,
+}) {
+  return (
+    <TableContainer component={Paper} sx={{ maxHeight: 'calc(100vh - 260px)', overflow: 'auto' }}>
+      <Table stickyHeader>
+        <TableHead sx={{ bgcolor: '#f5f5f5' }}>
+          <TableRow>
+            <TableCell padding="checkbox">
+              <Checkbox
+                size="small"
+                checked={listings.length > 0 && listings.every((l) => selectedIds.has(l.itemId))}
+                indeterminate={selectedIds.size > 0 && !listings.every((l) => selectedIds.has(l.itemId))}
+                onChange={(e) => onToggleSelectAll(e.target.checked)}
+                title="Select all on this page"
+              />
+            </TableCell>
+            <TableCell width="80">Image</TableCell>
+            <TableCell width="25%" sortDirection={['title', 'sku'].includes(sortBy) ? sortDir : false}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                <TableSortLabel
+                  active={sortBy === 'title'}
+                  direction={sortBy === 'title' ? sortDir : 'asc'}
+                  onClick={() => onSort('title')}
+                >
+                  Title
+                </TableSortLabel>
+                <TableSortLabel
+                  active={sortBy === 'sku'}
+                  direction={sortBy === 'sku' ? sortDir : 'asc'}
+                  onClick={() => onSort('sku')}
+                >
+                  SKU
+                </TableSortLabel>
+              </Box>
+            </TableCell>
+            <TableCell sortDirection={sortBy === 'price' ? sortDir : false}>
+              <TableSortLabel
+                active={sortBy === 'price'}
+                direction={sortBy === 'price' ? sortDir : 'desc'}
+                onClick={() => onSort('price')}
+              >
+                Price
+              </TableSortLabel>
+            </TableCell>
+            <TableCell sortDirection={sortBy === 'listedOn' ? sortDir : false}>
+              <TableSortLabel
+                active={sortBy === 'listedOn'}
+                direction={sortBy === 'listedOn' ? sortDir : 'desc'}
+                onClick={() => onSort('listedOn')}
+              >
+                Listed On
+              </TableSortLabel>
+            </TableCell>
+            <TableCell sortDirection={sortBy === 'status' ? sortDir : false}>
+              <TableSortLabel
+                active={sortBy === 'status'}
+                direction={sortBy === 'status' ? sortDir : 'asc'}
+                onClick={() => onSort('status')}
+              >
+                Status
+              </TableSortLabel>
+            </TableCell>
+            <TableCell width="40%" sortDirection={sortBy === 'fitment' ? sortDir : false}>
+              <TableSortLabel
+                active={sortBy === 'fitment'}
+                direction={sortBy === 'fitment' ? sortDir : 'desc'}
+                onClick={() => onSort('fitment')}
+              >
+                Fitment Summary
+              </TableSortLabel>
+            </TableCell>
+            <TableCell>Action</TableCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {listings.map((item, index) => {
+            const fitmentSummary = item.fitmentSummary?.length
+              ? item.fitmentSummary
+              : groupFitmentData(item.compatibility);
+            const isSelected = selectedIds.has(item.itemId);
+            return (
+              <TableRow key={item.itemId} selected={isSelected} hover>
+                <TableCell padding="checkbox">
+                  <Checkbox
+                    size="small"
+                    checked={isSelected}
+                    onChange={(e) => onToggleSelect(item.itemId, e.target.checked)}
+                  />
+                </TableCell>
+                <TableCell>
+                  {item.mainImageUrl && (
+                    <img
+                      src={item.mainImageUrl}
+                      alt=""
+                      width={60}
+                      height={60}
+                      loading="lazy"
+                      decoding="async"
+                      style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 4 }}
+                    />
+                  )}
+                </TableCell>
+                <TableCell>
+                  <Typography variant="subtitle2" sx={{ lineHeight: 1.2, mb: 0.5 }}>{item.title}</Typography>
+                  <Chip label={item.sku || 'No SKU'} size="small" variant="outlined" sx={{ fontSize: '0.7rem' }} />
+                  <Typography variant="caption" display="block" color="textSecondary" mt={0.5}>ID: {item.itemId}</Typography>
+                </TableCell>
+                <TableCell>{item.currency} {item.currentPrice}</TableCell>
+                <TableCell>
+                  <Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>{formatDate(item.startTime)}</Typography>
+                </TableCell>
+                <TableCell>
+                  <Chip
+                    size="small"
+                    label={listingStatusLabel(item.listingStatus)}
+                    color={listingStatusColor(item.listingStatus)}
+                    variant={String(item.listingStatus || '').toLowerCase() === 'active' ? 'filled' : 'outlined'}
+                    sx={{ fontWeight: 600, fontSize: '0.72rem' }}
+                  />
+                </TableCell>
+                <TableCell>
+                  {fitmentSummary.length > 0 ? (
+                    <Box sx={{ maxHeight: 120, overflowY: 'auto', border: '1px solid #eee', borderRadius: 1, p: 1, bgcolor: '#fafafa' }}>
+                      {fitmentSummary.map((grp, i) => (
+                        <Typography key={i} variant="caption" display="block" sx={{ mb: 0.5, lineHeight: 1.3 }}>
+                          <b>{grp.title}</b>: {grp.years}
+                        </Typography>
+                      ))}
+                    </Box>
+                  ) : (
+                    <Typography variant="caption" color="textSecondary" sx={{ fontStyle: 'italic' }}>No compatibility data</Typography>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <Button variant="outlined" size="small" startIcon={<EditIcon />} onClick={() => onEdit(item, index)}>Edit</Button>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+          {listings.length === 0 && (
+            <TableRow>
+              <TableCell colSpan={8} align="center" sx={{ py: 6 }}>
+                <Typography variant="body2" color="textSecondary">
+                  {(listedDate || listedFrom || listedTo)
+                    ? `No ${listingStatusFilter === 'all' ? '' : listingStatusLabel(listingStatusFilter) + ' '}listings on this IST date.`
+                    : `No ${listingStatusFilter === 'all' ? '' : listingStatusLabel(listingStatusFilter) + ' '}listings found for this seller.`}
+                </Typography>
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </TableContainer>
+  );
+});
+
 export default function CompatibilityDashboard() {
   const navigate = useNavigate();
   const [sellers, setSellers] = useState([]);
   const [currentSellerId, setCurrentSellerId] = useState('');
   const [listings, setListings] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncAllProgress, setSyncAllProgress] = useState('');
+  const [recheckingFitment, setRecheckingFitment] = useState(false);
+  const [recheckFitmentProgress, setRecheckFitmentProgress] = useState('');
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalItems, setTotalItems] = useState(0);
@@ -129,12 +315,16 @@ export default function CompatibilityDashboard() {
   const [newNotes, setNewNotes] = useState('');
   const [pageInputValue, setPageInputValue] = useState('');
   const [filterNoFitment, setFilterNoFitment] = useState(false);
+  const [listingStatusFilter, setListingStatusFilter] = useState('active');
+  const [sortBy, setSortBy] = useState('listedOn');
+  const [sortDir, setSortDir] = useState('desc');
   const [listedDateMode, setListedDateMode] = useState('range'); // 'single' | 'range'
   const [listedDate, setListedDate] = useState('');
 
   // SKU → ASIN backtrack info for the edit modal
   const [skuAsinInfo, setSkuAsinInfo] = useState(null);
   const [skuAsinLoading, setSkuAsinLoading] = useState(false);
+  const [detailsLoading, setDetailsLoading] = useState(false);
   const [listedFrom, setListedFrom] = useState('');
   const [listedTo, setListedTo] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
@@ -290,13 +480,101 @@ export default function CompatibilityDashboard() {
     return { startYear, endYear };
   };
 
-  const displayedListings = filterNoFitment
-    ? listings.filter(item => !item.compatibility || item.compatibility.length === 0)
-    : listings;
+  const listingsReqIdRef = useRef(0);
+
+  const hydrateListingsById = async (items) => {
+    const itemIds = (items || []).map((item) => item.itemId).filter(Boolean);
+    if (!currentSellerId || itemIds.length === 0) return items;
+    try {
+      const { data } = await api.post('/ebay/listings/by-ids', { sellerId: currentSellerId, itemIds });
+      const byId = new Map((data.listings || []).map((row) => [row.itemId, row]));
+      return items.map((item) => ({ ...item, ...(byId.get(item.itemId) || {}) }));
+    } catch {
+      return items;
+    }
+  };
+
+  const listingDetailsIncomplete = (item) => {
+    const title = String(item?.title || '').trim();
+    const desc = String(item?.descriptionPreview || '').trim();
+    return !title || !desc;
+  };
+
+  const refreshListingFromEbay = async (item, index) => {
+    const { data } = await api.post('/ebay/refresh-item', {
+      sellerId: currentSellerId,
+      itemId: item.itemId,
+    });
+    const listing = data?.listing;
+    if (!listing) return item;
+    const merged = { ...item, ...listing };
+    applyListingToModal(merged, index);
+    if (merged.sku) fetchSkuAsinInfo(merged.sku);
+    return merged;
+  };
+
+  const hydrateListingForModal = async (item, index) => {
+    let full = item;
+    try {
+      const [fromDb] = await hydrateListingsById([item]);
+      if (fromDb) {
+        full = { ...item, ...fromDb };
+        applyListingToModal(full, index);
+        if (full.sku) fetchSkuAsinInfo(full.sku);
+      }
+    } catch {
+      /* use the row we already have */
+    }
+    if (!listingDetailsIncomplete(full)) return full;
+    setDetailsLoading(true);
+    try {
+      return await refreshListingFromEbay(full, index);
+    } catch (e) {
+      showSnackbar(
+        'Could not load listing details from eBay: ' + (e.response?.data?.error || e.message),
+        'warning'
+      );
+      return full;
+    } finally {
+      setDetailsLoading(false);
+    }
+  };
+
+  const resetFitmentPicker = () => {
+    setSelectedMake(null);
+    setSelectedModel(null);
+    setSelectedYears([]);
+    setSelectedTrimsByYear({});
+    setTrimsByYear({});
+    setYearOptions([]);
+    setModelOptions([]);
+    setExpandedYears({});
+    setStartYear('');
+    setEndYear('');
+    setNewNotes('');
+    setTrimFilterKeyword('');
+    setAiSuggestedTrims([]);
+    setAiExcludedTrims([]);
+    setAiAllFitments([]);
+  };
+
+  const applyListingToModal = (item, index) => {
+    setSelectedItem(item);
+    setCurrentListingIndex(index);
+    setEditCompatList(JSON.parse(JSON.stringify(item.compatibility || [])));
+  };
+
+  const openListingInModal = async (item, index) => {
+    applyListingToModal(item, index);
+    resetFitmentPicker();
+    fetchSkuAsinInfo(item.sku);
+    await hydrateListingForModal(item, index);
+  };
 
   // Detect if a Poll All Sellers sync is already running when the page loads
   // (e.g., triggered by the scheduled cron job) and attach to its progress.
   const syncPollRef = useRef(null);
+  const recheckPollRef = useRef(null);
   useEffect(() => {
     const attachToRunningSyncIfNeeded = async () => {
       try {
@@ -323,21 +601,67 @@ export default function CompatibilityDashboard() {
       } catch { /* non-critical */ }
     };
     attachToRunningSyncIfNeeded();
-    return () => { if (syncPollRef.current) clearInterval(syncPollRef.current); };
+    const attachToRunningRecheckIfNeeded = async () => {
+      try {
+        const { data: status } = await api.get('/ebay/recheck-live-compatibility-status');
+        if (!status.running) return;
+        setRecheckingFitment(true);
+        setRecheckFitmentProgress(
+          `${status.checked || 0}/${status.total || 0} checked · ${status.withFitment || 0} have live fitment`
+        );
+        recheckPollRef.current = setInterval(async () => {
+          try {
+            const { data: s } = await api.get('/ebay/recheck-live-compatibility-status');
+            if (s.running) {
+              setRecheckFitmentProgress(
+                `${s.checked || 0}/${s.total || 0} checked · ${s.withFitment || 0} have live fitment · ${s.withoutFitment || 0} none`
+              );
+            } else {
+              clearInterval(recheckPollRef.current);
+              recheckPollRef.current = null;
+              setRecheckingFitment(false);
+              setRecheckFitmentProgress('');
+              showSnackbar(
+                `Live fitment recheck done: ${s.withFitment || 0} have fitment on eBay, ${s.withoutFitment || 0} have none`,
+                s.errors ? 'warning' : 'success'
+              );
+            }
+          } catch { /* ignore poll errors */ }
+        }, 2000);
+      } catch { /* non-critical */ }
+    };
+    attachToRunningRecheckIfNeeded();
+    return () => {
+      if (syncPollRef.current) clearInterval(syncPollRef.current);
+      if (recheckPollRef.current) clearInterval(recheckPollRef.current);
+    };
   }, []);
 
   useEffect(() => {
     const initDashboard = async () => {
+      setLoading(true);
       try {
         const { data } = await api.get('/sellers/all');
-        setSellers(data);
-        if (data.length > 0) setCurrentSellerId(data[0]._id);
+        const list = Array.isArray(data) ? data : [];
+        setSellers(list);
+        if (list.length > 0) setCurrentSellerId(String(list[0]._id));
+        else setLoading(false);
       } catch (adminError) {
         try {
           const { data } = await api.get('/sellers/me');
-          setSellers([data]);
-          setCurrentSellerId(data._id);
-        } catch (e) { console.error(e); }
+          if (data?._id) {
+            setSellers([data]);
+            setCurrentSellerId(String(data._id));
+          } else {
+            setSellers([]);
+            setLoading(false);
+          }
+        } catch (e) {
+          console.error(e);
+          setSellers([]);
+          setLoading(false);
+          showSnackbar('Failed to load stores', 'error');
+        }
       }
     };
     initDashboard();
@@ -345,7 +669,7 @@ export default function CompatibilityDashboard() {
 
   useEffect(() => {
     if (currentSellerId) loadListings();
-  }, [currentSellerId, page, listedDateMode, listedDate, listedFrom, listedTo]);
+  }, [currentSellerId, page, listedDateMode, listedDate, listedFrom, listedTo, filterNoFitment, listingStatusFilter, sortBy, sortDir]);
 
   useEffect(() => {
     if (currentSellerId) fetchApiUsage();
@@ -354,36 +678,10 @@ export default function CompatibilityDashboard() {
   // Handle navigation after page load
   useEffect(() => {
     if (!loading && pendingNavigation && listings.length > 0) {
-      if (pendingNavigation === 'first') {
-        const firstItem = listings[0];
-        setSelectedItem(firstItem);
-        setCurrentListingIndex(0);
-        setEditCompatList(JSON.parse(JSON.stringify(firstItem.compatibility || [])));
-        setSelectedMake(null);
-        setSelectedModel(null);
-        setSelectedYears([]);
-        setSelectedTrimsByYear({});
-        setTrimsByYear({});
-        setExpandedYears({});
-        setStartYear('');
-        setEndYear('');
-        setNewNotes('');
-      } else if (pendingNavigation === 'last') {
-        const lastItem = listings[listings.length - 1];
-        setSelectedItem(lastItem);
-        setCurrentListingIndex(listings.length - 1);
-        setEditCompatList(JSON.parse(JSON.stringify(lastItem.compatibility || [])));
-        setSelectedMake(null);
-        setSelectedModel(null);
-        setSelectedYears([]);
-        setSelectedTrimsByYear({});
-        setTrimsByYear({});
-        setExpandedYears({});
-        setStartYear('');
-        setEndYear('');
-        setNewNotes('');
-      }
+      const item = pendingNavigation === 'last' ? listings[listings.length - 1] : listings[0];
+      const index = pendingNavigation === 'last' ? listings.length - 1 : 0;
       setPendingNavigation(null);
+      openListingInModal(item, index);
     }
   }, [loading, pendingNavigation, listings]);
 
@@ -400,6 +698,8 @@ export default function CompatibilityDashboard() {
   };
 
   const loadListings = async (customSearch = null) => {
+    if (!currentSellerId) return;
+    const reqId = ++listingsReqIdRef.current;
     setLoading(true);
     try {
       const searchToSend = customSearch !== null ? customSearch : searchTerm;
@@ -409,23 +709,46 @@ export default function CompatibilityDashboard() {
           page,
           limit: 100,
           search: searchToSend,
+          noFitment: filterNoFitment ? 'true' : undefined,
+          listingStatus: listingStatusFilter,
+          sortBy,
+          sortDir,
           ...(listedDateMode === 'single'
             ? (listedDate ? { listedFrom: listedDate, listedTo: listedDate } : {})
             : { ...(listedFrom ? { listedFrom } : {}), ...(listedTo ? { listedTo } : {}) }),
         }
       });
-      setListings(data.listings);
-      setTotalPages(data.pagination.pages);
-      setTotalItems(data.pagination.total);
+      if (reqId !== listingsReqIdRef.current) return;
+      setListings(Array.isArray(data?.listings) ? data.listings : []);
+      setTotalPages(Number(data?.pagination?.pages) || 0);
+      setTotalItems(Number(data?.pagination?.total) || 0);
       // Clear selections when new page loads
       setSelectedIds(new Set());
-    } catch (e) { showSnackbar('Failed to load listings', 'error'); }
-    finally { setLoading(false); }
+    } catch (e) {
+      if (reqId !== listingsReqIdRef.current) return;
+      setListings([]);
+      setTotalPages(0);
+      setTotalItems(0);
+      showSnackbar('Failed to load listings', 'error');
+    }
+    finally {
+      if (reqId === listingsReqIdRef.current) setLoading(false);
+    }
   };
 
   const handleSearch = () => {
-    setPage(1);
-    loadListings(searchTerm);
+    if (page !== 1) setPage(1);
+    else loadListings(searchTerm);
+  };
+
+  const handleSort = (field) => {
+    if (sortBy === field) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(field);
+      setSortDir(field === 'title' || field === 'sku' || field === 'status' ? 'asc' : 'desc');
+    }
+    if (page !== 1) setPage(1);
   };
 
   const handleKeyPress = (e) => {
@@ -436,8 +759,11 @@ export default function CompatibilityDashboard() {
     if (!currentSellerId) return;
     setSyncing(true);
     try {
-      const { data } = await api.post('/ebay/sync-listings', { sellerId: currentSellerId });
-      showSnackbar(data.message, 'success');
+      const dateParams = listedDateMode === 'single'
+        ? (listedDate ? { listedFrom: listedDate, listedTo: listedDate } : {})
+        : { ...(listedFrom ? { listedFrom } : {}), ...(listedTo ? { listedTo } : {}) };
+      const { data } = await api.post('/ebay/sync-listings', { sellerId: currentSellerId, ...dateParams });
+      showSnackbar(data.message, data.warning ? 'warning' : 'success');
       setPage(1);
       await loadListings();
     } catch (e) { showSnackbar('Sync Failed: ' + (e.response?.data?.error || e.message), 'error'); }
@@ -484,6 +810,72 @@ export default function CompatibilityDashboard() {
       showSnackbar('Sync All Failed: ' + (e.response?.data?.message || e.response?.data?.error || e.message), 'error');
       setSyncingAll(false);
       setSyncAllProgress('');
+    }
+  };
+
+  const formatRecheckProgress = (s) => {
+    if (!s?.total) return 'Checking eBay...';
+    return `${s.checked || 0}/${s.total} checked · ${s.withFitment || 0} have live fitment · ${s.withoutFitment || 0} none${s.ended ? ` · ${s.ended} ended` : ''}${s.errors ? ` · ${s.errors} errors` : ''}`;
+  };
+
+  const handleRecheckLiveFitment = async () => {
+    if (!currentSellerId) return;
+    const selected = [...selectedIds];
+    const dateParams = listedDateMode === 'single'
+      ? (listedDate ? { listedFrom: listedDate, listedTo: listedDate } : {})
+      : { ...(listedFrom ? { listedFrom } : {}), ...(listedTo ? { listedTo } : {}) };
+    const confirmMsg = selected.length
+      ? `Check eBay for live parts compatibility on ${selected.length} selected listing(s)? Only Active Motors items are checked (1 GetItem call each).`
+      : 'Check eBay for live parts compatibility on Active listings that currently have no saved fitment (current seller and filters)? Each listing uses 1 GetItem API call.';
+    if (!window.confirm(confirmMsg)) return;
+
+    setRecheckingFitment(true);
+    setRecheckFitmentProgress('Starting...');
+    try {
+      const { data } = await api.post('/ebay/recheck-live-compatibility', {
+        sellerId: currentSellerId,
+        search: searchTerm || undefined,
+        ...dateParams,
+        ...(selected.length ? { itemIds: selected } : {}),
+      });
+      if (!data?.success) {
+        showSnackbar(data?.error || data?.message || 'Recheck did not start', 'error');
+        setRecheckingFitment(false);
+        setRecheckFitmentProgress('');
+        return;
+      }
+      if (!data.total) {
+        showSnackbar(data.message || 'Nothing to recheck', 'info');
+        setRecheckingFitment(false);
+        setRecheckFitmentProgress('');
+        return;
+      }
+      showSnackbar(data.message, 'info');
+      setRecheckFitmentProgress(`0/${data.total} checked`);
+      if (recheckPollRef.current) clearInterval(recheckPollRef.current);
+      recheckPollRef.current = setInterval(async () => {
+        try {
+          const { data: status } = await api.get('/ebay/recheck-live-compatibility-status');
+          if (status.running) {
+            setRecheckFitmentProgress(formatRecheckProgress(status));
+          } else {
+            clearInterval(recheckPollRef.current);
+            recheckPollRef.current = null;
+            setRecheckingFitment(false);
+            setRecheckFitmentProgress('');
+            const msg = `Live fitment recheck done: ${status.withFitment || 0} have fitment on eBay, ${status.withoutFitment || 0} have none${status.ended ? `, ${status.ended} no longer Active` : ''}${status.errors ? `, ${status.errors} errors` : ''}`;
+            showSnackbar(msg, status.errors ? 'warning' : 'success');
+            await loadListings();
+            fetchApiUsage();
+          }
+        } catch {
+          /* ignore poll errors */
+        }
+      }, 2000);
+    } catch (e) {
+      showSnackbar('Recheck failed: ' + (e.response?.data?.error || e.response?.data?.message || e.message), 'error');
+      setRecheckingFitment(false);
+      setRecheckFitmentProgress('');
     }
   };
 
@@ -703,9 +1095,13 @@ export default function CompatibilityDashboard() {
     if (!selectedItem) return;
     setAiLoading(true);
     try {
+      let item = selectedItem;
+      if (listingDetailsIncomplete(item)) {
+        item = await hydrateListingForModal(item, currentListingIndex);
+      }
       const { data } = await api.post('/ai/suggest-fitment', {
-        title: selectedItem.title || '',
-        description: selectedItem.descriptionPreview || ''
+        title: item.title || '',
+        description: item.descriptionPreview || ''
       });
       if (!data.make) {
         showSnackbar('AI could not extract fitment info from this listing', 'warning');
@@ -716,17 +1112,18 @@ export default function CompatibilityDashboard() {
       await applyFitmentToPicker(data);
     } catch (e) {
       setAiLoading(false);
-      showSnackbar('AI suggestion failed: ' + (e.response?.data?.error || e.message), 'error');
+      showSnackbar('AI suggestion failed: ' + (e.response?.data?.details || e.response?.data?.error || e.message), 'error');
     }
   };
   // --- BULK AI SUGGEST ---
 
   const handleBulkAiSuggest = async () => {
-    const selectedItems = displayedListings.filter(item => selectedIds.has(item.itemId));
+    const selectedItems = listings.filter(item => selectedIds.has(item.itemId));
     if (selectedItems.length === 0) return;
+    const hydratedItems = await hydrateListingsById(selectedItems);
 
     // Build initial queue (all loading)
-    const initial = selectedItems.map(item => ({
+    const initial = hydratedItems.map(item => ({
       item, status: 'loading', aiData: null,
       modelOptions: [], yearOptions: [], trimsByYear: {}, selectedYears: [],
       modelExists: true, yearsExist: true, error: null
@@ -737,7 +1134,7 @@ export default function CompatibilityDashboard() {
     setSelectedIds(new Set()); // deselect all checkboxes once queue is running
 
     // Open Edit modal immediately on first item (shows loading state)
-    const firstItem = selectedItems[0];
+    const firstItem = hydratedItems[0];
     const firstIdx = listings.findIndex(l => l.itemId === firstItem.itemId);
     setSelectedItem(firstItem);
     setCurrentListingIndex(firstIdx >= 0 ? firstIdx : 0);
@@ -865,8 +1262,8 @@ export default function CompatibilityDashboard() {
 
     // Process items in batches of CONCURRENCY_LIMIT
     (async () => {
-      for (let i = 0; i < selectedItems.length; i += CONCURRENCY_LIMIT) {
-        const batch = selectedItems.slice(i, i + CONCURRENCY_LIMIT);
+      for (let i = 0; i < hydratedItems.length; i += CONCURRENCY_LIMIT) {
+        const batch = hydratedItems.slice(i, i + CONCURRENCY_LIMIT);
         await Promise.all(batch.map((item, batchIdx) => processItem(item, i + batchIdx)));
       }
     })();
@@ -1046,7 +1443,14 @@ export default function CompatibilityDashboard() {
         prevListings.map(item => {
           if (successItemIds.has(item.itemId)) {
             const correctEntry = correctItems.find(q => q.item.itemId === item.itemId);
-            if (correctEntry) return { ...item, compatibility: correctEntry.finalCompatList };
+            if (correctEntry) {
+              return {
+                ...item,
+                compatibility: correctEntry.finalCompatList,
+                fitmentSummary: groupFitmentData(correctEntry.finalCompatList),
+                hasCompatibility: (correctEntry.finalCompatList || []).length > 0,
+              };
+            }
           }
           return item;
         })
@@ -1163,23 +1567,19 @@ export default function CompatibilityDashboard() {
     }
   };
 
-  const handleEditClick = (item, index, prefillAiData = null) => {
-    setSelectedItem(item);
-    setCurrentListingIndex(index);
-    setEditCompatList(JSON.parse(JSON.stringify(item.compatibility || [])));
+  const handleEditClick = async (item, index, prefillAiData = null) => {
     setOpenModal(true);
+    fetchMakes();
+    setBulkMode(false);
+    setBulkQueue([]);
+    setBulkQueueIdx(0);
+    applyListingToModal(item, index);
     setTrimsByYear({});
     setExpandedYears({});
     setNewNotes('');
     setTrimFilterKeyword('');
-    fetchMakes();
-    // Reset bulk mode when opening manually
-    setBulkMode(false);
-    setBulkQueue([]);
-    setBulkQueueIdx(0);
-
-    // Backtrack SKU → ASIN → Amazon data
     fetchSkuAsinInfo(item.sku);
+    void hydrateListingForModal(item, index);
 
     if (prefillAiData && prefillAiData.make) {
       setSelectedMake(prefillAiData.make);
@@ -1290,7 +1690,12 @@ export default function CompatibilityDashboard() {
       setListings(prevListings =>
         prevListings.map(item =>
           item.itemId === selectedItem.itemId
-            ? { ...item, compatibility: editCompatList }
+            ? {
+                ...item,
+                compatibility: editCompatList,
+                fitmentSummary: groupFitmentData(editCompatList),
+                hasCompatibility: editCompatList.length > 0,
+              }
             : item
         )
       );
@@ -1383,18 +1788,7 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
       // Check if there's a next item on current page
       if (currentListingIndex < listings.length - 1) {
         const nextItem = listings[currentListingIndex + 1];
-        setSelectedItem(nextItem);
-        setCurrentListingIndex(currentListingIndex + 1);
-        setEditCompatList(JSON.parse(JSON.stringify(nextItem.compatibility || [])));
-        setSelectedMake(null);
-        setSelectedModel(null);
-        setSelectedYears([]);
-        setSelectedTrimsByYear({});
-        setTrimsByYear({});
-        setExpandedYears({});
-        setStartYear('');
-        setEndYear('');
-        setNewNotes('');
+        await openListingInModal(nextItem, currentListingIndex + 1);
       } else if (page < totalPages) {
         // Load next page and open first item
         setPendingNavigation('first');
@@ -1412,23 +1806,7 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
 
   const handleNavigatePrevious = () => {
     if (currentListingIndex > 0) {
-      const prevItem = listings[currentListingIndex - 1];
-      setSelectedItem(prevItem);
-      setCurrentListingIndex(currentListingIndex - 1);
-      setEditCompatList(JSON.parse(JSON.stringify(prevItem.compatibility || [])));
-      setSelectedMake(null);
-      setSelectedModel(null);
-      setSelectedYears([]);
-      setSelectedTrimsByYear({});
-      setTrimsByYear({});
-      setExpandedYears({});
-      setStartYear('');
-      setEndYear('');
-      setNewNotes('');
-      setTrimFilterKeyword('');
-      setAiSuggestedTrims([]);
-      setAiExcludedTrims([]);
-      setAiAllFitments([]);
+      openListingInModal(listings[currentListingIndex - 1], currentListingIndex - 1);
     } else if (page > 1) {
       // Load previous page and open last item
       setPendingNavigation('last');
@@ -1438,23 +1816,7 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
 
   const handleNavigateNext = () => {
     if (currentListingIndex < listings.length - 1) {
-      const nextItem = listings[currentListingIndex + 1];
-      setSelectedItem(nextItem);
-      setCurrentListingIndex(currentListingIndex + 1);
-      setEditCompatList(JSON.parse(JSON.stringify(nextItem.compatibility || [])));
-      setSelectedMake(null);
-      setSelectedModel(null);
-      setSelectedYears([]);
-      setSelectedTrimsByYear({});
-      setTrimsByYear({});
-      setExpandedYears({});
-      setStartYear('');
-      setEndYear('');
-      setNewNotes('');
-      setTrimFilterKeyword('');
-      setAiSuggestedTrims([]);
-      setAiExcludedTrims([]);
-      setAiAllFitments([]);
+      openListingInModal(listings[currentListingIndex + 1], currentListingIndex + 1);
     } else if (page < totalPages) {
       // Load next page and open first item
       setPendingNavigation('first');
@@ -1462,48 +1824,161 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
     }
   };
 
+  const onEditRef = useRef(handleEditClick);
+  onEditRef.current = handleEditClick;
+  const onEdit = useCallback((item, index) => onEditRef.current(item, index), []);
+
+  const onSortRef = useRef(handleSort);
+  onSortRef.current = handleSort;
+  const onSort = useCallback((field) => onSortRef.current(field), []);
+
+  const onToggleSelect = useCallback((itemId, checked) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }, []);
+
+  const listingsForSelectRef = useRef(listings);
+  listingsForSelectRef.current = listings;
+  const onToggleSelectAll = useCallback((checked) => {
+    if (checked) {
+      setSelectedIds(new Set(listingsForSelectRef.current.map((row) => row.itemId)));
+    } else {
+      setSelectedIds(new Set());
+    }
+  }, []);
+
   return (
     <Box sx={{ p: 3 }}>
-      {/* HEADER WITH SEARCH */}
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3} flexWrap="wrap" gap={2}>
-        <Box display="flex" alignItems="center" gap={2}>
-          <Box>
-            <Typography variant="h5">Compatibility Dashboard</Typography>
-            <Typography variant="caption" color="textSecondary">Showing {displayedListings.length}{filterNoFitment ? ` (filtered)` : ` of ${totalItems}`} Active Listings</Typography>
+      {/* HEADER */}
+      <Box sx={{ mb: 2 }}>
+        <Box
+          sx={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 1.5,
+            mb: 1.5,
+          }}
+        >
+          <Box display="flex" alignItems="center" gap={1.5} flexWrap="wrap">
+            <Box>
+              <Typography variant="h5">Compatibility Dashboard</Typography>
+              <Typography variant="caption" color="textSecondary">
+                Showing {listings.length} of {totalItems}{listingStatusFilter === 'all' ? '' : ` ${listingStatusLabel(listingStatusFilter)}`} Listings
+                {' · '}Store Listings + Motors listings merged
+              </Typography>
+            </Box>
+
+            {apiUsage && apiUsage.success && (
+              <Tooltip
+                title={`${apiUsage.used.toLocaleString()} / ${apiUsage.limit.toLocaleString()} calls used today. Resets in ${apiUsage.hoursUntilReset}h`}
+                arrow
+              >
+                <Chip
+                  size="small"
+                  label={`API: ${Math.round((apiUsage.used / apiUsage.limit) * 100)}%`}
+                  color={
+                    apiUsage.used / apiUsage.limit > 0.9 ? 'error' :
+                      apiUsage.used / apiUsage.limit > 0.7 ? 'warning' :
+                        'success'
+                  }
+                  variant="outlined"
+                  sx={{ fontSize: '0.75rem' }}
+                />
+              </Tooltip>
+            )}
+
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => navigate('/admin/compatibility-batch-history')}
+              sx={{ fontSize: '0.75rem', textTransform: 'none' }}
+            >
+              Batch History
+            </Button>
           </Box>
 
-          {/* API USAGE BADGE */}
-          {apiUsage && apiUsage.success && (
+          <Box display="flex" alignItems="center" gap={1} flexWrap="wrap">
+            <FormControl size="small" sx={{ minWidth: 180, maxWidth: 240 }}>
+              <InputLabel>Select Seller</InputLabel>
+              <Select
+                value={currentSellerId ? String(currentSellerId) : ''}
+                label="Select Seller"
+                displayEmpty
+                onChange={(e) => {
+                  setPage(1);
+                  setListings([]);
+                  setLoading(true);
+                  setCurrentSellerId(String(e.target.value || ''));
+                }}
+              >
+                {sellers.length === 0 ? (
+                  <MenuItem value="" disabled>No stores</MenuItem>
+                ) : null}
+                {sellers.map((s) => (
+                  <MenuItem key={String(s._id)} value={String(s._id)}>
+                    {s.user?.username || s.user?.email || String(s._id).slice(-6)}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={syncing ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+              onClick={handleSync}
+              disabled={syncing || syncingAll || recheckingFitment || !currentSellerId}
+              sx={{ whiteSpace: 'nowrap' }}
+            >
+              {syncing ? 'Syncing...' : 'Poll eBay'}
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              color="secondary"
+              startIcon={syncingAll ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+              onClick={handleSyncAll}
+              disabled={syncing || syncingAll || recheckingFitment}
+              sx={{ whiteSpace: 'nowrap' }}
+            >
+              {syncingAll ? (syncAllProgress || 'Syncing All...') : 'Poll All Sellers'}
+            </Button>
             <Tooltip
-              title={`${apiUsage.used.toLocaleString()} / ${apiUsage.limit.toLocaleString()} calls used today. Resets in ${apiUsage.hoursUntilReset}h`}
+              title={selectedIds.size
+                ? 'Ask eBay whether the selected Active listings currently have parts compatibility. Updates Fitment Summary from the live listing.'
+                : 'Ask eBay whether Active listings with no saved fitment currently have parts compatibility. Updates Fitment Summary from the live listing. Uses 1 GetItem call per listing.'}
               arrow
             >
-              <Chip
-                size="small"
-                label={`API: ${Math.round((apiUsage.used / apiUsage.limit) * 100)}%`}
-                color={
-                  apiUsage.used / apiUsage.limit > 0.9 ? 'error' :
-                    apiUsage.used / apiUsage.limit > 0.7 ? 'warning' :
-                      'success'
-                }
-                variant="outlined"
-                sx={{ fontSize: '0.75rem' }}
-              />
+              <span>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="primary"
+                  startIcon={recheckingFitment ? <CircularProgress size={16} color="inherit" /> : <FactCheckIcon />}
+                  onClick={handleRecheckLiveFitment}
+                  disabled={syncing || syncingAll || recheckingFitment || !currentSellerId}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  {recheckingFitment ? 'Rechecking...' : (selectedIds.size ? `Recheck live fitment (${selectedIds.size})` : 'Recheck live fitment')}
+                </Button>
+              </span>
             </Tooltip>
-          )}
-
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={() => navigate('/admin/compatibility-batch-history')}
-            sx={{ fontSize: '0.75rem', textTransform: 'none' }}
-          >
-            Batch History
-          </Button>
+          </Box>
         </Box>
 
-        <Box display="flex" gap={2} alignItems="center">
-          {/* SEARCH BOX */}
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 1.5,
+          }}
+        >
           <TextField
             size="small"
             placeholder="Search SKU, ID, Title..."
@@ -1511,11 +1986,9 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
             onChange={(e) => {
               const newValue = e.target.value;
               setSearchTerm(newValue);
-
-              // FIX: If user deletes everything, reload the full list immediately
               if (newValue === '') {
-                setPage(1);
-                loadListings(''); // Pass empty string to fetch all
+                if (page !== 1) setPage(1);
+                else loadListings('');
               }
             }}
             onKeyPress={handleKeyPress}
@@ -1526,26 +1999,25 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
                     <IconButton
                       onClick={() => {
                         setSearchTerm('');
-                        setPage(1);
-                        loadListings('');
+                        if (page !== 1) setPage(1);
+                        else loadListings('');
                       }}
                       edge="end"
                       size="small"
-                      sx={{ mr: 1 }}
+                      sx={{ mr: 0.5 }}
                     >
                       <ClearIcon fontSize="small" />
                     </IconButton>
                   )}
-                  <IconButton onClick={handleSearch} edge="end">
+                  <IconButton onClick={handleSearch} edge="end" size="small">
                     <SearchIcon />
                   </IconButton>
                 </InputAdornment>
               )
             }}
-            sx={{ width: 300, bgcolor: 'white' }}
+            sx={{ flex: '1 1 220px', minWidth: 200, maxWidth: 320, bgcolor: 'white' }}
           />
 
-          {/* GO TO PAGE INPUT */}
           <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
             <TextField
               type="number"
@@ -1555,9 +2027,9 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
               onChange={(e) => setPageInputValue(e.target.value)}
               onKeyPress={(e) => e.key === 'Enter' && handleGoToPage()}
               inputProps={{ min: 1, max: totalPages }}
-              sx={{ width: 180 }}
+              sx={{ width: 140 }}
             />
-            <Button variant="outlined" size="small" onClick={handleGoToPage}>
+            <Button variant="outlined" size="small" onClick={handleGoToPage} sx={{ minWidth: 48, height: 40 }}>
               Go
             </Button>
           </Box>
@@ -1566,7 +2038,10 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
             control={
               <Switch
                 checked={filterNoFitment}
-                onChange={(e) => setFilterNoFitment(e.target.checked)}
+                onChange={(e) => {
+                  setPage(1);
+                  setFilterNoFitment(e.target.checked);
+                }}
                 size="small"
                 color="warning"
               />
@@ -1576,69 +2051,75 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
                 No Fitment Only
               </Typography>
             }
-            sx={{ mr: 0 }}
+            sx={{ mr: 0, ml: 0 }}
           />
 
-          {/* Listed On date filter (IST) — single or range */}
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-            <Typography variant="caption" color="textSecondary" fontWeight={600}>
-              Listed On (IST)
-            </Typography>
-            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-              <ToggleButtonGroup
-                size="small" exclusive value={listedDateMode}
-                onChange={(_, v) => {
-                  if (!v) return;
-                  setListedDateMode(v);
-                  setListedDate(''); setListedFrom(''); setListedTo('');
-                  setPage(1);
-                }}
-                sx={{ '& .MuiToggleButton-root': { px: 1.25, py: 0.4, fontSize: '0.7rem' } }}
-              >
-                <ToggleButton value="single">Single</ToggleButton>
-                <ToggleButton value="range">Range</ToggleButton>
-              </ToggleButtonGroup>
-              {listedDateMode === 'single' ? (
-                <TextField
-                  type="date" size="small" InputLabelProps={{ shrink: true }}
-                  value={listedDate}
-                  onChange={e => { setListedDate(e.target.value); setPage(1); }}
-                  sx={{ width: 150 }}
-                />
-              ) : (
-                <>
-                  <TextField
-                    label="From" type="date" size="small" InputLabelProps={{ shrink: true }}
-                    value={listedFrom}
-                    onChange={e => { setListedFrom(e.target.value); setPage(1); }}
-                    sx={{ width: 150 }}
-                  />
-                  <TextField
-                    label="To" type="date" size="small" InputLabelProps={{ shrink: true }}
-                    value={listedTo}
-                    onChange={e => { setListedTo(e.target.value); setPage(1); }}
-                    sx={{ width: 150 }}
-                  />
-                </>
-              )}
-              {(listedDate || listedFrom || listedTo) && (
-                <Button size="small" variant="outlined" onClick={() => { setListedDate(''); setListedFrom(''); setListedTo(''); setPage(1); }}>Clear</Button>
-              )}
-            </Box>
-          </Box>
-
-          <FormControl size="small" sx={{ minWidth: 200 }}>
-            <InputLabel>Select Seller</InputLabel>
-            <Select value={currentSellerId} label="Select Seller" onChange={(e) => setCurrentSellerId(e.target.value)}>
-              {sellers.map((s) => (<MenuItem key={s._id} value={s._id}>{s.user?.username || s.user?.email}</MenuItem>))}
+          <FormControl size="small" sx={{ minWidth: 120 }}>
+            <InputLabel>Status</InputLabel>
+            <Select
+              value={listingStatusFilter}
+              label="Status"
+              onChange={(e) => {
+                setListingStatusFilter(e.target.value);
+                setPage(1);
+              }}
+            >
+              <MenuItem value="active">Active</MenuItem>
+              <MenuItem value="ended">Ended</MenuItem>
+              <MenuItem value="all">All</MenuItem>
             </Select>
           </FormControl>
-          <Button variant="contained" startIcon={syncing ? <CircularProgress size={20} color="inherit" /> : <RefreshIcon />} onClick={handleSync} disabled={syncing || syncingAll || !currentSellerId}>
-            {syncing ? 'Syncing...' : 'Poll eBay'}
-          </Button>
-          <Button variant="outlined" color="secondary" startIcon={syncingAll ? <CircularProgress size={20} color="inherit" /> : <RefreshIcon />} onClick={handleSyncAll} disabled={syncing || syncingAll}>
-            {syncingAll ? (syncAllProgress || 'Syncing All...') : 'Poll All Sellers'}
-          </Button>
+
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Typography variant="caption" color="textSecondary" fontWeight={600} sx={{ whiteSpace: 'nowrap' }}>
+              Listed On (IST)
+            </Typography>
+            <ToggleButtonGroup
+              size="small" exclusive value={listedDateMode}
+              onChange={(_, v) => {
+                if (!v) return;
+                setListedDateMode(v);
+                setListedDate(''); setListedFrom(''); setListedTo('');
+                setPage(1);
+              }}
+              sx={{
+                height: 40,
+                '& .MuiToggleButton-root': { px: 1.25, py: 0, fontSize: '0.75rem', height: 40 }
+              }}
+            >
+              <ToggleButton value="single">Single</ToggleButton>
+              <ToggleButton value="range">Range</ToggleButton>
+            </ToggleButtonGroup>
+            {listedDateMode === 'single' ? (
+              <TextField
+                type="date" size="small"
+                value={listedDate}
+                onChange={e => { setListedDate(e.target.value); setPage(1); }}
+                sx={{ width: 150 }}
+                title="Filters to this IST calendar day only"
+              />
+            ) : (
+              <>
+                <TextField
+                  type="date" size="small"
+                  value={listedFrom}
+                  onChange={e => { setListedFrom(e.target.value); setPage(1); }}
+                  sx={{ width: 150 }}
+                  inputProps={{ 'aria-label': 'Listed from' }}
+                />
+                <TextField
+                  type="date" size="small"
+                  value={listedTo}
+                  onChange={e => { setListedTo(e.target.value); setPage(1); }}
+                  sx={{ width: 150 }}
+                  inputProps={{ 'aria-label': 'Listed to' }}
+                />
+              </>
+            )}
+            {(listedDate || listedFrom || listedTo) && (
+              <Button size="small" variant="outlined" onClick={() => { setListedDate(''); setListedFrom(''); setListedTo(''); setPage(1); }} sx={{ height: 40 }}>Clear</Button>
+            )}
+          </Box>
         </Box>
       </Box>
 
@@ -1660,9 +2141,27 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
         </Alert>
       )}
 
+      {recheckingFitment && (
+        <Alert
+          severity="info"
+          sx={{ mb: 2, borderRadius: 2 }}
+          icon={<CircularProgress size={18} color="inherit" />}
+        >
+          <Typography variant="body2" fontWeight={700}>
+            Rechecking live fitment on eBay (Active listings)
+          </Typography>
+          {recheckFitmentProgress && (
+            <Typography variant="caption" sx={{ display: 'block', mt: 0.25 }}>
+              {recheckFitmentProgress}
+            </Typography>
+          )}
+        </Alert>
+      )}
+
       {/* TABLE */}
-      {loading ? <Box display="flex" justifyContent="center" mt={5}><CircularProgress /></Box> : (
+      {loading && listings.length === 0 ? <Box display="flex" justifyContent="center" mt={5}><CircularProgress /></Box> : (
         <>
+          {loading && <LinearProgress sx={{ mb: 1, borderRadius: 1 }} />}
           {/* Bulk select toolbar */}
           {selectedIds.size > 0 && (
             <Box sx={{
@@ -1690,90 +2189,25 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
               </Button>
             </Box>
           )}
-          <TableContainer component={Paper} sx={{ maxHeight: 'calc(100vh - 260px)', overflow: 'auto' }}>
-            <Table stickyHeader>
-              <TableHead sx={{ bgcolor: '#f5f5f5' }}>
-                <TableRow>
-                  <TableCell padding="checkbox">
-                    <Checkbox
-                      size="small"
-                      checked={displayedListings.length > 0 && displayedListings.every(l => selectedIds.has(l.itemId))}
-                      indeterminate={selectedIds.size > 0 && !displayedListings.every(l => selectedIds.has(l.itemId))}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setSelectedIds(new Set(displayedListings.map(l => l.itemId)));
-                        } else {
-                          setSelectedIds(new Set());
-                        }
-                      }}
-                      title="Select all on this page"
-                    />
-                  </TableCell>
-                  <TableCell width="80">Image</TableCell>
-                  <TableCell width="25%">Title & SKU</TableCell>
-                  <TableCell>Price</TableCell>
-                  <TableCell>Listed On</TableCell>
-                  <TableCell width="40%">Fitment Summary</TableCell>
-                  <TableCell>Action</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {displayedListings.map((item, index) => {
-                  const fitmentSummary = groupFitmentData(item.compatibility);
-                  const isSelected = selectedIds.has(item.itemId);
-                  return (
-                    <TableRow key={item.itemId} selected={isSelected} hover>
-                      <TableCell padding="checkbox">
-                        <Checkbox
-                          size="small"
-                          checked={isSelected}
-                          onChange={(e) => {
-                            setSelectedIds(prev => {
-                              const next = new Set(prev);
-                              if (e.target.checked) next.add(item.itemId);
-                              else next.delete(item.itemId);
-                              return next;
-                            });
-                          }}
-                        />
-                      </TableCell>
-                      <TableCell>{item.mainImageUrl && <img src={item.mainImageUrl} alt="" style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 4 }} />}</TableCell>
-                      <TableCell>
-                        <Typography variant="subtitle2" sx={{ lineHeight: 1.2, mb: 0.5 }}>{item.title}</Typography>
-                        <Chip label={item.sku || 'No SKU'} size="small" variant="outlined" sx={{ fontSize: '0.7rem' }} />
-                        <Typography variant="caption" display="block" color="textSecondary" mt={0.5}>ID: {item.itemId}</Typography>
-                      </TableCell>
-                      <TableCell>{item.currency} {item.currentPrice}</TableCell>
-                      <TableCell><Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>{formatDate(item.startTime)}</Typography></TableCell>
-
-                      <TableCell>
-                        {fitmentSummary.length > 0 ? (
-                          <Box sx={{ maxHeight: 120, overflowY: 'auto', border: '1px solid #eee', borderRadius: 1, p: 1, bgcolor: '#fafafa' }}>
-                            {fitmentSummary.map((grp, i) => (
-                              <Typography key={i} variant="caption" display="block" sx={{ mb: 0.5, lineHeight: 1.3 }}>
-                                <b>{grp.title}</b>: {grp.years}
-                              </Typography>
-                            ))}
-                          </Box>
-                        ) : (
-                          <Typography variant="caption" color="textSecondary" sx={{ fontStyle: 'italic' }}>No compatibility data</Typography>
-                        )}
-                      </TableCell>
-
-                      <TableCell>
-                        <Button variant="outlined" size="small" startIcon={<EditIcon />} onClick={() => handleEditClick(item, index)}>Edit</Button>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </TableContainer>
+          <CompatibilityListingsTable
+            listings={listings}
+            selectedIds={selectedIds}
+            sortBy={sortBy}
+            sortDir={sortDir}
+            listedDate={listedDate}
+            listedFrom={listedFrom}
+            listedTo={listedTo}
+            listingStatusFilter={listingStatusFilter}
+            onSort={onSort}
+            onEdit={onEdit}
+            onToggleSelect={onToggleSelect}
+            onToggleSelectAll={onToggleSelectAll}
+          />
           <Box sx={{ mt: 2, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2 }}>
             <Typography variant="body2" color="textSecondary">
-              Showing {displayedListings.length}{filterNoFitment ? ' (filtered)' : ` of ${totalItems}`} listings
+              Showing {listings.length} of {totalItems} listings
             </Typography>
-            <Pagination count={totalPages} page={page} onChange={(e, v) => setPage(v)} color="primary" showFirstButton showLastButton />
+            <Pagination count={Math.max(1, totalPages || 1)} page={page} onChange={(e, v) => setPage(v)} color="primary" showFirstButton showLastButton />
           </Box>
         </>
       )}
@@ -1830,7 +2264,7 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
               </Box>
             )}
             <Typography variant="h6" sx={{ fontWeight: 'bold', mb: 0.5, fontSize: '1.3rem' }}>
-              {selectedItem?.title}
+              {selectedItem?.title || (detailsLoading ? 'Loading listing from eBay…' : 'Untitled listing')}
             </Typography>
             <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
               <Typography variant="body2" color="textSecondary">
@@ -1897,7 +2331,12 @@ Resets in: ${rateLimitInfo.hoursUntilReset} hour${rateLimitInfo.hoursUntilReset 
               </Box>
             )}
             <Typography variant="subtitle1" fontWeight="bold" gutterBottom>Item Description Preview</Typography>
-            {selectedItem?.descriptionPreview ? (
+            {detailsLoading ? (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 2 }}>
+                <CircularProgress size={16} />
+                <Typography variant="body2" color="textSecondary">Loading title, SKU, description, and fitment from eBay…</Typography>
+              </Box>
+            ) : selectedItem?.descriptionPreview ? (
               <div style={{ padding: 15, backgroundColor: '#fff', border: '1px solid #ccc', borderRadius: 4 }} dangerouslySetInnerHTML={{ __html: selectedItem.descriptionPreview }} />
             ) : <Typography variant="body2" color="textSecondary">No preview available.</Typography>}
           </Box>

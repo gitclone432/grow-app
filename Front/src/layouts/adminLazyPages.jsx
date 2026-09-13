@@ -47,6 +47,8 @@ export const EbayAnalyticsHubPage = lazy(() => import('../pages/admin/EbayAnalyt
 export const EbayFeedbackPage = lazy(() => import('../pages/admin/EbayFeedbackPage.jsx'));
 export const EbayApiTesterPage = lazy(() => import('../pages/admin/EbayApiTesterPage.jsx'));
 export const EbayInventoryManagerPage = lazy(() => import('../pages/admin/EbayInventoryManagerPage.jsx'));
+export const EbayBuyingLabPage = lazy(() => import('../pages/admin/EbayBuyingLabPage.jsx'));
+export const EbayBuyingAccountsPage = lazy(() => import('../pages/admin/EbayBuyingAccountsPage.jsx'));
 export const GetOrdersApiPage = lazy(() => import('../pages/admin/GetOrdersApiPage.jsx'));
 export const SkuIndexSyncPage = lazy(() => import('../pages/admin/SkuIndexSyncPage.jsx'));
 export const DuplicateSkusPage = lazy(() => import('../pages/admin/DuplicateSkusPage.jsx'));
@@ -92,6 +94,7 @@ export const InternalMessagesAdminPage = lazy(() => import('../pages/admin/Inter
 export const ManageCreditCardsPage = lazy(() => import('../pages/admin/ManageCreditCardsPage.jsx'));
 export const ExcludeOrderQtySkipsPage = lazy(() => import('../pages/admin/ExcludeOrderQtySkipsPage.jsx'));
 export const CronJobsPage = lazy(() => import('../pages/admin/CronJobsPage.jsx'));
+export const InfraUsagePage = lazy(() => import('../pages/admin/InfraUsagePage.jsx'));
 export const ScraperTesterPage = lazy(() => import('../pages/admin/ScraperTesterPage.jsx'));
 export const ImageOverlaySettingsPage = lazy(() => import('../pages/admin/ImageOverlaySettingsPage.jsx'));
 export const GmailTesterPage = lazy(() => import('../pages/admin/GmailTesterPage.jsx'));

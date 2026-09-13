@@ -128,6 +128,7 @@ export const PAGE_DEFAULT_ROLES = {
   'CreditCards': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'ExcludeOrderQtySkips': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
   'CronJobs': ['superadmin'],
+  'InfraUsage': ['superadmin'],
   'AffiliateOrders': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // eBay Parameters
@@ -190,6 +191,10 @@ export const PAGE_DEFAULT_ROLES = {
   'EtsyOrderAnalytics': ['superadmin', 'listingadmin'],
   'EtsyProfitSheet': ['superadmin', 'listingadmin'],
   'EtsyDashboard': ['superadmin', 'listingadmin'],
+
+  // eBay Buying
+  'EbayBuyingAccounts': ['superadmin'],
+  'EbayBuyingLab': ['superadmin'],
 
   // Stores
   'StoresPage': ['superadmin', 'listingadmin'],

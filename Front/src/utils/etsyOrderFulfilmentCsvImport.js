@@ -3,6 +3,7 @@ import { normalizeIdentifierString } from './normalizeIdentifierString.js';
 import { ETSY_ORDER_FULFILMENT_COLUMNS } from '../pages/admin/etsy/etsyOrderFulfilmentColumns.js';
 import { enrichOrderWithAmazonPricing, formatExRate, formatRupeeField, ETSY_RUPEE_INPUT_FIELDS } from './etsyOrderPricing.js';
 import { normalizeEtsyRegion } from './etsyAddressZip.js';
+import { formatSheetDateDmy, swapAmbiguousIsoDayMonth } from './etsySheetDate.js';
 
 /** Exact headers from the Order Fulfilment Google Sheet (import + template). */
 export const ETSY_FULFILMENT_SHEET_HEADERS = [
@@ -331,12 +332,13 @@ function alignDateYearToSold(soldIso, otherIso) {
   return otherIso;
 }
 
-function normalizeDate(value, defaultYear = new Date().getFullYear()) {
+function normalizeDate(value, defaultYear = new Date().getFullYear(), swapAmbiguousDay = false) {
   const raw = String(value || '').trim();
   if (!raw || raw === '-') return '';
 
   if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
-    return raw.slice(0, 10);
+    const iso = raw.slice(0, 10);
+    return swapAmbiguousDay ? swapAmbiguousIsoDayMonth(iso) : iso;
   }
 
   // Raw Excel serial (e.g. 46207 = 2026-07-04). Old years are usually MMM-YY
@@ -576,7 +578,11 @@ export function parseEtsyOrderFulfilmentMatrix(matrix, options = {}) {
       if (column.key === 'rowNum' || column.key === 'storeName') continue;
       if (headerMap[column.key] === undefined) continue;
       row[column.key] = DATE_FIELDS.has(column.key)
-        ? normalizeDate(cells[headerMap[column.key]], defaultYear)
+        ? normalizeDate(
+          cells[headerMap[column.key]],
+          defaultYear,
+          Boolean(options.swapAmbiguousOrderDate && column.key === 'dateSold'),
+        )
         : coerceValue(column.key, cells[headerMap[column.key]]);
     }
 
@@ -630,5 +636,51 @@ export function downloadEtsyImportTemplate() {
   link.href = url;
   link.download = 'etsy-order-fulfilment-template.csv';
   link.click();
+  URL.revokeObjectURL(url);
+}
+
+function csvEscape(value) {
+  const text = value == null ? '' : String(value);
+  if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+export function buildEtsySheetCsv({ columns = [], orders = [], storeNameById = {} }) {
+  const headers = columns.map((column) => column.label);
+  const lines = [headers.map(csvEscape).join(',')];
+
+  orders.forEach((raw, index) => {
+    const order = enrichOrderWithAmazonPricing(raw);
+    const cells = columns.map((column) => {
+      if (column.key === 'rowNum') return String(index + 1);
+      if (column.key === 'storeName') {
+        return order.storeName || storeNameById[String(order.store)] || '';
+      }
+      const value = order[column.key];
+      if (column.inputType === 'date') return formatSheetDateDmy(value);
+      if (value == null || value === '' || value === '-') return '';
+      return String(value);
+    });
+    lines.push(cells.map(csvEscape).join(','));
+  });
+
+  return `\uFEFF${lines.join('\n')}`;
+}
+
+export function downloadEtsySheetCsv({
+  columns,
+  orders,
+  storeNameById,
+  filename = 'etsy-sheet',
+}) {
+  const csv = buildEtsySheetCsv({ columns, orders, storeNameById });
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename.endsWith('.csv') ? filename : `${filename}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }

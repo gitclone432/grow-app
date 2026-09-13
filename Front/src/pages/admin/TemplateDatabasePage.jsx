@@ -4,7 +4,7 @@ import {
   TableRow, Typography, Chip, Stack, IconButton, Link as MuiLink, FormControl,
   InputLabel, Select, MenuItem, TextField, Collapse, Pagination, Alert,
   useMediaQuery, useTheme, Dialog, DialogTitle, DialogContent, DialogActions,
-  Divider, Grid, Tabs, Tab, TableSortLabel
+  Divider, Grid, Tabs, Tab, TableSortLabel, LinearProgress
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
@@ -413,7 +413,7 @@ export default function TemplateDatabasePage() {
 
   const fetchTemplates = async () => {
     try {
-      const { data } = await api.get('/listing-templates');
+      const { data } = await api.get('/listing-templates', { params: { summary: true } });
       setTemplates(data || []);
     } catch (err) {
       console.error('Error fetching templates:', err);
@@ -527,6 +527,7 @@ export default function TemplateDatabasePage() {
       const params = {
         page: pagination.page,
         limit: pagination.limit,
+        light: 1,
         ...dateFilterParams,
       };
       
@@ -905,7 +906,7 @@ export default function TemplateDatabasePage() {
               {summaryError}
             </Alert>
           )}
-          {summaryLoading ? (
+          {summaryLoading && summaryRows.length === 0 ? (
             <Paper sx={{ p: 3, textAlign: 'center' }}>
               <Typography>Loading summary...</Typography>
             </Paper>
@@ -914,7 +915,9 @@ export default function TemplateDatabasePage() {
               <Typography color="text.secondary">No listing data to summarize yet.</Typography>
             </Paper>
           ) : (
-            <TableContainer component={Paper} sx={{ overflowX: 'auto' }}>
+            <Paper sx={{ overflow: 'hidden' }}>
+              {summaryLoading && <LinearProgress />}
+              <TableContainer sx={{ overflowX: 'auto' }}>
               <Table size="small">
                 <TableHead>
                   <TableRow sx={{ bgcolor: 'grey.100' }}>
@@ -1005,6 +1008,7 @@ export default function TemplateDatabasePage() {
                 </TableBody>
               </Table>
             </TableContainer>
+            </Paper>
           )}
         </Box>
       )}
@@ -1388,7 +1392,7 @@ export default function TemplateDatabasePage() {
       )}
 
       {/* Loading */}
-      {loading ? (
+      {loading && listings.length === 0 ? (
         <Paper sx={{ p: 3, textAlign: 'center' }}>
           <Typography>Loading listings...</Typography>
         </Paper>

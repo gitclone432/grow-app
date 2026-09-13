@@ -32,6 +32,7 @@ import InsightsIcon from '@mui/icons-material/Insights';
 import StoreIcon from '@mui/icons-material/Store';
 import AppsIcon from '@mui/icons-material/Apps';
 import StorefrontIcon from '@mui/icons-material/Storefront';
+import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
 import CategoryIcon from '@mui/icons-material/Category';
 import ListAltIcon from '@mui/icons-material/ListAlt';
 import ExpandMore from '@mui/icons-material/ExpandMore';
@@ -113,6 +114,8 @@ import {
   EbayFeedbackPage,
   EbayApiTesterPage,
   EbayInventoryManagerPage,
+  EbayBuyingLabPage,
+  EbayBuyingAccountsPage,
   GetOrdersApiPage,
   SkuIndexSyncPage,
   DuplicateSkusPage,
@@ -158,6 +161,7 @@ import {
   ManageCreditCardsPage,
   ExcludeOrderQtySkipsPage,
   CronJobsPage,
+  InfraUsagePage,
   ScraperTesterPage,
   ImageOverlaySettingsPage,
   GmailTesterPage,
@@ -256,6 +260,7 @@ const categoryIcons = {
   hrManagement: SupervisorAccountIcon,
   others: AppsIcon,
   etsy: StorefrontIcon,
+  ebayBuying: ShoppingCartIcon,
   settingsSection: SettingsIcon,
 };
 
@@ -369,6 +374,7 @@ const COMPONENT_MAP = {
   'CreditCards': ManageCreditCardsPage,
   'ExcludeOrderQtySkips': ExcludeOrderQtySkipsPage,
   'CronJobs': CronJobsPage,
+  'InfraUsage': InfraUsagePage,
   'ScraperTester': ScraperTesterPage,
   'ImageOverlaySettings': ImageOverlaySettingsPage,
   'GmailTester': GmailTesterPage,
@@ -432,6 +438,8 @@ const COMPONENT_MAP = {
   'EtsyDailyOrders': EtsyDailyOrdersPage,
   'EtsyProfitSheet': EtsyProfitSheetPage,
   'EtsyDashboard': EtsyDashboardPage,
+  'EbayBuyingLab': EbayBuyingLabPage,
+  'EbayBuyingAccounts': EbayBuyingAccountsPage,
 };
 
 export default function AdminLayout({ user, onLogout }) {
@@ -781,6 +789,7 @@ export default function AdminLayout({ user, onLogout }) {
         {renderCategoryMenu('hrManagement')}
         {renderCategoryMenu('others')}
         {renderCategoryMenu('etsy')}
+        {renderCategoryMenu('ebayBuying')}
         {renderCategoryMenu('settingsSection')}
 
         {/* Ideas & Issues - standalone for users who don't see it in HR category */}
@@ -967,7 +976,7 @@ export default function AdminLayout({ user, onLogout }) {
           </Drawer>
         )}
       </Box>
-      <Box component="main" sx={{ flexGrow: 1, p: 3, width: { sm: `calc(100% - ${sidebarOpen ? drawerWidth : 56}px)` }, transition: 'width 0.2s' }}>
+      <Box component="main" sx={{ flexGrow: 1, p: 3, minWidth: 0, width: { sm: `calc(100% - ${sidebarOpen ? drawerWidth : 56}px)` }, transition: 'width 0.2s' }}>
         <Toolbar />
         <Suspense
           fallback={(

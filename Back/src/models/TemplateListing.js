@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { invalidateTemplateListingDashboardCache } from '../utils/templateListingDashboardCache.js';
 
 function extractBaseCustomLabel(value) {
   return String(value || '').trim().split('-')[0].trim();
@@ -227,6 +228,20 @@ templateListingSchema.index({ sellerId: 1, templateId: 1, createdAt: -1 });
 templateListingSchema.index({ customLabel: 1 });
 templateListingSchema.index({ deletedAt: 1 });
 templateListingSchema.index({ templateId: 1, sellerId: 1, downloadBatchId: 1 });
+// Covers Listings Database summary/stats so aggregations do not load description/HTML/snapshots.
+templateListingSchema.index(
+  {
+    deletedAt: 1,
+    sellerId: 1,
+    createdBy: 1,
+    status: 1,
+    listingOrigin: 1,
+    templateId: 1,
+    ebayPublishedAt: 1,
+    createdAt: -1,
+  },
+  { name: 'database_summary_cover' }
+);
 
 // Supports Amazon Stock Check SKU -> ASIN lookup with case-insensitive customLabel matching.
 templateListingSchema.index(
@@ -261,5 +276,16 @@ templateListingSchema.pre('save', function(next) {
   
   next();
 });
+
+function bumpListingDashboardCache() {
+  invalidateTemplateListingDashboardCache();
+}
+
+templateListingSchema.post('save', bumpListingDashboardCache);
+templateListingSchema.post('insertMany', bumpListingDashboardCache);
+templateListingSchema.post(
+  ['findOneAndUpdate', 'findOneAndDelete', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany'],
+  bumpListingDashboardCache
+);
 
 export default mongoose.model('TemplateListing', templateListingSchema);

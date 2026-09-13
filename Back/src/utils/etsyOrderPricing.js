@@ -1,6 +1,6 @@
 /** Pricing formulas for Etsy Order Fulfilment */
 
-export const ETSY_COMPUTED_FIELDS = ['tId', 'relistFee', 'net'];
+export const ETSY_COMPUTED_FIELDS = ['tId', 'relistFee', 'additionalFees', 'net'];
 
 export const ETSY_PRICING_TRIGGER_FIELDS = new Set([
   'qty',
@@ -23,6 +23,8 @@ export const AMAZON_PRICING_TRIGGER_FIELDS = new Set([
   ...ETSY_PRICING_TRIGGER_FIELDS,
 ]);
 
+const AMAZON_USD_INPUT_FIELDS = new Set(['itemCost', 'shipCost', 'amazonTax']);
+
 const AMAZON_PRICING_COMPUTED_FIELDS = [
   'totalInUsd',
   'totalInRs',
@@ -42,8 +44,9 @@ export const ETSY_RUPEE_INPUT_FIELDS = new Set([
   'tcs',
   'offsiteAds',
   'coupons',
-  'additionalFees',
 ]);
+
+export const ETSY_ZERO_AS_EMPTY_FIELDS = new Set(['coupons', 'shipCost']);
 
 export const ETSY_RUPEE_FIELDS = new Set([
   ...ETSY_RUPEE_INPUT_FIELDS,
@@ -54,6 +57,7 @@ const MARKUP_RATE = 0.035;
 const IGST_RATE = 0.18;
 const ETSY_T_ID_AMOUNT = 25;
 const ETSY_RELIST_FEE_PER_UNIT = 19;
+export const ETSY_DEFAULT_EX_RATE = 90;
 
 export function parseMoney(value) {
   const cleaned = String(value ?? '').replace(/[^\d.-]/g, '');
@@ -82,27 +86,60 @@ function formatRs(value) {
 }
 
 export function formatExRate(value) {
-  return formatRupeeField(value);
+  const amount = parseMoney(value);
+  return formatRs(amount > 0 ? amount : ETSY_DEFAULT_EX_RATE);
 }
 
-export function formatRupeeField(value) {
+export function formatRupeeField(value, { zeroAsEmpty = false } = {}) {
   const raw = String(value ?? '').trim();
   if (!raw || raw === '-') return '';
-  return formatRs(parseMoney(raw));
+  const amount = parseMoney(raw);
+  if (zeroAsEmpty && amount === 0) return '';
+  return formatRs(amount);
 }
 
 export function formatEtsyRupeeInputFields(row = {}) {
   const formatted = {};
-  for (const key of ETSY_RUPEE_INPUT_FIELDS) {
-    if (row[key] == null || !String(row[key]).trim()) continue;
-    const next = formatRupeeField(row[key]);
+  const keys = new Set([...ETSY_RUPEE_INPUT_FIELDS, ...ETSY_ZERO_AS_EMPTY_FIELDS]);
+  for (const key of keys) {
+    const raw = row[key];
+    const zeroAsEmpty = ETSY_ZERO_AS_EMPTY_FIELDS.has(key);
+    if (raw == null || !String(raw).trim()) {
+      if (zeroAsEmpty) formatted[key] = '';
+      continue;
+    }
+    if (zeroAsEmpty && parseMoney(raw) === 0) {
+      formatted[key] = '';
+      continue;
+    }
+    if (!ETSY_RUPEE_INPUT_FIELDS.has(key)) continue;
+    const next = formatRupeeField(raw, { zeroAsEmpty });
     if (next) formatted[key] = next;
+    else if (zeroAsEmpty) formatted[key] = '';
   }
   return formatted;
 }
 
 export function formatEtsyRupeeFields(row = {}) {
   return formatEtsyRupeeInputFields(row);
+}
+
+function formatAmazonUsdInputFields(row = {}) {
+  const formatted = {};
+  for (const key of AMAZON_USD_INPUT_FIELDS) {
+    const raw = row[key];
+    if (raw == null || !String(raw).trim()) {
+      formatted[key] = '';
+      continue;
+    }
+    const amount = parseMoney(raw);
+    if (ETSY_ZERO_AS_EMPTY_FIELDS.has(key) && amount === 0) {
+      formatted[key] = '';
+      continue;
+    }
+    formatted[key] = formatUsd(amount);
+  }
+  return formatted;
 }
 
 export function computeEtsyDerivedFields(row = {}) {
@@ -132,26 +169,27 @@ export function computeEtsyDerivedFields(row = {}) {
     || coupons !== 0;
 
   if (!hasOrderData) {
-    return { tId: '', relistFee: '', net: '' };
+    return { tId: '', relistFee: '', additionalFees: '', net: '' };
   }
 
-  const netAmount = round2(
-    total
-    - tax
-    - etsyFee
-    - processingFee
-    - regulatoryOperatingFee
-    - tds
-    - tcs
-    - offsiteAds
-    - coupons
-    - relistFeeAmount
-    - tIdAmount
+  const additionalFeesAmount = round2(
+    tax
+    + etsyFee
+    + processingFee
+    + regulatoryOperatingFee
+    + tds
+    + tcs
+    + offsiteAds
+    + coupons
+    + relistFeeAmount
+    + tIdAmount
   );
+  const netAmount = round2(total - additionalFeesAmount);
 
   return {
     tId: formatRs(tIdAmount),
     relistFee: qty > 0 ? formatRs(relistFeeAmount) : formatRs(0),
+    additionalFees: formatRs(additionalFeesAmount),
     net: formatRs(netAmount),
   };
 }
@@ -160,19 +198,25 @@ export function computeAmazonDerivedFields(row = {}) {
   const itemCost = parseMoney(row.itemCost);
   const shipCost = parseMoney(row.shipCost);
   const amazonTax = parseMoney(row.amazonTax);
-  const exRate = parseMoney(row.exRate);
+  const parsedExRate = parseMoney(row.exRate);
+  const exRate = parsedExRate > 0 ? parsedExRate : ETSY_DEFAULT_EX_RATE;
   const net = parseMoney(row.net);
 
   const hasAmazonCostInputs = itemCost !== 0 || shipCost !== 0 || amazonTax !== 0;
 
+  // Total (USD) = Item Cost + Ship Cost + Tax
   const totalInUsd = round2(itemCost + shipCost + amazonTax);
   const totalInRs = exRate > 0 ? round2(totalInUsd * exRate) : 0;
+  // MarkUp Fee = 3.5% of in (Rs)
   const markUpFee = totalInRs > 0 ? round2(totalInRs * MARKUP_RATE) : 0;
+  // IGST = 18% of MarkUp Fee
   const igst = markUpFee > 0 ? round2(markUpFee * IGST_RATE) : 0;
+  // Amazon Total = MarkUp Fee + IGST
   const amazonTotal = round2(markUpFee + igst);
+  // In Hand = Net - in (Rs) - Amazon Total
   const inHand = round2(net - totalInRs - amazonTotal);
 
-  if (!hasAmazonCostInputs && exRate <= 0 && net === 0) {
+  if (!hasAmazonCostInputs) {
     return {
       totalInUsd: '',
       totalInRs: '',
@@ -184,23 +228,26 @@ export function computeAmazonDerivedFields(row = {}) {
   }
 
   return {
-    totalInUsd: hasAmazonCostInputs || totalInUsd > 0 ? formatUsd(totalInUsd) : '',
-    totalInRs: exRate > 0 && (hasAmazonCostInputs || totalInUsd > 0) ? formatRs(totalInRs) : '',
-    markUpFee: exRate > 0 && totalInRs > 0 ? formatRs(markUpFee) : '',
-    igst: exRate > 0 && markUpFee > 0 ? formatRs(igst) : '',
-    amazonTotal: exRate > 0 && amazonTotal > 0 ? formatRs(amazonTotal) : '',
-    inHand: net !== 0 || totalInRs > 0 || amazonTotal > 0 ? formatRs(inHand) : '',
+    totalInUsd: formatUsd(totalInUsd),
+    totalInRs: formatRs(totalInRs),
+    markUpFee: formatRs(markUpFee),
+    igst: formatRs(igst),
+    amazonTotal: formatRs(amazonTotal),
+    inHand: formatRs(inHand),
   };
 }
 
 import { applyAddressDerivedFields } from './etsyAddressZip.js';
 
 export function enrichOrderRow(order = {}) {
-  const inputFields = formatEtsyRupeeInputFields(order);
+  const inputFields = {
+    ...formatEtsyRupeeInputFields(order),
+    ...formatAmazonUsdInputFields(order),
+  };
   const withInputs = {
     ...order,
     ...inputFields,
-    ...(formatExRate(order.exRate) ? { exRate: formatExRate(order.exRate) } : {}),
+    exRate: formatExRate(order.exRate),
     ...computeEtsyDerivedFields({ ...order, ...inputFields }),
     ...applyAddressDerivedFields(order),
   };
@@ -226,7 +273,7 @@ export function applyAmazonPricingToUpdate(existing = {}, update = {}) {
   if (!shouldRecalculate) return result;
 
   const enriched = enrichOrderRow({ ...existing, ...result });
-  const computedPatch = {};
+  const computedPatch = { exRate: enriched.exRate };
   for (const key of [...ETSY_COMPUTED_FIELDS, ...AMAZON_PRICING_COMPUTED_FIELDS]) {
     computedPatch[key] = enriched[key];
   }

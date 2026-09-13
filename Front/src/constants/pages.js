@@ -21,6 +21,7 @@ export const PAGE_CATEGORIES = {
   hrManagement: { id: 'hrManagement', name: 'HR & Management', icon: 'SupervisorAccountIcon' },
   others: { id: 'others', name: 'Others', icon: 'AppsIcon' },
   etsy: { id: 'etsy', name: 'ETSY', icon: 'StorefrontIcon' },
+  ebayBuying: { id: 'ebayBuying', name: 'eBay Buying', icon: 'ShoppingCartIcon' },
   settingsSection: { id: 'settingsSection', name: 'Settings', icon: 'SettingsIcon' },
 };
 
@@ -133,6 +134,7 @@ export const PAGE_REGISTRY = [
   { id: 'CreditCards', name: 'Manage Credit Cards', path: '/credit-cards', category: 'finance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'ExcludeOrderQtySkips', name: 'Exclude <$3', path: '/exclude-order-qty-skips', category: 'settingsSection', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'CronJobs', name: 'Cron Jobs', path: '/cron-jobs', category: 'settingsSection', defaultRoles: ['superadmin'] },
+  { id: 'InfraUsage', name: 'Infra Usage', path: '/infra-usage', category: 'settingsSection', defaultRoles: ['superadmin'] },
   { id: 'ScraperTester', name: 'Scraper Tester', path: '/scraper-tester', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'ImageOverlaySettings', name: 'Image Overlay', path: '/image-overlay', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'GmailTester', name: 'Gmail Tester', path: '/gmail-tester', category: 'settingsSection', defaultRoles: ['superadmin'] },
@@ -192,6 +194,10 @@ export const PAGE_REGISTRY = [
   { id: 'EtsyProfitSheet', name: 'Profit Sheet', path: '/etsy/profit-sheet', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyOrderAnalytics', name: 'Etsy Order Analytics', path: '/etsy/order-analytics', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyDailyOrders', name: 'Daily Orders', path: '/etsy/daily-orders', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
+
+  // ====== EBAY BUYING ======
+  { id: 'EbayBuyingAccounts', name: 'Buying Accounts', path: '/ebay-buying/accounts', category: 'ebayBuying', defaultRoles: ['superadmin'] },
+  { id: 'EbayBuyingLab', name: 'Place Orders', path: '/ebay-buying', category: 'ebayBuying', defaultRoles: ['superadmin'] },
 
   // ====== SETTINGS ======
   { id: 'StoresPage', name: 'eBay Stores', path: '/stores-page', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin'] },

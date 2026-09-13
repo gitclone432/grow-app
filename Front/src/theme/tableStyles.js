@@ -57,7 +57,7 @@ export const tableContainerSx = {
   border: '1px solid',
   borderColor: alpha(BRAND_DARK, 0.1),
   boxShadow: dashboardSignatureTokens.shadows.table,
-  overflow: 'hidden',
+  overflow: 'auto',
 };
 
 /** Row-number index badge used in the first column */

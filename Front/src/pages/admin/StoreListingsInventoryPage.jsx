@@ -115,12 +115,18 @@ export default function StoreListingsInventoryPage({
   const [syncingSellerId, setSyncingSellerId] = useState('');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
   const prevSyncRunningRef = useRef(false);
+  const prevAnyStoreRowSyncingRef = useRef(false);
   const [search, setSearch] = useState('');
   const [selectedSellerId, setSelectedSellerId] = useState('');
   const [dateMode, setDateMode] = useState('none'); // none | single | range
   const [dateSingle, setDateSingle] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [fetchSellerId, setFetchSellerId] = useState('');
+  const [fetchDateMode, setFetchDateMode] = useState('single'); // single | range
+  const [fetchDateSingle, setFetchDateSingle] = useState('');
+  const [fetchDateFrom, setFetchDateFrom] = useState('');
+  const [fetchDateTo, setFetchDateTo] = useState('');
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(50);
   const [total, setTotal] = useState(0);
@@ -344,6 +350,13 @@ export default function StoreListingsInventoryPage({
   }, [active, anyStoreRowSyncing, loadStoreStatus]);
 
   useEffect(() => {
+    if (prevAnyStoreRowSyncingRef.current && !anyStoreRowSyncing) {
+      void loadListings();
+    }
+    prevAnyStoreRowSyncingRef.current = anyStoreRowSyncing;
+  }, [anyStoreRowSyncing, loadListings]);
+
+  useEffect(() => {
     const running = Boolean(storeStatus.sync?.running);
     if (prevSyncRunningRef.current && !running) {
       setSyncing(false);
@@ -441,6 +454,160 @@ export default function StoreListingsInventoryPage({
     }
   };
 
+  const resolveFetchDateRange = () => {
+    if (fetchDateMode === 'single') {
+      const day = String(fetchDateSingle || '').trim();
+      if (!day) return null;
+      return { startDate: day, endDate: day };
+    }
+    const from = String(fetchDateFrom || '').trim();
+    const to = String(fetchDateTo || '').trim();
+    if (!from && !to) return null;
+    if (from && to && from > to) return { error: 'From date must be on or before To date.' };
+    return { startDate: from || to, endDate: to || from };
+  };
+
+  const handleFetchListingsByDate = async () => {
+    const range = resolveFetchDateRange();
+    if (!range) {
+      setSnackbar({
+        open: true,
+        message: 'Choose a single date or a date range first.',
+        severity: 'warning',
+      });
+      return;
+    }
+    if (range.error) {
+      setSnackbar({ open: true, message: range.error, severity: 'warning' });
+      return;
+    }
+
+    const sid = String(fetchSellerId || '').trim();
+    const storeName = sid
+      ? (storeStatus.stores.find((s) => String(s.sellerId) === sid)?.sellerName || 'store')
+      : '';
+
+    if (sid) {
+      setSyncingSellerId(sid);
+      try {
+        const { data } = await api.post('/ebay/store-listings/sync-one', {
+          sellerId: sid,
+          startDate: range.startDate,
+          endDate: range.endDate,
+        });
+        if (!data?.success) {
+          setSnackbar({
+            open: true,
+            message: data?.message || data?.error || 'Date fetch did not start',
+            severity: 'error',
+          });
+          return;
+        }
+        setSnackbar({
+          open: true,
+          message: data?.message || `Date fetch started for ${storeName}.`,
+          severity: 'info',
+        });
+        await loadStoreStatus({ silent: true });
+      } catch (error) {
+        console.error('Failed to start date fetch:', error);
+        const msg =
+          error?.response?.data?.message
+          || error?.response?.data?.error
+          || error?.message
+          || 'Failed to start date fetch';
+        setSnackbar({ open: true, message: msg, severity: 'error' });
+      } finally {
+        setSyncingSellerId('');
+      }
+      return;
+    }
+
+    setSyncing(true);
+    try {
+      const { data } = await api.post('/ebay/sync-all-sellers-listings', {
+        startDate: range.startDate,
+        endDate: range.endDate,
+      });
+      if (!data?.success) {
+        setSnackbar({
+          open: true,
+          message: data?.message || 'Date fetch did not start',
+          severity: 'error',
+        });
+        setSyncing(false);
+        return;
+      }
+      setSnackbar({
+        open: true,
+        message: data?.message || 'Date fetch started for all stores.',
+        severity: 'info',
+      });
+      await loadStoreStatus({ silent: true });
+    } catch (error) {
+      console.error('Failed to start all-store date fetch:', error);
+      const msg =
+        error?.response?.data?.message
+        || error?.response?.data?.error
+        || error?.message
+        || 'Failed to start date fetch';
+      setSnackbar({ open: true, message: msg, severity: 'error' });
+      setSyncing(false);
+    }
+  };
+
+  const resolveCatalogSellerId = () => {
+    const selected = String(selectedSellerId || '').trim();
+    if (selected) return selected;
+    const stores = storeStatus.stores || [];
+    if (stores.length === 1) return String(stores[0].sellerId);
+    return '';
+  };
+
+  const handleRefreshCatalog = async () => {
+    const sid = resolveCatalogSellerId();
+    if (!sid) {
+      setSnackbar({
+        open: true,
+        message: 'Choose a store first, then refresh titles and prices.',
+        severity: 'warning',
+      });
+      return;
+    }
+    const storeName = storeStatus.stores.find((s) => String(s.sellerId) === sid)?.sellerName || 'store';
+    setSyncingSellerId(sid);
+    try {
+      const { data } = await api.post('/ebay/store-listings/sync-one', {
+        sellerId: sid,
+        catalogOnly: true,
+      });
+      if (!data?.success) {
+        setSnackbar({
+          open: true,
+          message: data?.message || data?.error || 'Refresh did not start',
+          severity: 'error',
+        });
+        return;
+      }
+      setSnackbar({
+        open: true,
+        message: data?.message || `Refreshing titles and prices for ${storeName}.`,
+        severity: 'info',
+      });
+      await loadStoreStatus({ silent: true });
+    } catch (error) {
+      console.error('Failed to refresh listing details:', error);
+      const msg =
+        error?.response?.data?.message
+        || error?.response?.data?.error
+        || error?.message
+        || 'Failed to refresh listing details';
+      setSnackbar({ open: true, message: msg, severity: 'error' });
+    } finally {
+      setSyncingSellerId('');
+    }
+  };
+
   const handleSyncOneStore = async (sellerId, sellerName, event, mode = 'incremental') => {
     event?.stopPropagation?.();
     const syncMode = mode === 'full' ? 'full' : 'incremental';
@@ -484,9 +651,10 @@ export default function StoreListingsInventoryPage({
   };
 
   const formatPrice = (value, currency) => {
-    if (typeof value !== 'number') return '-';
-    if (!currency) return value.toFixed(2);
-    return `${currency} ${value.toFixed(2)}`;
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(n)) return '-';
+    if (!currency) return n.toFixed(2);
+    return `${currency} ${n.toFixed(2)}`;
   };
 
   const formatDateTime = (value) => {
@@ -545,6 +713,8 @@ export default function StoreListingsInventoryPage({
   const resultStart = total === 0 ? 0 : (page * rowsPerPage) + 1;
   const resultEnd = total === 0 ? 0 : Math.min((page * rowsPerPage) + rows.length, total);
   const promotedPct = total > 0 ? Math.round((summary.promotedCount / total) * 100) : 0;
+  const missingCatalogCount = rows.filter((row) => !String(row.title || '').trim()).length;
+  const catalogIncomplete = !loading && rows.length > 0 && missingCatalogCount >= Math.ceil(rows.length * 0.5);
 
   const formatUsd = (n) =>
     Number(n || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -914,6 +1084,15 @@ export default function StoreListingsInventoryPage({
           Refresh
         </Button>
         <Button
+          variant="outlined"
+          startIcon={<RefreshIcon />}
+          onClick={() => void handleRefreshCatalog()}
+          disabled={syncing || anyStoreRowSyncing || Boolean(syncingSellerId)}
+          sx={{ textTransform: 'none' }}
+        >
+          Refresh titles & prices
+        </Button>
+        <Button
           variant="contained"
           startIcon={<RefreshIcon />}
           onClick={() => handleSyncAllStores('incremental')}
@@ -995,6 +1174,26 @@ export default function StoreListingsInventoryPage({
           ))}
         </Box>
       </Menu>
+
+      {catalogIncomplete ? (
+        <Alert
+          severity="warning"
+          sx={{ mb: 2 }}
+          action={(
+            <Button
+              color="inherit"
+              size="small"
+              onClick={() => void handleRefreshCatalog()}
+              disabled={syncing || anyStoreRowSyncing || Boolean(syncingSellerId)}
+            >
+              Refresh titles & prices
+            </Button>
+          )}
+        >
+          These rows have listing IDs but no title, price, or image. A recent sync saved stubs only.
+          Refresh titles & prices from eBay ActiveList (or pick a store first if more than one is connected).
+        </Alert>
+      ) : null}
 
       <Paper sx={{ borderRadius: 2, overflow: 'hidden' }}>
         <Box sx={{ px: 2, py: 1.25, borderBottom: '1px solid #eee' }}>
@@ -1226,9 +1425,110 @@ export default function StoreListingsInventoryPage({
             ) : null}
           </Box>
         </Box>
+        <Box
+          sx={{
+            display: 'flex',
+            gap: 1.5,
+            alignItems: 'flex-start',
+            flexWrap: 'wrap',
+            mb: 2,
+            p: 1.5,
+            bgcolor: 'action.hover',
+            borderRadius: 1,
+          }}
+        >
+          <FormControl size="small" sx={{ minWidth: 200 }}>
+            <InputLabel>Store</InputLabel>
+            <Select
+              label="Store"
+              value={fetchSellerId}
+              displayEmpty
+              onChange={(e) => setFetchSellerId(e.target.value)}
+            >
+              <MenuItem value="">All Stores</MenuItem>
+              {storeStatus.stores.map((store) => (
+                <MenuItem key={String(store.sellerId)} value={String(store.sellerId)}>
+                  {store.sellerName}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl size="small" sx={{ minWidth: 160 }}>
+            <InputLabel>Listed (start)</InputLabel>
+            <Select
+              label="Listed (start)"
+              value={fetchDateMode}
+              onChange={(e) => {
+                setFetchDateMode(e.target.value);
+                setFetchDateSingle('');
+                setFetchDateFrom('');
+                setFetchDateTo('');
+              }}
+            >
+              <MenuItem value="single">Single day</MenuItem>
+              <MenuItem value="range">Date range</MenuItem>
+            </Select>
+          </FormControl>
+          {fetchDateMode === 'single' ? (
+            <TextField
+              size="small"
+              type="date"
+              label="Date"
+              helperText="IST listing StartTime"
+              value={fetchDateSingle}
+              onChange={(e) => setFetchDateSingle(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              sx={{ minWidth: 180 }}
+            />
+          ) : (
+            <>
+              <TextField
+                size="small"
+                type="date"
+                label="From"
+                value={fetchDateFrom}
+                onChange={(e) => setFetchDateFrom(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 160 }}
+              />
+              <TextField
+                size="small"
+                type="date"
+                label="To"
+                helperText="IST listing StartTime"
+                value={fetchDateTo}
+                onChange={(e) => setFetchDateTo(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 160 }}
+              />
+            </>
+          )}
+          <Button
+            size="small"
+            variant="contained"
+            startIcon={<RefreshIcon />}
+            onClick={() => void handleFetchListingsByDate()}
+            disabled={syncing || anyStoreRowSyncing || Boolean(syncingSellerId)}
+            sx={{ mt: 0.25, textTransform: 'none' }}
+          >
+            Fetch listings
+          </Button>
+          <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center', maxWidth: 420 }}>
+            Pulls GetSellerList for the chosen store(s) and listing start dates. Ranges over 120 days are split automatically.
+          </Typography>
+        </Box>
         {storeStatus.sync?.running && storeStatus.sync?.mode ? (
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-            Running mode: <strong>{storeStatus.sync.mode === 'full' ? 'Full resync' : 'Incremental'}</strong>
+            Running mode:{' '}
+            <strong>
+              {storeStatus.sync.mode === 'full'
+                ? 'Full resync'
+                : storeStatus.sync.mode === 'custom'
+                  ? 'Date fetch'
+                  : storeStatus.sync.mode === 'catalog'
+                    ? 'Titles & prices'
+                    : 'Incremental'}
+            </strong>
           </Typography>
         ) : null}
 

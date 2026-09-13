@@ -20,6 +20,13 @@ export function getOpenAiModel() {
   return String(process.env.OPENAI_MODEL || '').trim() || DEFAULT_OPENAI_MODEL;
 }
 
+/** Dedicated fitment key if set; otherwise the main OpenAI key. */
+export function getFitmentApiKey() {
+  const dedicated = String(process.env.OPENAI_FITMENT_API_KEY || '').trim();
+  if (dedicated) return dedicated;
+  return String(process.env.OPENAI_API_KEY || '').trim() || undefined;
+}
+
 /**
  * Build chat.completions.create params for the configured model.
  *
