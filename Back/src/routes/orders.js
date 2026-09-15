@@ -17,6 +17,120 @@ import { FINAL_CANCELLED_STATES } from '../constants/cancelStates.js';
 
 const router = Router();
 const EXCLUDED_CLIENT_USERNAME = 'Vergo';
+const ORDER_FULFILLMENT_BOARD_STATUSES = Object.freeze([
+  'todo',
+  'out_of_stock',
+  'cancellation',
+  'address_issue',
+  'late_delivery',
+  'not_fulfilled',
+  'fulfilled',
+  'buyer_confirmation',
+]);
+const ORDER_FULFILLMENT_BOARD_STATUS_SET = new Set(ORDER_FULFILLMENT_BOARD_STATUSES);
+
+const isOrderFulfillmentBoardStatus = (status) => ORDER_FULFILLMENT_BOARD_STATUS_SET.has(status);
+
+const resolveOrderFulfillmentBoardStatus = (order = {}) => {
+  const currentStatus = order?.complianceBoardStatus || 'todo';
+  if (isOrderFulfillmentBoardStatus(currentStatus)) {
+    return currentStatus;
+  }
+
+  const preservedStatus = order?.orderFulfillmentBoardStatus || null;
+  return isOrderFulfillmentBoardStatus(preservedStatus) ? preservedStatus : 'todo';
+};
+
+const buildOrderFulfillmentStatusExpression = (
+  statusField = '$complianceBoardStatus',
+  preservedField = '$orderFulfillmentBoardStatus'
+) => ({
+  $let: {
+    vars: {
+      complianceStatus: { $ifNull: [statusField, 'todo'] },
+      preservedStatus: { $ifNull: [preservedField, null] },
+    },
+    in: {
+      $cond: [
+        { $in: ['$$complianceStatus', ORDER_FULFILLMENT_BOARD_STATUSES] },
+        '$$complianceStatus',
+        {
+          $cond: [
+            { $in: ['$$preservedStatus', ORDER_FULFILLMENT_BOARD_STATUSES] },
+            '$$preservedStatus',
+            'todo'
+          ]
+        }
+      ]
+    }
+  }
+});
+
+const buildOrderFulfillmentStatusQuery = (status) => {
+  if (status === 'todo') {
+    return {
+      $or: [
+        { complianceBoardStatus: { $exists: false } },
+        { complianceBoardStatus: null },
+        { complianceBoardStatus: 'todo' },
+        {
+          $and: [
+            { complianceBoardStatus: { $nin: ORDER_FULFILLMENT_BOARD_STATUSES } },
+            {
+              $or: [
+                { orderFulfillmentBoardStatus: { $exists: false } },
+                { orderFulfillmentBoardStatus: null },
+                { orderFulfillmentBoardStatus: 'todo' },
+                { orderFulfillmentBoardStatus: { $nin: ORDER_FULFILLMENT_BOARD_STATUSES } }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+  }
+
+  return {
+    $or: [
+      { complianceBoardStatus: status },
+      {
+        $and: [
+          { complianceBoardStatus: { $nin: ORDER_FULFILLMENT_BOARD_STATUSES } },
+          { orderFulfillmentBoardStatus: status }
+        ]
+      }
+    ]
+  };
+};
+
+const buildOrderStatusSetForCategory = ({ currentOrder, nextStatus, nextCategory, nextSource }) => {
+  const setObj = {
+    complianceBoardStatus: nextStatus,
+  };
+
+  if (nextSource !== undefined) {
+    setObj.complianceBoardSource = nextSource;
+  }
+
+  if (nextCategory === 'order_fulfillment' && isOrderFulfillmentBoardStatus(nextStatus)) {
+    setObj.orderFulfillmentBoardStatus = nextStatus;
+    return setObj;
+  }
+
+  if (nextCategory && nextCategory !== 'order_fulfillment') {
+    const preservedStatus = isOrderFulfillmentBoardStatus(currentOrder?.complianceBoardStatus)
+      ? currentOrder.complianceBoardStatus
+      : (isOrderFulfillmentBoardStatus(currentOrder?.orderFulfillmentBoardStatus)
+        ? currentOrder.orderFulfillmentBoardStatus
+        : null);
+
+    if (preservedStatus) {
+      setObj.orderFulfillmentBoardStatus = preservedStatus;
+    }
+  }
+
+  return setObj;
+};
 
 async function enrichOrdersWithConversationMeta(orders = []) {
   const orderIds = [...new Set(
@@ -2541,7 +2655,9 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
 
     if (statusFilter) {
       query.$and = query.$and || [];
-      if (statusFilter === 'todo') {
+      if (category === 'order_fulfillment') {
+        query.$and.push(buildOrderFulfillmentStatusQuery(statusFilter));
+      } else if (statusFilter === 'todo') {
         query.$and.push({
           $or: [
             { complianceBoardStatus: { $exists: false } },
@@ -2641,7 +2757,6 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     // instead of counted under its own key. Only applies to order_fulfillment
     // - other boards' per-status counts (case_not_opened, etc.) stay exactly
     // as before.
-    const ORDER_FULFILLMENT_STATUSES = ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'];
     let statusCountQuery = detailQuery;
     if (category === 'order_fulfillment') {
       // Only exclude by cancelState (the real source of truth), not by a
@@ -2668,9 +2783,19 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       overdueCancellationCount,
       overdueAddressIssueCount
     ] = await Promise.all([
-      isCancellationBoard
-        ? Promise.resolve(0)  // Don't count Order collection for cancellation board
-        : Order.countDocuments(detailQuery),
+      category === 'order_fulfillment'
+        ? Order.aggregate([
+            { $match: statusCountQuery },
+            {
+              $group: {
+                _id: '$orderId'
+              }
+            },
+            { $count: 'total' }
+          ]).then((rows) => rows[0]?.total || 0)
+        : isCancellationBoard
+          ? Promise.resolve(0)  // Don't count Order collection for cancellation board
+          : Order.countDocuments(detailQuery),
       Order.aggregate([
         { $match: statusCountQuery },
         // Dedup by orderId FIRST - this sidebar/expanded stats count must
@@ -2694,13 +2819,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
               $top: {
                 sortBy: { updatedAt: -1 },
                 output: category === 'order_fulfillment'
-                  ? {
-                      $cond: [
-                        { $in: [{ $ifNull: ['$complianceBoardStatus', 'todo'] }, ORDER_FULFILLMENT_STATUSES] },
-                        { $ifNull: ['$complianceBoardStatus', 'todo'] },
-                        'todo'
-                      ]
-                    }
+                  ? buildOrderFulfillmentStatusExpression()
                   : { $ifNull: ['$complianceBoardStatus', 'todo'] }
               }
             }
@@ -2750,13 +2869,53 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 500));
     const skip = (pageNum - 1) * limitNum;
 
-    let orders = await Order.find(detailQuery)
-      .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
-      .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
-      .sort({ dateSold: -1 })
-      .skip(skip)
-      .limit(limitNum)
-      .lean();
+    let orders;
+    if (category === 'order_fulfillment') {
+      const latestOrderRows = await Order.aggregate([
+        { $match: statusCountQuery },
+        {
+          $group: {
+            _id: '$orderId',
+            orderDoc: {
+              $top: {
+                sortBy: { updatedAt: -1 },
+                output: {
+                  _id: '$_id',
+                  dateSold: '$dateSold',
+                  updatedAt: '$updatedAt'
+                }
+              }
+            }
+          }
+        },
+        { $replaceRoot: { newRoot: '$orderDoc' } },
+        { $sort: { dateSold: -1, updatedAt: -1 } },
+        { $skip: skip },
+        { $limit: limitNum }
+      ]);
+
+      const pageOrderIds = latestOrderRows.map((row) => row?._id).filter(Boolean);
+      orders = pageOrderIds.length > 0
+        ? await Order.find({ _id: { $in: pageOrderIds } })
+            .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus orderFulfillmentBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
+            .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+            .lean()
+        : [];
+
+      const pageOrderIndex = new Map(pageOrderIds.map((id, index) => [String(id), index]));
+      orders.sort((left, right) => (
+        (pageOrderIndex.get(String(left._id)) ?? Number.MAX_SAFE_INTEGER)
+        - (pageOrderIndex.get(String(right._id)) ?? Number.MAX_SAFE_INTEGER)
+      ));
+    } else {
+      orders = await Order.find(detailQuery)
+        .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus orderFulfillmentBoardStatus complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
+        .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
+        .sort({ dateSold: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean();
+    }
 
     // For cancellation board, also fetch Cancellation records and merge with Order records
     if (isCancellationBoard) {
@@ -2884,7 +3043,7 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     if (searchOrderId && orders.length > 0) {
       console.log(`[BOARD-FETCH] Fetched ${orders.length} orders for search "${searchOrderId}":`);
       orders.forEach(order => {
-        console.log(`  - orderId: ${order.orderId}, _id: ${order._id}, status: ${order.complianceBoardStatus || 'todo'}, updatedAt: ${order.updatedAt}`);
+        console.log(`  - orderId: ${order.orderId}, _id: ${order._id}, status: ${category === 'order_fulfillment' ? resolveOrderFulfillmentBoardStatus(order) : (order.complianceBoardStatus || 'todo')}, updatedAt: ${order.updatedAt}`);
       });
     }
 
@@ -2939,7 +3098,9 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         ...o,
         orderObjectId: o._id,  // Include original MongoDB _id for frontend drag-drop updates
         complianceBoardCategories: categories,
-        complianceBoardStatus: o.complianceBoardStatus || 'todo'
+        complianceBoardStatus: category === 'order_fulfillment'
+          ? resolveOrderFulfillmentBoardStatus(o)
+          : (o.complianceBoardStatus || 'todo')
       };
     }))).map(o => ({
       ...o,
@@ -2951,12 +3112,14 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
     if (BOARD_DEBUG) {
       const ordersByStatus = {};
       updatedOrders.forEach(o => {
-        const status = o.complianceBoardStatus || 'todo';
+        const status = category === 'order_fulfillment'
+          ? resolveOrderFulfillmentBoardStatus(o)
+          : (o.complianceBoardStatus || 'todo');
         ordersByStatus[status] = (ordersByStatus[status] || 0) + 1;
       });
       console.log(`[BOARD-ENDPOINT-DEBUG] Returned ${updatedOrders.length} orders with status distribution:`, ordersByStatus);
       updatedOrders.slice(0, 5).forEach(o => {
-        console.log(`  - orderId: ${o.orderId}, status: ${o.complianceBoardStatus || 'todo'}`);
+        console.log(`  - orderId: ${o.orderId}, status: ${category === 'order_fulfillment' ? resolveOrderFulfillmentBoardStatus(o) : (o.complianceBoardStatus || 'todo')}`);
       });
     }
 
@@ -3377,10 +3540,17 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       // Update the associated Order by orderId with the new complianceBoardStatus
       if (conversationDoc.orderId) {
         console.log(`[PATCH-COMPLIANCE] [UPDATING-ORDER] Updating Order: ${conversationDoc.orderId} with status: ${complianceBoardStatus}`);
+        const currentOrder = await Order.findOne({ orderId: conversationDoc.orderId })
+          .select('complianceBoardStatus orderFulfillmentBoardStatus')
+          .lean();
         const orderUpdate = await Order.findOneAndUpdate(
           { orderId: conversationDoc.orderId },
-          { 
-            $set: { complianceBoardStatus },
+          {
+            $set: buildOrderStatusSetForCategory({
+              currentOrder,
+              nextStatus: complianceBoardStatus,
+              nextCategory: 'return_refund',
+            }),
             // Also ensure this order is categorized as return_refund
             $addToSet: { complianceBoardCategories: 'return_refund' }
           },
@@ -3518,9 +3688,18 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       // Also sync to associated Order if it has the cancellation category
       if (cancellationDoc.orderId) {
         console.log(`[PATCH-COMPLIANCE] [SYNC] Updating associated Order: ${cancellationDoc.orderId}`);
+        const currentOrder = await Order.findOne({ orderId: cancellationDoc.orderId })
+          .select('complianceBoardStatus orderFulfillmentBoardStatus')
+          .lean();
         const orderUpdate = await Order.findOneAndUpdate(
           { orderId: cancellationDoc.orderId },
-          { $set: { complianceBoardStatus } },
+          {
+            $set: buildOrderStatusSetForCategory({
+              currentOrder,
+              nextStatus: complianceBoardStatus,
+              nextCategory: 'cancellation',
+            })
+          },
           { new: true }
         );
         if (orderUpdate) {
@@ -3611,9 +3790,18 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       // Also sync to associated Order if it has the inr category
       if (inrDoc.orderId) {
         console.log(`[PATCH-COMPLIANCE] [SYNC] Updating associated Order: ${inrDoc.orderId}`);
+        const currentOrder = await Order.findOne({ orderId: inrDoc.orderId })
+          .select('complianceBoardStatus orderFulfillmentBoardStatus')
+          .lean();
         const orderUpdate = await Order.findOneAndUpdate(
           { orderId: inrDoc.orderId },
-          { $set: { complianceBoardStatus } },
+          {
+            $set: buildOrderStatusSetForCategory({
+              currentOrder,
+              nextStatus: complianceBoardStatus,
+              nextCategory: 'inr',
+            })
+          },
           { new: true }
         );
         if (orderUpdate) {
@@ -3668,9 +3856,18 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       // IMPORTANT: Also update the associated Order document so both are in sync
       if (returnDoc.orderId) {
         console.log(`[PATCH-COMPLIANCE] [SYNC] Updating associated Order: ${returnDoc.orderId}`);
+        const currentOrder = await Order.findOne({ orderId: returnDoc.orderId })
+          .select('complianceBoardStatus orderFulfillmentBoardStatus')
+          .lean();
         const orderUpdate = await Order.findOneAndUpdate(
           { orderId: returnDoc.orderId },
-          { $set: { complianceBoardStatus } },
+          {
+            $set: buildOrderStatusSetForCategory({
+              currentOrder,
+              nextStatus: complianceBoardStatus,
+              nextCategory: 'return_refund',
+            })
+          },
           { new: true }
         );
         if (orderUpdate) {
@@ -3690,13 +3887,6 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
     // - complianceBoardStatus: always set it
     // - complianceBoardCategories: add to array (plural, not singular)
     // - complianceBoardSource: set if provided (marks where the assignment came from)
-    const setObj = { complianceBoardStatus };
-    
-    // Add complianceBoardSource if provided
-    if (complianceBoardSource) {
-      setObj.complianceBoardSource = complianceBoardSource;
-    }
-    
     // Add "first changed" date for Case Not Opened status
     // This tracks when the item was FIRST moved to Case Not Opened (only set once, never updated)
     const now = new Date().toISOString();
@@ -3706,7 +3896,13 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       ? { $or: [{ _id: orderId }, { orderId: orderId }] }
       : { orderId: orderId };
     
-    const currentOrder = await Order.findOne(orderQuery).select('returnCaseNotOpenedAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt');
+    const currentOrder = await Order.findOne(orderQuery).select('complianceBoardStatus orderFulfillmentBoardStatus returnCaseNotOpenedAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt');
+    const setObj = buildOrderStatusSetForCategory({
+      currentOrder,
+      nextStatus: complianceBoardStatus,
+      nextCategory: complianceBoardCategory,
+      nextSource: complianceBoardSource,
+    });
     
     if (complianceBoardStatus === 'case_not_opened') {
       // Only set the AssignedAt if it doesn't already exist (first time only)
@@ -4457,8 +4653,6 @@ router.get('/stats', requireAuth, requirePageAccess('ComplianceBoard'), async (r
     // only applies for category='order_fulfillment' - other boards (inr,
     // cancellation, return_refund) keep their original per-status counts
     // (case_not_opened, cancellation_request, etc.) untouched.
-    const ORDER_FULFILLMENT_STATUSES = ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'];
-
     // Use aggregation to count and deduplicate by orderId at the same time.
     // This prevents duplicate orders from being counted multiple times: the
     // same orderId can exist as more than one Order document that disagree
@@ -4482,13 +4676,7 @@ router.get('/stats', requireAuth, requirePageAccess('ComplianceBoard'), async (r
             $top: {
               sortBy: { updatedAt: -1 },
               output: category === 'order_fulfillment'
-                ? {
-                    $cond: [
-                      { $in: [{ $ifNull: ['$complianceBoardStatus', 'todo'] }, ORDER_FULFILLMENT_STATUSES] },
-                      { $ifNull: ['$complianceBoardStatus', 'todo'] },
-                      'todo'
-                    ]
-                  }
+                ? buildOrderFulfillmentStatusExpression()
                 : { $ifNull: ['$complianceBoardStatus', 'todo'] }
             }
           }
@@ -4828,19 +5016,16 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
     // 'todo' here too, matching the stats count and the board's own grouping.
     // Only applies when category='order_fulfillment' - other boards' status
     // lookups (case_not_opened, cancellation_request, etc.) are untouched.
-    const ORDER_FULFILLMENT_STATUSES = ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'];
-
     // Match by complianceBoardStatus (handle 'todo' as missing/null status)
     const statusCriteria = [];
-    if (status === 'todo') {
+    if (category === 'order_fulfillment') {
+      statusCriteria.push(buildOrderFulfillmentStatusQuery(status));
+    } else if (status === 'todo') {
       statusCriteria.push(
         { complianceBoardStatus: { $exists: false } },
         { complianceBoardStatus: null },
         { complianceBoardStatus: 'todo' }
       );
-      if (category === 'order_fulfillment') {
-        statusCriteria.push({ complianceBoardStatus: { $nin: ORDER_FULFILLMENT_STATUSES } });
-      }
     } else {
       statusCriteria.push({ complianceBoardStatus: status });
     }
@@ -4878,7 +5063,7 @@ router.get('/stats-details', requireAuth, requirePageAccess('ComplianceBoard'), 
 
     // Fetch orders for this status
     let orders = await Order.find(query)
-      .select('orderId dateSold buyer itemNumber lineItems productName subtotalUSD subtotal')
+      .select('orderId dateSold buyer itemNumber lineItems productName subtotalUSD subtotal complianceBoardStatus orderFulfillmentBoardStatus')
       .populate({ path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } })
       .sort({ dateSold: -1, updatedAt: -1 })
       .lean();
