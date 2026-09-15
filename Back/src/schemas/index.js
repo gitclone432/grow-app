@@ -24,6 +24,8 @@ const USER_ROLES = [
   'trainee',
   'hoc',
   'compliancemanager',
+  'financemanager',
+  'itadmin',
 ];
 
 export const createUserSchema = z.object({

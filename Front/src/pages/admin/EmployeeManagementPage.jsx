@@ -733,6 +733,9 @@ export default function EmployeeManagementPage() {
                                                 <MenuItem value="hradmin">HR Admin</MenuItem>
                                                 <MenuItem value="hr">HR</MenuItem>
                                                 <MenuItem value="operationhead">Operation Head</MenuItem>
+                                                <MenuItem value="compliancemanager">Compliance Manager</MenuItem>
+                                                <MenuItem value="financemanager">Finance Manager</MenuItem>
+                                                <MenuItem value="itadmin">IT Admin</MenuItem>
                                                 <MenuItem value="lister">Lister</MenuItem>
                                                 <MenuItem value="advancelister">Advance Lister</MenuItem>
                                                 <MenuItem value="trainee">Trainee</MenuItem>
@@ -765,6 +768,9 @@ export default function EmployeeManagementPage() {
                                                 <MenuItem value="HR">HR Department</MenuItem>
                                                 <MenuItem value="Operations">Operations Department</MenuItem>
                                                 <MenuItem value="Executives">Executives Department</MenuItem>
+                                                <MenuItem value="Compliance">Compliance Department</MenuItem>
+                                                <MenuItem value="Finance">Finance Department</MenuItem>
+                                                <MenuItem value="IT">IT Department</MenuItem>
                                             </TextField>
                                         </Grid>
                                         <Grid item xs={12} sm={6}>

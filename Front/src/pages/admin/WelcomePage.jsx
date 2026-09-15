@@ -79,6 +79,8 @@ const ROLE_LABELS = {
   operationhead:       'Operation Head',
   hoc:                 'Head of Compliance',
   compliancemanager:   'Compliance Manager',
+  financemanager:      'Finance Manager',
+  itadmin:             'IT Admin',
   lister:              'Lister',
   advancelister:       'Advance Lister',
   trainee:             'Trainee',

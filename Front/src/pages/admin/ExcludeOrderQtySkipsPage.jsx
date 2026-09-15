@@ -4,8 +4,12 @@ import {
   Box,
   Button,
   CircularProgress,
+  FormControl,
   IconButton,
+  InputLabel,
+  MenuItem,
   Paper,
+  Select,
   Stack,
   Table,
   TableBody,
@@ -18,11 +22,15 @@ import {
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import api from '../../lib/api.js';
+import { sortSellersByName } from '../../lib/sellersSort';
 
 export default function ExcludeOrderQtySkipsPage() {
   const [rows, setRows] = useState([]);
   const [legacyItemId, setLegacyItemId] = useState('');
+  const [sellerId, setSellerId] = useState('');
   const [bulkText, setBulkText] = useState('');
+  const [bulkSellerId, setBulkSellerId] = useState('');
+  const [sellers, setSellers] = useState([]);
   const [error, setError] = useState('');
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
@@ -31,16 +39,23 @@ export default function ExcludeOrderQtySkipsPage() {
     api.get('/order-qty-exclude-legacy').then(({ data }) => setRows(Array.isArray(data) ? data : [])).catch(console.error);
   };
 
+  const loadSellers = () => {
+    api.get('/sellers/all-unfiltered').then(({ data }) => setSellers(sortSellersByName(data || []))).catch(console.error);
+  };
+
   useEffect(() => {
     load();
+    loadSellers();
   }, []);
+
+  const sellerLabel = (seller) => seller?.user?.username || seller?.user?.email || seller?._id;
 
   const addRow = async (e) => {
     e.preventDefault();
     setError('');
     setBulkResult(null);
     try {
-      await api.post('/order-qty-exclude-legacy', { legacyItemId: legacyItemId.trim() });
+      await api.post('/order-qty-exclude-legacy', { legacyItemId: legacyItemId.trim(), sellerId: sellerId || null });
       setLegacyItemId('');
       load();
     } catch (err) {
@@ -58,7 +73,7 @@ export default function ExcludeOrderQtySkipsPage() {
     }
     setBulkBusy(true);
     try {
-      const { data } = await api.post('/order-qty-exclude-legacy/bulk', { bulkText });
+      const { data } = await api.post('/order-qty-exclude-legacy/bulk', { bulkText, sellerId: bulkSellerId || null });
       setBulkResult(data);
       setBulkText('');
       load();
@@ -66,6 +81,15 @@ export default function ExcludeOrderQtySkipsPage() {
       setError(err.response?.data?.error || 'Bulk add failed');
     } finally {
       setBulkBusy(false);
+    }
+  };
+
+  const changeRowSeller = async (id, newSellerId) => {
+    try {
+      await api.patch(`/order-qty-exclude-legacy/${id}`, { sellerId: newSellerId || null });
+      load();
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to update seller');
     }
   };
 
@@ -109,6 +133,19 @@ export default function ExcludeOrderQtySkipsPage() {
             placeholder="e.g. 406874777825"
             sx={{ minWidth: 260 }}
           />
+          <FormControl size="small" sx={{ minWidth: 220 }}>
+            <InputLabel>Seller account</InputLabel>
+            <Select
+              value={sellerId}
+              label="Seller account"
+              onChange={(e) => setSellerId(e.target.value)}
+            >
+              <MenuItem value="">Unassigned</MenuItem>
+              {sellers.map((seller) => (
+                <MenuItem key={seller._id} value={seller._id}>{sellerLabel(seller)}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
           <Button type="submit" variant="contained" size="medium">Add</Button>
         </Stack>
       </Paper>
@@ -117,6 +154,7 @@ export default function ExcludeOrderQtySkipsPage() {
         <Typography variant="subtitle2" sx={{ mb: 1 }}>Bulk add</Typography>
         <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
           One ID per line, or comma / space separated. Duplicate IDs are ignored; invalid tokens are skipped and reported.
+          Choosing a seller account here assigns it to every ID in this batch (including ones already listed).
         </Typography>
         <TextField
           multiline
@@ -128,16 +166,30 @@ export default function ExcludeOrderQtySkipsPage() {
           onChange={(e) => setBulkText(e.target.value)}
           sx={{ mb: 2, fontFamily: 'monospace' }}
         />
+        <FormControl size="small" sx={{ minWidth: 220, mb: 2, display: 'block' }}>
+          <InputLabel>Seller account</InputLabel>
+          <Select
+            value={bulkSellerId}
+            label="Seller account"
+            onChange={(e) => setBulkSellerId(e.target.value)}
+          >
+            <MenuItem value="">Unassigned</MenuItem>
+            {sellers.map((seller) => (
+              <MenuItem key={seller._id} value={seller._id}>{sellerLabel(seller)}</MenuItem>
+            ))}
+          </Select>
+        </FormControl>
         <Button variant="contained" onClick={bulkAdd} disabled={bulkBusy} startIcon={bulkBusy ? <CircularProgress size={16} color="inherit" /> : null}>
           {bulkBusy ? 'Adding…' : 'Bulk add IDs'}
         </Button>
       </Paper>
 
-      <TableContainer component={Paper} sx={{ maxWidth: 520 }}>
+      <TableContainer component={Paper} sx={{ maxWidth: 760 }}>
         <Table size="small">
           <TableHead>
             <TableRow sx={{ bgcolor: 'primary.main' }}>
               <TableCell sx={{ color: 'white', fontWeight: 'bold' }}>Legacy item ID</TableCell>
+              <TableCell sx={{ color: 'white', fontWeight: 'bold', width: 240 }}>Seller account</TableCell>
               <TableCell sx={{ color: 'white', fontWeight: 'bold', width: 56 }} align="right">Action</TableCell>
             </TableRow>
           </TableHead>
@@ -145,6 +197,20 @@ export default function ExcludeOrderQtySkipsPage() {
             {rows.map((r) => (
               <TableRow key={r._id} hover>
                 <TableCell>{r.legacyItemId}</TableCell>
+                <TableCell>
+                  <FormControl size="small" fullWidth>
+                    <Select
+                      value={r.seller?._id || ''}
+                      displayEmpty
+                      onChange={(e) => changeRowSeller(r._id, e.target.value)}
+                    >
+                      <MenuItem value="">Unassigned</MenuItem>
+                      {sellers.map((seller) => (
+                        <MenuItem key={seller._id} value={seller._id}>{sellerLabel(seller)}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </TableCell>
                 <TableCell align="right">
                   <IconButton size="small" color="error" onClick={() => removeRow(r._id)} aria-label="remove">
                     <DeleteIcon fontSize="small" />
@@ -154,7 +220,7 @@ export default function ExcludeOrderQtySkipsPage() {
             ))}
             {!rows.length && (
               <TableRow>
-                <TableCell colSpan={2} align="center">No IDs configured (defaults seed on first use).</TableCell>
+                <TableCell colSpan={3} align="center">No IDs configured (defaults seed on first use).</TableCell>
               </TableRow>
             )}
           </TableBody>

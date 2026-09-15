@@ -22,7 +22,9 @@ const UserSchema = new mongoose.Schema(
         'operationhead',
         'trainee',
         'hoc',
-        'compliancemanager'
+        'compliancemanager',
+        'financemanager',
+        'itadmin'
       ],
       required: true
     },

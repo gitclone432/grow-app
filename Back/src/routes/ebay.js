@@ -37,6 +37,7 @@ import SyncAllSellersLock from '../models/SyncAllSellersLock.js';
 import SyncAllSellersStatusCache from '../models/SyncAllSellersStatusCache.js';
 import FitmentCache from '../models/FitmentCache.js';
 import ConversationMeta from '../models/ConversationMeta.js';
+import OrderQtyExcludeLegacy from '../models/OrderQtyExcludeLegacy.js';
 import {
   EbayMessageConversation,
   EbayMessageConversationMessage
@@ -21899,6 +21900,8 @@ async function fetchEbayItemInventory(accessToken, itemId) {
   <OutputSelector>Item.ListingDetails.ViewItemURL</OutputSelector>
   <OutputSelector>Item.SellingStatus.ListingStatus</OutputSelector>
   <OutputSelector>Item.SellingStatus.QuantitySold</OutputSelector>
+  <OutputSelector>Item.SellingStatus.CurrentPrice</OutputSelector>
+  <OutputSelector>Item.BuyItNowPrice</OutputSelector>
   <OutputSelector>Item.Variations</OutputSelector>
 </GetItemRequest>`;
 
@@ -21937,6 +21940,8 @@ async function fetchEbayItemInventory(accessToken, itemId) {
     ? quantityAvailable
     : (totalQuantity != null ? Math.max(0, totalQuantity - quantitySold) : null);
 
+  const price = moneyFromEbayNode(item.SellingStatus?.CurrentPrice) ?? moneyFromEbayNode(item.BuyItNowPrice) ?? null;
+
   return {
     itemId: String(itemId),
     title: item.Title || null,
@@ -21948,6 +21953,7 @@ async function fetchEbayItemInventory(accessToken, itemId) {
     galleryUrl: item.PictureDetails?.GalleryURL || null,
     viewItemUrl: item.ListingDetails?.ViewItemURL || `https://www.ebay.com/itm/${itemId}`,
     hasVariations,
+    price,
   };
 }
 
@@ -21965,6 +21971,269 @@ async function resolveInventorySeller(itemId, requestedSellerId) {
   if (!seller?._id) return null;
   return Seller.findById(seller._id).populate('user');
 }
+
+/**
+ * Live eBay active listings (paginated GetMyeBaySelling ActiveList) filtered to those whose
+ * current price is below `maxPrice`. Used by the Inventory Manager's bulk fetch/edit view.
+ */
+async function fetchEbayActiveListingsBelowThreshold(accessToken, { maxPrice = Infinity } = {}) {
+  const entriesPerPage = 200;
+  const buildRequest = (page) => `<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${accessToken}</eBayAuthToken></RequesterCredentials>
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <ActiveList>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
+      <PageNumber>${page}</PageNumber>
+    </Pagination>
+  </ActiveList>
+  <OutputSelector>ActiveList.PaginationResult</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.ItemID</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.Title</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.SKU</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.PictureDetails.GalleryURL</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.BuyItNowPrice</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.SellingStatus.CurrentPrice</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.Quantity</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.QuantityAvailable</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.SellingStatus.QuantitySold</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.Variations</OutputSelector>
+</GetMyeBaySellingRequest>`;
+
+  const parsePage = async (page) => {
+    const response = await postEbayTradingApi(buildRequest(page), {
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
+      'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
+      'Content-Type': 'text/xml',
+    }, { logLabel: `Inventory bulk fetch p${page}`, maxRetries: 2 });
+    const result = await parseStringPromise(response.data);
+    const root = result?.GetMyeBaySellingResponse;
+    if (!root) throw new Error('Empty GetMyeBaySelling response');
+    if (root.Ack?.[0] === 'Failure') {
+      throw new Error(root.Errors?.[0]?.LongMessage?.[0] || 'GetMyeBaySelling failed');
+    }
+    return root;
+  };
+
+  const firstRoot = await parsePage(1);
+  const totalPagesRaw =
+    firstRoot.ActiveList?.[0]?.PaginationResult?.[0]?.TotalNumberOfPages?.[0]
+    ?? firstRoot.ActiveList?.PaginationResult?.TotalNumberOfPages;
+  const totalPages = Math.max(1, Number.parseInt(String(totalPagesRaw ?? '1'), 10) || 1);
+
+  const results = [];
+  const collect = (root) => {
+    const items =
+      root.ActiveList?.[0]?.ItemArray?.[0]?.Item
+      || root.ActiveList?.ItemArray?.Item
+      || [];
+    const list = Array.isArray(items) ? items : (items ? [items] : []);
+    for (const item of list) {
+      const sellingStatus = item.SellingStatus?.[0] || item.SellingStatus || {};
+      const currentPriceNode = sellingStatus.CurrentPrice?.[0] || sellingStatus.CurrentPrice;
+      const buyItNowNode = item.BuyItNowPrice?.[0] || item.BuyItNowPrice;
+      const price = moneyFromEbayNode(currentPriceNode) ?? moneyFromEbayNode(buyItNowNode) ?? null;
+      if (price == null || price >= maxPrice) continue;
+
+      const totalQtyRaw = firstXmlValue(item.Quantity);
+      const availQtyRaw = firstXmlValue(item.QuantityAvailable);
+      const soldRaw = firstXmlValue(sellingStatus.QuantitySold);
+      const totalQty = totalQtyRaw != null ? Number.parseInt(String(totalQtyRaw), 10) : null;
+      const availQty = availQtyRaw != null ? Number.parseInt(String(availQtyRaw), 10) : null;
+      const sold = soldRaw != null ? (Number.parseInt(String(soldRaw), 10) || 0) : 0;
+      const quantity = availQty != null
+        ? availQty
+        : (totalQty != null ? Math.max(0, totalQty - sold) : 0);
+
+      results.push({
+        itemId: firstXmlValue(item.ItemID),
+        title: firstXmlValue(item.Title) || null,
+        sku: firstXmlValue(item.SKU) || null,
+        galleryUrl: firstXmlValue(item.PictureDetails?.[0]?.GalleryURL || item.PictureDetails?.GalleryURL) || null,
+        price,
+        quantity,
+        quantitySold: sold,
+        hasVariations: !!item.Variations,
+      });
+    }
+  };
+  collect(firstRoot);
+  if (totalPages > 1) {
+    const remainingPages = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+    // Fetch remaining pages with bounded concurrency instead of one-at-a-time — a store with
+    // thousands of active listings can span dozens of pages, and sequential fetching made this
+    // take minutes.
+    const roots = await mapWithConcurrency(remainingPages, 6, (page) => parsePage(page));
+    roots.forEach(collect);
+  }
+  return results;
+}
+
+// Fetch every active listing for a seller with current price below maxPrice, live from eBay.
+router.get('/inventory/bulk-fetch', requireAuth, requirePageAccess('EbayInventoryManager'), async (req, res) => {
+  try {
+    const sellerId = String(req.query.sellerId || '').trim();
+    if (!sellerId) return res.status(400).json({ error: 'sellerId is required' });
+    const maxPrice = req.query.maxPrice != null ? Number(req.query.maxPrice) : 3;
+    if (!Number.isFinite(maxPrice) || maxPrice < 0) {
+      return res.status(400).json({ error: 'maxPrice must be a non-negative number' });
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerId, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const accessToken = await ensureValidToken(seller);
+    const listings = await fetchEbayActiveListingsBelowThreshold(accessToken, { maxPrice });
+
+    return res.json({
+      success: true,
+      sellerId: String(seller._id),
+      sellerName: seller.user?.username || seller.user?.email || seller.ebayUserId || null,
+      maxPrice,
+      count: listings.length,
+      listings,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Inventory Bulk Fetch] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Bulk fetch failed' });
+  }
+});
+
+// Fetch live quantity/price only for the legacy item IDs assigned to this seller on the
+// Exclude < $3 page (Settings → Exclude < $3), instead of paging every active listing on the
+// account. Items no longer active on eBay (GetItem failure) are reported but skipped.
+router.get('/inventory/bulk-fetch-from-exclusions', requireAuth, requirePageAccess('EbayInventoryManager'), async (req, res) => {
+  try {
+    const sellerId = String(req.query.sellerId || '').trim();
+    if (!sellerId) return res.status(400).json({ error: 'sellerId is required' });
+
+    const seller = await findSellerByIdOrUsername(sellerId, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const exclusions = await OrderQtyExcludeLegacy.find({ seller: seller._id }).lean();
+    const itemIds = exclusions.map((e) => e.legacyItemId).filter(Boolean);
+
+    if (!itemIds.length) {
+      return res.json({
+        success: true,
+        sellerId: String(seller._id),
+        sellerName: seller.user?.username || seller.user?.email || seller.ebayUserId || null,
+        count: 0,
+        listings: [],
+        failed: [],
+      });
+    }
+
+    const accessToken = await ensureValidToken(seller);
+
+    const failed = [];
+    const fetched = await mapWithConcurrency(itemIds, 5, async (itemId) => {
+      try {
+        return await fetchEbayItemInventory(accessToken, itemId);
+      } catch (err) {
+        failed.push({ itemId, error: err.message || 'GetItem failed' });
+        return null;
+      }
+    });
+    const listings = fetched.filter(Boolean);
+
+    return res.json({
+      success: true,
+      sellerId: String(seller._id),
+      sellerName: seller.user?.username || seller.user?.email || seller.ebayUserId || null,
+      count: listings.length,
+      listings,
+      failed,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Inventory Bulk Fetch From Exclusions] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Bulk fetch failed' });
+  }
+});
+
+// Apply live quantity updates to many items at once (bulk edit from Inventory Manager).
+router.post('/inventory/bulk-quantity', requireAuth, requirePageAccess('EbayInventoryManager'), async (req, res) => {
+  try {
+    const sellerId = String(req.body.sellerId || '').trim();
+    if (!sellerId) return res.status(400).json({ error: 'sellerId is required' });
+
+    const updates = Array.isArray(req.body.updates) ? req.body.updates : [];
+    if (!updates.length) return res.status(400).json({ error: 'updates array is required' });
+    if (updates.length > 500) {
+      return res.status(400).json({ error: 'Too many items in one request (max 500)' });
+    }
+    for (const u of updates) {
+      const qty = Number(u?.quantity);
+      if (!u?.itemId || !Number.isFinite(qty) || qty < 0 || !Number.isInteger(qty)) {
+        return res.status(400).json({ error: `Invalid update entry: ${JSON.stringify(u)}` });
+      }
+    }
+
+    const seller = await findSellerByIdOrUsername(sellerId, { populate: 'user' });
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+
+    const accessToken = await ensureValidToken(seller);
+
+    const results = await mapWithConcurrency(updates, 5, async (u) => {
+      const itemId = String(u.itemId).trim();
+      const quantity = Number(u.quantity);
+      try {
+        const xmlRequest = `<?xml version="1.0" encoding="utf-8"?>
+<ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>${accessToken}</eBayAuthToken></RequesterCredentials>
+  <InventoryStatus>
+    <ItemID>${escapeXml(itemId)}</ItemID>
+    <Quantity>${quantity}</Quantity>
+  </InventoryStatus>
+</ReviseInventoryStatusRequest>`;
+
+        const response = await postEbayTradingApi(xmlRequest, {
+          'X-EBAY-API-SITEID': '0',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1271',
+          'X-EBAY-API-CALL-NAME': 'ReviseInventoryStatus',
+          'X-EBAY-API-IAF-TOKEN': accessToken,
+          'Content-Type': 'text/xml',
+        }, { logLabel: 'Inventory bulk ReviseInventoryStatus', maxRetries: 2 });
+
+        const parsed = await parseStringPromise(response.data, { explicitArray: false });
+        const body = parsed?.ReviseInventoryStatusResponse;
+        const ack = body?.Ack;
+        if (ack !== 'Success' && ack !== 'Warning') {
+          const err = body?.Errors;
+          const errNode = Array.isArray(err) ? err[0] : err;
+          return {
+            itemId,
+            success: false,
+            error: errNode?.LongMessage || errNode?.ShortMessage || 'ReviseInventoryStatus failed',
+          };
+        }
+        return { itemId, success: true, quantity };
+      } catch (err) {
+        return { itemId, success: false, error: err.message || 'Update failed' };
+      }
+    });
+
+    const succeeded = results.filter((r) => r.success).length;
+    return res.json({
+      success: true,
+      sellerId: String(seller._id),
+      total: results.length,
+      succeeded,
+      failed: results.length - succeeded,
+      results,
+    });
+  } catch (err) {
+    if (sendTokenReconnectError(err, res)) return;
+    console.error('[Inventory Bulk Update] Error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Bulk update failed' });
+  }
+});
 
 // Look up an item by ID and return its live quantity from eBay (real-time, not cached).
 router.get('/inventory/lookup', requireAuth, requirePageAccess('EbayInventoryManager'), async (req, res) => {

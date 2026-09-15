@@ -1,5 +1,6 @@
 import express from 'express';
 import OrderQtyExcludeLegacy from '../models/OrderQtyExcludeLegacy.js';
+import mongoose from 'mongoose';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import { invalidateOrderQtyExcludedLegacyCache, ensureOrderQtyExcludeLegacySeededIfEmpty } from '../utils/orderQtyExcludeLegacyCache.js';
 
@@ -32,7 +33,10 @@ function parseBulkLegacyIds(body) {
 router.get('/', requireAuth, requirePageAccess('ExcludeOrderQtySkips'), async (req, res) => {
   try {
     await ensureOrderQtyExcludeLegacySeededIfEmpty();
-    const rows = await OrderQtyExcludeLegacy.find().sort({ legacyItemId: 1 }).lean();
+    const rows = await OrderQtyExcludeLegacy.find()
+      .sort({ legacyItemId: 1 })
+      .populate({ path: 'seller', populate: { path: 'user', select: 'username email' } })
+      .lean();
     res.json(rows);
   } catch (err) {
     console.error('[OrderQtyExcludeLegacy] list:', err.message);
@@ -50,7 +54,9 @@ router.post('/', requireAuth, requirePageAccess('ExcludeOrderQtySkips'), async (
     if (!/^\d+$/.test(legacyItemId)) {
       return res.status(400).json({ error: 'legacyItemId must be numeric' });
     }
-    const doc = await OrderQtyExcludeLegacy.create({ legacyItemId });
+    const sellerRaw = req.body?.sellerId ?? req.body?.seller ?? null;
+    const seller = sellerRaw && mongoose.isValidObjectId(sellerRaw) ? sellerRaw : null;
+    const doc = await OrderQtyExcludeLegacy.create({ legacyItemId, seller });
     invalidateOrderQtyExcludedLegacyCache();
     res.status(201).json(doc);
   } catch (err) {
@@ -82,13 +88,19 @@ router.post('/bulk', requireAuth, requirePageAccess('ExcludeOrderQtySkips'), asy
       return res.status(400).json({ error: `At most ${BULK_MAX_IDS} IDs per bulk request` });
     }
 
+    const sellerRaw = req.body?.sellerId ?? req.body?.seller ?? null;
+    const seller = sellerRaw && mongoose.isValidObjectId(sellerRaw) ? sellerRaw : null;
+
     let upserted = 0;
     if (valid.length) {
       const result = await OrderQtyExcludeLegacy.bulkWrite(
         valid.map((legacyItemId) => ({
           updateOne: {
             filter: { legacyItemId },
-            update: { $setOnInsert: { legacyItemId } },
+            update: {
+              $setOnInsert: { legacyItemId },
+              ...(seller ? { $set: { seller } } : {}),
+            },
             upsert: true,
           },
         })),
@@ -107,6 +119,26 @@ router.post('/bulk', requireAuth, requirePageAccess('ExcludeOrderQtySkips'), asy
   } catch (err) {
     console.error('[OrderQtyExcludeLegacy] bulk:', err.message);
     res.status(500).json({ error: 'Failed to bulk add legacy item IDs' });
+  }
+});
+
+router.patch('/:id', requireAuth, requirePageAccess('ExcludeOrderQtySkips'), async (req, res) => {
+  try {
+    const sellerRaw = req.body?.sellerId ?? req.body?.seller ?? null;
+    const seller = sellerRaw && mongoose.isValidObjectId(sellerRaw) ? sellerRaw : null;
+    const doc = await OrderQtyExcludeLegacy.findByIdAndUpdate(
+      req.params.id,
+      { seller },
+      { new: true }
+    ).populate({ path: 'seller', populate: { path: 'user', select: 'username email' } });
+    if (!doc) {
+      return res.status(404).json({ error: 'Entry not found' });
+    }
+    invalidateOrderQtyExcludedLegacyCache();
+    res.json(doc);
+  } catch (err) {
+    console.error('[OrderQtyExcludeLegacy] update:', err.message);
+    res.status(500).json({ error: 'Failed to update seller assignment' });
   }
 });
 
