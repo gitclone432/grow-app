@@ -30,7 +30,9 @@ const MEETING_PAGE_ROLES = [
     'operationhead',
     'trainee',
     'hoc',
-    'compliancemanager'
+    'compliancemanager',
+    'financemanager',
+    'itadmin'
 ];
 
 const userSummaryPopulate = { path: 'organizer attendees createdBy updatedBy actionItems.assignee', select: 'username email role department' };

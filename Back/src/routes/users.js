@@ -86,7 +86,9 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
     'operationhead',
     'trainee',
     'hoc',
-    'compliancemanager'
+    'compliancemanager',
+    'financemanager',
+    'itadmin'
   ];
 
   if (!allowedRoles.includes(newUserRole)) return res.status(400).json({ error: 'Invalid newUserRole' });
@@ -98,7 +100,7 @@ router.post('/', requireAuth, validate(createUserSchema), async (req, res) => {
 
   // Only superadmin can create high-level admins (productadmin, listingadmin, compatibilityadmin, fulfillmentadmin)
   // Added 'hoc' and 'compliancemanager' to the list of roles that require high privileges
-  if (['productadmin', 'listingadmin', 'compatibilityadmin', 'seller', 'fulfillmentadmin', 'hradmin', 'operationhead', 'hoc', 'compliancemanager'].includes(newUserRole) && !['superadmin', 'hradmin', 'operationhead'].includes(role)) {
+  if (['productadmin', 'listingadmin', 'compatibilityadmin', 'seller', 'fulfillmentadmin', 'hradmin', 'operationhead', 'hoc', 'compliancemanager', 'financemanager', 'itadmin'].includes(newUserRole) && !['superadmin', 'hradmin', 'operationhead'].includes(role)) {
     return res.status(403).json({ error: 'Only superadmin, hradmin or operationhead can create admin roles or sellers' });
   }
 

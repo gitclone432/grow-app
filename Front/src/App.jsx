@@ -186,6 +186,8 @@ export default function App() {
                   user.role === 'operationhead' ||
                   user.role === 'hoc' ||
                   user.role === 'compliancemanager' ||
+                  user.role === 'financemanager' ||
+                  user.role === 'itadmin' ||
                   user.role === 'lister' ||
                   user.role === 'advancelister' ||
                   user.role === 'trainee' ? (

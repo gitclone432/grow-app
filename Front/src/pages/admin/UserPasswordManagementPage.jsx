@@ -160,6 +160,8 @@ const UserPasswordManagementPage = () => {
             operationhead: 'secondary',
             hoc: 'secondary',
             compliancemanager: 'secondary',
+            financemanager: 'secondary',
+            itadmin: 'secondary',
             lister: 'default',
             advancelister: 'info',
             compatibilityeditor: 'default',

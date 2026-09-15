@@ -31,6 +31,8 @@ const ROLE_NAMES = {
   trainee: 'Trainee',
   hoc: 'HOC',
   compliancemanager: 'Compliance Manager',
+  financemanager: 'Finance Manager',
+  itadmin: 'IT Admin',
 };
 
 export default function AddUserForm({ onCreated, compact = false }) {
@@ -86,7 +88,7 @@ export default function AddUserForm({ onCreated, compact = false }) {
 
       const needsDepartment = (
         isSuperLike || isListingAdmin || isCompatibilityAdmin ||
-        ['lister', 'listingadmin', 'compatibilityadmin', 'compatibilityeditor', 'hoc', 'compliancemanager'].includes(newRole)
+        ['lister', 'listingadmin', 'compatibilityadmin', 'compatibilityeditor', 'hoc', 'compliancemanager', 'financemanager', 'itadmin'].includes(newRole)
       );
       if (needsDepartment && !newDepartment) {
         setMsg('Department is required');
@@ -176,6 +178,8 @@ export default function AddUserForm({ onCreated, compact = false }) {
               <MenuItem value="trainee">Trainee</MenuItem>
               <MenuItem value="hoc">HOC</MenuItem>
               <MenuItem value="compliancemanager">Compliance Manager</MenuItem>
+              <MenuItem value="financemanager">Finance Manager</MenuItem>
+              <MenuItem value="itadmin">IT Admin</MenuItem>
             </Select>
           </FormControl>
         ) : isListingAdmin ? (
@@ -205,6 +209,8 @@ export default function AddUserForm({ onCreated, compact = false }) {
               <MenuItem value="Operations">Operations Department</MenuItem>
               <MenuItem value="Executives">Executives Department</MenuItem>
               <MenuItem value="Compliance">Compliance Department</MenuItem>
+              <MenuItem value="Finance">Finance Department</MenuItem>
+              <MenuItem value="IT">IT Department</MenuItem>
             </Select>
           </FormControl>
         ) : null}
