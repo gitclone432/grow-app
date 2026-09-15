@@ -213,6 +213,11 @@ const OrderSchema = new mongoose.Schema(
       ],
       default: 'todo'
     },
+    orderFulfillmentBoardStatus: {
+      type: String,
+      enum: ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'],
+      default: null
+    },
     complianceBoardCategories: {
       type: [String],
       enum: ['order_fulfillment', 'order_communication', 'cancellation', 'inr', 'return_refund'],

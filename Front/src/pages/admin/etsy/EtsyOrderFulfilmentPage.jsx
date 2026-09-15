@@ -333,6 +333,7 @@ export default function EtsyOrderFulfilmentPage({
   dateToLabel = 'Date to',
   initialSingleDate = '',
   noFilteredResultsMessage = 'No orders match the selected filters.',
+  headerSupplement = null,
 } = {}) {
   const theme = useTheme();
   const isSmallMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -1026,6 +1027,12 @@ export default function EtsyOrderFulfilmentPage({
               {error}
             </Alert>
           )}
+
+          {headerSupplement ? (
+            <Box sx={{ mt: 2 }}>
+              {headerSupplement}
+            </Box>
+          ) : null}
         </Paper>
 
         {!selectedStoreId ? (
