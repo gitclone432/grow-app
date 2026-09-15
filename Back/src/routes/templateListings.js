@@ -24,6 +24,8 @@ import { getAsinCacheStats, clearAsinCache, invalidateAsinCache, getCachedAsinDa
 import { amazonSourceSnapshotFields, buildListingReuseContext } from '../utils/listingDatabaseAmazonCache.js';
 import AsinDirectory from '../models/AsinDirectory.js';
 import User from '../models/User.js';
+import AsinSourcingBatch from '../models/AsinSourcingBatch.js';
+import { exportAndFeedUploadSavedRows } from '../lib/asinSourcingAutomation.js';
 import { ensureValidToken } from './ebay.js';
 import {
   parseDirectListAsins,
@@ -3413,13 +3415,17 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
             templateId,
             sellerId,
             status: 'active',
-            action: listingData.action || defaultAction,
+            // Always 'Add' when reactivating as active — never trust
+            // listingData.action, which can carry a stale 'Draft' reused
+            // from a prior save of the same ASIN (see
+            // utils/listingDatabaseAmazonCache.js REUSE_CORE_FIELD_KEYS).
+            action: defaultAction,
             updatedAt: Date.now()
           });
-          
+
           await inactiveListing.save();
           skuSet.add(sku);
-          
+
           results.push({
             status: 'reactivated',
             listing: inactiveListing.toObject(),
@@ -3480,7 +3486,11 @@ router.post('/bulk-create', requireAuth, async (req, res) => {
           templateId,
           sellerId,
           status: listingStatus,
-          action: listingStatus === 'draft' ? 'Draft' : (listingData.action || defaultAction),
+          // Always derived from listingStatus — never trust listingData.action,
+          // which can carry a stale 'Draft' reused from a prior save of the
+          // same ASIN (see utils/listingDatabaseAmazonCache.js
+          // REUSE_CORE_FIELD_KEYS).
+          action: listingStatus === 'draft' ? 'Draft' : defaultAction,
           createdBy: req.user.userId
         });
         
@@ -3838,7 +3848,7 @@ router.post('/bulk-preview', requireAuth, async (req, res) => {
 // Bulk save: Save reviewed/edited listings to database
 router.post('/bulk-save', requireAuth, async (req, res) => {
   try {
-    const { templateId, sellerId, listings, options = {}, region = 'US' } = req.body;
+    const { templateId, sellerId, listings, options = {}, region = 'US', sourcingBatchId } = req.body;
     
     if (!templateId) {
       return res.status(400).json({ error: 'Template ID is required' });
@@ -4058,13 +4068,17 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
             templateId,
             sellerId,
             status: 'active',
-            action: listingData.action || defaultAction,
+            // Always 'Add' when reactivating as active — never trust
+            // listingData.action, which can carry a stale 'Draft' reused
+            // from a prior save of the same ASIN (see
+            // utils/listingDatabaseAmazonCache.js REUSE_CORE_FIELD_KEYS).
+            action: defaultAction,
             updatedAt: Date.now()
           });
-          
+
           await inactiveListing.save();
           skuSet.add(sku);
-          
+
           results.push(slimBulkSaveResult('reactivated', listingData, {
             id: inactiveListing._id,
             sku,
@@ -4115,7 +4129,11 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
           templateId,
           sellerId,
           status: listingStatus,
-          action: listingStatus === 'draft' ? 'Draft' : (listingData.action || defaultAction),
+          // Always derived from listingStatus — never trust listingData.action,
+          // which can carry a stale 'Draft' reused from a prior save of the
+          // same ASIN (see utils/listingDatabaseAmazonCache.js
+          // REUSE_CORE_FIELD_KEYS).
+          action: listingStatus === 'draft' ? 'Draft' : defaultAction,
           createdBy: req.user.userId
         });
         
@@ -4164,7 +4182,54 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
     const failed = results.filter(r => r.status === 'failed').length;
     
     console.log(`✅ Bulk save completed: ${created} created, ${updated} updated, ${reactivated} reactivated, ${failed} failed, ${skippedCount} skipped`);
-    
+
+    // Save All from the Sourcing Rule review queue (AsinReviewModal, opened
+    // via ?fromSourcingBatch=<id>) passes sourcingBatchId so the rows the
+    // reviewer kept get fed to eBay the same way the old fully-automatic
+    // autoGenerateAndSave path used to — export exactly what landed in the
+    // DB (created/updated/reactivated) to CSV and upload it via the Feed
+    // API. Never blocks the save response on this: the listings are already
+    // saved regardless of whether the feed-upload step succeeds.
+    let feedUpload = null;
+    if (sourcingBatchId) {
+      try {
+        const savedListingIds = [...new Set(
+          results
+            .filter((r) => ['created', 'updated', 'reactivated'].includes(r.status) && r.id)
+            .map((r) => String(r.id))
+        )];
+        const log = (...args) => console.log(`[Sourcing Review Save] [batch ${sourcingBatchId}]`, ...args);
+        feedUpload = await exportAndFeedUploadSavedRows(
+          { template: templateId, seller: sellerId, region, createdBy: req.user?.userId, logLabel: sourcingBatchId },
+          savedListingIds,
+          log,
+          null
+        );
+        await AsinSourcingBatch.updateOne(
+          { _id: sourcingBatchId },
+          {
+            $set: {
+              status: 'generated',
+              consumedAt: new Date(),
+              'generation.attempted': true,
+              'generation.saveSummary': {
+                total: listings.length,
+                created,
+                updated,
+                reactivated,
+                failed,
+                skipped: skippedCount,
+              },
+              'generation.feedUpload': feedUpload,
+            },
+          }
+        );
+      } catch (err) {
+        console.error('[Sourcing Review Save] feed-upload after Save All failed:', err.message);
+        feedUpload = { exported: false, csvStorageId: null, listingCount: 0, taskId: null, status: '', blockedByDailyLimit: false, error: err.message };
+      }
+    }
+
     res.json({
       success: true,
       total: listings.length,
@@ -4174,7 +4239,8 @@ router.post('/bulk-save', requireAuth, async (req, res) => {
       failed,
       skipped: skippedCount,
       results,
-      errors: errors.length > 0 ? errors : undefined
+      errors: errors.length > 0 ? errors : undefined,
+      feedUpload
     });
     
   } catch (error) {

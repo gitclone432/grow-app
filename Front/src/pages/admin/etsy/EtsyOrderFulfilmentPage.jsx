@@ -78,6 +78,24 @@ const ALL_STORES_VALUE = '__all__';
 function parseSortableDate(value) {
   const text = String(value || '').trim();
   if (!text) return 0;
+
+  const isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    const timestamp = Date.UTC(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]), 12, 0, 0);
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  }
+
+  const dayMonthYearMatch = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (dayMonthYearMatch) {
+    const year = dayMonthYearMatch[3].length === 2
+      ? 2000 + Number(dayMonthYearMatch[3])
+      : Number(dayMonthYearMatch[3]);
+    const month = Number(dayMonthYearMatch[2]);
+    const day = Number(dayMonthYearMatch[1]);
+    const timestamp = Date.UTC(year, month - 1, day, 12, 0, 0);
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  }
+
   const timestamp = Date.parse(text);
   return Number.isNaN(timestamp) ? 0 : timestamp;
 }
@@ -88,13 +106,25 @@ function toDateKey(value) {
   return new Date(timestamp).toISOString().slice(0, 10);
 }
 
-function matchesDateSoldFilter(order, dateFrom, dateTo) {
-  const soldKey = toDateKey(order?.dateSold);
-  if (!dateFrom && !dateTo) return true;
-  if (!soldKey) return false;
+function matchesDateFilter(order, {
+  field,
+  mode,
+  dateFrom,
+  dateTo,
+  selectedDate,
+}) {
+  const dateKey = toDateKey(order?.[field]);
 
-  if (dateFrom && soldKey < dateFrom) return false;
-  if (dateTo && soldKey > dateTo) return false;
+  if (mode === 'single') {
+    if (!selectedDate) return true;
+    return Boolean(dateKey) && dateKey === selectedDate;
+  }
+
+  if (!dateFrom && !dateTo) return true;
+  if (!dateKey) return false;
+
+  if (dateFrom && dateKey < dateFrom) return false;
+  if (dateTo && dateKey > dateTo) return false;
   return true;
 }
 
@@ -290,6 +320,19 @@ export default function EtsyOrderFulfilmentPage({
   columnLabelOverrides = {},
   apiBasePath = '/etsy/order-fulfilment',
   embedded = false,
+  fixedVisibleColumns = null,
+  allowColumnSelection = true,
+  allowImport = true,
+  allowCreate = true,
+  allowDelete = true,
+  showRegionFilter = true,
+  dateFilterField = 'dateSold',
+  dateFilterMode = 'range',
+  singleDateLabel = 'Date',
+  dateFromLabel = 'Date from',
+  dateToLabel = 'Date to',
+  initialSingleDate = '',
+  noFilteredResultsMessage = 'No orders match the selected filters.',
 } = {}) {
   const theme = useTheme();
   const isSmallMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -308,6 +351,7 @@ export default function EtsyOrderFulfilmentPage({
   const [addRowStoreId, setAddRowStoreId] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [selectedDate, setSelectedDate] = useState(initialSingleDate);
   const [selectedRegion, setSelectedRegion] = useState('');
   const [error, setError] = useState('');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
@@ -319,9 +363,20 @@ export default function EtsyOrderFulfilmentPage({
     [hiddenColumnKeys]
   );
 
+  const fixedColumnKeys = useMemo(() => {
+    if (!Array.isArray(fixedVisibleColumns) || fixedVisibleColumns.length === 0) {
+      return null;
+    }
+
+    const validKeys = new Set(ETSY_ORDER_FULFILMENT_COLUMNS.map((column) => column.key));
+    return fixedVisibleColumns.filter((key) => validKeys.has(key) && !hiddenKeys.has(key));
+  }, [fixedVisibleColumns, hiddenKeys]);
+
   const [visibleColumns, setVisibleColumns] = useState(
     () => loadVisibleEtsyColumns(columnStorageKey, hiddenKeys)
   );
+
+  const effectiveVisibleColumns = fixedColumnKeys || visibleColumns;
 
   const selectorColumnOptions = useMemo(
     () => ETSY_COLUMN_SELECTOR_OPTIONS
@@ -356,7 +411,7 @@ export default function EtsyOrderFulfilmentPage({
     [supplierAccountNames, hiddenKeys, columnLabelOverrides]
   );
 
-  const visibleColumnsSet = useMemo(() => new Set(visibleColumns), [visibleColumns]);
+  const visibleColumnsSet = useMemo(() => new Set(effectiveVisibleColumns), [effectiveVisibleColumns]);
 
   const visibleFulfilmentColumns = useMemo(
     () => fulfilmentColumns.filter((column) => visibleColumnsSet.has(column.key)),
@@ -364,8 +419,8 @@ export default function EtsyOrderFulfilmentPage({
   );
 
   const visibleSectionHeaders = useMemo(
-    () => buildVisibleEtsySectionHeaders(visibleColumns.filter((key) => !hiddenKeys.has(key))),
-    [visibleColumns, hiddenKeys]
+    () => buildVisibleEtsySectionHeaders(effectiveVisibleColumns.filter((key) => !hiddenKeys.has(key))),
+    [effectiveVisibleColumns, hiddenKeys]
   );
 
   const handleVisibleColumnsChange = useCallback((nextColumns) => {
@@ -462,12 +517,22 @@ export default function EtsyOrderFulfilmentPage({
     loadOrders(selectedStoreId);
   }, [selectedStoreId, loadOrders]);
 
+  useEffect(() => {
+    setSelectedDate(initialSingleDate);
+  }, [initialSingleDate]);
+
   const filteredOrders = useMemo(
     () => orders.filter((order) => (
-      matchesDateSoldFilter(order, dateFrom, dateTo)
-      && matchesRegionFilter(order, selectedRegion)
+      matchesDateFilter(order, {
+        field: dateFilterField,
+        mode: dateFilterMode,
+        dateFrom,
+        dateTo,
+        selectedDate,
+      })
+      && (!showRegionFilter || matchesRegionFilter(order, selectedRegion))
     )),
-    [orders, dateFrom, dateTo, selectedRegion]
+    [orders, dateFilterField, dateFilterMode, dateFrom, dateTo, selectedDate, selectedRegion, showRegionFilter]
   );
 
   const sortColumn = useMemo(
@@ -494,18 +559,18 @@ export default function EtsyOrderFulfilmentPage({
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
     downloadEtsySheetCsv({
-      columns: fulfilmentColumns,
+      columns: visibleFulfilmentColumns,
       orders: sortedOrders,
       storeNameById,
       filename: `${sheetSlug}-${storeSlug}`,
     });
   }, [
-    fulfilmentColumns,
     isAllStoresSelected,
     selectedStore?.name,
     sortedOrders,
     storeNameById,
     title,
+    visibleFulfilmentColumns,
   ]);
 
   const handleSort = (columnKey) => {
@@ -521,7 +586,7 @@ export default function EtsyOrderFulfilmentPage({
 
   useEffect(() => {
     setPage(1);
-  }, [dateFrom, dateTo, selectedRegion]);
+  }, [dateFilterMode, dateFrom, dateTo, selectedDate, selectedRegion]);
 
   const totalPages = Math.max(1, Math.ceil(sortedOrders.length / ROWS_PER_PAGE));
 
@@ -584,6 +649,7 @@ export default function EtsyOrderFulfilmentPage({
   };
 
   const handleAddRow = () => {
+    if (!allowCreate) return;
     if (stores.length === 0) {
       setSnackbar({
         open: true,
@@ -601,6 +667,7 @@ export default function EtsyOrderFulfilmentPage({
   };
 
   const handleDeleteRow = async (orderId) => {
+    if (!allowDelete) return;
     if (!window.confirm('Remove this row? This cannot be undone.')) return;
 
     setDeletingIds((prev) => ({ ...prev, [orderId]: true }));
@@ -704,6 +771,27 @@ export default function EtsyOrderFulfilmentPage({
     loadOrders(selectedStoreId);
   };
 
+  const hasActiveDateFilter = dateFilterMode === 'single'
+    ? Boolean(selectedDate)
+    : Boolean(dateFrom || dateTo);
+
+  const hasActiveFilters = hasActiveDateFilter || (showRegionFilter && Boolean(selectedRegion));
+
+  const handleClearFilters = () => {
+    setDateFrom('');
+    setDateTo('');
+    setSelectedDate('');
+    setSelectedRegion('');
+  };
+
+  const selectStorePrompt = allowImport || allowCreate
+    ? 'Select an Etsy store to view or import orders.'
+    : 'Select an Etsy store to view orders.';
+
+  const emptyStoreDescription = allowImport || allowCreate
+    ? 'Import a CSV from your spreadsheet or add rows manually.'
+    : 'Orders will appear here once matching rows exist in Order Fulfilment.';
+
   return (
     <Box
         sx={{
@@ -740,7 +828,7 @@ export default function EtsyOrderFulfilmentPage({
               {(filteredOrders.length > 0 || orders.length > 0) && (
                 <Chip
                   label={
-                    (dateFrom || dateTo) && filteredOrders.length !== orders.length
+                    hasActiveFilters && filteredOrders.length !== orders.length
                       ? `${filteredOrders.length} of ${orders.length} orders`
                       : `${filteredOrders.length} order${filteredOrders.length === 1 ? '' : 's'}`
                   }
@@ -760,17 +848,19 @@ export default function EtsyOrderFulfilmentPage({
               >
                 {isSmallMobile ? 'Refresh' : 'Refresh'}
               </Button>
-              <Button
-                variant="outlined"
-                color="primary"
-                size="small"
-                startIcon={<UploadIcon />}
-                onClick={() => setImportOpen(true)}
-                disabled={stores.length === 0}
-                sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
-              >
-                {isSmallMobile ? 'Import' : 'Import CSV'}
-              </Button>
+              {allowImport && (
+                <Button
+                  variant="outlined"
+                  color="primary"
+                  size="small"
+                  startIcon={<UploadIcon />}
+                  onClick={() => setImportOpen(true)}
+                  disabled={stores.length === 0}
+                  sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
+                >
+                  {isSmallMobile ? 'Import' : 'Import CSV'}
+                </Button>
+              )}
               <Button
                 variant="outlined"
                 color="primary"
@@ -782,17 +872,19 @@ export default function EtsyOrderFulfilmentPage({
               >
                 {isSmallMobile ? 'Download' : 'Download CSV'}
               </Button>
-              <Button
-                variant="contained"
-                color="primary"
-                size="small"
-                startIcon={creating ? <CircularProgress size={16} color="inherit" /> : <AddIcon />}
-                onClick={handleAddRow}
-                disabled={creating || stores.length === 0}
-                sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
-              >
-                {isSmallMobile ? 'Add Row' : 'Add Row'}
-              </Button>
+              {allowCreate && (
+                <Button
+                  variant="contained"
+                  color="primary"
+                  size="small"
+                  startIcon={creating ? <CircularProgress size={16} color="inherit" /> : <AddIcon />}
+                  onClick={handleAddRow}
+                  disabled={creating || stores.length === 0}
+                  sx={{ fontSize: { xs: '0.7rem', sm: '0.8rem' } }}
+                >
+                  {isSmallMobile ? 'Add Row' : 'Add Row'}
+                </Button>
+              )}
             </Stack>
           </Stack>
 
@@ -833,65 +925,79 @@ export default function EtsyOrderFulfilmentPage({
               </Select>
             </FormControl>
 
-            <TextField
-              size="small"
-              type="date"
-              label="Date from"
-              value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: { xs: '100%', sm: 160 } }}
-            />
-            <TextField
-              size="small"
-              type="date"
-              label="Date to"
-              value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: { xs: '100%', sm: 160 } }}
-            />
+            {dateFilterMode === 'single' ? (
+              <TextField
+                size="small"
+                type="date"
+                label={singleDateLabel}
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: { xs: '100%', sm: 180 } }}
+              />
+            ) : (
+              <>
+                <TextField
+                  size="small"
+                  type="date"
+                  label={dateFromLabel}
+                  value={dateFrom}
+                  onChange={(e) => setDateFrom(e.target.value)}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ minWidth: { xs: '100%', sm: 160 } }}
+                />
+                <TextField
+                  size="small"
+                  type="date"
+                  label={dateToLabel}
+                  value={dateTo}
+                  onChange={(e) => setDateTo(e.target.value)}
+                  InputLabelProps={{ shrink: true }}
+                  sx={{ minWidth: { xs: '100%', sm: 160 } }}
+                />
+              </>
+            )}
 
-            <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 140 } }}>
-              <InputLabel id="etsy-region-filter-label">Region</InputLabel>
-              <Select
-                labelId="etsy-region-filter-label"
-                value={selectedRegion}
-                label="Region"
-                onChange={(e) => setSelectedRegion(e.target.value)}
-                disabled={!selectedStoreId}
-              >
-                <MenuItem value="">All Regions</MenuItem>
-                {ETSY_REGION_OPTIONS.map((region) => (
-                  <MenuItem key={region} value={region}>
-                    {region}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            {showRegionFilter && (
+              <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 140 } }}>
+                <InputLabel id="etsy-region-filter-label">Region</InputLabel>
+                <Select
+                  labelId="etsy-region-filter-label"
+                  value={selectedRegion}
+                  label="Region"
+                  onChange={(e) => setSelectedRegion(e.target.value)}
+                  disabled={!selectedStoreId}
+                >
+                  <MenuItem value="">All Regions</MenuItem>
+                  {ETSY_REGION_OPTIONS.map((region) => (
+                    <MenuItem key={region} value={region}>
+                      {region}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
 
-            {(dateFrom || dateTo || selectedRegion) && (
+            {hasActiveFilters && (
               <Button
                 size="small"
                 variant="text"
-                onClick={() => {
-                  setDateFrom('');
-                  setDateTo('');
-                  setSelectedRegion('');
-                }}
+                onClick={handleClearFilters}
               >
                 Clear filters
               </Button>
             )}
 
-            <ColumnSelector
-              allColumns={selectorColumnOptions}
-              visibleColumns={visibleColumns.filter((key) => key !== 'rowNum')}
-              onColumnChange={handleVisibleColumnsChange}
-              onReset={handleResetVisibleColumns}
-              page={columnSelectorPage}
-              disabled={!selectedStoreId}
-            />
+            {allowColumnSelection && !fixedColumnKeys && (
+              <ColumnSelector
+                allColumns={selectorColumnOptions}
+                visibleColumns={visibleColumns.filter((key) => key !== 'rowNum')}
+                onColumnChange={handleVisibleColumnsChange}
+                onReset={handleResetVisibleColumns}
+                page={columnSelectorPage}
+                disabled={!selectedStoreId}
+              />
+            )}
 
             {isAllStoresSelected && (
               <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: '0.8rem', sm: '0.875rem' } }}>
@@ -928,7 +1034,7 @@ export default function EtsyOrderFulfilmentPage({
             <Typography variant="body1" color="text.secondary">
               {stores.length === 0
                 ? 'Add an Etsy store in Settings → Etsy Stores, then select it here.'
-                : 'Select an Etsy store to view or import orders.'}
+                : selectStorePrompt}
             </Typography>
             {stores.length === 0 && (
               <Button
@@ -956,31 +1062,33 @@ export default function EtsyOrderFulfilmentPage({
               No rows for {isAllStoresSelected ? 'any store' : (selectedStore?.name || 'this store')}.
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Import a CSV from your spreadsheet or add rows manually.
+              {emptyStoreDescription}
             </Typography>
-            <Stack direction="row" spacing={1} justifyContent="center" flexWrap="wrap" useFlexGap>
-              <Button variant="outlined" size="small" startIcon={<UploadIcon />} onClick={() => setImportOpen(true)}>
-                Import CSV
-              </Button>
-              <Button variant="contained" size="small" startIcon={<AddIcon />} onClick={handleAddRow} disabled={creating || stores.length === 0}>
-                Add Row
-              </Button>
-            </Stack>
+            {(allowImport || allowCreate) && (
+              <Stack direction="row" spacing={1} justifyContent="center" flexWrap="wrap" useFlexGap>
+                {allowImport && (
+                  <Button variant="outlined" size="small" startIcon={<UploadIcon />} onClick={() => setImportOpen(true)}>
+                    Import CSV
+                  </Button>
+                )}
+                {allowCreate && (
+                  <Button variant="contained" size="small" startIcon={<AddIcon />} onClick={handleAddRow} disabled={creating || stores.length === 0}>
+                    Add Row
+                  </Button>
+                )}
+              </Stack>
+            )}
           </Paper>
         ) : filteredOrders.length === 0 ? (
           <Paper sx={{ p: { xs: 2, sm: 4 }, textAlign: 'center', flexShrink: 0 }}>
             <Typography variant="body1" color="text.secondary" gutterBottom>
-              No orders match the selected filters.
+              {noFilteredResultsMessage}
             </Typography>
             <Button
               size="small"
               variant="outlined"
               sx={{ mt: 1 }}
-              onClick={() => {
-                setDateFrom('');
-                setDateTo('');
-                setSelectedRegion('');
-              }}
+              onClick={handleClearFilters}
             >
               Clear filters
             </Button>
@@ -1079,7 +1187,7 @@ export default function EtsyOrderFulfilmentPage({
                               serialNumber={serialNumber}
                               deleting={rowDeleting}
                               inlineActions
-                              onDelete={() => handleDeleteRow(row._id)}
+                              onDelete={allowDelete ? () => handleDeleteRow(row._id) : undefined}
                             />
                           ) : column.key === 'storeName' ? (
                             <Typography variant="body2" fontWeight="medium" noWrap>
@@ -1116,7 +1224,7 @@ export default function EtsyOrderFulfilmentPage({
           </TableContainer>
         )}
 
-        {importOpen && (
+        {allowImport && importOpen && (
           <Suspense fallback={null}>
             <EtsyOrderFulfilmentImportDialog
               open={importOpen}
@@ -1130,43 +1238,45 @@ export default function EtsyOrderFulfilmentPage({
           </Suspense>
         )}
 
-        <Dialog
-          open={addRowStoreOpen}
-          onClose={creating ? undefined : () => setAddRowStoreOpen(false)}
-          maxWidth="xs"
-          fullWidth
-        >
-          <DialogTitle>Add Row</DialogTitle>
-          <DialogContent>
-            <TextField
-              select
-              label="Etsy Store"
-              value={addRowStoreId}
-              onChange={(e) => setAddRowStoreId(e.target.value)}
-              fullWidth
-              size="small"
-              sx={{ mt: 1 }}
-              disabled={creating}
-            >
-              {stores.map((store) => (
-                <MenuItem key={store._id} value={store._id}>
-                  {store.name}
-                </MenuItem>
-              ))}
-            </TextField>
-          </DialogContent>
-          <DialogActions>
-            <Button onClick={() => setAddRowStoreOpen(false)} disabled={creating}>Cancel</Button>
-            <Button
-              variant="contained"
-              onClick={() => createOrderRow(addRowStoreId)}
-              disabled={creating || !addRowStoreId}
-              startIcon={creating ? <CircularProgress size={16} color="inherit" /> : <AddIcon />}
-            >
-              Add Row
-            </Button>
-          </DialogActions>
-        </Dialog>
+        {allowCreate && (
+          <Dialog
+            open={addRowStoreOpen}
+            onClose={creating ? undefined : () => setAddRowStoreOpen(false)}
+            maxWidth="xs"
+            fullWidth
+          >
+            <DialogTitle>Add Row</DialogTitle>
+            <DialogContent>
+              <TextField
+                select
+                label="Etsy Store"
+                value={addRowStoreId}
+                onChange={(e) => setAddRowStoreId(e.target.value)}
+                fullWidth
+                size="small"
+                sx={{ mt: 1 }}
+                disabled={creating}
+              >
+                {stores.map((store) => (
+                  <MenuItem key={store._id} value={store._id}>
+                    {store.name}
+                  </MenuItem>
+                ))}
+              </TextField>
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setAddRowStoreOpen(false)} disabled={creating}>Cancel</Button>
+              <Button
+                variant="contained"
+                onClick={() => createOrderRow(addRowStoreId)}
+                disabled={creating || !addRowStoreId}
+                startIcon={creating ? <CircularProgress size={16} color="inherit" /> : <AddIcon />}
+              >
+                Add Row
+              </Button>
+            </DialogActions>
+          </Dialog>
+        )}
 
         <Snackbar
           open={snackbar.open}

@@ -60,7 +60,7 @@ router.get('/', requireAuth, requirePageAccess('SourcingRules'), async (req, res
 /** POST / — create a rule. */
 router.post('/', requireAuth, requirePageAccess('SourcingRules'), async (req, res) => {
   try {
-    const { templateId, sellerId, searchKeyword, priceMin, priceMax, region, targetAsinCount, filters, enabled, autoGenerateAndSave } = req.body || {};
+    const { templateId, sellerId, searchKeyword, priceMin, priceMax, region, targetAsinCount, filters, enabled, autoGenerateAndSave, ebayMotorsMode } = req.body || {};
 
     if (!templateId || !sellerId) {
       return res.status(400).json({ error: 'Template and seller are required' });
@@ -83,6 +83,7 @@ router.post('/', requireAuth, requirePageAccess('SourcingRules'), async (req, re
       filters: sanitizeFilters(filters),
       createdBy: req.user.userId,
       autoGenerateAndSave: Boolean(autoGenerateAndSave),
+      ebayMotorsMode: Boolean(ebayMotorsMode),
       enabled: enabled !== false,
     });
 
@@ -96,7 +97,7 @@ router.post('/', requireAuth, requirePageAccess('SourcingRules'), async (req, re
 /** PATCH /:id — update a rule's config/enabled state. */
 router.patch('/:id', requireAuth, requirePageAccess('SourcingRules'), async (req, res) => {
   try {
-    const { templateId, sellerId, searchKeyword, priceMin, priceMax, region, targetAsinCount, filters, enabled, autoGenerateAndSave } = req.body || {};
+    const { templateId, sellerId, searchKeyword, priceMin, priceMax, region, targetAsinCount, filters, enabled, autoGenerateAndSave, ebayMotorsMode } = req.body || {};
     const update = {};
 
     if (templateId !== undefined) update.template = templateId;
@@ -119,6 +120,7 @@ router.patch('/:id', requireAuth, requirePageAccess('SourcingRules'), async (req
     }
     if (enabled !== undefined) update.enabled = Boolean(enabled);
     if (autoGenerateAndSave !== undefined) update.autoGenerateAndSave = Boolean(autoGenerateAndSave);
+    if (ebayMotorsMode !== undefined) update.ebayMotorsMode = Boolean(ebayMotorsMode);
     // createdBy is never accepted from the client — it's the identity used to
     // sign internal API calls (see lib/asinSourcingAutomation.js). Rules
     // created before this field existed have none; backfill it here from

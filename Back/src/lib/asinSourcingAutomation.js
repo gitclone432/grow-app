@@ -8,11 +8,12 @@ import { searchAmazonAsinsPage } from '../utils/amazonSearchScraper.js';
 import { loadActiveSkuSet, precheckAsin, passesPrecheckFilters } from '../utils/asinPrecheckCore.js';
 import { callInternalApi } from './internalApiClient.js';
 import { checkUploadLimit, performFeedUpload } from './ebayFeedUpload.js';
+import { classifyEbayMotorsTitle } from './ebayMotorsClassifier.js';
 
 // eBay Feed API marketplace country codes (CsvStorage.country enum) —
 // region 'CA' in Sourcing Rules maps to 'Canada' here, matching how the
 // manual Feed Upload page labels it.
-const REGION_TO_FEED_COUNTRY = { US: 'US', UK: 'UK', AU: 'AU', CA: 'Canada' };
+export const REGION_TO_FEED_COUNTRY = { US: 'US', UK: 'UK', AU: 'AU', CA: 'Canada' };
 
 // How many Amazon search-result pages one run will page through while still
 // short of targetAsinCount, before giving up and reporting a shortfall.
@@ -36,8 +37,8 @@ async function runWithConcurrency(items, concurrency, worker) {
   await Promise.allSettled(workers);
 }
 
-const SAVABLE_STATUSES = new Set(['success', 'warning']);
-const SAVED_RESULT_STATUSES = new Set(['created', 'updated', 'reactivated']);
+export const SAVABLE_STATUSES = new Set(['success', 'warning']);
+export const SAVED_RESULT_STATUSES = new Set(['created', 'updated', 'reactivated']);
 
 /**
  * Records live progress on a SourcingRuleRun (see lib/sourcingRuleRunQueue.js
@@ -59,8 +60,13 @@ async function setStage(runDoc, stage, stageDetail = '') {
  * listingIds filter, routes/templateListings.js) to CSV, records it in CSV
  * Storage, and immediately uploads it to eBay's Feed API. Never throws —
  * returns a result object describing what happened at each step.
+ *
+ * `target` is a plain {template, seller, region, createdBy, logLabel}
+ * config rather than a full SourcingRule doc, so this is reusable both by
+ * the sourcing-rule automation and by the manual "Save All" review flow
+ * (routes/templateListings.js bulk-save, when saving from a sourcing batch).
  */
-async function exportAndFeedUploadSavedRows(rule, listingIds, log, runDoc) {
+export async function exportAndFeedUploadSavedRows(target, listingIds, log, runDoc) {
   const empty = { exported: false, csvStorageId: null, listingCount: 0, taskId: null, status: '', blockedByDailyLimit: false, error: '' };
   if (listingIds.length === 0) {
     log('Nothing saved — skipping CSV export / feed upload.');
@@ -72,8 +78,8 @@ async function exportAndFeedUploadSavedRows(rule, listingIds, log, runDoc) {
     log(`Exporting ${listingIds.length} saved row(s) to CSV...`);
     const exportResponse = await callInternalApi({
       method: 'GET',
-      path: `/template-listings/export-csv/${String(rule.template)}?sellerId=${String(rule.seller)}&listingIds=${listingIds.join(',')}`,
-      asUserId: rule.createdBy,
+      path: `/template-listings/export-csv/${String(target.template)}?sellerId=${String(target.seller)}&listingIds=${listingIds.join(',')}`,
+      asUserId: target.createdBy,
       responseType: 'arraybuffer',
       raw: true,
     });
@@ -81,32 +87,32 @@ async function exportAndFeedUploadSavedRows(rule, listingIds, log, runDoc) {
     const csvBuffer = Buffer.from(exportResponse.data);
     const contentDisposition = String(exportResponse.headers?.['content-disposition'] || '');
     const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/i);
-    const fileName = filenameMatch?.[1] || `sourcing_${rule._id}_${Date.now()}.csv`;
-    const country = REGION_TO_FEED_COUNTRY[rule.region] || 'US';
+    const fileName = filenameMatch?.[1] || `sourcing_${target.logLabel || target._id || 'batch'}_${Date.now()}.csv`;
+    const country = REGION_TO_FEED_COUNTRY[target.region] || 'US';
 
     const csvRecord = await CsvStorage.create({
       name: fileName.replace(/\.csv$/i, ''),
       fileName,
       csvData: csvBuffer,
       mimeType: 'text/csv',
-      seller: rule.seller,
-      templateId: rule.template,
+      seller: target.seller,
+      templateId: target.template,
       listingCount: listingIds.length,
       source: 'sourcing_automation',
       listingStatus: 'active',
       country,
-      createdBy: rule.createdBy,
+      createdBy: target.createdBy,
     });
     log(`Saved to CSV Storage: ${csvRecord._id} (${fileName})`);
 
-    const limitCheck = await checkUploadLimit(String(rule.seller), country);
+    const limitCheck = await checkUploadLimit(String(target.seller), country);
     if (limitCheck.isBlocked) {
       log(`Daily upload limit reached for this seller in ${country} (${limitCheck.currentCount}/${limitCheck.limit}) — CSV saved but not uploaded.`);
       return { exported: true, csvStorageId: String(csvRecord._id), listingCount: listingIds.length, taskId: null, status: '', blockedByDailyLimit: true, error: '' };
     }
 
     log(`Uploading to eBay Feed API (${country})...`);
-    const taskId = await performFeedUpload(String(rule.seller), csvBuffer, fileName, 'FX_LISTING', '1.0', { country });
+    const taskId = await performFeedUpload(String(target.seller), csvBuffer, fileName, 'FX_LISTING', '1.0', { country });
     log(`Feed task created: ${taskId}`);
 
     const feedUploadDoc = await FeedUpload.findOne({ taskId }).select('_id status').lean();
@@ -124,46 +130,36 @@ async function exportAndFeedUploadSavedRows(rule, listingIds, log, runDoc) {
       error: '',
     };
   } catch (error) {
-    console.error(`[Sourcing Automation] [rule ${rule._id}] CSV export/feed upload failed:`, error.message);
+    console.error(`[Sourcing Automation] CSV export/feed upload failed:`, error.message);
     return { ...empty, listingCount: listingIds.length, error: error.message };
   }
 }
 
 /**
- * If rule.autoGenerateAndSave is on: generate listings (/bulk-preview), save
- * them as Active (/bulk-save), then push the newly-saved rows to eBay via
- * the same CSV Feed pipeline the "CSV Listings" page's Download CSV button
- * uses — export exactly those rows to CSV (/export-csv, scoped by
- * listingIds so nothing else pending gets swept in), record that CSV in CSV
- * Storage (so it shows up in CSV Listings' history, same as a manual
- * download), then upload it to eBay's Feed API immediately
- * (performFeedUpload — the same function the Feed Upload page and the
- * scheduled CSV auto-upload cron both call), linking the resulting
- * FeedUpload record back onto the CSV Storage row exactly like a manual
- * upload does. Its status/success-failure counts are then visible on the
- * Feed Upload page like any other upload.
+ * If rule.autoGenerateAndSave is on: pre-generate listing previews
+ * (/bulk-preview) right after the batch is collected, so it's already
+ * populated when a human opens it in the review queue — nothing is saved
+ * or fed to eBay here. The batch stays at status 'ready'; a human must
+ * still dismiss unwanted items and click "Save All" in the Template
+ * Listings Lab (see routes/templateListings.js bulk-save, which performs
+ * the actual save + feed-upload for whatever the reviewer kept).
  *
- * bulk-preview/bulk-save go through lib/internalApiClient.js (an internal,
- * authenticated request to this same server) so behavior never diverges
- * from the manual "Save All" flow — matches its item filter exactly (see
- * AsinReviewModal.jsx:964-966): saves 'success' AND 'warning' items, skips
- * only error/blocked/loading. export-csv is also called that way (it's a
- * large, request-coupled route handler); CSV Storage and the Feed API
- * upload are plain model/lib calls, made directly.
+ * bulk-preview goes through lib/internalApiClient.js (an internal,
+ * authenticated request to this same server) so results never diverge from
+ * the manual "Autofill" flow used when a batch is opened for review.
  *
  * Every step is logged with a `[Sourcing Automation]` prefix and recorded on
- * the batch's `generation` field, so a run's outcome (generated? saved? fed
- * to eBay? why not?) is always inspectable without re-running anything.
- * Never throws: a failure here leaves the batch 'ready' so a human can still
- * open it manually.
+ * the batch's `generation` field. Never throws: a failure here just leaves
+ * the batch without a pre-generated preview — a human can still open it
+ * manually and it will be generated on demand as before.
  */
-async function generateAndSaveBatch(rule, batch, runDoc) {
+async function generatePreviewForBatch(rule, batch, runDoc) {
   const log = (...args) => console.log(`[Sourcing Automation] [rule ${rule._id}] [batch ${batch._id}]`, ...args);
 
   if (!rule.autoGenerateAndSave || batch.asins.length === 0) return null;
 
   if (!rule.createdBy) {
-    const msg = 'autoGenerateAndSave is on but the rule has no createdBy (legacy rule) — skipping.';
+    const msg = 'autoGenerateAndSave is on but the rule has no createdBy (legacy rule) — skipping preview.';
     console.warn(`[Sourcing Automation] [rule ${rule._id}]`, msg);
     await AsinSourcingBatch.updateOne(
       { _id: batch._id },
@@ -188,72 +184,26 @@ async function generateAndSaveBatch(rule, batch, runDoc) {
     }, {});
     log(`bulk-preview done: ${items.length} item(s) —`, statusBreakdown);
 
-    const savableItems = items.filter((i) => SAVABLE_STATUSES.has(i.status));
-    const skippedItems = items.filter((i) => !SAVABLE_STATUSES.has(i.status));
-    if (skippedItems.length > 0) {
-      log(`Skipping ${skippedItems.length} non-savable item(s):`, skippedItems.map((i) => `${i.asin} (${i.status}: ${(i.errors || []).join('; ') || (i.warnings || []).join('; ')})`));
-    }
-    const listings = savableItems.map((i) => i.generatedListing).filter(Boolean);
-
-    let saveSummary = null;
-    let saveResults = [];
-    if (listings.length > 0) {
-      await setStage(runDoc, 'saving_listings', `Saving ${listings.length} listing(s) as Active...`);
-      log(`Requesting bulk-save (Active) for ${listings.length} listing(s)...`);
-      const saveResponse = await callInternalApi({
-        path: '/template-listings/bulk-save',
-        data: {
-          templateId: String(rule.template),
-          sellerId: String(rule.seller),
-          listings,
-          options: { skipDuplicates: true, status: 'active' },
-          region: rule.region,
-        },
-        asUserId: rule.createdBy,
-      });
-      saveSummary = {
-        total: saveResponse.total,
-        created: saveResponse.created,
-        updated: saveResponse.updated,
-        reactivated: saveResponse.reactivated,
-        failed: saveResponse.failed,
-        skipped: saveResponse.skipped,
-      };
-      saveResults = saveResponse.results || [];
-      log('bulk-save done:', saveSummary);
-      if (saveResponse.errors?.length) {
-        log('bulk-save errors:', saveResponse.errors);
-      }
-    } else {
-      log('Nothing savable — skipping bulk-save.');
-    }
-
-    // Only feed-upload rows that actually landed in the DB
-    // (created/updated/reactivated) — not ones bulk-save itself skipped/failed.
-    const savedListingIds = [...new Set(
-      saveResults
-        .filter((r) => SAVED_RESULT_STATUSES.has(r.status) && r.listing?._id)
-        .map((r) => String(r.listing._id))
-    )];
-
-    const feedUpload = await exportAndFeedUploadSavedRows(rule, savedListingIds, log, runDoc);
-
     const generation = {
       attempted: true,
-      previewSummary: previewResponse.summary || null,
+      previewSummary: previewResponse.summary || {
+        total: items.length,
+        successful: statusBreakdown.success || 0,
+        warnings: statusBreakdown.warning || 0,
+        failed: (statusBreakdown.error || 0) + (statusBreakdown.blocked || 0),
+      },
       statusBreakdown,
-      saveSummary,
       skippedForWarnings: statusBreakdown.warning || 0,
-      feedUpload,
       error: '',
       generatedAt: new Date(),
     };
 
-    await AsinSourcingBatch.updateOne({ _id: batch._id }, { $set: { status: 'generated', generation } });
-    log('Batch marked generated.', generation);
+    // status stays 'ready' — this batch still needs a human review + Save All.
+    await AsinSourcingBatch.updateOne({ _id: batch._id }, { $set: { generation } });
+    log('Preview pre-generated for review.', generation);
     return generation;
   } catch (error) {
-    console.error(`[Sourcing Automation] [rule ${rule._id}] Auto-generate/save failed:`, error.message);
+    console.error(`[Sourcing Automation] [rule ${rule._id}] Preview pre-generation failed:`, error.message);
     const generation = { attempted: true, error: error.message };
     await AsinSourcingBatch.updateOne(
       { _id: batch._id },
@@ -323,10 +273,15 @@ export async function runSourcingRule(rule, runDoc = null) {
         try {
           const generated = rowByAsin.get(asin);
           const row = await precheckAsin(asin, rule.region, template, activeSkuSet, generated);
-          if (passesPrecheckFilters(row, rule.filters) && !qualifyingAsinSet.has(asin)) {
-            qualifyingAsinSet.add(asin);
-            qualifying.push(asin);
+          if (!passesPrecheckFilters(row, rule.filters) || qualifyingAsinSet.has(asin)) return;
+
+          if (rule.ebayMotorsMode) {
+            const classification = await classifyEbayMotorsTitle(row.title, asin);
+            if (!classification.eligible) return;
           }
+
+          qualifyingAsinSet.add(asin);
+          qualifying.push(asin);
         } catch (err) {
           console.warn(`[Sourcing Automation] Failed to precheck ${asin} for rule ${rule._id}:`, err.message);
         }
@@ -355,7 +310,7 @@ export async function runSourcingRule(rule, runDoc = null) {
       );
     }
 
-    const generation = await generateAndSaveBatch(rule, batch, runDoc);
+    const generation = await generatePreviewForBatch(rule, batch, runDoc);
 
     const durationSec = Math.round((Date.now() - startedAt) / 1000);
     let summary = shortfall
@@ -365,23 +320,11 @@ export async function runSourcingRule(rule, runDoc = null) {
     let lastRunStatus = shortfall ? 'partial' : 'success';
     if (generation) {
       if (generation.error) {
-        summary += ` Auto-generate/save failed: ${generation.error}`;
+        summary += ` Preview pre-generation failed: ${generation.error}`;
         lastRunStatus = 'partial';
-      } else if (generation.saveSummary) {
-        const s = generation.saveSummary;
-        summary += ` Auto-saved: ${s.created} created, ${s.updated} updated, ${s.reactivated} reactivated, ${s.failed} failed, ${s.skipped} skipped.`;
-        const fu = generation.feedUpload;
-        if (fu?.blockedByDailyLimit) {
-          summary += ` CSV saved but not uploaded — daily eBay upload limit reached for this seller.`;
-          lastRunStatus = 'partial';
-        } else if (fu?.taskId) {
-          summary += ` Fed ${fu.listingCount} to eBay (feed task ${fu.taskId}).`;
-        } else if (fu?.error) {
-          summary += ` CSV export/feed upload failed: ${fu.error}`;
-          lastRunStatus = 'partial';
-        }
-      } else {
-        summary += ' No listings qualified for auto-save (all had errors/blocked).';
+      } else if (generation.previewSummary) {
+        const s = generation.previewSummary;
+        summary += ` Preview ready for review: ${s.successful} success, ${s.warnings} warning, ${s.failed} failed/blocked.`;
       }
     }
 

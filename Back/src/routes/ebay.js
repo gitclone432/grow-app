@@ -4032,7 +4032,7 @@ router.get('/order/:orderId', requireAuth, requirePageAccess('Fulfillment'), asy
 
 
 // List view: omit large eBay blobs not needed for fulfillment tables (saves bandwidth + JSON parse time).
-const STORED_ORDER_LIST_OMIT = '-paymentSummary -fulfillmentStartInstructions -ebayCollectAndRemitTax -totalFeeBasisAmount -totalMarketplaceFee -pricingSummary -buyerCheckoutNotes -fulfillmentHrefs';
+const STORED_ORDER_LIST_OMIT = '-paymentSummary -fulfillmentStartInstructions -ebayCollectAndRemitTax -totalFeeBasisAmount -totalMarketplaceFee -pricingSummary -fulfillmentHrefs';
 
 function slimStoredOrderForList(order) {
   if (!order) return order;

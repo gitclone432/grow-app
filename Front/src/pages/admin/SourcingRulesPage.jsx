@@ -71,7 +71,8 @@ const EMPTY_FORM = {
   targetAsinCount: '',
   filters: { ...DEFAULT_FILTERS, excludeKeywords: '' },
   enabled: true,
-  autoGenerateAndSave: false
+  autoGenerateAndSave: false,
+  ebayMotorsMode: false
 };
 
 const RUN_STAGE_LABELS = {
@@ -116,6 +117,13 @@ export default function SourcingRulesPage() {
   const selectedTemplate = useMemo(
     () => templates.find((t) => t._id === form.templateId) || null,
     [templates, form.templateId]
+  );
+
+  // A batch stays pending review until a human opens it, dismisses what
+  // they don't want, and clicks Save All (which moves it to 'generated').
+  const pendingReviewCount = useMemo(
+    () => batches.filter((b) => b.status !== 'generated' && b.foundCount > 0).length,
+    [batches]
   );
 
   const loadAll = async () => {
@@ -191,7 +199,8 @@ export default function SourcingRulesPage() {
         excludeKeywords: (rule.filters?.excludeKeywords || []).join(', ')
       },
       enabled: rule.enabled !== false,
-      autoGenerateAndSave: Boolean(rule.autoGenerateAndSave)
+      autoGenerateAndSave: Boolean(rule.autoGenerateAndSave),
+      ebayMotorsMode: Boolean(rule.ebayMotorsMode)
     });
     setDialogOpen(true);
   };
@@ -233,7 +242,8 @@ export default function SourcingRulesPage() {
           .filter(Boolean)
       },
       enabled: form.enabled,
-      autoGenerateAndSave: form.autoGenerateAndSave
+      autoGenerateAndSave: form.autoGenerateAndSave,
+      ebayMotorsMode: form.ebayMotorsMode
     };
 
     setSaving(true);
@@ -437,11 +447,20 @@ export default function SourcingRulesPage() {
 
         <Paper sx={{ p: 2 }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5 }}>
-            <Typography variant="subtitle1" fontWeight={700}>Recent Batches</Typography>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Typography variant="subtitle1" fontWeight={700}>Pending Review</Typography>
+              {pendingReviewCount > 0 && (
+                <Chip size="small" label={pendingReviewCount} color="primary" />
+              )}
+            </Stack>
             <Button size="small" onClick={() => navigate('/admin/feed-upload')}>
               View Feed Uploads →
             </Button>
           </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+            Every batch stops here until a human reviews it — click Review, dismiss anything you don't want, and
+            click Save All to save the rest as Active and feed them to eBay.
+          </Typography>
           <TableContainer>
             <Table size="small">
               <TableHead>
@@ -474,14 +493,14 @@ export default function SourcingRulesPage() {
                       <Stack spacing={0.5}>
                         <Chip
                           size="small"
-                          label={batch.status}
-                          color={batch.status === 'ready' ? 'primary' : batch.status === 'generated' ? 'success' : 'default'}
+                          label={batch.status === 'generated' ? 'saved' : 'pending review'}
+                          color={batch.status === 'generated' ? 'success' : 'primary'}
                           variant={batch.status === 'consumed' ? 'outlined' : 'filled'}
                         />
                         {batch.generation?.attempted && (
                           batch.generation.error ? (
                             <Tooltip title={batch.generation.error}>
-                              <Chip size="small" label="Auto-save failed" color="error" variant="outlined" />
+                              <Chip size="small" label="Preview generation failed" color="error" variant="outlined" />
                             </Tooltip>
                           ) : batch.generation.saveSummary ? (
                             <Stack spacing={0.25}>
@@ -510,24 +529,33 @@ export default function SourcingRulesPage() {
                                   <Chip size="small" label="CSV export/feed upload failed" color="error" variant="outlined" />
                                 </Tooltip>
                               ) : (
-                                <Typography variant="caption" color="text.secondary">Not fed to eBay (nothing saved)</Typography>
+                                <Typography variant="caption" color="text.secondary">Nothing kept to feed to eBay</Typography>
                               )}
                             </Stack>
-                          ) : (
+                          ) : batch.generation.previewSummary ? (
                             <Tooltip title={`bulk-preview: ${JSON.stringify(batch.generation.statusBreakdown || {})}`}>
-                              <Typography variant="caption" color="text.secondary">Nothing qualified to auto-save</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Preview ready: {batch.generation.previewSummary.successful} success,{' '}
+                                {batch.generation.previewSummary.warnings} warning, {batch.generation.previewSummary.failed} failed
+                              </Typography>
                             </Tooltip>
-                          )
+                          ) : null
                         )}
                       </Stack>
                     </TableCell>
                     <TableCell>{new Date(batch.createdAt).toLocaleString()}</TableCell>
                     <TableCell align="right">
-                      <Tooltip title={batch.status === 'generated' ? 'Already generated & saved — nothing to hand off' : 'Open in Template Listings Lab'}>
+                      <Tooltip title={batch.status === 'generated' ? 'Already reviewed & saved — nothing left to review' : 'Review in Template Listings Lab'}>
                         <span>
-                          <IconButton size="small" onClick={() => openBatchInLab(batch)} disabled={batch.foundCount === 0 || batch.status === 'generated'}>
-                            <OpenInNewIcon fontSize="small" />
-                          </IconButton>
+                          <Button
+                            size="small"
+                            variant={batch.status === 'generated' ? 'text' : 'outlined'}
+                            onClick={() => openBatchInLab(batch)}
+                            disabled={batch.foundCount === 0 || batch.status === 'generated'}
+                            startIcon={<OpenInNewIcon fontSize="small" />}
+                          >
+                            Review
+                          </Button>
                         </span>
                       </Tooltip>
                     </TableCell>
@@ -606,6 +634,23 @@ export default function SourcingRulesPage() {
               helperText="How many qualifying ASINs each run should collect for this template/account"
             />
 
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={form.ebayMotorsMode}
+                  onChange={(e) => setForm((prev) => ({ ...prev, ebayMotorsMode: e.target.checked }))}
+                />
+              }
+              label="eBay Motors mode"
+            />
+            {form.ebayMotorsMode && (
+              <Alert severity="info" sx={{ mt: -1 }}>
+                Each candidate ASIN's title is also checked with the same eBay Motors classifier used by the
+                manual ASIN Precheck page — it must contain both a vehicle model name and a year/year range
+                to qualify. Universal-fit products are excluded even if flagged "universal".
+              </Alert>
+            )}
+
             <Typography variant="subtitle2" fontWeight={700}>Universal Filters</Typography>
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
               <TextField
@@ -667,16 +712,16 @@ export default function SourcingRulesPage() {
                   color="warning"
                 />
               }
-              label="Auto-generate, save (Active) & feed-upload to eBay — no human review"
+              label="Auto-generate listing previews for review"
             />
             {form.autoGenerateAndSave && (
-              <Alert severity="warning" sx={{ mt: -1 }}>
-                Generated listings are saved as <strong>Active</strong>, exported to CSV, saved to CSV Storage, and
-                uploaded to eBay's Feed API immediately — same pipeline as the CSV Listings page's Download CSV
-                button, with zero review. Check the Feed Upload page for final created/failed counts once eBay
-                finishes processing. Items with errors are skipped. ASINs that already exist in
-                another template get a unique title and SKU and are still saved and uploaded;
-                items with minor warnings (e.g. missing description) are also saved and uploaded.
+              <Alert severity="info" sx={{ mt: -1 }}>
+                As soon as a batch is collected, listing previews are generated automatically so the batch is
+                ready to review immediately — nothing is saved or uploaded yet. A human still has to open it in
+                the review queue below, dismiss any unwanted listings, and click <strong>Save All</strong>; that
+                save then saves the kept listings as Active and feeds them to eBay's Feed API (same pipeline the
+                CSV Listings page's Download CSV button uses). When this is off, the preview is instead generated
+                on demand the moment someone opens the batch to review.
               </Alert>
             )}
           </Stack>

@@ -235,6 +235,10 @@ export default function TemplateListingsLabPage({ embedded = false }) {
   const [customizationDialog, setCustomizationDialog] = useState(false);
   const [reviewModal, setReviewModal] = useState(false);
   const [previewItems, setPreviewItems] = useState([]);
+  // Set when this review session came from a Sourcing Rule batch
+  // (?fromSourcingBatch=<id>) — passed to bulk-save so Save All also
+  // triggers the same feed-upload pipeline the batch would have used.
+  const [sourcingBatchId, setSourcingBatchId] = useState(null);
 
   const [scheduleDate, setScheduleDate] = useState('');
   const [scheduleTimeFrom, setScheduleTimeFrom] = useState('');
@@ -995,6 +999,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
 
         setAsinInput(batchAsins.join('\n'));
         if (batch.region) setRegion(batch.region);
+        setSourcingBatchId(batchId);
         handleBulkAutofill(batchAsins, batch.region || null);
 
         if (batch.status === 'ready') {
@@ -1060,7 +1065,8 @@ export default function TemplateListingsLabPage({ embedded = false }) {
         options: {
           skipDuplicates: true,
           status: listingStatusFilter,
-        }
+        },
+        ...(sourcingBatchId ? { sourcingBatchId } : {}),
       }, { timeout: 90000 });
 
       // Update processing log with final results
@@ -1070,14 +1076,24 @@ export default function TemplateListingsLabPage({ embedded = false }) {
         `✅ Save completed: ${data.created} created, ${data.updated || 0} updated, ${data.reactivated || 0} reactivated, ${data.failed} failed, ${data.skipped} skipped`
       ]);
 
-      setSuccess(
-        `Bulk save completed: ${data.created} created, ${data.updated || 0} updated, ${data.reactivated || 0} reactivated, ${data.failed} failed, ${data.skipped} skipped`
-      );
+      let successMessage = `Bulk save completed: ${data.created} created, ${data.updated || 0} updated, ${data.reactivated || 0} reactivated, ${data.failed} failed, ${data.skipped} skipped`;
+      if (sourcingBatchId && data.feedUpload) {
+        if (data.feedUpload.taskId) {
+          successMessage += `. Fed ${data.feedUpload.listingCount} listing(s) to eBay (feed task ${data.feedUpload.taskId}).`;
+          setProcessingLog(prev => [...prev, `📤 Fed ${data.feedUpload.listingCount} listing(s) to eBay (feed task ${data.feedUpload.taskId}).`]);
+        } else if (data.feedUpload.blockedByDailyLimit) {
+          successMessage += '. CSV saved but not uploaded — daily eBay upload limit reached for this seller.';
+        } else if (data.feedUpload.error) {
+          successMessage += `. Feed upload failed: ${data.feedUpload.error}`;
+        }
+      }
+      setSuccess(successMessage);
 
       // Close review modal first so Save All does not stay on "Saving..."
       setReviewModal(false);
       setPreviewItems([]);
       setAsinInput('');
+      setSourcingBatchId(null);
       void fetchListings();
 
     } catch (err) {

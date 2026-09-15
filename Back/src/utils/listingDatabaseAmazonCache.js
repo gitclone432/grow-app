@@ -133,8 +133,12 @@ export function amazonSourceSnapshotFields(amazonData, region = 'US') {
   };
 }
 
+// 'action' is deliberately excluded: it's listing-lifecycle metadata (Add vs
+// Draft), not product data, and must never be silently reused from a prior
+// save of the same ASIN — a listing saved as Active must export Action=Add
+// even if that ASIN was previously saved as a Draft. See templateListings.js
+// bulk-save, which is the actual source of truth for a new save's action.
 const REUSE_CORE_FIELD_KEYS = [
-  'action',
   'categoryId',
   'categoryName',
   'startPrice',
