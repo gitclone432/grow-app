@@ -63,6 +63,14 @@ const SourcingRuleSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // When on, each candidate ASIN's title is also run through the eBay
+    // Motors classifier (lib/ebayMotorsClassifier.js — same AI check used by
+    // the manual ASIN Precheck page's "eBay Motors mode" toggle): it must
+    // contain BOTH a vehicle model name and a year/year range to qualify.
+    ebayMotorsMode: {
+      type: Boolean,
+      default: false,
+    },
     // Identity used to act as the automation when it calls the internal
     // bulk-preview/bulk-save APIs (see lib/asinSourcingAutomation.js) — set
     // from req.user.userId when the rule is created, never overwritten.
@@ -71,8 +79,11 @@ const SourcingRuleSchema = new mongoose.Schema(
       ref: 'User',
       default: null,
     },
-    // Opt-in: after collecting a batch, also generate + save the listings
-    // as Active (no human review) instead of stopping at a ready batch.
+    // Opt-in: after collecting a batch, also auto-run listing preview
+    // generation (bulk-preview) so it's ready to review immediately — the
+    // batch still stops at 'ready' and always requires a human to dismiss
+    // unwanted items and click "Save All" in the Template Listings Lab
+    // review queue before anything is saved or fed to eBay.
     autoGenerateAndSave: {
       type: Boolean,
       default: false,

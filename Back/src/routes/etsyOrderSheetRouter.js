@@ -123,6 +123,24 @@ async function resolveStoreId(storeId) {
 export function parseSortableDate(value) {
   const text = String(value || '').trim();
   if (!text) return 0;
+
+  const isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    const timestamp = Date.UTC(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]), 12, 0, 0);
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  }
+
+  const dayMonthYearMatch = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (dayMonthYearMatch) {
+    const year = dayMonthYearMatch[3].length === 2
+      ? 2000 + Number(dayMonthYearMatch[3])
+      : Number(dayMonthYearMatch[3]);
+    const month = Number(dayMonthYearMatch[2]);
+    const day = Number(dayMonthYearMatch[1]);
+    const timestamp = Date.UTC(year, month - 1, day, 12, 0, 0);
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  }
+
   const timestamp = Date.parse(text);
   return Number.isNaN(timestamp) ? 0 : timestamp;
 }

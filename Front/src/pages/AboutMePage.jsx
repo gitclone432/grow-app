@@ -217,59 +217,68 @@ export default function AboutMePage() {
             <Grid container spacing={2}>
               <Grid item xs={12} sm={6}>
                 <label>Profile Photo:</label>
-                {fileFlags.hasProfilePic ? (
-                  <img
-                    key={fileRefreshKeys.profilePic}
-                    src={`${import.meta.env.VITE_API_URL}/employee-profiles/me/file/profile-pic?token=${localStorage.getItem('auth_token')}&t=${fileRefreshKeys.profilePic}`}
-                    alt="Profile"
-                    style={{ width: 80, height: 80, borderRadius: '50%', display: 'block', marginTop: 8 }}
-                  />
-                ) : uploading.profilePic ? (
-                  <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-                    <CircularProgress size={24} />
-                    <span style={{ marginLeft: 8 }}>Uploading...</span>
-                  </Box>
-                ) : (
-                  <input type="file" accept="image/*,application/pdf" onChange={e => handleUpload(e, 'profile-pic')} />
-                )}
+                <Box sx={{ mt: 1 }}>
+                  {fileFlags.hasProfilePic && (
+                    <img
+                      key={fileRefreshKeys.profilePic}
+                      src={`${import.meta.env.VITE_API_URL}/employee-profiles/me/file/profile-pic?token=${localStorage.getItem('auth_token')}&t=${fileRefreshKeys.profilePic}`}
+                      alt="Profile"
+                      style={{ width: 80, height: 80, borderRadius: '50%', display: 'block', marginBottom: 8 }}
+                    />
+                  )}
+                  {uploading.profilePic ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <CircularProgress size={24} />
+                      <span style={{ marginLeft: 8 }}>Uploading...</span>
+                    </Box>
+                  ) : (
+                    <input type="file" accept="image/*,application/pdf" onChange={e => handleUpload(e, 'profile-pic')} disabled={uploading.profilePic} />
+                  )}
+                </Box>
               </Grid>
               {/* Aadhar Document Upload */}
               <Grid item xs={12} sm={6}>
                 <label>Aadhar Card Document:</label>
-                {fileFlags.hasAadhar ? (
-                  <Box sx={{ mt: 1 }}>
-                    <Button variant="outlined" size="small" onClick={() => window.open(getMyFileUrl('aadhar'), '_blank')}>
-                      View Aadhar Document
-                    </Button>
-                    <Typography variant="caption" color="success.main" sx={{ display: 'block', mt: 0.5 }}>Aadhar document uploaded</Typography>
-                  </Box>
-                ) : uploading.aadhar ? (
-                  <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-                    <CircularProgress size={24} />
-                    <span style={{ marginLeft: 8 }}>Uploading...</span>
-                  </Box>
-                ) : (
-                  <input type="file" accept="image/*,application/pdf" onChange={e => handleUpload(e, 'aadhar')} />
-                )}
+                <Box sx={{ mt: 1 }}>
+                  {fileFlags.hasAadhar && (
+                    <Box sx={{ mb: 1 }}>
+                      <Button variant="outlined" size="small" onClick={() => window.open(getMyFileUrl('aadhar'), '_blank')}>
+                        View Aadhar Document
+                      </Button>
+                      <Typography variant="caption" color="success.main" sx={{ display: 'block', mt: 0.5 }}>Aadhar document uploaded</Typography>
+                    </Box>
+                  )}
+                  {uploading.aadhar ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <CircularProgress size={24} />
+                      <span style={{ marginLeft: 8 }}>Uploading...</span>
+                    </Box>
+                  ) : (
+                    <input type="file" accept="image/*,application/pdf" onChange={e => handleUpload(e, 'aadhar')} disabled={uploading.aadhar} />
+                  )}
+                </Box>
               </Grid>
               {/* PAN Document Upload */}
               <Grid item xs={12} sm={6}>
                 <label>PAN Card Document:</label>
-                {fileFlags.hasPan ? (
-                  <Box sx={{ mt: 1 }}>
-                    <Button variant="outlined" size="small" onClick={() => window.open(getMyFileUrl('pan'), '_blank')}>
-                      View PAN Document
-                    </Button>
-                    <Typography variant="caption" color="success.main" sx={{ display: 'block', mt: 0.5 }}>PAN document uploaded</Typography>
-                  </Box>
-                ) : uploading.pan ? (
-                  <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-                    <CircularProgress size={24} />
-                    <span style={{ marginLeft: 8 }}>Uploading...</span>
-                  </Box>
-                ) : (
-                  <input type="file" accept="image/*,application/pdf" onChange={e => handleUpload(e, 'pan')} />
-                )}
+                <Box sx={{ mt: 1 }}>
+                  {fileFlags.hasPan && (
+                    <Box sx={{ mb: 1 }}>
+                      <Button variant="outlined" size="small" onClick={() => window.open(getMyFileUrl('pan'), '_blank')}>
+                        View PAN Document
+                      </Button>
+                      <Typography variant="caption" color="success.main" sx={{ display: 'block', mt: 0.5 }}>PAN document uploaded</Typography>
+                    </Box>
+                  )}
+                  {uploading.pan ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <CircularProgress size={24} />
+                      <span style={{ marginLeft: 8 }}>Uploading...</span>
+                    </Box>
+                  ) : (
+                    <input type="file" accept="image/*,application/pdf" onChange={e => handleUpload(e, 'pan')} disabled={uploading.pan} />
+                  )}
+                </Box>
               </Grid>
               <Grid item xs={12} sm={6}>
                 <TextField label="Name" name="name" value={form.name} onChange={onChange} fullWidth />

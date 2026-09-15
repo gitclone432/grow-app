@@ -479,7 +479,7 @@ export function EtsyRowNumberCell({
   compact = false,
   inlineActions = false,
 }) {
-  const removeButton = (
+  const removeButton = onDelete ? (
     <Typography
       component="button"
       type="button"
@@ -501,7 +501,7 @@ export function EtsyRowNumberCell({
     >
       {deleting ? '...' : 'remove'}
     </Typography>
-  );
+  ) : null;
 
   if (compact || inlineActions) {
     return (
@@ -580,26 +580,28 @@ export function EtsyRowNumberCell({
           Calc
         </Typography>
       )}
-      <Typography
-        component="button"
-        type="button"
-        variant="caption"
-        disabled={deleting}
-        onClick={onDelete}
-        sx={{
-          border: 'none',
-          background: 'none',
-          color: 'error.main',
-          cursor: deleting ? 'default' : 'pointer',
-          p: 0,
-          fontSize: compact ? '0.625rem' : '0.7rem',
-          lineHeight: 1.1,
-          textDecoration: 'underline',
-          opacity: deleting ? 0.5 : 1,
-        }}
-      >
-        {deleting ? '...' : 'Remove'}
-      </Typography>
+      {onDelete && (
+        <Typography
+          component="button"
+          type="button"
+          variant="caption"
+          disabled={deleting}
+          onClick={onDelete}
+          sx={{
+            border: 'none',
+            background: 'none',
+            color: 'error.main',
+            cursor: deleting ? 'default' : 'pointer',
+            p: 0,
+            fontSize: compact ? '0.625rem' : '0.7rem',
+            lineHeight: 1.1,
+            textDecoration: 'underline',
+            opacity: deleting ? 0.5 : 1,
+          }}
+        >
+          {deleting ? '...' : 'Remove'}
+        </Typography>
+      )}
     </Box>
   );
 }
