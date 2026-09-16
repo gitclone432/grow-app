@@ -14,6 +14,14 @@ node_modules/
 **/.vite/
 Back/public/app/
 
+# User-uploaded files (created at runtime by the app; not source)
+Back/public/uploads/*
+!Back/public/uploads/overlay-badges/
+!Back/public/uploads/overlay-badges/.gitkeep
+!Back/public/uploads/overlay-badges/usa-seller.png
+!Back/public/uploads/ebay-images/
+!Back/public/uploads/ebay-images/ebay-text-1785302705363-dhdzwi.jpg
+
 # Logs & OS
 *.log
 .DS_Store
