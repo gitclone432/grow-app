@@ -146,7 +146,16 @@ import { initSocket } from './lib/socket.js';
 
 const app = express();
 
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      // Allow item images from eBay/Amazon/etc. (and any https host) — the default
+      // 'self' data: img-src blocks all external product/order images in the UI.
+      imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+    },
+  },
+}));
 app.use(compression({
   filter: (req, res) => {
     // Gzip buffers the whole response, which blocks EventSource item-by-item updates
