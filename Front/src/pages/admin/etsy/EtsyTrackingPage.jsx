@@ -14,6 +14,8 @@ const TRACKING_VISIBLE_COLUMNS = [
   'dateSold',
   'etsyOrdersReceivedTime',
   'shipBy',
+  'amazonAccount',
+  'estimateAmazonDelivery',
   'sku',
   'address',
   'zipCode',
