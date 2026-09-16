@@ -12,6 +12,7 @@ node_modules/
 **/node_modules/
 **/dist/
 **/.vite/
+Back/public/app/
 
 # Logs & OS
 *.log
