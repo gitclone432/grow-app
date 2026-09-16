@@ -1207,7 +1207,7 @@ export default function EtsyOrderFulfilmentPage({
                               saving={Boolean(savingCells[`${row._id}:${column.key}`])}
                               disabled={rowDeleting}
                               onSave={(value) => handleSaveCell(row._id, column.key, value)}
-                              onCopy={column.copyable ? handleCopyCell : undefined}
+                              onCopy={column.copyable || column.key === 'address' ? handleCopyCell : undefined}
                             />
                           )}
                         </TableCell>

@@ -53,6 +53,13 @@ function normalizeDisplayValue(value) {
   return String(value);
 }
 
+function getFirstNonEmptyLine(value) {
+  return String(value ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || '';
+}
+
 function parseUsdNumber(value) {
   const cleaned = String(value ?? '').replace(/[^\d.-]/g, '');
   if (!cleaned || cleaned === '-' || cleaned === '.') return null;
@@ -269,6 +276,8 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
   if (!editing) {
     const rawText = normalizeDisplayValue(value);
     const canCopy = column.copyable && rawText && onCopy;
+    const buyerName = column.key === 'address' ? getFirstNonEmptyLine(rawText) : '';
+    const canCopyBuyerName = Boolean(buyerName) && onCopy;
 
     return (
       <Box
@@ -339,6 +348,20 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
             onClick={(e) => {
               e.stopPropagation();
               onCopy(rawText);
+            }}
+            sx={{ p: compact ? 0.125 : 0.25, flexShrink: 0 }}
+          >
+            <ContentCopyIcon sx={{ fontSize: compact ? 12 : 14 }} />
+          </IconButton>
+        )}
+        {canCopyBuyerName && (
+          <IconButton
+            size="small"
+            aria-label="Copy buyer name"
+            disabled={disabled || saving}
+            onClick={(e) => {
+              e.stopPropagation();
+              onCopy(buyerName);
             }}
             sx={{ p: compact ? 0.125 : 0.25, flexShrink: 0 }}
           >
