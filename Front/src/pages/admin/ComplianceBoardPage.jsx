@@ -130,6 +130,29 @@ const ORDER_FULFILLMENT_PROGRESS_OPTIONS = [
   { id: COLUMN_STATUS.BUYER_CONFIRMATION, label: 'Buyer Confirmation', color: '#0f766e' },
 ];
 
+const ORDER_FULFILLMENT_STATUS_SET = new Set([
+  COLUMN_STATUS.TODO,
+  COLUMN_STATUS.OUT_OF_STOCK,
+  COLUMN_STATUS.CANCELLATION,
+  COLUMN_STATUS.ADDRESS_ISSUE,
+  COLUMN_STATUS.LATE_DELIVERY,
+  COLUMN_STATUS.NOT_FULFILLED,
+  COLUMN_STATUS.FULFILLED,
+  COLUMN_STATUS.BUYER_CONFIRMATION,
+]);
+
+function resolveOrderFulfillmentColumnStatus(order) {
+  const currentStatus = order?.complianceBoardStatus || COLUMN_STATUS.TODO;
+  if (ORDER_FULFILLMENT_STATUS_SET.has(currentStatus)) {
+    return currentStatus;
+  }
+
+  const preservedStatus = order?.orderFulfillmentBoardStatus || COLUMN_STATUS.TODO;
+  return ORDER_FULFILLMENT_STATUS_SET.has(preservedStatus)
+    ? preservedStatus
+    : COLUMN_STATUS.TODO;
+}
+
 const RETURN_FLOW_OPTIONS = [
   { id: COLUMN_STATUS.RETURN_FOLLOW_UP, label: 'Follow Up', color: '#8b5cf6' },
   { id: COLUMN_STATUS.PROVIDE_RETURN_LABEL, label: 'Provide Return Label', color: '#3b82f6' },
@@ -274,6 +297,65 @@ const ALERT_REQUEST_TIMEOUT_MS = 12000;
 const HEAVY_BOARD_CATEGORIES = new Set(['return_refund', 'cancellation', 'inr']);
 
 const ensureArray = (value) => (Array.isArray(value) ? value : []);
+
+const normalizeThreadKeyValue = (value) => String(value || '').trim();
+
+const getAlertThreadMergeKey = (thread) => {
+  const sellerId = normalizeThreadKeyValue(thread?.sellerId || thread?.seller?._id || thread?.seller);
+  const orderId = normalizeThreadKeyValue(thread?.orderId);
+  const buyerUsername = normalizeThreadKeyValue(thread?.buyerUsername).toLowerCase();
+  const conversationId = normalizeThreadKeyValue(thread?.conversationId);
+  const itemId = normalizeThreadKeyValue(thread?.itemId);
+
+  if (sellerId && orderId) {
+    return `seller:${sellerId}|order:${orderId}|buyer:${buyerUsername}`;
+  }
+
+  if (sellerId && conversationId) {
+    return `seller:${sellerId}|conversation:${conversationId}`;
+  }
+
+  return `seller:${sellerId}|buyer:${buyerUsername}|item:${itemId || 'DIRECT_MESSAGE'}`;
+};
+
+const mergeAlertThreads = (threads = []) => {
+  const byKey = new Map();
+
+  ensureArray(threads).forEach((thread) => {
+    const key = getAlertThreadMergeKey(thread);
+    const existing = byKey.get(key);
+
+    if (!existing) {
+      byKey.set(key, { ...thread });
+      return;
+    }
+
+    const existingActivity = getThreadActivityTimestamp(existing);
+    const nextActivity = getThreadActivityTimestamp(thread);
+    const newer = nextActivity >= existingActivity ? thread : existing;
+    const older = nextActivity >= existingActivity ? existing : thread;
+
+    byKey.set(key, {
+      ...older,
+      ...newer,
+      unreadCount: Math.max(Number(existing?.unreadCount) || 0, Number(thread?.unreadCount) || 0),
+      messageUnreadCount: Math.max(Number(existing?.messageUnreadCount) || 0, Number(thread?.messageUnreadCount) || 0),
+      lastBuyerMessageAt: existing?.lastBuyerMessageAt && thread?.lastBuyerMessageAt
+        ? (new Date(existing.lastBuyerMessageAt) > new Date(thread.lastBuyerMessageAt) ? existing.lastBuyerMessageAt : thread.lastBuyerMessageAt)
+        : (existing?.lastBuyerMessageAt || thread?.lastBuyerMessageAt || null),
+      lastSellerMessageAt: existing?.lastSellerMessageAt && thread?.lastSellerMessageAt
+        ? (new Date(existing.lastSellerMessageAt) > new Date(thread.lastSellerMessageAt) ? existing.lastSellerMessageAt : thread.lastSellerMessageAt)
+        : (existing?.lastSellerMessageAt || thread?.lastSellerMessageAt || null),
+      _conversationMeta: newer?._conversationMeta || older?._conversationMeta || null,
+      category: newer?.category || older?.category || '',
+      status: newer?.status || older?.status || 'Open',
+      caseStatus: newer?.caseStatus || older?.caseStatus || 'Case Not Opened',
+      pickedUpBy: newer?.pickedUpBy || older?.pickedUpBy || null,
+    });
+  });
+
+  return [...byKey.values()].sort((left, right) => getThreadActivityTimestamp(right) - getThreadActivityTimestamp(left));
+};
 
 const getBoardRequestTimeout = (category) => (
   HEAVY_BOARD_CATEGORIES.has(category)
@@ -871,6 +953,15 @@ function ComplianceBoardPage() {
     return true;
   };
 
+  const matchesAlertMessageFilters = (message) => {
+    if (selectedSeller) {
+      const messageSellerId = String(message?.sellerId || message?.seller?._id || message?.seller || '');
+      if (messageSellerId !== String(selectedSeller)) return false;
+    }
+
+    return true;
+  };
+
   const getThreadActivityTimestamp = (thread) => {
     const value = thread?.lastDate
       || thread?.lastMessageDate
@@ -891,7 +982,7 @@ function ComplianceBoardPage() {
   };
 
   const getBoardAlertThreads = () => {
-    const filteredThreads = ensureArray(allMessagesForAlerts).filter(matchesMessageFilters);
+    const filteredThreads = ensureArray(allMessagesForAlerts).filter(matchesAlertMessageFilters);
 
     if (selectedCategory === 'return_refund') {
       return filteredThreads.filter((thread) => getAlertThreadCategory(thread) === MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE);
@@ -1228,10 +1319,10 @@ function ComplianceBoardPage() {
       page: 1,
       limit: MESSAGE_THREAD_LIMIT,
       excludeClient,
+      source: 'commerce',
       filterType: 'ALL',
       complianceBoardMode: true,
       maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
-      variant: 'v2',
       ...buildMessageDateParams(),
       ...buildBoardFilterParams(),
     };
@@ -1495,32 +1586,15 @@ function ComplianceBoardPage() {
         }
       }
 
-      const ORDER_FULFILLMENT_STATUSES = new Set([
-        COLUMN_STATUS.TODO,
-        COLUMN_STATUS.OUT_OF_STOCK,
-        COLUMN_STATUS.CANCELLATION,
-        COLUMN_STATUS.ADDRESS_ISSUE,
-        COLUMN_STATUS.LATE_DELIVERY,
-        COLUMN_STATUS.NOT_FULFILLED,
-        COLUMN_STATUS.FULFILLED,
-        COLUMN_STATUS.BUYER_CONFIRMATION,
-      ]);
-
       boardOrders.forEach((order) => {
-        const rawStatus = order.complianceBoardStatus || COLUMN_STATUS.TODO;
+        const rawStatus = selectedCategory === 'order_fulfillment'
+          ? resolveOrderFulfillmentColumnStatus(order)
+          : (order.complianceBoardStatus || COLUMN_STATUS.TODO);
         let status = rawStatus === 'inr_case_closed'
           ? COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED
           : rawStatus;
-        // Order Fulfillment board must keep showing orders that have also been
-        // tagged Return/INR/Cancellation elsewhere - only an actually cancelled
-        // order should disappear from this board. A specialized status (e.g.
-        // 'case_not_opened', 'inr_case_opened') from those boards doesn't map to
-        // any Order Fulfillment column, so fall back to its own To Do bucket
-        // instead of silently dropping the order. This only applies when
-        // viewing the order_fulfillment board itself - Return/INR/Cancellation
-        // boards keep grouping by their own real statuses untouched.
-        if (selectedCategory === 'order_fulfillment' && !ORDER_FULFILLMENT_STATUSES.has(status)) {
-          status = COLUMN_STATUS.TODO;
+        if (selectedCategory === 'order_fulfillment' && !ORDER_FULFILLMENT_STATUS_SET.has(status)) {
+          status = resolveOrderFulfillmentColumnStatus(order);
         }
         if (grouped[status]) {
           grouped[status].push(order);
@@ -2307,9 +2381,7 @@ function ComplianceBoardPage() {
         // without anyone dragging it.
         if (dedupedCancelledOrders.length > 0) {
           dedupedCancelledOrders.forEach((order) => {
-            const status = ORDER_FULFILLMENT_STATUSES.has(order.complianceBoardStatus)
-              ? order.complianceBoardStatus
-              : COLUMN_STATUS.TODO;
+            const status = resolveOrderFulfillmentColumnStatus(order);
             if (!grouped[status]) {
               grouped[status] = [];
             }
@@ -2660,32 +2732,48 @@ function ComplianceBoardPage() {
     alertMessagesRequestRef.current = requestId;
 
     try {
-      const params = {
+      const baseParams = {
         page: 1,
         limit: MESSAGE_THREAD_LIMIT,
         excludeClient,
         filterType: 'ALL',
         complianceBoardMode: true,
         maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
-        variant: 'v2',
         ...buildMessageDateParams(),
-        ...buildBoardFilterParams(),
       };
 
-      const response = await api.get('/ebay/chat/threads', {
-        params,
-        timeout: ALERT_REQUEST_TIMEOUT_MS,
-      });
-      const threads = ensureArray(response.data?.threads).filter(matchesMessageFilters);
+      if (selectedSeller) {
+        baseParams.sellerId = selectedSeller;
+      }
+
+      const [commerceResult, legacyResult] = await Promise.allSettled([
+        api.get('/ebay/chat/threads', {
+          params: { ...baseParams, source: 'commerce' },
+          timeout: ALERT_REQUEST_TIMEOUT_MS,
+        }),
+        api.get('/ebay/chat/threads', {
+          params: { ...baseParams, source: 'legacy' },
+          timeout: ALERT_REQUEST_TIMEOUT_MS,
+        })
+      ]);
+
+      if (commerceResult.status === 'rejected' && legacyResult.status === 'rejected') {
+        throw commerceResult.reason;
+      }
+
+      const threads = mergeAlertThreads([
+        ...ensureArray(commerceResult.status === 'fulfilled' ? commerceResult.value.data?.threads : []),
+        ...ensureArray(legacyResult.status === 'fulfilled' ? legacyResult.value.data?.threads : []),
+      ]).filter(matchesAlertMessageFilters);
       const threadMetaResults = await fetchConversationMetaForThreads(threads, ALERT_REQUEST_TIMEOUT_MS);
-      const enrichedThreads = threadMetaResults.map(({ thread, meta }) => ({
+      const enrichedThreads = mergeAlertThreads(threadMetaResults.map(({ thread, meta }) => ({
         ...thread,
         _conversationMeta: meta || thread._conversationMeta || null,
         category: meta?.category || thread.category || '',
         status: meta?.status || thread.status || 'Open',
         caseStatus: meta?.caseStatus || thread.caseStatus || 'Case Not Opened',
         pickedUpBy: meta?.pickedUpBy || thread.pickedUpBy || null,
-      }));
+      })));
 
       if (requestId !== alertMessagesRequestRef.current) return;
       setAllMessagesForAlerts(enrichedThreads);
@@ -2715,10 +2803,10 @@ function ComplianceBoardPage() {
         page: 1,
         limit: MESSAGE_THREAD_LIMIT,
         excludeClient,
+        source: 'commerce',
         filterType: 'ALL', // Get all message types
         complianceBoardMode: true,
         maxAgeDays: MESSAGE_THREAD_MAX_AGE_DAYS,
-        variant: 'v2',
         ...buildMessageDateParams(),
         ...buildBoardFilterParams(),
       };
@@ -2928,10 +3016,10 @@ function ComplianceBoardPage() {
         issueHubSourceCategory,
         issueHubWorkspaceCategory,
         issueHubMessageTypeFilter,
+        source: 'commerce',
         orderCommunicationWorkCategory,
         fulfillmentIssueCategory,
         fulfillmentProgressCategory,
-        returnCaseOpenedCategory,
         returnCaseNotOpenedCategory,
         returnFlowCategory,
         returnResolutionCategory,
@@ -3328,13 +3416,17 @@ function ComplianceBoardPage() {
     const directUnreadCount = getDirectUnreadCount(order);
     if (directUnreadCount > 0) return directUnreadCount;
 
+    const relevantThreads = ['return_refund', 'cancellation', 'inr'].includes(selectedCategory)
+      ? getBoardAlertThreads()
+      : allMessagesForAlerts;
+
     const sellerId = getSellerMatchId(order);
     const orderIds = getOrderMatchValues(order);
     const itemIds = getItemMatchValues(order);
     const buyerValues = getBuyerMatchValues(order);
     const seenThreads = new Set();
 
-    return allMessagesForAlerts.reduce((total, thread) => {
+    return relevantThreads.reduce((total, thread) => {
       const unreadCount = Number(thread?.unreadCount) || 0;
       if (unreadCount <= 0) return total;
 
@@ -3374,21 +3466,24 @@ function ComplianceBoardPage() {
       : getBoardAlertThreads();
 
     return allBoardMessages.filter((msg) => {
-      // Only check messages where buyer sent the last message
-      if (msg.sender !== 'BUYER') return false;
+      const lastBuyerMessageTime = parseTimeMs(
+        msg.lastBuyerMessageAt || msg.lastDate || msg.lastMessageDate || msg.messageDate
+      );
+      if (!lastBuyerMessageTime) return false;
 
-      const lastMessageTime = parseTimeMs(msg.lastDate || msg.lastMessageDate || msg.messageDate);
-      if (!lastMessageTime) return false;
+      const lastSellerMessageTime = parseTimeMs(msg.lastSellerMessageAt);
+      if (lastSellerMessageTime && lastSellerMessageTime >= lastBuyerMessageTime) return false;
 
-      const elapsedMs = nowMs - lastMessageTime;
+      const elapsedMs = nowMs - lastBuyerMessageTime;
       return elapsedMs > MESSAGE_REPLY_SLA_MS;
     }).map((msg) => {
-      const lastMessageTime = parseTimeMs(msg.lastDate || msg.lastMessageDate || msg.messageDate);
-      const elapsedMs = nowMs - lastMessageTime;
+      const lastBuyerMessageTimeValue = msg.lastBuyerMessageAt || msg.lastDate || msg.lastMessageDate || msg.messageDate;
+      const lastBuyerMessageTime = parseTimeMs(lastBuyerMessageTimeValue);
+      const elapsedMs = nowMs - lastBuyerMessageTime;
       return {
         ...msg,
         _overdueInfo: {
-          lastMessageTime: msg.lastDate || msg.lastMessageDate || msg.messageDate,
+          lastMessageTime: lastBuyerMessageTimeValue,
           elapsedMs,
           overdueMs: elapsedMs - MESSAGE_REPLY_SLA_MS,
           alertType: MESSAGE_OVERDUE_ALERT_ID,

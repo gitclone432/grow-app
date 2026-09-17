@@ -50,22 +50,29 @@ const filterFieldSx = {
   }
 };
 
+function getConversationManagementNote(item = {}) {
+  if (typeof item.fulfillmentNotes === 'string') {
+    return item.fulfillmentNotes;
+  }
+  return item.notes || '';
+}
+
 // --- NOTES CELL COMPONENT (Inline Editable) ---
 const NotesCell = React.memo(function NotesCell({ item, onSave }) {
   const [isEditing, setIsEditing] = React.useState(false);
-  const [tempValue, setTempValue] = React.useState(item.notes || '');
+  const [tempValue, setTempValue] = React.useState(getConversationManagementNote(item));
   const [isSaving, setIsSaving] = React.useState(false);
 
   React.useEffect(() => {
     if (!isEditing) {
-      setTempValue(item.notes || '');
+      setTempValue(getConversationManagementNote(item));
     }
-  }, [item.notes, isEditing]);
+  }, [item.fulfillmentNotes, item.notes, isEditing]);
 
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      await onSave(item._id, tempValue);
+      await onSave(item, tempValue);
       setIsEditing(false);
     } catch (e) {
       console.error('Failed to save note', e);
@@ -75,7 +82,7 @@ const NotesCell = React.memo(function NotesCell({ item, onSave }) {
   };
 
   const handleCancel = () => {
-    setTempValue(item.notes || '');
+    setTempValue(getConversationManagementNote(item));
     setIsEditing(false);
   };
 
@@ -135,9 +142,9 @@ const NotesCell = React.memo(function NotesCell({ item, onSave }) {
         '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1, px: 1 }
       }}
     >
-      {item.notes ? (
+      {getConversationManagementNote(item) ? (
         <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
-          {item.notes}
+          {getConversationManagementNote(item)}
         </Typography>
       ) : (
         <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
@@ -1117,7 +1124,7 @@ export default function ConversationManagementPage() {
     { id: 'sl', label: 'SL No' },
     { id: 'seller', label: 'Seller' },
     { id: 'orderId', label: 'Order ID' },
-    { id: 'creationDate', label: 'Creation Date' },
+    { id: 'creationDate', label: 'Date Sold' },
     { id: 'username', label: 'Buyer ID' },
     { id: 'buyerName', label: 'Buyer Name' },
     { id: 'buyerSla', label: 'Buyer SLA' },
@@ -1309,7 +1316,7 @@ export default function ConversationManagementPage() {
           value: (item) => item.orderId || ''
         },
         creationDate: {
-          label: 'Creation Date',
+          label: 'Date Sold',
           value: (item) => formatCreationDate(item.creationDate)
         },
         username: {
@@ -1350,7 +1357,7 @@ export default function ConversationManagementPage() {
         },
         notes: {
           label: 'Notes',
-          value: (item) => item.notes || ''
+          value: (item) => getConversationManagementNote(item)
         }
       };
 
@@ -1442,9 +1449,15 @@ export default function ConversationManagementPage() {
     }
   }
 
-  async function handleNotesSave(itemId, notesText) {
-    await api.patch(`/ebay/conversation-management/${itemId}/notes`, { notes: notesText });
-    setItems(prev => prev.map(i => i._id === itemId ? { ...i, notes: notesText } : i));
+  async function handleNotesSave(item, notesText) {
+    if (item.orderObjectId) {
+      await api.patch(`/ebay/orders/${item.orderObjectId}/fulfillment-notes`, { fulfillmentNotes: notesText });
+      setItems(prev => prev.map(i => i._id === item._id ? { ...i, fulfillmentNotes: notesText } : i));
+      return;
+    }
+
+    await api.patch(`/ebay/conversation-management/${item._id}/notes`, { notes: notesText });
+    setItems(prev => prev.map(i => i._id === item._id ? { ...i, notes: notesText } : i));
   }
 
   return (
@@ -1773,7 +1786,7 @@ export default function ConversationManagementPage() {
                   {visibleColumns.includes('sl') && <TableCell sx={tableHeaderCellSx}>SL</TableCell>}
                   {visibleColumns.includes('seller') && <TableCell sx={tableHeaderCellSx}>Seller</TableCell>}
                   {visibleColumns.includes('orderId') && <TableCell sx={tableHeaderCellSx}>Order ID</TableCell>}
-                  {visibleColumns.includes('creationDate') && <TableCell sx={tableHeaderCellSx}>Created</TableCell>}
+                  {visibleColumns.includes('creationDate') && <TableCell sx={tableHeaderCellSx}>Date Sold</TableCell>}
                   {visibleColumns.includes('username') && <TableCell sx={tableHeaderCellSx}>Buyer ID</TableCell>}
                   {visibleColumns.includes('buyerName') && <TableCell sx={tableHeaderCellSx}>Buyer Name</TableCell>}
                   {visibleColumns.includes('buyerSla') && <TableCell sx={tableHeaderCellSx}>Buyer SLA</TableCell>}
