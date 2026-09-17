@@ -28,8 +28,21 @@ const ORDER_FULFILLMENT_BOARD_STATUSES = Object.freeze([
   'buyer_confirmation',
 ]);
 const ORDER_FULFILLMENT_BOARD_STATUS_SET = new Set(ORDER_FULFILLMENT_BOARD_STATUSES);
+const SPECIALIZED_BOARD_STATUS_CONFIG = Object.freeze({
+  inr: { category: 'inr' },
+  cancellation: { category: 'cancellation' },
+  return_refund: { category: 'return_refund' },
+});
+const SPECIALIZED_BOARD_CATEGORIES = new Set(Object.keys(SPECIALIZED_BOARD_STATUS_CONFIG));
 
 const isOrderFulfillmentBoardStatus = (status) => ORDER_FULFILLMENT_BOARD_STATUS_SET.has(status);
+
+const getNormalizedBoardCategories = (order = {}) => {
+  if (Array.isArray(order?.complianceBoardCategories) && order.complianceBoardCategories.length > 0) {
+    return order.complianceBoardCategories.filter(Boolean).map(String);
+  }
+  return order?.complianceBoardCategory ? [String(order.complianceBoardCategory)] : [];
+};
 
 const resolveOrderFulfillmentBoardStatus = (order = {}) => {
   const currentStatus = order?.complianceBoardStatus || 'todo';
@@ -39,6 +52,20 @@ const resolveOrderFulfillmentBoardStatus = (order = {}) => {
 
   const preservedStatus = order?.orderFulfillmentBoardStatus || null;
   return isOrderFulfillmentBoardStatus(preservedStatus) ? preservedStatus : 'todo';
+};
+
+const resolveSpecializedBoardStatus = (order = {}, category) => {
+  const config = SPECIALIZED_BOARD_STATUS_CONFIG[category];
+  const currentStatus = order?.complianceBoardStatus || 'todo';
+  if (!config) return currentStatus;
+
+  const categories = getNormalizedBoardCategories(order);
+  const isLegacyAssignedOrder =
+    order?.complianceBoardSource === 'order_communication' &&
+    categories.includes(config.category) &&
+    (currentStatus === 'todo' || isOrderFulfillmentBoardStatus(currentStatus));
+
+  return isLegacyAssignedOrder ? 'case_not_opened' : currentStatus;
 };
 
 const buildOrderFulfillmentStatusExpression = (
@@ -61,6 +88,52 @@ const buildOrderFulfillmentStatusExpression = (
             'todo'
           ]
         }
+      ]
+    }
+  }
+});
+
+const buildSpecializedBoardStatusExpression = (
+  category,
+  statusField = '$complianceBoardStatus',
+  categoriesField = '$complianceBoardCategories',
+  categoryField = '$complianceBoardCategory',
+  sourceField = '$complianceBoardSource'
+) => ({
+  $let: {
+    vars: {
+      complianceStatus: { $ifNull: [statusField, 'todo'] },
+      complianceSource: { $ifNull: [sourceField, null] },
+      complianceCategories: {
+        $cond: [
+          { $isArray: categoriesField },
+          categoriesField,
+          {
+            $cond: [
+              { $ne: [{ $ifNull: [categoryField, null] }, null] },
+              [categoryField],
+              []
+            ]
+          }
+        ]
+      },
+    },
+    in: {
+      $cond: [
+        {
+          $and: [
+            { $eq: ['$$complianceSource', 'order_communication'] },
+            { $in: [category, '$$complianceCategories'] },
+            {
+              $or: [
+                { $eq: ['$$complianceStatus', 'todo'] },
+                { $in: ['$$complianceStatus', ORDER_FULFILLMENT_BOARD_STATUSES] }
+              ]
+            }
+          ]
+        },
+        'case_not_opened',
+        '$$complianceStatus'
       ]
     }
   }
@@ -2153,25 +2226,12 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
                 { complianceBoardCategories: category },
                 { complianceBoardCategory: category }
               ]
-            },
-            // For specialized boards (return_refund, cancellation, inr), don't exclude by other categories
-            // An order can be in multiple categories legitimately
-            // Only for order_fulfillment, exclude orders in specialized categories
-            ...(category === 'order_fulfillment' ? [
-              {
-                $and: [
-                  { complianceBoardCategories: { $ne: 'return_refund' } },
-                  { complianceBoardCategories: { $ne: 'cancellation' } },
-                  { complianceBoardCategories: { $ne: 'inr' } }
-                ]
-              }
-            ] : [])
-          ],
-          ...dateFilter
+            }
+          ]
         })
           .select('orderId dateSold buyer subtotal subtotalUSD orderFulfillmentStatus complianceBoardStatus complianceBoardTracking complianceBoardCategory complianceBoardCategories complianceBoardSource outOfStockAssignedAt cancellationAssignedAt addressIssueAssignedAt returnCaseNotOpenedAssignedAt returnItemDeliveredAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt updatedAt purchaseMarketplaceId remark seller itemNumber lineItems productName trackingNumber manualTrackingNumber cancelState amazonAccount arrivingDate beforeTax estimatedTax azOrderId')
           .populate({ path: 'seller', populate: { path: 'user', select: 'username' } })
-          .sort({ dateSold: -1 })
+          .sort({ returnCaseNotOpenedAssignedAt: -1, updatedAt: -1, dateSold: -1 })
           .lean()
       ]);
       
@@ -2427,13 +2487,29 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
       
       returnBoardOrders = Array.from(orderDedupeMap.values());
       
+      const getReturnBoardFilterDate = (order) => {
+        if (order.returnBoardSource === 'return_request') {
+          return order.returnInfo?.createdDate || order.dateSold || order.updatedAt || null;
+        }
+
+        if (order.complianceBoardStatus === 'case_not_opened') {
+          return order.returnCaseNotOpenedAssignedAt
+            || order.conversationInfo?.updatedAt
+            || order.updatedAt
+            || order.dateSold
+            || null;
+        }
+
+        return order.conversationInfo?.updatedAt || order.updatedAt || order.dateSold || null;
+      };
+
       if (dateFilter.dateSold) {
         returnBoardOrders = returnBoardOrders.filter((order) => {
-          if (order.returnBoardSource === 'return_request') return true;
-          if (!order.dateSold) return true;
-          const sold = new Date(order.dateSold);
-          if (dateFilter.dateSold.$gte && sold < dateFilter.dateSold.$gte) return false;
-          if (dateFilter.dateSold.$lte && sold > dateFilter.dateSold.$lte) return false;
+          const filterDate = getReturnBoardFilterDate(order);
+          if (!filterDate) return true;
+          const activityDate = new Date(filterDate);
+          if (dateFilter.dateSold.$gte && activityDate < dateFilter.dateSold.$gte) return false;
+          if (dateFilter.dateSold.$lte && activityDate > dateFilter.dateSold.$lte) return false;
           return true;
         });
       }
@@ -2820,6 +2896,8 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
                 sortBy: { updatedAt: -1 },
                 output: category === 'order_fulfillment'
                   ? buildOrderFulfillmentStatusExpression()
+                  : SPECIALIZED_BOARD_CATEGORIES.has(category)
+                    ? buildSpecializedBoardStatusExpression(category)
                   : { $ifNull: ['$complianceBoardStatus', 'todo'] }
               }
             }
@@ -3100,6 +3178,8 @@ router.get('/compliance-board', requireAuth, requirePageAccess('ComplianceBoard'
         complianceBoardCategories: categories,
         complianceBoardStatus: category === 'order_fulfillment'
           ? resolveOrderFulfillmentBoardStatus(o)
+          : SPECIALIZED_BOARD_CATEGORIES.has(category)
+            ? resolveSpecializedBoardStatus({ ...o, complianceBoardCategories: categories }, category)
           : (o.complianceBoardStatus || 'todo')
       };
     }))).map(o => ({

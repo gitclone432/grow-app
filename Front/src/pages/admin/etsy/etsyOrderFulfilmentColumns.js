@@ -106,7 +106,7 @@ export const ETSY_ORDER_FULFILMENT_COLUMNS = [
   { key: 'amazonAccount', label: 'Amazon Acc.', minWidth: 160, section: 'amazon', inputType: 'select', options: [''] },
   { key: 'cardNo', label: 'Card No.', minWidth: 110, section: 'amazon', inputType: 'text' },
   { key: 'issuesIfAny', label: 'Issues If Any', minWidth: 180, section: 'fulfilment', inputType: 'select', options: ['', ...ISSUES_IF_ANY_OPTIONS], optionStyles: ISSUES_IF_ANY_STYLES },
-  { key: 'trackingId', label: 'Tracking Id.', minWidth: 140, section: 'fulfilment', inputType: 'text' },
+  { key: 'trackingId', label: 'Tracking Id.', minWidth: 140, section: 'fulfilment', inputType: 'text', copyable: true },
   { key: 'remark', label: 'Remark', minWidth: 180, section: 'fulfilment', inputType: 'select', options: ['', ...REMARK_OPTIONS], optionStyles: REMARK_STYLES },
   { key: 'trackingIdUploaded', label: 'Tracking ID Uploaded', minWidth: 180, section: 'fulfilment', inputType: 'select', options: ['', 'Yes', 'No'], optionStyles: TRACKING_ID_UPLOADED_STYLES },
   { key: 'amazonOrderNumber', label: 'Amazon Order Number', minWidth: 168, section: 'fulfilment', inputType: 'text' },

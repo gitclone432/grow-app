@@ -10,7 +10,8 @@
     "start:test": "node --env-file=.env.test src/index.js",
     "clone": "node copy-prod-to-test.js",
     "db:drop-bank-name-unique": "node tools/dropBankAccountNameUniqueIndex.js",
-    "db:import-transactions-csv": "node tools/importTransactionsCsv.js"
+    "db:import-transactions-csv": "node tools/importTransactionsCsv.js",
+    "db:normalize-specialized-statuses": "node --env-file=.env tools/normalizeSpecializedBoardStatuses.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
