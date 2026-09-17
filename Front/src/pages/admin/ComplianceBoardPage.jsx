@@ -254,6 +254,12 @@ const ISSUE_HUB_OPTIONS = [
   { id: MESSAGE_CATEGORIES.INQUIRY, label: 'Inquiry', type: 'message', color: BRAND_GREEN },
 ];
 
+const ISSUE_HUB_MESSAGE_TYPE_FILTERS = [
+  { id: 'all', label: 'All Tags' },
+  { id: 'inquiry', label: 'Inquiry' },
+  { id: 'order', label: 'Order Message' },
+];
+
 // Limit items per column to improve performance and reduce lag
 const MAX_ITEMS_PER_COLUMN = 8;
 const INITIAL_LOAD_LIMIT = 50; // Only load first 50 items per fetch instead of 500
@@ -624,6 +630,7 @@ function ComplianceBoardPage() {
   // back within BOARD_CACHE_TTL_MS reuses this instead of re-fetching.
   // Cleared whenever a board mutation lands (see applyOrderColumn/applyMessageColumn).
   const boardCacheRef = useRef({});
+  const alertMessagesRequestRef = useRef(0);
   const [pendingOrderMoves, setPendingOrderMoves] = useState({});
   const [pendingMessageMoves, setPendingMessageMoves] = useState({});
   const [applyingColumns, setApplyingColumns] = useState({});
@@ -631,6 +638,7 @@ function ComplianceBoardPage() {
   const [visibleMessageCounts, setVisibleMessageCounts] = useState({});
   const [issueHubSourceCategory, setIssueHubSourceCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
   const [issueHubWorkspaceCategory, setIssueHubWorkspaceCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
+  const [issueHubMessageTypeFilter, setIssueHubMessageTypeFilter] = useState('all');
   const [orderCommunicationWorkCategory, setOrderCommunicationWorkCategory] = useState(MESSAGE_CATEGORIES.ON_HOLD);
   const [fulfillmentIssueCategory, setFulfillmentIssueCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
   const [fulfillmentProgressCategory, setFulfillmentProgressCategory] = useState(COLUMN_STATUS.NOT_FULFILLED);
@@ -768,21 +776,17 @@ function ComplianceBoardPage() {
       // Handle unread messages alert locally (no backend call needed)
       if (statType === UNREAD_MESSAGES_ALERT_ID) {
         console.log('[STATS-DETAILS] Handling UNREAD_MESSAGES_ALERT_ID');
-        console.log('[STATS-DETAILS] allMessagesForAlerts:', allMessagesForAlerts);
-        console.log('[STATS-DETAILS] allMessagesForAlerts length:', allMessagesForAlerts?.length);
+        const unreadThreads = getUnreadAlertThreads();
+        console.log('[STATS-DETAILS] unreadThreads:', unreadThreads);
+        console.log('[STATS-DETAILS] unreadThreads length:', unreadThreads.length);
         
-        if (!allMessagesForAlerts || allMessagesForAlerts.length === 0) {
-          console.warn('[STATS-DETAILS] allMessagesForAlerts is empty!');
+        if (unreadThreads.length === 0) {
+          console.warn('[STATS-DETAILS] unreadThreads is empty!');
           setStatsDetailsModal(prev => ({ ...prev, items: [] }));
           return;
         }
         
-        const unreadItems = allMessagesForAlerts
-          .filter(thread => {
-            const unreadCount = Number(thread?.unreadCount) || 0;
-            console.log(`[STATS-DETAILS] Thread orderId=${thread?.orderId}, unreadCount=${unreadCount}, thread=`, thread);
-            return unreadCount > 0;
-          })
+        const unreadItems = unreadThreads
           .map(thread => {
             const unreadCount = Number(thread?.unreadCount) || 0;
             return {
@@ -866,6 +870,57 @@ function ComplianceBoardPage() {
 
     return true;
   };
+
+  const getThreadActivityTimestamp = (thread) => {
+    const value = thread?.lastDate
+      || thread?.lastMessageDate
+      || thread?.messageDate
+      || thread?.updatedAt
+      || thread?.createdAt;
+    if (!value) return 0;
+    const ms = new Date(value).getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  };
+
+  const getAlertThreadCategory = (thread) => {
+    const rawCategory = String(thread?._conversationMeta?.category || thread?.category || '').trim();
+    if (rawCategory === 'Refund' || rawCategory === 'Replace') {
+      return MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE;
+    }
+    return rawCategory;
+  };
+
+  const getBoardAlertThreads = () => {
+    const filteredThreads = ensureArray(allMessagesForAlerts).filter(matchesMessageFilters);
+
+    if (selectedCategory === 'return_refund') {
+      return filteredThreads.filter((thread) => getAlertThreadCategory(thread) === MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE);
+    }
+
+    if (selectedCategory === 'cancellation') {
+      return filteredThreads.filter((thread) => getAlertThreadCategory(thread) === MESSAGE_CATEGORIES.CANCELLATION);
+    }
+
+    if (selectedCategory === 'inr') {
+      return filteredThreads.filter((thread) => getAlertThreadCategory(thread) === MESSAGE_CATEGORIES.INR);
+    }
+
+    return filteredThreads;
+  };
+
+  const getUnreadAlertThreads = () => (
+    getBoardAlertThreads()
+      .filter((thread) => (Number(thread?.unreadCount) || 0) > 0)
+      .sort((left, right) => {
+        const unreadDiff = (Number(right?.unreadCount) || 0) - (Number(left?.unreadCount) || 0);
+        if (unreadDiff !== 0) return unreadDiff;
+        return getThreadActivityTimestamp(right) - getThreadActivityTimestamp(left);
+      })
+  );
+
+  const getUnreadAlertCount = () => (
+    getUnreadAlertThreads().reduce((total, thread) => total + Math.max(0, Number(thread?.unreadCount) || 0), 0)
+  );
 
   const matchesBoardOrderFilters = (order) => {
     if (selectedSeller) {
@@ -2601,6 +2656,9 @@ function ComplianceBoardPage() {
 
   // Fetch messages for alert system (all boards except order_communication)
   const fetchMessagesForAlerts = async () => {
+    const requestId = alertMessagesRequestRef.current + 1;
+    alertMessagesRequestRef.current = requestId;
+
     try {
       const params = {
         page: 1,
@@ -2618,10 +2676,22 @@ function ComplianceBoardPage() {
         params,
         timeout: ALERT_REQUEST_TIMEOUT_MS,
       });
-      const threads = ensureArray(response.data?.threads);
-      setAllMessagesForAlerts(threads);
+      const threads = ensureArray(response.data?.threads).filter(matchesMessageFilters);
+      const threadMetaResults = await fetchConversationMetaForThreads(threads, ALERT_REQUEST_TIMEOUT_MS);
+      const enrichedThreads = threadMetaResults.map(({ thread, meta }) => ({
+        ...thread,
+        _conversationMeta: meta || thread._conversationMeta || null,
+        category: meta?.category || thread.category || '',
+        status: meta?.status || thread.status || 'Open',
+        caseStatus: meta?.caseStatus || thread.caseStatus || 'Case Not Opened',
+        pickedUpBy: meta?.pickedUpBy || thread.pickedUpBy || null,
+      }));
+
+      if (requestId !== alertMessagesRequestRef.current) return;
+      setAllMessagesForAlerts(enrichedThreads);
     } catch (err) {
       console.warn('Failed to fetch messages for alerts:', err);
+      if (requestId !== alertMessagesRequestRef.current) return;
       setAllMessagesForAlerts([]);
     }
   };
@@ -2831,6 +2901,7 @@ function ComplianceBoardPage() {
         const prefs = JSON.parse(savedPrefs);
         if (prefs.issueHubSourceCategory) setIssueHubSourceCategory(prefs.issueHubSourceCategory);
         if (prefs.issueHubWorkspaceCategory) setIssueHubWorkspaceCategory(prefs.issueHubWorkspaceCategory);
+        if (prefs.issueHubMessageTypeFilter) setIssueHubMessageTypeFilter(prefs.issueHubMessageTypeFilter);
         if (prefs.orderCommunicationWorkCategory) setOrderCommunicationWorkCategory(prefs.orderCommunicationWorkCategory);
         if (prefs.fulfillmentIssueCategory) setFulfillmentIssueCategory(prefs.fulfillmentIssueCategory);
         if (prefs.fulfillmentProgressCategory) setFulfillmentProgressCategory(prefs.fulfillmentProgressCategory);
@@ -2856,6 +2927,7 @@ function ComplianceBoardPage() {
       const prefs = {
         issueHubSourceCategory,
         issueHubWorkspaceCategory,
+        issueHubMessageTypeFilter,
         orderCommunicationWorkCategory,
         fulfillmentIssueCategory,
         fulfillmentProgressCategory,
@@ -2877,6 +2949,7 @@ function ComplianceBoardPage() {
   }, [
     issueHubSourceCategory,
     issueHubWorkspaceCategory,
+    issueHubMessageTypeFilter,
     orderCommunicationWorkCategory,
     fulfillmentIssueCategory,
     fulfillmentProgressCategory,
@@ -3200,6 +3273,14 @@ function ComplianceBoardPage() {
       ? (messages[categoryId] || [])
       : (orders[categoryId] || [])
   );
+  const getMessageTagType = (item) => ((item?.actualMessageType || item?.messageType) === 'ORDER' ? 'order' : 'inquiry');
+  const filterIssueHubItemsByMessageTag = (items, optionType) => {
+    if (optionType !== 'message' || issueHubMessageTypeFilter === 'all') {
+      return items;
+    }
+
+    return items.filter((item) => getMessageTagType(item) === issueHubMessageTypeFilter);
+  };
   const normalizeMatchValue = (value) => String(value || '').trim().toLowerCase();
   const getSellerMatchId = (item) => String(
     item?.seller?._id ||
@@ -3290,7 +3371,7 @@ function ComplianceBoardPage() {
     const nowMs = Date.now();
     const allBoardMessages = selectedCategory === 'order_communication' || selectedCategory === 'issue_hub'
       ? Object.values(messages).flat()
-      : allMessagesForAlerts;
+      : getBoardAlertThreads();
 
     return allBoardMessages.filter((msg) => {
       // Only check messages where buyer sent the last message
@@ -3331,8 +3412,12 @@ function ComplianceBoardPage() {
   const isReturnOverdueAlert = (alertId) => [RETURN_LABEL_OVERDUE_ALERT_ID, PAYMENT_STATUS_OVERDUE_ALERT_ID].includes(alertId);
   const isFulfillmentIssueOverdueAlert = (alertId) => Boolean(FULFILLMENT_ISSUE_STATUS_BY_ALERT_ID[alertId]);
   const isMessageOverdueAlert = (alertId) => alertId === MESSAGE_OVERDUE_ALERT_ID;
+  const isMessageAlert = (alertId) => alertId === UNREAD_MESSAGES_ALERT_ID || alertId === MESSAGE_OVERDUE_ALERT_ID;
 
   const getAlertPreviewItems = (boardCategory, alertId) => {
+    if (alertId === UNREAD_MESSAGES_ALERT_ID) {
+      return getUnreadAlertThreads();
+    }
     if (isMessageOverdueAlert(alertId)) {
       return getOverdueMessages();
     }
@@ -3353,7 +3438,7 @@ function ComplianceBoardPage() {
     if (
       selectedCategory === 'order_communication' ||
       selectedCategory === 'issue_hub' ||
-      isMessageOverdueAlert(alertId)
+      isMessageAlert(alertId)
     ) {
       return;
     }
@@ -3403,7 +3488,7 @@ function ComplianceBoardPage() {
     }
   };
   const getAlertPreviewVisibleCount = (boardCategory, alertId) => {
-    if (isMessageOverdueAlert(alertId)) {
+    if (isMessageAlert(alertId)) {
       return visibleMessageCounts[alertId] ?? LOAD_MORE_STEP;
     }
     return boardCategory === 'order_communication'
@@ -3414,7 +3499,7 @@ function ComplianceBoardPage() {
         : getVisibleOrderCount(alertId);
   };
   const handleLoadMoreAlertPreviewItems = (boardCategory, alertId, totalItems) => {
-    if (isMessageOverdueAlert(alertId)) {
+    if (isMessageAlert(alertId)) {
       setVisibleMessageCounts((prev) => ({
         ...prev,
         [alertId]: Math.min(totalItems, (prev[alertId] ?? LOAD_MORE_STEP) + LOAD_MORE_STEP),
@@ -3705,10 +3790,7 @@ function ComplianceBoardPage() {
     if (selectedCategory === 'return_refund') {
       const overdueReturnLabelOrders = getOverdueReturnLabelOrders();
       const overduePaymentStatusOrders = getOverduePaymentStatusOrders();
-      const unreadReturnMessages = allMessagesForAlerts.reduce((total, thread) => {
-        const unreadCount = Number(thread?.unreadCount) || 0;
-        return total + Math.max(0, unreadCount);
-      }, 0);
+      const unreadReturnMessages = getUnreadAlertCount();
       
       return [
         { id: COLUMN_STATUS.CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.CASE_OPENED), type: 'stat' },
@@ -3728,10 +3810,7 @@ function ComplianceBoardPage() {
     }
 
     if (selectedCategory === 'cancellation') {
-      const unreadCancellationMessages = allMessagesForAlerts.reduce((total, thread) => {
-        const unreadCount = Number(thread?.unreadCount) || 0;
-        return total + Math.max(0, unreadCount);
-      }, 0);
+      const unreadCancellationMessages = getUnreadAlertCount();
       
       return [
         { id: COLUMN_STATUS.CANCELLATION_REQUEST, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.CANCELLATION_REQUEST), type: 'stat' },
@@ -3750,10 +3829,7 @@ function ComplianceBoardPage() {
     }
 
     if (selectedCategory === 'inr') {
-      const unreadInrMessages = allMessagesForAlerts.reduce((total, thread) => {
-        const unreadCount = Number(thread?.unreadCount) || 0;
-        return total + Math.max(0, unreadCount);
-      }, 0);
+      const unreadInrMessages = getUnreadAlertCount();
       
       return [
         { id: COLUMN_STATUS.INR_CASE_OPENED, label: 'Case Opened', color: BRAND_RED, count: getStatusCount(COLUMN_STATUS.INR_CASE_OPENED), type: 'stat' },
@@ -5577,55 +5653,98 @@ function ComplianceBoardPage() {
   const renderIssueHubBoard = () => {
     const sourceOption = getIssueHubOption(issueHubSourceCategory);
     const workspaceOption = getIssueHubOption(issueHubWorkspaceCategory);
-    const sourceItems = getIssueHubItems(issueHubSourceCategory);
-    const workspaceItems = getIssueHubItems(issueHubWorkspaceCategory);
+    const sourceItems = filterIssueHubItemsByMessageTag(getIssueHubItems(issueHubSourceCategory), sourceOption.type);
+    const workspaceItems = filterIssueHubItemsByMessageTag(getIssueHubItems(issueHubWorkspaceCategory), workspaceOption.type);
     const alerts = getAlertsForCurrentBoard();
+    const sourceVisibleCount = sourceOption.type === 'message'
+      ? Math.min(getVisibleMessageCount(issueHubSourceCategory), sourceItems.length)
+      : Math.min(getVisibleOrderCount(issueHubSourceCategory), sourceItems.length);
+    const sourceRemainingCount = Math.max(0, sourceItems.length - sourceVisibleCount);
+    const workspaceVisibleCount = workspaceOption.type === 'message'
+      ? Math.min(getVisibleMessageCount(issueHubWorkspaceCategory), workspaceItems.length)
+      : Math.min(getVisibleOrderCount(issueHubWorkspaceCategory), workspaceItems.length);
+    const workspaceRemainingCount = Math.max(0, workspaceItems.length - workspaceVisibleCount);
 
     return (
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', xl: '300px minmax(0, 1fr) 280px' }, gap: 3 }}>
-        <Paper sx={{ p: 2, minHeight: 740, borderRadius: 2, border: '2px solid #e2e8f0', display: 'flex', flexDirection: 'column' }}>
-          <FormControl fullWidth size="small" sx={{ mb: 2 }}>
-            <InputLabel>Issue Type</InputLabel>
-            <Select
-              value={issueHubSourceCategory}
-              label="Issue Type"
-              onChange={(e) => setIssueHubSourceCategory(e.target.value)}
-            >
-              {ISSUE_HUB_OPTIONS.map((option) => (
-                <MenuItem key={option.id} value={option.id}>{option.label}</MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          <Typography variant="h6" fontWeight={700} sx={{ color: sourceOption.color, mb: 1.5, pb: 1.5, borderBottom: `2px solid ${sourceOption.color}` }}>
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', xl: '300px minmax(0, 1fr) 280px' }, gap: 3, alignItems: 'start' }}>
+        <Paper sx={{ p: 2, height: 740, minHeight: 0, borderRadius: 2, border: '2px solid #e2e8f0', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <Stack spacing={1.5} sx={{ mb: 2, flexShrink: 0 }}>
+            <FormControl fullWidth size="small">
+              <InputLabel>Issue Type</InputLabel>
+              <Select
+                value={issueHubSourceCategory}
+                label="Issue Type"
+                onChange={(e) => setIssueHubSourceCategory(e.target.value)}
+              >
+                {ISSUE_HUB_OPTIONS.map((option) => (
+                  <MenuItem key={option.id} value={option.id}>{option.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <FormControl fullWidth size="small">
+              <InputLabel>Message Tag</InputLabel>
+              <Select
+                value={issueHubMessageTypeFilter}
+                label="Message Tag"
+                onChange={(e) => setIssueHubMessageTypeFilter(e.target.value)}
+              >
+                {ISSUE_HUB_MESSAGE_TYPE_FILTERS.map((option) => (
+                  <MenuItem key={option.id} value={option.id}>{option.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Stack>
+          <Typography variant="h6" fontWeight={700} sx={{ color: sourceOption.color, mb: 1.5, pb: 1.5, borderBottom: `2px solid ${sourceOption.color}`, flexShrink: 0 }}>
             {sourceOption.label}
           </Typography>
-          <Stack spacing={1} sx={{ overflowY: 'auto', flex: 1 }}>
+          <Stack spacing={1} sx={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
             {sourceItems.length === 0 ? (
               <Typography variant="body2" color="text.secondary">No items found</Typography>
             ) : (
-              sourceItems.slice(0, getIssueHubOption(issueHubSourceCategory).type === 'message'
-                ? getVisibleMessageCount(issueHubSourceCategory)
-                : getVisibleOrderCount(issueHubSourceCategory)
-              ).map((item) => sourceOption.type === 'message'
+              sourceItems.slice(0, sourceVisibleCount).map((item) => sourceOption.type === 'message'
                 ? renderStaticMessageCard(item)
                 : renderStaticOrderCard(item)
               )
             )}
+            {sourceRemainingCount > 0 && (
+              <Button
+                size="small"
+                onClick={() => sourceOption.type === 'message'
+                  ? handleLoadMoreMessages(issueHubSourceCategory)
+                  : handleLoadMoreOrders(issueHubSourceCategory)
+                }
+                sx={{ alignSelf: 'center', fontSize: '0.75rem', fontWeight: 700, textTransform: 'none' }}
+              >
+                +{sourceRemainingCount} more
+              </Button>
+            )}
           </Stack>
         </Paper>
 
-        <Paper sx={{ p: 2, minHeight: 740, borderRadius: 2, border: '2px solid #e2e8f0', display: 'flex', flexDirection: 'column' }}>
-          <Typography variant="h6" fontWeight={700} sx={{ color: workspaceOption.color, mb: 1.5, pb: 1.5, borderBottom: `2px solid ${workspaceOption.color}` }}>
+        <Paper sx={{ p: 2, height: 740, minHeight: 0, borderRadius: 2, border: '2px solid #e2e8f0', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <Typography variant="h6" fontWeight={700} sx={{ color: workspaceOption.color, mb: 1.5, pb: 1.5, borderBottom: `2px solid ${workspaceOption.color}`, flexShrink: 0 }}>
             Working Space: {workspaceOption.label}
           </Typography>
-          <Stack spacing={1} sx={{ overflowY: 'auto', flex: 1 }}>
+          <Stack spacing={1} sx={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
             {workspaceItems.length === 0 ? (
               <Typography variant="body2" color="text.secondary">Click an alert to open its items here</Typography>
             ) : (
-              workspaceItems.map((item) => workspaceOption.type === 'message'
+              workspaceItems.slice(0, workspaceVisibleCount).map((item) => workspaceOption.type === 'message'
                 ? renderStaticMessageCard(item)
                 : renderStaticOrderCard(item)
               )
+            )}
+            {workspaceRemainingCount > 0 && (
+              <Button
+                size="small"
+                onClick={() => workspaceOption.type === 'message'
+                  ? handleLoadMoreMessages(issueHubWorkspaceCategory)
+                  : handleLoadMoreOrders(issueHubWorkspaceCategory)
+                }
+                sx={{ alignSelf: 'center', fontSize: '0.75rem', fontWeight: 700, textTransform: 'none' }}
+              >
+                +{workspaceRemainingCount} more
+              </Button>
             )}
           </Stack>
         </Paper>
@@ -6674,7 +6793,7 @@ function ComplianceBoardPage() {
     const previewItems = activeAlert
       ? (alertPreviewItems !== null ? alertPreviewItems : getAlertPreviewItems(selectedCategory, activeAlert.id))
       : [];
-    const isMessageAlert = selectedCategory === 'order_communication' || (activeAlert && isMessageOverdueAlert(activeAlert.id));
+    const usesMessageCards = selectedCategory === 'order_communication' || (activeAlert && isMessageAlert(activeAlert.id));
     const visibleCount = activeAlert
       ? (alertPreviewItems !== null ? previewItems.length : getAlertPreviewVisibleCount(selectedCategory, activeAlert.id))
       : 0;
@@ -6708,7 +6827,7 @@ function ComplianceBoardPage() {
               </Typography>
               {activeAlert && (
                 <Typography variant="body2" color="text.secondary">
-                  {previewItems.length} {isMessageAlert ? 'message' : 'order'}{previewItems.length === 1 ? '' : 's'} in this category
+                  {previewItems.length} {usesMessageCards ? 'message' : 'order'}{previewItems.length === 1 ? '' : 's'} in this category
                 </Typography>
               )}
             </Box>
@@ -6736,7 +6855,7 @@ function ComplianceBoardPage() {
           ) : (
             <Stack spacing={1.25} sx={{ flex: 1, minHeight: 0, overflowY: 'auto', pr: 0.5 }}>
               {previewItems.slice(0, visibleCount).map((item) => (
-                isMessageAlert ? renderStaticMessageCard(item) : renderStaticOrderCard(item)
+                usesMessageCards ? renderStaticMessageCard(item) : renderStaticOrderCard(item)
               ))}
               {remainingCount > 0 && (
                 <Button
