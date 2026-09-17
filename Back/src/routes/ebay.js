@@ -20954,6 +20954,7 @@ function buildConversationManagementBasePipeline(query = {}) {
     {
       $project: {
         _id: 1,
+        orderObjectId: { $ifNull: [{ $arrayElemAt: ['$orderInfo._id', 0] }, null] },
         sellerId: '$sellerDoc._id',
         sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
         // Prefer Order.buyer.username — ConversationMeta.buyerUsername is sometimes
@@ -20970,6 +20971,7 @@ function buildConversationManagementBasePipeline(query = {}) {
         caseStatus: 1,
         status: 1,
         notes: 1,
+        fulfillmentNotes: { $ifNull: [{ $arrayElemAt: ['$orderInfo.fulfillmentNotes', 0] }, null] },
         pickedUpBy: 1,
         updatedAt: 1,
         creationDate: {

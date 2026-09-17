@@ -177,9 +177,20 @@ const buildOrderFulfillmentStatusQuery = (status) => {
 };
 
 const buildOrderStatusSetForCategory = ({ currentOrder, nextStatus, nextCategory, nextSource }) => {
-  const setObj = {
-    complianceBoardStatus: nextStatus,
-  };
+  const setObj = {};
+
+  const preservedStatus = isOrderFulfillmentBoardStatus(currentOrder?.complianceBoardStatus)
+    ? currentOrder.complianceBoardStatus
+    : (isOrderFulfillmentBoardStatus(currentOrder?.orderFulfillmentBoardStatus)
+      ? currentOrder.orderFulfillmentBoardStatus
+      : null);
+
+  if (!nextCategory && nextStatus === 'todo' && preservedStatus) {
+    setObj.complianceBoardStatus = preservedStatus;
+    setObj.orderFulfillmentBoardStatus = preservedStatus;
+  } else {
+    setObj.complianceBoardStatus = nextStatus;
+  }
 
   if (nextSource !== undefined) {
     setObj.complianceBoardSource = nextSource;
@@ -191,12 +202,6 @@ const buildOrderStatusSetForCategory = ({ currentOrder, nextStatus, nextCategory
   }
 
   if (nextCategory && nextCategory !== 'order_fulfillment') {
-    const preservedStatus = isOrderFulfillmentBoardStatus(currentOrder?.complianceBoardStatus)
-      ? currentOrder.complianceBoardStatus
-      : (isOrderFulfillmentBoardStatus(currentOrder?.orderFulfillmentBoardStatus)
-        ? currentOrder.orderFulfillmentBoardStatus
-        : null);
-
     if (preservedStatus) {
       setObj.orderFulfillmentBoardStatus = preservedStatus;
     }
@@ -3976,7 +3981,7 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
       ? { $or: [{ _id: orderId }, { orderId: orderId }] }
       : { orderId: orderId };
     
-    const currentOrder = await Order.findOne(orderQuery).select('complianceBoardStatus orderFulfillmentBoardStatus returnCaseNotOpenedAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt');
+    const currentOrder = await Order.findOne(orderQuery).select('complianceBoardStatus orderFulfillmentBoardStatus complianceBoardCategories returnCaseNotOpenedAssignedAt cancellationCaseNotOpenedAssignedAt inrCaseNotOpenedAssignedAt');
     const setObj = buildOrderStatusSetForCategory({
       currentOrder,
       nextStatus: complianceBoardStatus,
@@ -4013,9 +4018,32 @@ router.patch('/:orderId/compliance-status', requireAuth, requirePageAccess('Comp
     const updateObj = {
       $set: setObj
     };
+
+    if (clearCategory) {
+      const categoriesToClear = [];
+      if (complianceBoardCategory) {
+        categoriesToClear.push(complianceBoardCategory);
+      } else if (Array.isArray(currentOrder?.complianceBoardCategories)) {
+        currentOrder.complianceBoardCategories.forEach((category) => {
+          if (SPECIALIZED_BOARD_CATEGORIES.has(String(category))) {
+            categoriesToClear.push(String(category));
+          }
+        });
+      }
+
+      if (categoriesToClear.length > 0) {
+        updateObj.$pull = {
+          complianceBoardCategories: { $in: [...new Set(categoriesToClear)] }
+        };
+      }
+
+      if (complianceBoardCategory && currentOrder?.complianceBoardCategory === complianceBoardCategory) {
+        updateObj.$set.complianceBoardCategory = null;
+      }
+    }
     
     // Use $addToSet to add category to the array without duplicates
-    if (complianceBoardCategory) {
+    if (complianceBoardCategory && !clearCategory) {
       updateObj.$addToSet = { complianceBoardCategories: complianceBoardCategory };
     }
     
