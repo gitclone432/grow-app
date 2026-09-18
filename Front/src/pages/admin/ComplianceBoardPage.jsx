@@ -725,6 +725,7 @@ function ComplianceBoardPage() {
   const [fulfillmentIssueCategory, setFulfillmentIssueCategory] = useState(COLUMN_STATUS.OUT_OF_STOCK);
   const [fulfillmentProgressCategory, setFulfillmentProgressCategory] = useState(COLUMN_STATUS.NOT_FULFILLED);
   const [showOnlyUnreadMessages, setShowOnlyUnreadMessages] = useState(false);
+  const [issueHubPickedUpByFilter, setIssueHubPickedUpByFilter] = useState('all');
   const [returnCaseOpenedCategory, setReturnCaseOpenedCategory] = useState(COLUMN_STATUS.CASE_OPENED);
   const [returnCaseNotOpenedCategory, setReturnCaseNotOpenedCategory] = useState(COLUMN_STATUS.CASE_NOT_OPENED);
   const [returnFlowCategory, setReturnFlowCategory] = useState(COLUMN_STATUS.PROVIDE_RETURN_LABEL);
@@ -3385,12 +3386,33 @@ function ComplianceBoardPage() {
       : (orders[categoryId] || [])
   );
   const getMessageTagType = (item) => ((item?.actualMessageType || item?.messageType) === 'ORDER' ? 'order' : 'inquiry');
+  const getIssueHubPickedUpByNames = (categoryId) => {
+    const items = getIssueHubItems(categoryId);
+    const pickerNames = new Set();
+    items.forEach((item) => {
+      const name = item?.pickedUpBy?.username || item?.pickedUpBy?.name || item?.pickedUpBy;
+      if (name) {
+        pickerNames.add(String(name).trim());
+      }
+    });
+    return Array.from(pickerNames).sort();
+  };
   const filterIssueHubItemsByMessageTag = (items, optionType) => {
-    if (optionType !== 'message' || issueHubMessageTypeFilter === 'all') {
-      return items;
+    let filtered = items;
+    
+    if (optionType === 'message' && issueHubMessageTypeFilter !== 'all') {
+      filtered = filtered.filter((item) => getMessageTagType(item) === issueHubMessageTypeFilter);
     }
-
-    return items.filter((item) => getMessageTagType(item) === issueHubMessageTypeFilter);
+    
+    // Apply picked up by filter
+    if (issueHubPickedUpByFilter !== 'all') {
+      filtered = filtered.filter((item) => {
+        const pickerName = item?.pickedUpBy?.username || item?.pickedUpBy?.name || item?.pickedUpBy;
+        return String(pickerName || '').trim() === issueHubPickedUpByFilter;
+      });
+    }
+    
+    return filtered;
   };
   const normalizeMatchValue = (value) => String(value || '').trim().toLowerCase();
   const getSellerMatchId = (item) => String(
@@ -5771,6 +5793,7 @@ function ComplianceBoardPage() {
   const renderIssueHubBoard = () => {
     const sourceOption = getIssueHubOption(issueHubSourceCategory);
     const workspaceOption = getIssueHubOption(issueHubWorkspaceCategory);
+    const pickedUpByNames = getIssueHubPickedUpByNames(issueHubSourceCategory);
     const sourceItems = filterIssueHubItemsByMessageTag(getIssueHubItems(issueHubSourceCategory), sourceOption.type);
     const workspaceItems = filterIssueHubItemsByMessageTag(getIssueHubItems(issueHubWorkspaceCategory), workspaceOption.type);
     const alerts = getAlertsForCurrentBoard();
@@ -5808,6 +5831,20 @@ function ComplianceBoardPage() {
               >
                 {ISSUE_HUB_MESSAGE_TYPE_FILTERS.map((option) => (
                   <MenuItem key={option.id} value={option.id}>{option.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <FormControl fullWidth size="small">
+              <InputLabel>Picked Up By</InputLabel>
+              <Select
+                value={issueHubPickedUpByFilter}
+                label="Picked Up By"
+                onChange={(e) => setIssueHubPickedUpByFilter(e.target.value)}
+              >
+                <MenuItem value="all">All Users</MenuItem>
+                <MenuItem value="">Unassigned</MenuItem>
+                {pickedUpByNames.map((name) => (
+                  <MenuItem key={name} value={name}>{name}</MenuItem>
                 ))}
               </Select>
             </FormControl>
