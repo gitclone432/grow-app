@@ -34,7 +34,7 @@ async function calculateCarryoverForDate(cardId, targetDate) {
   const previousDayRecord = await DailyCardExpense.findOne({
     card: cardId,
     date: { $gte: prevStart, $lte: prevEnd }
-  });
+  }).sort({ date: -1, createdAt: -1, _id: -1 });
 
   return previousDayRecord?.availableBalance || 0;
 }
@@ -87,7 +87,7 @@ router.get('/', requireAuth, requirePageAccess('FinanceCashflow'), async (req, r
       .populate('amazonAccount', 'name')
       .populate('createdBy', 'username')
       .populate('updatedBy', 'username')
-      .sort({ date: -1 })
+      .sort({ date: -1, createdAt: -1, _id: -1 })
       .lean();
 
     // Get all cards for dropdown
@@ -233,17 +233,6 @@ router.post('/', requireAuth, requirePageAccess('FinanceCashflow'), async (req, 
     // Calculate available balance from previous day as default
     const calculatedAvailableBalance = await calculateCarryoverForDate(card, date);
     const availableBalanceNum = availableBalance !== undefined ? parseFloat(availableBalance) : calculatedAvailableBalance;
-
-    // Check if record already exists for this card and date
-    const { start, end } = getDateBounds(date);
-    const existingRecord = await DailyCardExpense.findOne({
-      card,
-      date: { $gte: start, $lte: end }
-    });
-
-    if (existingRecord) {
-      return res.status(400).json({ error: 'Record already exists for this card on this date' });
-    }
 
     const balanceAddedNum = parseFloat(balanceAdded) || 0;
     const expenseNum = parseFloat(expense) || 0;
