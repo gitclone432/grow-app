@@ -20954,6 +20954,7 @@ function buildConversationManagementBasePipeline(query = {}) {
     {
       $project: {
         _id: 1,
+        orderObjectId: { $ifNull: [{ $arrayElemAt: ['$orderInfo._id', 0] }, null] },
         sellerId: '$sellerDoc._id',
         sellerName: { $ifNull: ['$userDoc.username', 'Unknown'] },
         // Prefer Order.buyer.username — ConversationMeta.buyerUsername is sometimes
@@ -20970,6 +20971,7 @@ function buildConversationManagementBasePipeline(query = {}) {
         caseStatus: 1,
         status: 1,
         notes: 1,
+        fulfillmentNotes: { $ifNull: [{ $arrayElemAt: ['$orderInfo.fulfillmentNotes', 0] }, null] },
         pickedUpBy: 1,
         updatedAt: 1,
         creationDate: {
@@ -24754,6 +24756,50 @@ router.patch('/returns/:returnId/notes', requireAuth, async (req, res) => {
     res.json({ success: true, return: returnDoc });
   } catch (err) {
     console.error('Error updating return notes:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/returns/:returnId/internal-reason', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const { internalReason } = req.body;
+
+    const returnDoc = await Return.findOneAndUpdate(
+      { returnId },
+      { internalReason: internalReason || '' },
+      { new: true }
+    );
+
+    if (!returnDoc) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    res.json({ success: true, return: returnDoc });
+  } catch (err) {
+    console.error('Error updating return internal reason:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/returns/:returnId/verdict', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const { verdict } = req.body;
+
+    const returnDoc = await Return.findOneAndUpdate(
+      { returnId },
+      { verdict: verdict || '' },
+      { new: true }
+    );
+
+    if (!returnDoc) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    res.json({ success: true, return: returnDoc });
+  } catch (err) {
+    console.error('Error updating return verdict:', err);
     res.status(500).json({ error: err.message });
   }
 });

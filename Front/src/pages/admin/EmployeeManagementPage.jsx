@@ -236,7 +236,7 @@ export default function EmployeeManagementPage() {
         name: '',
         phoneNumber: '',
         dateOfBirth: '',
-
+        bloodGroup: '',
         dateOfJoining: '',
         gender: '',
         address: '',
@@ -298,6 +298,7 @@ export default function EmployeeManagementPage() {
             name: profile.name || '',
             phoneNumber: profile.phoneNumber || '',
             dateOfBirth: profile.dateOfBirth || '',
+            bloodGroup: profile.bloodGroup || '',
             dateOfJoining: profile.dateOfJoining || '',
             gender: profile.gender || '',
             address: profile.address || '',
@@ -796,17 +797,6 @@ export default function EmployeeManagementPage() {
                                                 <MenuItem value="office">Office</MenuItem>
                                                 <MenuItem value="hybrid">Hybrid</MenuItem>
                                             </TextField>
-                                        </Grid>
-                                        <Grid item xs={12} sm={6}>
-                                            <TextField
-                                                label="Working Hours"
-                                                value={editForm.workingHours}
-                                                onChange={(e) => setEditForm({ ...editForm, workingHours: e.target.value })}
-                                                fullWidth
-                                                size="small"
-                                                placeholder="e.g., 9 AM - 6 PM"
-                                                disabled={!isEditing}
-                                            />
                                         </Grid>
                                         <Grid item xs={12} sm={6}>
                                             <TextField

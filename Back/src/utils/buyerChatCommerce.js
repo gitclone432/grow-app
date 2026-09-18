@@ -107,21 +107,71 @@ function appendBuyerReplyState(stateMap, key, message) {
   stateMap.set(key, current);
 }
 
+function appendCommerceBuyerReplyState(stateMap, key, message, thread = {}) {
+  if (!key) return;
+
+  const current = stateMap.get(key) || emptyBuyerReplyState();
+  const when = message?.createdDate || message?.createdAt
+    ? new Date(message.createdDate || message.createdAt)
+    : null;
+  const isValidDate = when && !Number.isNaN(when.getTime());
+  if (!isValidDate) return;
+
+  const sellerNames = [
+    thread?.sellerUsername,
+    thread?.sellerEmail,
+    thread?.sellerEbayUsername,
+  ].filter(Boolean);
+  const senderRole = resolveSenderRole(
+    message?.senderUsername,
+    thread?.buyerUsername,
+    sellerNames,
+    message?.recipientUsername
+  );
+
+  if (senderRole === 'BUYER') {
+    if (!current.lastBuyerMessageAt || when > current.lastBuyerMessageAt) {
+      current.lastBuyerMessageAt = when;
+    }
+  }
+
+  if (senderRole === 'SELLER') {
+    if (!current.lastSellerMessageAt || when > current.lastSellerMessageAt) {
+      current.lastSellerMessageAt = when;
+    }
+  }
+
+  stateMap.set(key, current);
+}
+
 async function enrichThreadsWithBuyerReplyState(threads = []) {
   if (!Array.isArray(threads) || threads.length === 0) return threads;
 
   const orderIds = new Set();
   const fallbackMatches = [];
+  const conversationMatches = [];
 
   threads.forEach((thread) => {
+    const conversationId = normalizeMessageMatchValue(thread?.conversationId);
+    const sellerId = normalizeMessageMatchValue(thread?.sellerId);
+    const buyerUsername = normalizeMessageMatchValue(thread?.buyerUsername);
+    if (conversationId && sellerId) {
+      conversationMatches.push({
+        conversationId,
+        sellerId,
+        buyerUsername,
+        sellerUsername: thread?.sellerUsername || '',
+        sellerEmail: thread?.sellerEmail || '',
+        sellerEbayUsername: thread?.sellerEbayUsername || '',
+      });
+    }
+
     const orderId = normalizeMessageMatchValue(thread?.orderId);
     if (orderId) {
       orderIds.add(orderId);
       return;
     }
 
-    const sellerId = normalizeMessageMatchValue(thread?.sellerId);
-    const buyerUsername = normalizeMessageMatchValue(thread?.buyerUsername);
     const itemId = normalizeMessageMatchValue(thread?.itemId);
     if (sellerId && buyerUsername && itemId) {
       fallbackMatches.push({ sellerId, buyerUsername, itemId });
@@ -143,13 +193,35 @@ async function enrichThreadsWithBuyerReplyState(threads = []) {
 
   if (queryOr.length === 0) return threads;
 
-  const messages = await Message.find({ $or: queryOr })
-    .select('seller orderId buyerUsername itemId sender messageDate')
-    .lean();
+  const commerceMessageOr = conversationMatches.map(({ sellerId, conversationId }) => ({
+    seller: mongoose.Types.ObjectId.isValid(sellerId)
+      ? new mongoose.Types.ObjectId(sellerId)
+      : sellerId,
+    conversationId,
+  }));
+
+  const [messages, commerceMessages] = await Promise.all([
+    Message.find({ $or: queryOr })
+      .select('seller orderId buyerUsername itemId sender messageDate')
+      .lean(),
+    commerceMessageOr.length > 0
+      ? EbayMessageConversationMessage.find({ $or: commerceMessageOr })
+          .select('seller conversationId senderUsername recipientUsername createdDate createdAt')
+          .lean()
+      : Promise.resolve([])
+  ]);
 
   const bySellerOrder = new Map();
   const byOrder = new Map();
   const bySellerBuyerItem = new Map();
+  const bySellerConversation = new Map();
+
+  const threadBySellerConversation = new Map(
+    conversationMatches.map((match) => [
+      `${match.sellerId}::${match.conversationId}`,
+      match,
+    ])
+  );
 
   messages.forEach((message) => {
     const sellerId = normalizeMessageMatchValue(message?.seller);
@@ -169,14 +241,34 @@ async function enrichThreadsWithBuyerReplyState(threads = []) {
     }
   });
 
+  commerceMessages.forEach((message) => {
+    const sellerId = normalizeMessageMatchValue(message?.seller);
+    const conversationId = normalizeMessageMatchValue(message?.conversationId);
+    if (!sellerId || !conversationId) return;
+
+    const thread = threadBySellerConversation.get(`${sellerId}::${conversationId}`);
+    if (!thread) return;
+
+    appendCommerceBuyerReplyState(
+      bySellerConversation,
+      `${sellerId}::${conversationId}`,
+      message,
+      thread
+    );
+  });
+
   return threads.map((thread) => {
     const sellerId = normalizeMessageMatchValue(thread?.sellerId);
     const orderId = normalizeMessageMatchValue(thread?.orderId);
     const buyerUsername = normalizeMessageMatchValue(thread?.buyerUsername);
     const itemId = normalizeMessageMatchValue(thread?.itemId);
+    const conversationId = normalizeMessageMatchValue(thread?.conversationId);
 
     const replyState =
-      (orderId
+      (sellerId && conversationId
+        ? bySellerConversation.get(`${sellerId}::${conversationId}`) || null
+        : null)
+      || (orderId
         ? ((sellerId ? bySellerOrder.get(`${sellerId}::${orderId}`) : null) || byOrder.get(orderId) || null)
         : null)
       || (sellerId && buyerUsername && itemId

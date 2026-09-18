@@ -98,6 +98,12 @@ const ReturnSchema = new mongoose.Schema(
     // Internal team notes (separate from buyer comments)
     internalNotes: { type: String, default: '' },
 
+    // Internal reason (manual entry field)
+    internalReason: { type: String, default: '' },
+
+    // Verdict (manual entry field)
+    verdict: { type: String, default: '' },
+
     // Compliance board status for kanban board
     complianceBoardStatus: { type: String, default: 'case_opened' },
 
