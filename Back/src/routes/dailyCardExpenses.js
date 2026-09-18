@@ -40,7 +40,7 @@ async function calculateCarryoverForDate(cardId, targetDate) {
 }
 
 // GET /api/daily-card-expenses - List with filtering
-router.get('/', requireAuth, requirePageAccess('FinanceCashflow'), async (req, res) => {
+router.get('/', requireAuth, requirePageAccess(['DailyCardExpenses', 'FinanceCashflow']), async (req, res) => {
   try {
     const { dateMode = 'None', date = '', from = '', to = '', cardId = '' } = req.query;
 
@@ -123,7 +123,7 @@ router.get('/', requireAuth, requirePageAccess('FinanceCashflow'), async (req, r
 
 // GET /api/daily-card-expenses/calc-expenses/:date/:amazonAccountId - Calculate expenses from previous day orders
 // NOTE: This route must come BEFORE the /:id route to be matched correctly
-router.get('/calc-expenses/:date/:amazonAccountId', requireAuth, requirePageAccess('FinanceCashflow'), async (req, res) => {
+router.get('/calc-expenses/:date/:amazonAccountId', requireAuth, requirePageAccess(['DailyCardExpenses', 'FinanceCashflow']), async (req, res) => {
   try {
     const { date, amazonAccountId } = req.params;
 
@@ -185,7 +185,7 @@ router.get('/calc-expenses/:date/:amazonAccountId', requireAuth, requirePageAcce
 });
 
 // GET /api/daily-card-expenses/:id - Get single record
-router.get('/:id', requireAuth, requirePageAccess('FinanceCashflow'), async (req, res) => {
+router.get('/:id', requireAuth, requirePageAccess(['DailyCardExpenses', 'FinanceCashflow']), async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: 'Invalid record ID' });
@@ -209,7 +209,7 @@ router.get('/:id', requireAuth, requirePageAccess('FinanceCashflow'), async (req
 });
 
 // POST /api/daily-card-expenses - Create
-router.post('/', requireAuth, requirePageAccess('FinanceCashflow'), async (req, res) => {
+router.post('/', requireAuth, requirePageAccess(['DailyCardExpenses', 'FinanceCashflow']), async (req, res) => {
   try {
     const { card, date, balanceAdded, availableBalance, expense, notes, amazonAccount } = req.body;
 
@@ -261,7 +261,7 @@ router.post('/', requireAuth, requirePageAccess('FinanceCashflow'), async (req, 
 });
 
 // PUT /api/daily-card-expenses/:id - Update
-router.put('/:id', requireAuth, requirePageAccess('FinanceCashflow'), async (req, res) => {
+router.put('/:id', requireAuth, requirePageAccess(['DailyCardExpenses', 'FinanceCashflow']), async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: 'Invalid record ID' });
@@ -325,7 +325,7 @@ router.put('/:id', requireAuth, requirePageAccess('FinanceCashflow'), async (req
 });
 
 // DELETE /api/daily-card-expenses/:id - Delete
-router.delete('/:id', requireAuth, requirePageAccess('FinanceCashflow'), async (req, res) => {
+router.delete('/:id', requireAuth, requirePageAccess(['DailyCardExpenses', 'FinanceCashflow']), async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: 'Invalid record ID' });
