@@ -588,6 +588,38 @@ const getOrderBoardCategories = (order) => (
     : (order?.complianceBoardCategory ? [order.complianceBoardCategory] : [])
 );
 
+const normalizeInrBoardStatus = (item) => {
+  const rawStatus = String(item?.complianceBoardStatus || '').trim();
+
+  if (!rawStatus || rawStatus === COLUMN_STATUS.CASE_NOT_OPENED) {
+    return COLUMN_STATUS.INR_CASE_OPENED;
+  }
+
+  return rawStatus === 'inr_case_closed'
+    ? COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED
+    : rawStatus;
+};
+
+const normalizeReturnBoardStatus = (item) => {
+  const rawStatus = String(item?.complianceBoardStatus || '').trim();
+
+  if (!rawStatus || rawStatus === COLUMN_STATUS.CASE_NOT_OPENED) {
+    return COLUMN_STATUS.CASE_OPENED;
+  }
+
+  return rawStatus;
+};
+
+const normalizeCancellationBoardStatus = (item) => {
+  const rawStatus = String(item?.complianceBoardStatus || '').trim();
+
+  if (!rawStatus || rawStatus === COLUMN_STATUS.CASE_NOT_OPENED) {
+    return COLUMN_STATUS.CANCELLATION_REQUEST;
+  }
+
+  return rawStatus;
+};
+
 // An order is treated as "cancelled" (and hidden from Order Fulfillment) only
 // when it's actually cancelled per eBay's own cancel state. We intentionally
 // do NOT also check for a 'cancellation' entry in complianceBoardCategories:
@@ -1785,7 +1817,7 @@ function ComplianceBoardPage() {
             }
             const orderId = String(caseItem.orderId || caseItem.caseOrderId || '').toLowerCase();
             if (!orderId) return;
-            const status = caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
+            const status = normalizeInrBoardStatus(caseItem);
             const existing = byOrderId.get(orderId);
             if (!existing) {
               byOrderId.set(orderId, { caseItem, status, creationDate: caseItem.creationDate });
@@ -1829,9 +1861,12 @@ function ComplianceBoardPage() {
             console.warn(`[BOARD-GROUP-FILTER] BLOCKED Case Management case: orderId=${caseItem.orderId}, sourceType=${caseItem.sourceType}`);
             return; // Skip this item
           }
-          const status = caseItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
+          const status = normalizeInrBoardStatus(caseItem);
           if (grouped[status]) {
-            grouped[status].push(caseItem);
+            grouped[status].push({
+              ...caseItem,
+              complianceBoardStatus: status,
+            });
             inrCasePushedOrderIds.add(String(caseItem.orderId || caseItem.caseOrderId || '').toLowerCase());
           }
         });
@@ -1845,10 +1880,13 @@ function ComplianceBoardPage() {
             console.warn(`[BOARD-GROUP-FILTER] BLOCKED non-dispute item: orderId=${disputeItem.orderId}, sourceType=${disputeItem.sourceType}`);
             return; // Skip if not a dispute
           }
-          const status = disputeItem.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
+          const status = normalizeInrBoardStatus(disputeItem);
           disputesByColumn[status] = (disputesByColumn[status] || 0) + 1;
           if (grouped[status]) {
-            grouped[status].push(disputeItem);
+            grouped[status].push({
+              ...disputeItem,
+              complianceBoardStatus: status,
+            });
             inrCasePushedOrderIds.add(String(disputeItem.orderId || disputeItem.caseOrderId || '').toLowerCase());
           }
         });
@@ -1950,9 +1988,12 @@ function ComplianceBoardPage() {
             const item = caseEntry?.caseItem || disputeEntry;
             if (!item) return;
             if (item.sourceType === 'inr-case' || item.__t === 'CaseManagement' || item._type === 'CaseManagement' || item.caseManagementId) return;
-            const status = item.complianceBoardStatus || COLUMN_STATUS.INR_CASE_OPENED;
+            const status = normalizeInrBoardStatus(item);
             if (grouped[status]) {
-              grouped[status].push(item);
+              grouped[status].push({
+                ...item,
+                complianceBoardStatus: status,
+              });
               inrCasePushedOrderIds.add(orderId);
             }
           });
@@ -2021,6 +2062,33 @@ function ComplianceBoardPage() {
         backfillRealCaseCards(inrFollowUpCandidates.filter((order) =>
           inrCaseSourceOrderIds.has(String(order.orderId || order.caseOrderId || '').toLowerCase())
         ));
+
+        const realInrStatuses = new Set([
+          COLUMN_STATUS.INR_CASE_OPENED,
+          COLUMN_STATUS.INR_FOLLOW_UP,
+          COLUMN_STATUS.INR_TRACKING_ID_UPLOAD,
+          COLUMN_STATUS.INR_CASE_OPEN_EBAY_STEP_IN,
+          COLUMN_STATUS.INR_FULLY_REFUNDED,
+          COLUMN_STATUS.INR_PARTIAL_REFUND,
+          COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED,
+          COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN,
+          COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE,
+        ]);
+        const realInrOrderIds = new Set();
+
+        realInrStatuses.forEach((status) => {
+          (grouped[status] || []).forEach((item) => {
+            const orderId = String(item.orderId || item.caseOrderId || '').toLowerCase();
+            if (orderId) {
+              realInrOrderIds.add(orderId);
+            }
+          });
+        });
+
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = (grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).filter((item) => {
+          const orderId = String(item.orderId || item.caseOrderId || '').toLowerCase();
+          return !orderId || !realInrOrderIds.has(orderId);
+        });
 
         console.log(`[BOARD-GROUP] INR board: CASE_NOT_OPENED=${inrCaseNotOpenedItems.length}, INR_CASE_OPENED (stored Inquiry)=${(grouped[COLUMN_STATUS.INR_CASE_OPENED] || []).length}, INR_FOLLOW_UP=${inrFollowUpItems.length}`);
         console.log(`[BOARD-GROUP] Final CASE_NOT_OPENED total: ${grouped[COLUMN_STATUS.CASE_NOT_OPENED].length}`);
@@ -2165,9 +2233,12 @@ function ComplianceBoardPage() {
         // Group deduplicated cancellation cases by their complianceBoardStatus
         console.log(`[BOARD-GROUP] Processing ${dedupCancellationCases.length} deduplicated cancellation cases for grouping`);
         dedupCancellationCases.forEach((caseItem, idx) => {
-          const status = caseItem.complianceBoardStatus || COLUMN_STATUS.CANCELLATION_REQUEST;
+          const status = normalizeCancellationBoardStatus(caseItem);
           if (grouped[status]) {
-            grouped[status].push(caseItem);
+            grouped[status].push({
+              ...caseItem,
+              complianceBoardStatus: status,
+            });
             
             // Log first few cancellations to show what status they're getting
             if (idx < 3) {
@@ -2175,6 +2246,30 @@ function ComplianceBoardPage() {
             }
           }
         });
+        
+        // Priority cleanup: Remove "Case Not Opened" orders that have real cancellation cases in other columns
+        const realCancellationStatuses = new Set([
+          COLUMN_STATUS.CANCELLATION_REQUEST,
+          COLUMN_STATUS.ACCEPTED,
+          COLUMN_STATUS.DECLINED,
+        ]);
+        const realCancellationOrderIds = new Set();
+
+        realCancellationStatuses.forEach((status) => {
+          (grouped[status] || []).forEach((item) => {
+            const orderId = String(item.orderId || item.legacyOrderId || '').toLowerCase();
+            if (orderId) {
+              realCancellationOrderIds.add(orderId);
+            }
+          });
+        });
+
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = (grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).filter((item) => {
+          const orderId = String(item.orderId || item.legacyOrderId || '').toLowerCase();
+          return !orderId || !realCancellationOrderIds.has(orderId);
+        });
+        
+        console.log(`[BOARD-GROUP] Cancellation board: real cases found for ${realCancellationOrderIds.size} orders, removed from CASE_NOT_OPENED`);
         
         // Track all orderIds that have been added from stored cancellation cases
         // This prevents duplicate cards for the same orderId
@@ -2515,9 +2610,12 @@ function ComplianceBoardPage() {
         // Group deduplicated return cases by their complianceBoardStatus
         console.log(`[BOARD-GROUP] Processing ${dedupReturnCases.length} deduplicated return cases for grouping`);
         dedupReturnCases.forEach((returnItem, idx) => {
-          const status = returnItem.complianceBoardStatus || COLUMN_STATUS.CASE_OPENED;
+          const status = normalizeReturnBoardStatus(returnItem);
           if (grouped[status]) {
-            grouped[status].push(returnItem);
+            grouped[status].push({
+              ...returnItem,
+              complianceBoardStatus: status,
+            });
             
             // Log first few returns to show what status they're getting
             if (idx < 3) {
@@ -2525,6 +2623,35 @@ function ComplianceBoardPage() {
             }
           }
         });
+        
+        // Priority cleanup: Remove "Case Not Opened" orders that have real return cases in other columns
+        const realReturnStatuses = new Set([
+          COLUMN_STATUS.CASE_OPENED,
+          COLUMN_STATUS.RETURN_FOLLOW_UP,
+          COLUMN_STATUS.PROVIDE_RETURN_LABEL,
+          COLUMN_STATUS.BUYER_DROP_OFF,
+          COLUMN_STATUS.ITEM_DELIVERED,
+          COLUMN_STATUS.PARTIAL_REFUND,
+          COLUMN_STATUS.FULL_REFUND,
+          COLUMN_STATUS.REPLACEMENT,
+        ]);
+        const realReturnOrderIds = new Set();
+
+        realReturnStatuses.forEach((status) => {
+          (grouped[status] || []).forEach((item) => {
+            const orderId = String(item.orderId || item.itemId || '').toLowerCase();
+            if (orderId) {
+              realReturnOrderIds.add(orderId);
+            }
+          });
+        });
+
+        grouped[COLUMN_STATUS.CASE_NOT_OPENED] = (grouped[COLUMN_STATUS.CASE_NOT_OPENED] || []).filter((item) => {
+          const orderId = String(item.orderId || item.itemId || '').toLowerCase();
+          return !orderId || !realReturnOrderIds.has(orderId);
+        });
+        
+        console.log(`[BOARD-GROUP] Return board: real cases found for ${realReturnOrderIds.size} orders, removed from CASE_NOT_OPENED`);
         
         // Case Opened = Return cases (from Issues & Resolutions / stored return cases)
         // Case Not Opened = Conversation items assigned to Return/Refund/Replace

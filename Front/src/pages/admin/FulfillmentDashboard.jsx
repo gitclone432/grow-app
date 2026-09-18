@@ -1439,10 +1439,12 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
   searchIssueType, setSearchIssueType,
   searchCaseCategory, setSearchCaseCategory,
   searchCaseStatus, setSearchCaseStatus,
+  searchRemark, setSearchRemark,
   draftSelectedSeller, setDraftSelectedSeller, setSelectedSeller,
   draftDateFilter, setDraftDateFilter,
   setDateFilter,
   onApplyFilters,
+  remarkOptions,
   isSmallMobile,
 }, ref) {
   const [filtersExpanded, setFiltersExpanded] = useState(() => {
@@ -1474,6 +1476,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
   const [localIssueType, setLocalIssueType] = useState(searchIssueType);
   const [localCaseCategory, setLocalCaseCategory] = useState(searchCaseCategory);
   const [localCaseStatus, setLocalCaseStatus] = useState(searchCaseStatus);
+  const [localRemark, setLocalRemark] = useState(searchRemark);
 
   // Keep local drafts in sync when parent clears / applies externally.
   useEffect(() => { setLocalOrderId(searchOrderId); }, [searchOrderId]);
@@ -1487,6 +1490,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
   useEffect(() => { setLocalIssueType(searchIssueType); }, [searchIssueType]);
   useEffect(() => { setLocalCaseCategory(searchCaseCategory); }, [searchCaseCategory]);
   useEffect(() => { setLocalCaseStatus(searchCaseStatus); }, [searchCaseStatus]);
+  useEffect(() => { setLocalRemark(searchRemark); }, [searchRemark]);
 
   // Commit drafts → parent (seller/date + search filters), then force a fetch.
   const handleSearch = useCallback(() => {
@@ -1501,6 +1505,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     setSearchIssueType(localIssueType);
     setSearchCaseCategory(localCaseCategory);
     setSearchCaseStatus(localCaseStatus);
+    setSearchRemark(localRemark);
     setSelectedSeller(draftSelectedSeller);
     setDateFilter(normalizeDateFilter(draftDateFilter));
     onApplyFilters?.({
@@ -1517,13 +1522,14 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
       searchIssueType: localIssueType,
       searchCaseCategory: localCaseCategory,
       searchCaseStatus: localCaseStatus,
+      searchRemark: localRemark,
     });
   }, [
     localOrderId, localAzOrderId, localBuyerName, localItemId, localSku, localProductName,
-    localPaymentStatus, localCancelStatus, localIssueType, localCaseCategory, localCaseStatus,
+    localPaymentStatus, localCancelStatus, localIssueType, localCaseCategory, localCaseStatus, localRemark,
     draftSelectedSeller, draftDateFilter,
     setSearchOrderId, setSearchAzOrderId, setSearchBuyerName, setSearchItemId, setSearchSku, setSearchProductName,
-    setSearchPaymentStatus, setSearchCancelStatus, setSearchIssueType, setSearchCaseCategory, setSearchCaseStatus,
+    setSearchPaymentStatus, setSearchCancelStatus, setSearchIssueType, setSearchCaseCategory, setSearchCaseStatus, setSearchRemark,
     setSelectedSeller, setDateFilter, onApplyFilters,
   ]);
 
@@ -1541,6 +1547,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     setLocalIssueType('');
     setLocalCaseCategory('');
     setLocalCaseStatus('');
+    setLocalRemark('');
     setDraftSelectedSeller('');
     setDraftDateFilter(clearedDateFilter);
 
@@ -1555,6 +1562,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     setSearchIssueType('');
     setSearchCaseCategory('');
     setSearchCaseStatus('');
+    setSearchRemark('');
     setSelectedSeller('');
     setDateFilter(clearedDateFilter);
     onApplyFilters?.({
@@ -1571,6 +1579,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
       searchIssueType: '',
       searchCaseCategory: '',
       searchCaseStatus: '',
+      searchRemark: '',
     });
   }, [
     setDraftSelectedSeller, setDraftDateFilter,
@@ -1667,6 +1676,28 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
               sx={{ flex: 1 }}
               fullWidth
             />
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 200 }, maxWidth: { sm: 240 } }}>
+              <Select
+                value={localRemark}
+                onChange={(e) => setLocalRemark(e.target.value)}
+                displayEmpty
+                sx={{
+                  backgroundColor: '#fff',
+                  borderRadius: 1,
+                  minHeight: 40,
+                  fontSize: '0.85rem',
+                }}
+              >
+                <MenuItem value="">
+                  <em style={{ color: '#aaa' }}>- Select -</em>
+                </MenuItem>
+                {(remarkOptions || []).map((option) => (
+                  <MenuItem key={option._id} value={option.name}>
+                    {option.name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
           </Stack>
 
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={{ xs: 1, sm: 2 }}>
@@ -1832,6 +1863,7 @@ function FulfillmentDashboard() {
   const [searchIssueType, setSearchIssueType] = useState(() => getInitialState('searchIssueType', ''));
   const [searchCaseCategory, setSearchCaseCategory] = useState(() => getInitialState('searchCaseCategory', ''));
   const [searchCaseStatus, setSearchCaseStatus] = useState(() => getInitialState('searchCaseStatus', ''));
+  const [searchRemark, setSearchRemark] = useState(() => getInitialState('searchRemark', ''));
   const [excludeClient, setExcludeClient] = useState(() => getInitialState('excludeClient', true));
   const [excludeLowValue, setExcludeLowValue] = useState(() => getInitialState('excludeLowValue', true));
   const [missingAmazonAccount, setMissingAmazonAccount] = useState(() => getInitialState('missingAmazonAccount', false));
@@ -2514,6 +2546,7 @@ function FulfillmentDashboard() {
       searchIssueType,
       searchCaseCategory,
       searchCaseStatus,
+      searchRemark,
       excludeClient,
       excludeLowValue,
       missingAmazonAccount,
@@ -2531,7 +2564,7 @@ function FulfillmentDashboard() {
       setCurrentPage(1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchProductName, searchMarketplace, searchAmazonAccount, searchPaymentStatus, searchCancelStatus, searchIssueType, searchCaseCategory, searchCaseStatus, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
+  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchProductName, searchMarketplace, searchAmazonAccount, searchPaymentStatus, searchCancelStatus, searchIssueType, searchCaseCategory, searchCaseStatus, searchRemark, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
 
   // orderEarnings is now read-only (auto-calculated server-side)
   // No manual editing handlers needed
@@ -2552,6 +2585,7 @@ function FulfillmentDashboard() {
     const activeIssueType = overrides.searchIssueType !== undefined ? overrides.searchIssueType : searchIssueType;
     const activeCaseCategory = overrides.searchCaseCategory !== undefined ? overrides.searchCaseCategory : searchCaseCategory;
     const activeCaseStatus = overrides.searchCaseStatus !== undefined ? overrides.searchCaseStatus : searchCaseStatus;
+    const activeRemark = overrides.searchRemark !== undefined ? overrides.searchRemark : searchRemark;
 
     const params = {};
     if (includePagination) {
@@ -2566,6 +2600,7 @@ function FulfillmentDashboard() {
     if (String(activeBuyerName || '').trim()) params.searchBuyerName = String(activeBuyerName).trim();
     if (String(activeItemId || '').trim()) params.searchItemId = String(activeItemId).trim();
     if (String(activeSku || '').trim()) params.searchSku = String(activeSku).trim();
+    if (String(activeRemark || '').trim()) params.remark = String(activeRemark).trim();
     if (searchMarketplace) params.searchMarketplace = searchMarketplace;
     if (searchAmazonAccount) params.amazonAccount = searchAmazonAccount;
     if (activePaymentStatus) params.paymentStatus = activePaymentStatus;
@@ -2600,6 +2635,7 @@ function FulfillmentDashboard() {
       searchIssueType: draft.searchIssueType ?? '',
       searchCaseCategory: draft.searchCaseCategory ?? '',
       searchCaseStatus: draft.searchCaseStatus ?? '',
+      searchRemark: draft.searchRemark ?? '',
       excludeClient,
       excludeLowValue,
       missingAmazonAccount,
@@ -2626,6 +2662,7 @@ function FulfillmentDashboard() {
       searchIssueType: draft.searchIssueType ?? '',
       searchCaseCategory: draft.searchCaseCategory ?? '',
       searchCaseStatus: draft.searchCaseStatus ?? '',
+      searchRemark: draft.searchRemark ?? '',
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -4841,6 +4878,8 @@ function FulfillmentDashboard() {
             setSearchCaseCategory={setSearchCaseCategory}
             searchCaseStatus={searchCaseStatus}
             setSearchCaseStatus={setSearchCaseStatus}
+            searchRemark={searchRemark}
+            setSearchRemark={setSearchRemark}
             draftSelectedSeller={draftSelectedSeller}
             setDraftSelectedSeller={setDraftSelectedSeller}
             setSelectedSeller={setSelectedSeller}
@@ -4848,6 +4887,7 @@ function FulfillmentDashboard() {
             setDraftDateFilter={setDraftDateFilter}
             setDateFilter={setDateFilter}
             onApplyFilters={applyCommittedFilters}
+            remarkOptions={remarkOptionsFromTemplates(remarkTemplates)}
             isSmallMobile={isSmallMobile}
           />
 
