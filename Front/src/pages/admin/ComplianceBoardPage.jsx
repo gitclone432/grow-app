@@ -1327,7 +1327,7 @@ function ComplianceBoardPage() {
       ...buildBoardFilterParams(),
     };
 
-    const [ordersResult, messagesResult] = await Promise.allSettled([
+    const [ordersResult, messagesResult, assignedResult] = await Promise.allSettled([
       api.get('/orders/compliance-board', {
         params: orderParams,
         timeout: BOARD_REQUEST_TIMEOUT_MS,
@@ -1336,6 +1336,15 @@ function ComplianceBoardPage() {
         params: messageParams,
         timeout: BOARD_REQUEST_TIMEOUT_MS,
       }),
+      dateFilter.mode === 'none'
+        ? api.get('/ebay/conversation-meta/assigned-board', {
+            params: {
+              limit: 500,
+              ...buildBoardFilterParams(),
+            },
+            timeout: BOARD_REQUEST_TIMEOUT_MS,
+          })
+        : Promise.resolve({ data: { threads: [] } }),
     ]);
 
     if (ordersResult.status === 'rejected') {
@@ -1346,8 +1355,14 @@ function ComplianceBoardPage() {
     const messagesResponse = messagesResult.status === 'fulfilled'
       ? messagesResult.value
       : { data: { threads: [] } };
+    const assignedResponse = assignedResult.status === 'fulfilled'
+      ? assignedResult.value
+      : { data: { threads: [] } };
     if (messagesResult.status === 'rejected') {
       console.warn('Issue hub message source unavailable:', messagesResult.reason);
+    }
+    if (assignedResult.status === 'rejected') {
+      console.warn('Issue hub assigned board source unavailable:', assignedResult.reason);
     }
 
     const groupedOrders = {
@@ -1369,7 +1384,15 @@ function ComplianceBoardPage() {
       [MESSAGE_CATEGORIES.INQUIRY]: [],
     };
 
-    const threads = ensureArray(messagesResponse.data?.threads);
+    const threadMap = new Map();
+    [
+      ...ensureArray(messagesResponse.data?.threads),
+      ...ensureArray(assignedResponse.data?.threads),
+    ].forEach((thread) => {
+      threadMap.set(getMessageKey(thread), thread);
+    });
+
+    const threads = Array.from(threadMap.values()).filter(matchesMessageFilters);
     const threadMetaResults = await fetchConversationMetaForThreads(threads, ALERT_REQUEST_TIMEOUT_MS);
     const enrichedThreads = [];
     threadMetaResults.forEach(({ thread, meta }) => {
