@@ -53,6 +53,7 @@ import ChatIcon from '@mui/icons-material/Chat';
 import api from '../../lib/api';
 import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
+import { fetchAllPages } from '../../lib/fetchAllPages';
 import ColumnSelector from '../../components/ColumnSelector';
 import ChatModal from '../../components/ChatModal';
 import { yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
@@ -445,6 +446,36 @@ function buildReturnCsvData(items, columns) {
   return prepareCSVData(items, fieldMapping);
 }
 
+  function buildStoredReturnParams({
+    sellerFilter,
+    statusFilter,
+    orderIdFilter,
+    dueFilter,
+    responseDueDateFilter,
+    dateFilter,
+    page,
+    limit,
+  } = {}) {
+    const params = {};
+    if (page != null) params.page = page;
+    if (limit != null) params.limit = limit;
+    if (sellerFilter) params.sellerId = sellerFilter;
+    if (statusFilter) params.status = statusFilter;
+    if (orderIdFilter) params.orderId = orderIdFilter;
+    if (dueFilter === 'due') params.urgentOnly = 'true';
+    if (responseDueDateFilter) params.responseDueDate = responseDueDateFilter;
+
+    if (dateFilter?.mode === 'single' && dateFilter.single) {
+      params.startDate = dateFilter.single;
+      params.endDate = dateFilter.single;
+    } else if (dateFilter?.mode === 'range') {
+      if (dateFilter.from) params.startDate = dateFilter.from;
+      if (dateFilter.to) params.endDate = dateFilter.to;
+    }
+
+    return params;
+  }
+
 function humanizeEnum(value) {
   return String(value || '').replace(/_/g, ' ');
 }
@@ -671,6 +702,9 @@ export default function ReturnPostOrderPage({
   const [partialDialog, setPartialDialog] = useState({
     open: false, row: null, amount: '', currency: 'USD', comments: '',
   });
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportSource, setExportSource] = useState('page');
   const limit = 25;
 
   const ALL_COLUMNS = [
@@ -727,28 +761,16 @@ export default function ReturnPostOrderPage({
     setLoading(true);
     setError('');
     try {
-      const params = { page, limit };
-      if (sellerFilter) params.sellerId = sellerFilter;
-      if (statusFilter) params.status = statusFilter;
-      if (orderIdFilter) params.orderId = orderIdFilter;
-      
-      // Send urgent filter to backend
-      if (dueFilter === 'due') {
-        params.urgentOnly = 'true';
-      }
-      
-      // Send response due date filter to backend
-      if (responseDueDateFilter) {
-        params.responseDueDate = responseDueDateFilter;
-      }
-      
-      if (dateFilter.mode === 'single' && dateFilter.single) {
-        params.startDate = dateFilter.single;
-        params.endDate = dateFilter.single;
-      } else if (dateFilter.mode === 'range') {
-        if (dateFilter.from) params.startDate = dateFilter.from;
-        if (dateFilter.to) params.endDate = dateFilter.to;
-      }
+      const params = buildStoredReturnParams({
+        sellerFilter,
+        statusFilter,
+        orderIdFilter,
+        dueFilter,
+        responseDueDateFilter,
+        dateFilter,
+        page,
+        limit,
+      });
       const res = await api.get('/ebay/stored-returns', { params, timeout: 60000 });
       let returns = res.data.returns || [];
       
@@ -764,6 +786,49 @@ export default function ReturnPostOrderPage({
       setRows([]);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleExportCsv() {
+    setExportLoading(true);
+    setError('');
+    try {
+      let exportRows = rows;
+
+      if (exportSource === 'all') {
+        const params = buildStoredReturnParams({
+          sellerFilter,
+          statusFilter,
+          orderIdFilter,
+          dueFilter,
+          responseDueDateFilter,
+          dateFilter,
+        });
+        exportRows = await fetchAllPages('/ebay/stored-returns', params, {
+          itemsKey: 'returns',
+          pagesKey: 'totalPages',
+          limit: 200,
+          timeout: 120000,
+        });
+      }
+
+      if (!Array.isArray(exportRows) || exportRows.length === 0) {
+        setSnackbar({ open: true, severity: 'info', message: 'No rows to export.' });
+        return;
+      }
+
+      const csvData = buildReturnCsvData(exportRows, ALL_COLUMNS);
+      downloadCSV(csvData, exportSource === 'all' ? 'Return_PostOrder_API_All' : 'Return_PostOrder_API');
+      setExportDialogOpen(false);
+      setSnackbar({
+        open: true,
+        severity: 'success',
+        message: `Exported ${exportRows.length} return rows${exportSource === 'all' ? ' from all matching pages' : ''}`,
+      });
+    } catch (e) {
+      setError(`Failed to export CSV: ${e.response?.data?.error || e.message}`);
+    } finally {
+      setExportLoading(false);
     }
   }
 
@@ -1517,10 +1582,7 @@ export default function ReturnPostOrderPage({
             sx={yellowOutlinedButtonSx}
             startIcon={<DownloadIcon />}
             disabled={rows.length === 0}
-            onClick={() => {
-              const csvData = buildReturnCsvData(rows, ALL_COLUMNS);
-              downloadCSV(csvData, 'Return_PostOrder_API');
-            }}
+            onClick={() => setExportDialogOpen(true)}
           >
             CSV ({rows.length})
           </Button>
@@ -1859,6 +1921,41 @@ export default function ReturnPostOrderPage({
           />
         </Stack>
       )}
+
+      <Dialog open={exportDialogOpen} onClose={() => !exportLoading && setExportDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Export Return API CSV</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <FormControl fullWidth size="small">
+              <InputLabel>Export Data</InputLabel>
+              <Select
+                value={exportSource}
+                onChange={(e) => setExportSource(e.target.value)}
+                label="Export Data"
+              >
+                <MenuItem value="page">Current page ({rows.length} rows)</MenuItem>
+                <MenuItem value="all">All matching pages</MenuItem>
+              </Select>
+            </FormControl>
+            <Typography variant="body2" color="text.secondary">
+              {exportSource === 'page'
+                ? 'Exports only the rows currently loaded in this page.'
+                : 'Exports all rows matching the current seller, status, order ID, urgent, response due date, and shared date filters.'}
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setExportDialogOpen(false)} disabled={exportLoading}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleExportCsv}
+            disabled={exportLoading}
+            startIcon={exportLoading ? <CircularProgress size={16} color="inherit" /> : <DownloadIcon />}
+          >
+            {exportLoading ? 'Exporting...' : 'Export CSV'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Menu
         anchorEl={actionMenu.anchorEl}
