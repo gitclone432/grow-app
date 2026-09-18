@@ -69,6 +69,14 @@ function TabPanel({ children, value, index }) {
   );
 }
 
+const VISIBLE_DISPUTE_TABS = new Set([2, 3, 4, 5]);
+
+function normalizeDisputesTab(value) {
+  const numericValue = Number(value);
+  if (VISIBLE_DISPUTE_TABS.has(numericValue)) return numericValue;
+  return 2;
+}
+
 // LogsCell component for editable logs field with save functionality
 function LogsCell({ value, onSave, id }) {
   const [localValue, setLocalValue] = useState(value || '');
@@ -116,10 +124,12 @@ function LogsCell({ value, onSave, id }) {
 }
 
 export default function DisputesPage({ initialTab = 0 }) {
-  const [tabValue, setTabValue] = useState(initialTab);
+  const [tabValue, setTabValue] = useState(() => normalizeDisputesTab(initialTab));
   useEffect(() => {
-    setTabValue(initialTab);
+    setTabValue(normalizeDisputesTab(initialTab));
   }, [initialTab]);
+
+  const showLegacyIssueTabs = false;
   
   // INR Cases state
   const [cases, setCases] = useState([]);
@@ -217,6 +227,7 @@ export default function DisputesPage({ initialTab = 0 }) {
 
   // Load INR cases when filters change
   useEffect(() => {
+    if (!showLegacyIssueTabs) return;
     if (!hasFetchedCases.current) {
       hasFetchedCases.current = true;
       loadStoredCases();
@@ -227,6 +238,7 @@ export default function DisputesPage({ initialTab = 0 }) {
 
   // Load Payment Disputes when filters change
   useEffect(() => {
+    if (!showLegacyIssueTabs) return;
     if (!hasFetchedDisputes.current) {
       hasFetchedDisputes.current = true;
       loadStoredDisputes();
@@ -780,16 +792,7 @@ export default function DisputesPage({ initialTab = 0 }) {
             }}
           >
             <Tab
-              icon={<LocalShippingIcon sx={{ fontSize: 16 }} />}
-              label={`INR Cases (${cases.length})`}
-              iconPosition="start"
-            />
-            <Tab
-              icon={<PaymentIcon sx={{ fontSize: 16 }} />}
-              label={`Payment Disputes (${disputes.length})`}
-              iconPosition="start"
-            />
-            <Tab
+              value={2}
               icon={<AssignmentReturnIcon sx={{ fontSize: 16 }} />}
               label="Return API"
               iconPosition="start"
@@ -800,16 +803,19 @@ export default function DisputesPage({ initialTab = 0 }) {
               iconPosition="start"
             /> */}
             <Tab
+              value={3}
               icon={<CancelIcon sx={{ fontSize: 16 }} />}
               label="Cancellation Search"
               iconPosition="start"
             />
             <Tab
+              value={4}
               icon={<ListAltIcon sx={{ fontSize: 16 }} />}
               label="Worksheet"
               iconPosition="start"
             />
             <Tab
+              value={5}
               icon={<GavelIcon sx={{ fontSize: 16 }} />}
               label="INR API"
               iconPosition="start"

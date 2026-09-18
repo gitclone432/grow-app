@@ -169,6 +169,202 @@ const NotesCell = React.memo(function NotesCell({ row, onSave, onNotify }) {
   );
 });
 
+// --- INTERNAL REASON CELL COMPONENT (Inline Editable) ---
+const InternalReasonCell = React.memo(function InternalReasonCell({ row, onSave, onNotify }) {
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [tempValue, setTempValue] = React.useState(row.internalReason || '');
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isEditing) {
+      setTempValue(row.internalReason || '');
+    }
+  }, [row.internalReason, isEditing]);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await onSave(row.returnId, tempValue);
+      setIsEditing(false);
+      onNotify('success', 'Internal reason saved successfully');
+    } catch (e) {
+      onNotify('error', 'Failed to save internal reason');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setTempValue(row.internalReason || '');
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <Box
+        onClick={(e) => e.stopPropagation()}
+        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 200 }}
+      >
+        <TextField
+          fullWidth
+          multiline
+          minRows={2}
+          size="small"
+          value={tempValue}
+          onChange={(e) => setTempValue(e.target.value)}
+          placeholder="Enter internal reason..."
+          autoFocus
+        />
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="contained"
+            size="small"
+            onClick={handleSave}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5 }}
+          >
+            {isSaving ? 'Saving...' : 'Save'}
+          </Button>
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={handleCancel}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5 }}
+          >
+            Cancel
+          </Button>
+        </Stack>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      onClick={(e) => {
+        e.stopPropagation();
+        setIsEditing(true);
+      }}
+      sx={{
+        cursor: 'pointer',
+        minHeight: 30,
+        minWidth: 150,
+        display: 'flex',
+        alignItems: 'center',
+        '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1, px: 1 }
+      }}
+    >
+      {row.internalReason ? (
+        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
+          {row.internalReason}
+        </Typography>
+      ) : (
+        <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+          + Add Reason
+        </Typography>
+      )}
+    </Box>
+  );
+});
+
+// --- VERDICT CELL COMPONENT (Inline Editable) ---
+const VerdictCell = React.memo(function VerdictCell({ row, onSave, onNotify }) {
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [tempValue, setTempValue] = React.useState(row.verdict || '');
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isEditing) {
+      setTempValue(row.verdict || '');
+    }
+  }, [row.verdict, isEditing]);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await onSave(row.returnId, tempValue);
+      setIsEditing(false);
+      onNotify('success', 'Verdict saved successfully');
+    } catch (e) {
+      onNotify('error', 'Failed to save verdict');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setTempValue(row.verdict || '');
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <Box
+        onClick={(e) => e.stopPropagation()}
+        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 200 }}
+      >
+        <TextField
+          fullWidth
+          multiline
+          minRows={2}
+          size="small"
+          value={tempValue}
+          onChange={(e) => setTempValue(e.target.value)}
+          placeholder="Enter verdict..."
+          autoFocus
+        />
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="contained"
+            size="small"
+            onClick={handleSave}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5 }}
+          >
+            {isSaving ? 'Saving...' : 'Save'}
+          </Button>
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={handleCancel}
+            disabled={isSaving}
+            sx={{ fontSize: '0.7rem', py: 0.5 }}
+          >
+            Cancel
+          </Button>
+        </Stack>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      onClick={(e) => {
+        e.stopPropagation();
+        setIsEditing(true);
+      }}
+      sx={{
+        cursor: 'pointer',
+        minHeight: 30,
+        minWidth: 150,
+        display: 'flex',
+        alignItems: 'center',
+        '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1, px: 1 }
+      }}
+    >
+      {row.verdict ? (
+        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
+          {row.verdict}
+        </Typography>
+      ) : (
+        <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+          + Add Verdict
+        </Typography>
+      )}
+    </Box>
+  );
+});
+
 function formatEbayInstant(value) {
   if (!value) return '';
   const raw = typeof value === 'object' ? (value.value || value.formattedValue || '') : value;
@@ -434,6 +630,8 @@ export default function ReturnPostOrderPage({
     { id: 'reasonType', label: 'reasonType' },
     { id: 'returnCloseReason', label: 'returnCloseReason' },
     { id: 'notes', label: 'notes' },
+    { id: 'internalReason', label: 'Internal Reason' },
+    { id: 'verdict', label: 'Verdict' },
     { id: 'refund', label: 'refund' },
     { id: 'trackingNumber', label: 'trackingNumber' },
     { id: 'carrierUsed', label: 'carrierUsed' },
@@ -639,6 +837,16 @@ export default function ReturnPostOrderPage({
   async function handleNotesSave(returnId, notesText) {
     await api.patch(`/ebay/returns/${returnId}/notes`, { notes: notesText });
     setRows(prev => prev.map(r => r.returnId === returnId ? { ...r, internalNotes: notesText } : r));
+  }
+
+  async function handleInternalReasonSave(returnId, internalReasonText) {
+    await api.patch(`/ebay/returns/${returnId}/internal-reason`, { internalReason: internalReasonText });
+    setRows(prev => prev.map(r => r.returnId === returnId ? { ...r, internalReason: internalReasonText } : r));
+  }
+
+  async function handleVerdictSave(returnId, verdictText) {
+    await api.patch(`/ebay/returns/${returnId}/verdict`, { verdict: verdictText });
+    setRows(prev => prev.map(r => r.returnId === returnId ? { ...r, verdict: verdictText } : r));
   }
 
   const handleNotify = (severity, message) => {
@@ -1335,6 +1543,8 @@ export default function ReturnPostOrderPage({
                 {visibleColumns.includes('reasonType') && <TableCell sx={headerSx}>reasonType</TableCell>}
                 {visibleColumns.includes('returnCloseReason') && <TableCell sx={headerSx}>returnCloseReason</TableCell>}
                 {visibleColumns.includes('notes') && <TableCell sx={headerSx}>notes</TableCell>}
+                {visibleColumns.includes('internalReason') && <TableCell sx={headerSx}>Internal Reason</TableCell>}
+                {visibleColumns.includes('verdict') && <TableCell sx={headerSx}>Verdict</TableCell>}
                 {visibleColumns.includes('refund') && <TableCell sx={headerSx}>refund</TableCell>}
                 {visibleColumns.includes('trackingNumber') && <TableCell sx={headerSx}>trackingNumber</TableCell>}
                 {visibleColumns.includes('carrierUsed') && <TableCell sx={headerSx}>carrierUsed</TableCell>}
@@ -1436,6 +1646,16 @@ export default function ReturnPostOrderPage({
                     {visibleColumns.includes('notes') && (
                       <TableCell sx={{ maxWidth: 280 }}>
                         <NotesCell row={row} onSave={handleNotesSave} onNotify={handleNotify} />
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('internalReason') && (
+                      <TableCell sx={{ maxWidth: 280 }}>
+                        <InternalReasonCell row={row} onSave={handleInternalReasonSave} onNotify={handleNotify} />
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('verdict') && (
+                      <TableCell sx={{ maxWidth: 280 }}>
+                        <VerdictCell row={row} onSave={handleVerdictSave} onNotify={handleNotify} />
                       </TableCell>
                     )}
                     {visibleColumns.includes('refund') && (

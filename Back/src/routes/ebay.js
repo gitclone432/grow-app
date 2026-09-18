@@ -24760,6 +24760,50 @@ router.patch('/returns/:returnId/notes', requireAuth, async (req, res) => {
   }
 });
 
+router.patch('/returns/:returnId/internal-reason', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const { internalReason } = req.body;
+
+    const returnDoc = await Return.findOneAndUpdate(
+      { returnId },
+      { internalReason: internalReason || '' },
+      { new: true }
+    );
+
+    if (!returnDoc) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    res.json({ success: true, return: returnDoc });
+  } catch (err) {
+    console.error('Error updating return internal reason:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/returns/:returnId/verdict', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const { verdict } = req.body;
+
+    const returnDoc = await Return.findOneAndUpdate(
+      { returnId },
+      { verdict: verdict || '' },
+      { new: true }
+    );
+
+    if (!returnDoc) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    res.json({ success: true, return: returnDoc });
+  } catch (err) {
+    console.error('Error updating return verdict:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Mark / unmark a return as SNAD (manual BBE override)
 router.patch('/returns/:returnId/mark-snad', requireAuth, async (req, res) => {
   try {
