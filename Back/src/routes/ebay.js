@@ -45,7 +45,7 @@ import {
 import ChatAgent from '../models/ChatAgent.js';
 import MarketingViewCache from '../models/MarketingViewCache.js';
 import { getOrderQtyExcludedLegacyIdSet } from '../utils/orderQtyExcludeLegacyCache.js';
-import { enrichOrdersWithSupplierLinks } from '../utils/supplierLinkFromListings.js';
+import { enrichOrdersWithSupplierLinks, extractOrderSku } from '../utils/supplierLinkFromListings.js';
 import { buildSellerAnalyticsFromOrders } from '../utils/sellerAnalyticsFinancials.js';
 import {
   processEbayMessage,
@@ -11963,14 +11963,15 @@ router.get('/stored-returns', async (req, res) => {
     // Lookup product names and order dates from Orders collection
     const orderIds = returns.map(r => r.orderId).filter(Boolean);
     const orders = orderIds.length
-      ? await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1, creationDate: 1, purchaseMarketplaceId: 1 }).lean()
+      ? await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1, creationDate: 1, purchaseMarketplaceId: 1, sku: 1, lineItems: 1 }).lean()
       : [];
     const orderMap = {};
     orders.forEach(o => {
       orderMap[o.orderId] = {
         productName: o.productName,
         dateSold: o.creationDate,
-        purchaseMarketplaceId: o.purchaseMarketplaceId
+        purchaseMarketplaceId: o.purchaseMarketplaceId,
+        sku: extractOrderSku(o),
       };
     });
 
@@ -11978,6 +11979,7 @@ router.get('/stored-returns', async (req, res) => {
     const returnsWithOrderData = returns.map(r => ({
       ...r,
       productName: orderMap[r.orderId]?.productName || null,
+      sku: orderMap[r.orderId]?.sku || '',
       // Date Sold = Order's creation date (when order was placed)
       dateSold: orderMap[r.orderId]?.dateSold || r.transactionDate || null,
       // Purchase Marketplace for timezone formatting

@@ -390,6 +390,61 @@ function formatEbayMoney(amount) {
   return currency ? `${currency} ${value}` : String(value);
 }
 
+function formatReturnDisplayDate(dateStr) {
+  if (!dateStr) return '-';
+  try {
+    return new Date(dateStr).toLocaleString('en-US', {
+      timeZone: 'America/Los_Angeles',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '-';
+  }
+}
+
+const RETURN_EXPORT_COLUMNS = {
+  returnId: { header: 'returnId', value: (row) => row.returnId || '' },
+  orderId: { header: 'orderId', value: (row) => row.orderId || row.legacyOrderId || '' },
+  sku: { header: 'SKU', value: (row) => row.sku || '' },
+  seller: { header: 'Seller', value: (row) => row.seller?.user?.username || '' },
+  buyerLoginName: { header: 'buyerLoginName', value: (row) => row.buyerUsername || '' },
+  itemId: { header: 'itemId', value: (row) => row.itemId || '' },
+  status: { header: 'status', value: (row) => row.returnStatus || '' },
+  state: { header: 'state', value: (row) => row.returnState || '' },
+  reason: { header: 'reason', value: (row) => (row.returnReason || '').toString().replace(/_/g, ' ') },
+  reasonType: { header: 'reasonType', value: (row) => row.reasonType || '' },
+  returnCloseReason: { header: 'returnCloseReason', value: (row) => (row.returnCloseReason || '').toString().replace(/_/g, ' ') },
+  notes: { header: 'notes', value: (row) => row.internalNotes || '' },
+  internalReason: { header: 'Internal Reason', value: (row) => row.internalReason || '' },
+  verdict: { header: 'Verdict', value: (row) => row.verdict || '' },
+  refund: { header: 'refund', value: (row) => row.refundAmount?.value ? `${row.refundAmount.currency || 'USD'} ${row.refundAmount.value}` : '' },
+  trackingNumber: { header: 'trackingNumber', value: (row) => row.trackingNumber || '' },
+  carrierUsed: { header: 'carrierUsed', value: (row) => row.carrierUsed || '' },
+  trackingStatus: { header: 'trackingStatus', value: (row) => row.trackingStatus || '' },
+  filesCount: { header: 'files', value: (row) => row.filesCount ?? row.files?.length ?? 0 },
+  marketplaceId: { header: 'marketplaceId', value: (row) => row.marketplaceId || '' },
+  transactionDate: { header: 'transactionDate', value: (row) => formatReturnDisplayDate(row.transactionDate || row.dateSold) },
+  created: { header: 'creationDate', value: (row) => formatReturnDisplayDate(row.creationDate) },
+  responseDue: { header: 'Response Due (PST)', value: (row) => formatReturnDisplayDate(row.responseDate) },
+  worksheetStatus: { header: 'Worksheet Status', value: (row) => row.worksheetStatus || '' },
+};
+
+function buildReturnCsvData(items, columns) {
+  const fieldMapping = {};
+  columns
+    .filter((column) => column.id !== 'action')
+    .forEach((column) => {
+      const config = RETURN_EXPORT_COLUMNS[column.id];
+      if (!config) return;
+      fieldMapping[config.header] = config.value;
+    });
+  return prepareCSVData(items, fieldMapping);
+}
+
 function humanizeEnum(value) {
   return String(value || '').replace(/_/g, ' ');
 }
@@ -621,6 +676,7 @@ export default function ReturnPostOrderPage({
   const ALL_COLUMNS = [
     { id: 'returnId', label: 'returnId' },
     { id: 'orderId', label: 'orderId' },
+    { id: 'sku', label: 'SKU' },
     { id: 'seller', label: 'Seller' },
     { id: 'buyerLoginName', label: 'buyerLoginName' },
     { id: 'itemId', label: 'itemId' },
@@ -858,21 +914,7 @@ export default function ReturnPostOrderPage({
     navigator?.clipboard?.writeText?.(String(text));
   };
 
-  const formatDate = (dateStr) => {
-    if (!dateStr) return '-';
-    try {
-      return new Date(dateStr).toLocaleString('en-US', {
-        timeZone: 'America/Los_Angeles',
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    } catch {
-      return '-';
-    }
-  };
+  const formatDate = formatReturnDisplayDate;
 
   const getStatusColor = (status) => {
     const s = String(status || '').toUpperCase();
@@ -1476,26 +1518,7 @@ export default function ReturnPostOrderPage({
             startIcon={<DownloadIcon />}
             disabled={rows.length === 0}
             onClick={() => {
-              const csvData = prepareCSVData(rows, {
-                returnId: 'returnId',
-                orderId: 'orderId',
-                Seller: (r) => r.seller?.user?.username || '',
-                buyerLoginName: 'buyerUsername',
-                itemId: 'itemId',
-                status: 'returnStatus',
-                state: 'returnState',
-                reason: 'returnReason',
-                reasonType: 'reasonType',
-                returnCloseReason: 'returnCloseReason',
-                notes: (r) => r.notes || r.buyerComments || '',
-                trackingNumber: 'trackingNumber',
-                carrierUsed: 'carrierUsed',
-                trackingStatus: 'trackingStatus',
-                files: 'filesCount',
-                marketplaceId: 'marketplaceId',
-                transactionDate: (r) => formatDate(r.transactionDate || r.dateSold),
-                creationDate: (r) => formatDate(r.creationDate),
-              });
+              const csvData = buildReturnCsvData(rows, ALL_COLUMNS);
               downloadCSV(csvData, 'Return_PostOrder_API');
             }}
           >
@@ -1534,6 +1557,7 @@ export default function ReturnPostOrderPage({
               <TableRow>
                 {visibleColumns.includes('returnId') && <TableCell sx={headerSx}>returnId</TableCell>}
                 {visibleColumns.includes('orderId') && <TableCell sx={headerSx}>orderId</TableCell>}
+                {visibleColumns.includes('sku') && <TableCell sx={headerSx}>SKU</TableCell>}
                 {visibleColumns.includes('seller') && <TableCell sx={headerSx}>Seller</TableCell>}
                 {visibleColumns.includes('buyerLoginName') && <TableCell sx={headerSx}>buyerLoginName</TableCell>}
                 {visibleColumns.includes('itemId') && <TableCell sx={headerSx}>itemId</TableCell>}
@@ -1586,6 +1610,13 @@ export default function ReturnPostOrderPage({
                       <TableCell>
                         <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>
                           {row.orderId || row.legacyOrderId || '-'}
+                        </Typography>
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('sku') && (
+                      <TableCell>
+                        <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.72rem' }}>
+                          {row.sku || '-'}
                         </Typography>
                       </TableCell>
                     )}
