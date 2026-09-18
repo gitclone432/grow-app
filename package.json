@@ -5,7 +5,8 @@
     "dev": "concurrently -n BACK,FRONT -c cyan,magenta \"npm --prefix Back run dev\" \"npm --prefix Front run dev\"",
     "dev:back": "npm --prefix Back run dev",
     "dev:front": "npm --prefix Front run dev",
-    "dev:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-dev.ps1"
+    "dev:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/start-dev.ps1",
+    "deploy": "npm --prefix Front run build && pm2 restart grow-app"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
