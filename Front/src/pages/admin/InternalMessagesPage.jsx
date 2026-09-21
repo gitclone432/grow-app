@@ -21,8 +21,40 @@ import RemoveModeratorIcon from '@mui/icons-material/RemoveModerator';
 import api from '../../lib/api.js';
 import { onSocketEvent } from '../../lib/socket.js';
 
+function readStoredUser() {
+  try {
+    return JSON.parse(localStorage.getItem('user') || 'null');
+  } catch {
+    return null;
+  }
+}
+
 function currentUserId() {
-  return JSON.parse(localStorage.getItem('user') || 'null')?.id;
+  const storedUser = readStoredUser();
+  return storedUser?.id || storedUser?._id || null;
+}
+
+function sanitizeParticipants(participants) {
+  return (participants || []).filter((participant) => participant && participant._id);
+}
+
+function normalizeConversation(conversation) {
+  if (!conversation) return null;
+  const participants = sanitizeParticipants(conversation.participants);
+  return {
+    ...conversation,
+    participants,
+    otherUser: conversation.otherUser && conversation.otherUser._id ? conversation.otherUser : null,
+  };
+}
+
+function normalizeMessage(message) {
+  if (!message) return null;
+  return {
+    ...message,
+    sender: message.sender || { _id: null, username: 'Former user', role: 'unknown' },
+    mentions: (message.mentions || []).filter((mention) => mention && mention._id),
+  };
 }
 
 // Splits a message body on "@username" tokens matching a known participant,
@@ -148,7 +180,9 @@ export default function InternalMessagesPage() {
   useEffect(() => {
     const offNewMessage = onSocketEvent('new_message', (payload) => {
       if (selectedConversation && String(payload.conversationId) === String(selectedConversation.conversationId)) {
-        setMessages((prev) => (prev.some((m) => m._id === payload.message._id) ? prev : [...prev, payload.message]));
+        const incomingMessage = normalizeMessage(payload.message);
+        if (!incomingMessage) return;
+        setMessages((prev) => (prev.some((m) => m._id === incomingMessage._id) ? prev : [...prev, incomingMessage]));
         markConversationRead(payload.conversationId);
       }
       loadConversations();
@@ -186,11 +220,12 @@ export default function InternalMessagesPage() {
     setLoadingConversations(true);
     try {
       const { data } = await api.get('/internal-messages/conversations');
-      setConversations(data);
+      const nextConversations = data.map(normalizeConversation).filter(Boolean);
+      setConversations(nextConversations);
       // Keep the open conversation's participant list fresh (e.g. after add/remove)
       setSelectedConversation((prev) => {
         if (!prev) return prev;
-        const fresh = data.find((c) => String(c.conversationId) === String(prev.conversationId));
+        const fresh = nextConversations.find((c) => String(c.conversationId) === String(prev.conversationId));
         return fresh || prev;
       });
     } catch (err) {
@@ -213,7 +248,7 @@ export default function InternalMessagesPage() {
     if (showLoading) setLoadingMessages(true);
     try {
       const { data } = await api.get(`/internal-messages/messages/${conversationId}`);
-      setMessages(data);
+      setMessages(data.map(normalizeMessage).filter(Boolean));
       markConversationRead(conversationId);
     } catch (err) {
       console.error('Failed to load messages:', err);
@@ -250,7 +285,10 @@ export default function InternalMessagesPage() {
         mentions: mentionIds
       });
 
-      setMessages((prev) => [...prev, data]);
+      const sentMessage = normalizeMessage(data);
+      if (sentMessage) {
+        setMessages((prev) => [...prev, sentMessage]);
+      }
       resetDraft();
       loadConversations();
     } catch (err) {
@@ -283,7 +321,7 @@ export default function InternalMessagesPage() {
         if (!selectedUser) return;
         const { data } = await api.post('/internal-messages/conversations/dm', { recipientId: selectedUser._id });
         await loadConversations();
-        setSelectedConversation(data);
+        setSelectedConversation(normalizeConversation(data));
         await loadMessages(data.conversationId);
       } else {
         if (!groupName.trim() || groupMembers.length === 0) return;
@@ -292,7 +330,7 @@ export default function InternalMessagesPage() {
           participantIds: groupMembers.map((u) => u._id)
         });
         await loadConversations();
-        setSelectedConversation(data);
+        setSelectedConversation(normalizeConversation(data));
         await loadMessages(data.conversationId);
       }
       closeNewChatDialog();
@@ -347,9 +385,9 @@ export default function InternalMessagesPage() {
   // ── @mention handling ────────────────────────────────────────────────────
   const mentionCandidates = useMemo(() => {
     if (mentionQuery === null || !selectedConversation) return [];
-    const others = (selectedConversation.participants || []).filter((p) => p._id !== myId);
+    const others = sanitizeParticipants(selectedConversation.participants).filter((participant) => participant._id !== myId);
     if (!mentionQuery) return others;
-    return others.filter((p) => p.username.toLowerCase().startsWith(mentionQuery.toLowerCase()));
+    return others.filter((participant) => participant.username?.toLowerCase().startsWith(mentionQuery.toLowerCase()));
   }, [mentionQuery, selectedConversation, myId]);
 
   function handleMessageInputChange(e) {
@@ -398,7 +436,7 @@ export default function InternalMessagesPage() {
       const { data } = await api.post(`/internal-messages/conversations/${selectedConversation.conversationId}/participants`, {
         userIds: addMemberSelection.map((u) => u._id)
       });
-      setSelectedConversation(data);
+      setSelectedConversation(normalizeConversation(data));
       setAddMemberSelection([]);
       setAddMemberQuery('');
       setAddMemberResults([]);
@@ -419,7 +457,7 @@ export default function InternalMessagesPage() {
         setSelectedConversation(null);
         setMembersDialogOpen(false);
       } else {
-        setSelectedConversation(data);
+        setSelectedConversation(normalizeConversation(data));
       }
       loadConversations();
     } catch (err) {
@@ -441,7 +479,7 @@ export default function InternalMessagesPage() {
     setMembersBusy(true);
     try {
       const { data } = await api.post(`/internal-messages/conversations/${selectedConversation.conversationId}/admins/${userId}`);
-      setSelectedConversation(data);
+      setSelectedConversation(normalizeConversation(data));
       loadConversations();
     } catch (err) {
       alert('Failed to make admin: ' + (err.response?.data?.error || err.message));
@@ -455,7 +493,7 @@ export default function InternalMessagesPage() {
     setMembersBusy(true);
     try {
       const { data } = await api.delete(`/internal-messages/conversations/${selectedConversation.conversationId}/admins/${userId}`);
-      setSelectedConversation(data);
+      setSelectedConversation(normalizeConversation(data));
       loadConversations();
     } catch (err) {
       alert('Failed to remove admin: ' + (err.response?.data?.error || err.message));
@@ -649,7 +687,7 @@ export default function InternalMessagesPage() {
                   )}
 
                   {messages.map((msg) => {
-                    const isMe = msg.sender._id === myId;
+                    const isMe = msg.sender?._id === myId;
                     const isGroup = selectedConversation.type === 'group';
                     return (
                       <Box
@@ -849,6 +887,7 @@ export default function InternalMessagesPage() {
         <DialogContent>
           <List dense>
             {selectedConversation?.participants?.map((p) => {
+              if (!p?._id) return null;
               const isAdmin = isConvAdmin(selectedConversation, p._id);
               // Superadmin is protected: never demotable or removable by a group admin.
               const isProtected = p.role === 'superadmin';

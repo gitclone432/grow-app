@@ -47,6 +47,50 @@ const router = Router();
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+function asUserId(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value.toString === 'function') return value.toString();
+  return null;
+}
+
+function sanitizeParticipants(participants) {
+  return (participants || []).filter((participant) => participant && asUserId(participant._id || participant));
+}
+
+function getConversationParticipantIds(conversation) {
+  return sanitizeParticipants(conversation.participants)
+    .map((participant) => asUserId(participant._id || participant))
+    .filter(Boolean);
+}
+
+function sanitizeMentions(mentions) {
+  return (mentions || []).filter((mention) => mention && asUserId(mention._id || mention));
+}
+
+function shapeMessage(message) {
+  const senderId = asUserId(message.sender?._id || message.sender);
+  return {
+    ...message.toObject(),
+    sender: message.sender
+      ? {
+          _id: senderId,
+          username: message.sender.username || 'Former user',
+          role: message.sender.role || 'unknown',
+        }
+      : {
+          _id: null,
+          username: 'Former user',
+          role: 'unknown',
+        },
+    mentions: sanitizeMentions(message.mentions).map((mention) => ({
+      _id: asUserId(mention._id || mention),
+      username: mention.username || 'Former user',
+      role: mention.role || 'unknown',
+    })),
+  };
+}
+
 async function loadConversationForUser(conversationId, userId, role) {
   if (!mongoose.isValidObjectId(conversationId)) return { conversation: null, forbidden: false };
   const conversation = await Conversation.findById(conversationId);
@@ -78,12 +122,12 @@ function isGroupAdmin(conversation, userId) {
 // against stale data from before that protection existed.
 function computeEffectiveAdminIds(conversation) {
   const ids = new Set((conversation.admins || []).map((a) => a.toString()));
-  (conversation.participants || []).forEach((p) => {
-    if (p.role === 'superadmin') ids.add(p._id.toString());
+  sanitizeParticipants(conversation.participants).forEach((participant) => {
+    if (participant.role === 'superadmin') ids.add(asUserId(participant._id));
   });
   if (ids.size === 0) {
     if (conversation.createdBy) ids.add(conversation.createdBy.toString());
-    else (conversation.participants || []).forEach((p) => ids.add(p._id.toString()));
+    else getConversationParticipantIds(conversation).forEach((participantId) => ids.add(participantId));
   }
   return Array.from(ids);
 }
@@ -91,8 +135,9 @@ function computeEffectiveAdminIds(conversation) {
 // Shapes a Conversation doc (with populated participants) for the sidebar/list,
 // resolving the display name/avatar for dm vs group and attaching unreadCount.
 async function shapeConversation(conversation, currentUserId) {
-  const otherParticipants = conversation.participants.filter(
-    (p) => p._id.toString() !== String(currentUserId)
+  const participants = sanitizeParticipants(conversation.participants);
+  const otherParticipants = participants.filter(
+    (participant) => asUserId(participant._id) !== String(currentUserId)
   );
 
   const isGroup = conversation.type === 'group';
@@ -112,7 +157,7 @@ async function shapeConversation(conversation, currentUserId) {
     name: conversation.name,
     displayName,
     avatarUrl: conversation.avatarUrl,
-    participants: conversation.participants,
+    participants,
     otherUser: !isGroup ? (otherParticipants[0] || null) : null,
     admins: isGroup ? computeEffectiveAdminIds(conversation) : [],
     createdBy: conversation.createdBy ? conversation.createdBy.toString() : null,
@@ -256,7 +301,7 @@ router.patch('/conversations/:id', requireAuth, validate(updateConversationSchem
     await conversation.populate('participants', 'username role email');
 
     emitToUsers(
-      conversation.participants.map((p) => p._id.toString()).filter((id) => id !== String(currentUserId)),
+      getConversationParticipantIds(conversation).filter((id) => id !== String(currentUserId)),
       'conversation_updated',
       { conversationId: conversation._id }
     );
@@ -291,7 +336,7 @@ router.post('/conversations/:id/participants', requireAuth, validate(addParticip
 
     emitToUsers(userIds, 'conversation_updated', { conversationId: conversation._id, added: true });
     emitToUsers(
-      conversation.participants.map((p) => p._id.toString()).filter((id) => id !== String(currentUserId)),
+      getConversationParticipantIds(conversation).filter((id) => id !== String(currentUserId)),
       'conversation_updated',
       { conversationId: conversation._id }
     );
@@ -338,7 +383,7 @@ router.delete('/conversations/:id/participants/:userId', requireAuth, async (req
 
     emitToUsers([userId], 'conversation_updated', { conversationId: conversation._id, removed: true });
     emitToUsers(
-      conversation.participants.map((p) => p._id.toString()).filter((id) => id !== String(currentUserId)),
+      getConversationParticipantIds(conversation).filter((id) => id !== String(currentUserId)),
       'conversation_updated',
       { conversationId: conversation._id }
     );
@@ -374,7 +419,7 @@ router.post('/conversations/:id/admins/:userId', requireAuth, async (req, res) =
     await conversation.populate('participants', 'username role email');
 
     emitToUsers(
-      conversation.participants.map((p) => p._id.toString()).filter((id) => id !== String(currentUserId)),
+      getConversationParticipantIds(conversation).filter((id) => id !== String(currentUserId)),
       'conversation_updated',
       { conversationId: conversation._id }
     );
@@ -419,7 +464,7 @@ router.delete('/conversations/:id/admins/:userId', requireAuth, async (req, res)
     await conversation.populate('participants', 'username role email');
 
     emitToUsers(
-      conversation.participants.map((p) => p._id.toString()).filter((id) => id !== String(currentUserId)),
+      getConversationParticipantIds(conversation).filter((id) => id !== String(currentUserId)),
       'conversation_updated',
       { conversationId: conversation._id }
     );
@@ -454,7 +499,7 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
       { $push: { readBy: { user: currentUserId, readAt: new Date() } } }
     );
 
-    res.json(messages);
+    res.json(messages.map(shapeMessage));
   } catch (err) {
     console.error('Get messages error:', err);
     res.status(500).json({ error: err.message });
@@ -494,10 +539,10 @@ router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) 
 
     emitToUsers(recipientIds, 'new_message', {
       conversationId: conversation._id,
-      message: newMessage,
+      message: shapeMessage(newMessage),
     });
 
-    res.json(newMessage);
+    res.json(shapeMessage(newMessage));
   } catch (err) {
     console.error('Send message error:', err);
     res.status(500).json({ error: err.message });
@@ -554,7 +599,7 @@ router.get('/admin/all-conversations', requireAuth, requirePageAccess('ViewAllMe
           conversationId: conv._id,
           type: conv.type,
           name: conv.name,
-          participants: conv.participants,
+          participants: sanitizeParticipants(conv.participants),
           messageCount,
           lastMessageDate: conv.lastMessageAt,
         };
@@ -578,7 +623,7 @@ router.get('/admin/conversation/:conversationId', requireAuth, requirePageAccess
       .populate('mentions', 'username role')
       .sort({ messageDate: 1 });
 
-    res.json(messages);
+    res.json(messages.map(shapeMessage));
   } catch (err) {
     console.error('Admin get conversation error:', err);
     res.status(500).json({ error: err.message });
