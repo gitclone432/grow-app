@@ -19,7 +19,7 @@ export const REGION_TO_FEED_COUNTRY = { US: 'US', UK: 'UK', AU: 'AU', CA: 'Canad
 // short of targetAsinCount, before giving up and reporting a shortfall.
 // Keep trying rather than stopping early — the old 5-page cap gave up well
 // before genuinely exhausting Amazon's results for the keyword.
-const MAX_SEARCH_PAGES = parseInt(process.env.SOURCING_MAX_SEARCH_PAGES, 10) || 25;
+const MAX_SEARCH_PAGES = parseInt(process.env.SOURCING_MAX_SEARCH_PAGES, 10) || 100;
 const ENRICH_CONCURRENCY = parseInt(process.env.ASIN_PRECHECK_CONCURRENCY, 10)
   || parseInt(process.env.SCRAPER_API_CONCURRENT, 10)
   || 10;
@@ -241,20 +241,53 @@ export async function runSourcingRule(rule, runDoc = null) {
     const priceMin = rule.priceMin != null && Number.isFinite(Number(rule.priceMin)) ? Number(rule.priceMin) : null;
     const priceMax = rule.priceMax != null && Number.isFinite(Number(rule.priceMax)) ? Number(rule.priceMax) : null;
 
+    // A page fetch failing (e.g. a transient 429 from the shared scraper
+    // account while other Sourcing Rule runs are also active) isn't reason
+    // enough to give up on the whole run — searchAmazonAsinsPage already
+    // retries transient errors internally with backoff, so a failure here
+    // means those retries were exhausted. Skip just that page and keep
+    // going; only give up once several pages in a row have failed, which
+    // means something is genuinely wrong (bad keyword, API down, etc.).
+    const MAX_CONSECUTIVE_PAGE_FAILURES = 3;
+    let consecutivePageFailures = 0;
+
+    // Diagnostics — a "shortfall" with no further detail gives no way to
+    // tell "Amazon genuinely has no more matching products for this
+    // keyword" apart from "the scraper kept failing" apart from "the
+    // filters are too strict for this niche." Track exactly why candidates
+    // were rejected and why the loop eventually stopped, and surface it in
+    // the run summary so that's diagnosable from the Sourcing Rules table
+    // instead of guessing.
+    let pagesSearched = 0;
+    let stopReason = 'target_reached';
+    const rejectCounts = { alreadyActive: 0, lowRating: 0, slowDelivery: 0, outOfStock: 0, excludedKeyword: 0, motorsIneligible: 0, precheckFailed: 0 };
+
     for (let page = 1; page <= MAX_SEARCH_PAGES && qualifying.length < rule.targetAsinCount; page++) {
       await setStage(runDoc, 'collecting_asins', `Page ${page} — searching Amazon (${qualifying.length}/${rule.targetAsinCount} qualifying so far)`);
       let pageRows;
       try {
         pageRows = await searchAmazonAsinsPage({ keyword: rule.searchKeyword, region: rule.region, page });
+        consecutivePageFailures = 0;
       } catch (err) {
         if (page === 1) throw err;
-        console.warn(`[Sourcing Automation] Search page ${page} failed for rule ${rule._id}, stopping pagination:`, err.message);
-        break;
+        consecutivePageFailures += 1;
+        console.warn(`[Sourcing Automation] Search page ${page} failed for rule ${rule._id} (${consecutivePageFailures}/${MAX_CONSECUTIVE_PAGE_FAILURES} consecutive):`, err.message);
+        if (consecutivePageFailures >= MAX_CONSECUTIVE_PAGE_FAILURES) {
+          console.warn(`[Sourcing Automation] Giving up on rule ${rule._id} after ${consecutivePageFailures} consecutive page failures.`);
+          stopReason = 'scraper_errors';
+          break;
+        }
+        continue;
       }
+
+      pagesSearched = page;
 
       // No rows at all = Amazon's result set for this keyword is exhausted —
       // no point requesting further pages.
-      if (!Array.isArray(pageRows) || pageRows.length === 0) break;
+      if (!Array.isArray(pageRows) || pageRows.length === 0) {
+        stopReason = 'no_more_results';
+        break;
+      }
 
       const candidates = pageRows
         .filter((r) => priceMin == null || r.price == null || r.price >= priceMin)
@@ -273,23 +306,56 @@ export async function runSourcingRule(rule, runDoc = null) {
         try {
           const generated = rowByAsin.get(asin);
           const row = await precheckAsin(asin, rule.region, template, activeSkuSet, generated);
-          if (!passesPrecheckFilters(row, rule.filters) || qualifyingAsinSet.has(asin)) return;
+          if (qualifyingAsinSet.has(asin)) return;
+          if (!passesPrecheckFilters(row, rule.filters)) {
+            const f = rule.filters || {};
+            if ((f.active ?? 'all') === 'inactive' && row.active === true) rejectCounts.alreadyActive += 1;
+            else if (Number.isFinite(Number(f.minRating)) && String(f.minRating ?? '') !== '' && !(Number(row.rating) >= Number(f.minRating))) rejectCounts.lowRating += 1;
+            else if (Number.isFinite(Number(f.deliveryWithinDays)) && String(f.deliveryWithinDays ?? '') !== '' && !(Number(row.deliveryDays) <= Number(f.deliveryWithinDays))) rejectCounts.slowDelivery += 1;
+            else if ((f.stock ?? 'all') === 'in_stock' && row.inStock !== true) rejectCounts.outOfStock += 1;
+            else rejectCounts.excludedKeyword += 1;
+            return;
+          }
 
           if (rule.ebayMotorsMode) {
             const classification = await classifyEbayMotorsTitle(row.title, asin);
-            if (!classification.eligible) return;
+            if (!classification.eligible) {
+              rejectCounts.motorsIneligible += 1;
+              return;
+            }
           }
 
           qualifyingAsinSet.add(asin);
           qualifying.push(asin);
         } catch (err) {
+          rejectCounts.precheckFailed += 1;
           console.warn(`[Sourcing Automation] Failed to precheck ${asin} for rule ${rule._id}:`, err.message);
         }
       });
     }
 
+    if (stopReason === 'target_reached' && qualifying.length < rule.targetAsinCount) {
+      stopReason = 'max_pages_reached';
+    }
+
     const finalAsins = qualifying.slice(0, rule.targetAsinCount);
     const shortfall = finalAsins.length < rule.targetAsinCount;
+
+    const stopReasonText = {
+      no_more_results: `Amazon had no more results for "${rule.searchKeyword}" after page ${pagesSearched}`,
+      max_pages_reached: `hit the ${MAX_SEARCH_PAGES}-page search cap`,
+      scraper_errors: `the scraper kept failing after page ${pagesSearched} (rate-limited or provider down)`,
+      target_reached: '',
+    }[stopReason];
+
+    const rejectSummary = Object.entries(rejectCounts)
+      .filter(([, count]) => count > 0)
+      .map(([reason, count]) => `${count} ${reason.replace(/([A-Z])/g, ' $1').toLowerCase()}`)
+      .join(', ');
+
+    const shortfallDetail = shortfall
+      ? ` — stopped: ${stopReasonText}${seenCandidates.size ? `; saw ${seenCandidates.size} candidate(s) across ${pagesSearched} page(s)` : ''}${rejectSummary ? `; rejected ${rejectSummary}` : ''}.`
+      : '';
 
     const batch = await AsinSourcingBatch.create({
       rule: rule._id,
@@ -314,7 +380,7 @@ export async function runSourcingRule(rule, runDoc = null) {
 
     const durationSec = Math.round((Date.now() - startedAt) / 1000);
     let summary = shortfall
-      ? `Found ${finalAsins.length}/${rule.targetAsinCount} qualifying ASINs in ${durationSec}s (shortfall).`
+      ? `Found ${finalAsins.length}/${rule.targetAsinCount} qualifying ASINs in ${durationSec}s (shortfall)${shortfallDetail}`
       : `Found ${finalAsins.length}/${rule.targetAsinCount} qualifying ASINs in ${durationSec}s.`;
 
     let lastRunStatus = shortfall ? 'partial' : 'success';

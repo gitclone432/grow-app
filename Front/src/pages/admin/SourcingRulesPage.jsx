@@ -177,10 +177,25 @@ export default function SourcingRulesPage() {
     return () => clearTimeout(pollTimerRef.current);
   }, [rules]);
 
+  // `templates` is only loaded once on mount (see loadAll above) — if
+  // templates have since been renamed/added/deleted/merged from the Manage
+  // Templates page (a separate page, possibly in another tab), this state
+  // goes stale and the picker below shows outdated names/duplicates. Refetch
+  // right before showing it so the list is always current when it matters.
+  const refreshTemplates = async () => {
+    try {
+      const { data } = await api.get('/listing-templates');
+      setTemplates(data || []);
+    } catch (err) {
+      console.error('Failed to refresh templates:', err);
+    }
+  };
+
   const openCreateDialog = () => {
     setEditingId(null);
     setForm(EMPTY_FORM);
     setDialogOpen(true);
+    refreshTemplates();
   };
 
   const openEditDialog = (rule) => {
@@ -203,6 +218,7 @@ export default function SourcingRulesPage() {
       ebayMotorsMode: Boolean(rule.ebayMotorsMode)
     });
     setDialogOpen(true);
+    refreshTemplates();
   };
 
   const updateFilter = (key, value) => {
@@ -780,8 +796,8 @@ export default function SourcingRulesPage() {
                           color={run.status === 'done' ? 'success' : run.status === 'failed' ? 'error' : run.status === 'processing' ? 'info' : 'default'}
                         />
                       </TableCell>
-                      <TableCell sx={{ maxWidth: 360 }}>
-                        <Typography variant="body2" noWrap title={run.summary || run.error || run.stageDetail}>
+                      <TableCell sx={{ maxWidth: 420 }}>
+                        <Typography variant="body2" sx={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
                           {run.status === 'failed'
                             ? (run.error || 'Failed')
                             : run.summary || RUN_STAGE_LABELS[run.stage] || run.stageDetail || '—'}

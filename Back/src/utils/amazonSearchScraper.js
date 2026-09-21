@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getScraperProvider } from './scraperApiProduct.js';
+import { getScraperProvider, getScraperConcurrencyLimiter } from './scraperApiProduct.js';
 
 /**
  * Amazon SEARCH RESULTS scraping (keyword -> list of ASINs), for the
@@ -115,12 +115,28 @@ async function searchWithScraperApi(keyword, region, page) {
   return rows;
 }
 
+function isRetryableSearchError(err) {
+  const status = err?.response?.status;
+  // 429 (rate limit) and 502/503 (gateway hiccups) are transient — worth a
+  // backoff+retry. Anything else (bad keyword, 401, etc.) won't fix itself.
+  return status === 429 || status === 502 || status === 503;
+}
+
+const SEARCH_MAX_RETRIES = parseInt(process.env.SOURCING_SEARCH_MAX_RETRIES, 10) || 4;
+
 /**
  * Fetches a single Amazon search-results page, normalized (no dedup/filter —
  * that's the caller's job). Used by lib/asinSourcingAutomation.js to page
  * incrementally (one new page per call) instead of re-fetching pages 1..N
  * on every call, so it can search far beyond searchAmazonAsins' 5-page cap
  * without wasting scraper API calls re-requesting pages it already has.
+ *
+ * Runs through the same shared concurrency limiter as product-detail scrapes
+ * (see scraperApiProduct.js) — with multiple Sourcing Rule runs active at
+ * once, this keeps total in-flight requests within the provider's real
+ * plan limit instead of each run competing unbounded and 429-ing each
+ * other. Transient failures (429/502/503) are retried with exponential
+ * backoff rather than immediately bubbling up and truncating the run.
  */
 export async function searchAmazonAsinsPage({ keyword, region = 'US', page = 1 }) {
   const trimmedKeyword = String(keyword || '').trim();
@@ -129,12 +145,28 @@ export async function searchAmazonAsinsPage({ keyword, region = 'US', page = 1 }
   }
 
   const provider = getScraperProvider();
-  const rawRows = provider === 'scrapingdog'
-    ? await searchWithScrapingDog(trimmedKeyword, region, page)
-    : await searchWithScraperApi(trimmedKeyword, region, page);
+  const limit = getScraperConcurrencyLimiter();
 
-  if (!Array.isArray(rawRows)) return [];
-  return rawRows.map((raw) => normalizeResultRow(raw || {})).filter(Boolean);
+  return limit(async () => {
+    for (let attempt = 1; attempt <= SEARCH_MAX_RETRIES; attempt++) {
+      try {
+        const rawRows = provider === 'scrapingdog'
+          ? await searchWithScrapingDog(trimmedKeyword, region, page)
+          : await searchWithScraperApi(trimmedKeyword, region, page);
+
+        if (!Array.isArray(rawRows)) return [];
+        return rawRows.map((raw) => normalizeResultRow(raw || {})).filter(Boolean);
+      } catch (err) {
+        if (isRetryableSearchError(err) && attempt < SEARCH_MAX_RETRIES) {
+          const backoffDelay = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s, 8s
+          console.warn(`[Amazon Search] Page ${page} attempt ${attempt} failed (${err.message}), retrying in ${backoffDelay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+          continue;
+        }
+        throw err;
+      }
+    }
+  });
 }
 
 /**

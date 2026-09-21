@@ -18,6 +18,15 @@ const SCRAPINGDOG_PRODUCT_BASE = 'https://api.scrapingdog.com/amazon/product';
 const CONCURRENT_REQUESTS = parseInt(process.env.SCRAPER_API_CONCURRENT, 10) || 5;
 const limit = pLimit(CONCURRENT_REQUESTS);
 
+// Shared across every scraper call in this process — product-detail fetches
+// (above) AND Amazon search-page fetches (utils/amazonSearchScraper.js) —
+// so concurrent Sourcing Rule runs draw from one real concurrency budget
+// instead of each independently opening up to CONCURRENT_REQUESTS of their
+// own on top of each other and tripping the provider's plan-wide 429 limit.
+export function getScraperConcurrencyLimiter() {
+  return limit;
+}
+
 export function getScraperProvider() {
   const provider = String(process.env.SCRAPER_PROVIDER || 'scraperapi').trim().toLowerCase();
   return provider === 'scrapingdog' ? 'scrapingdog' : 'scraperapi';
