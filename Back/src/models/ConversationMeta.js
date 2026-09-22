@@ -15,6 +15,9 @@ const ConversationMetaSchema = new mongoose.Schema(
       enum: ['', 'On Hold', 'INR', 'Cancellation', 'Return', 'Refund', 'Replace', 'Out of Stock', 'Issue with Product', 'Issue with Delivery', 'Inquiry'],
       default: ''
     },
+    // When the conversation was last dragged/assigned into its current category
+    categoryAssignedAt: { type: Date, default: null },
+
     caseStatus: {
       type: String,
       enum: ['Case Opened', 'Case Not Opened'],

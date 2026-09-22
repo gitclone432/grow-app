@@ -1409,15 +1409,14 @@ function ComplianceBoardPage() {
         params: messageParams,
         timeout: BOARD_REQUEST_TIMEOUT_MS,
       }),
-      dateFilter.mode === 'none'
-        ? api.get('/ebay/conversation-meta/assigned-board', {
-            params: {
-              limit: 500,
-              ...buildBoardFilterParams(),
-            },
-            timeout: BOARD_REQUEST_TIMEOUT_MS,
-          })
-        : Promise.resolve({ data: { threads: [] } }),
+      api.get('/ebay/conversation-meta/assigned-board', {
+        params: {
+          limit: 500,
+          ...buildMessageDateParams(),
+          ...buildBoardFilterParams(),
+        },
+        timeout: BOARD_REQUEST_TIMEOUT_MS,
+      }),
     ]);
 
     if (ordersResult.status === 'rejected') {
@@ -1469,15 +1468,41 @@ function ComplianceBoardPage() {
     const threadMetaResults = await fetchConversationMetaForThreads(threads, ALERT_REQUEST_TIMEOUT_MS);
     const enrichedThreads = [];
     threadMetaResults.forEach(({ thread, meta }) => {
+      const categoryAssignedAt = meta?.categoryAssignedAt || thread.categoryAssignedAt || null;
       const enrichedThread = {
         ...thread,
         _conversationMeta: meta || thread._conversationMeta || null,
         category: meta?.category || thread.category || '',
         status: meta?.status || thread.status || 'Open',
         caseStatus: meta?.caseStatus || thread.caseStatus || 'Case Not Opened',
-        pickedUpBy: meta?.pickedUpBy || thread.pickedUpBy || null
+        pickedUpBy: meta?.pickedUpBy || thread.pickedUpBy || null,
+        categoryAssignedAt
       };
       enrichedThreads.push(enrichedThread);
+
+      // Issue Hub message columns (Issue with Product / Inquiry) are keyed by
+      // when the conversation was dragged/assigned into that category, not by
+      // its underlying message date - so apply the active Date Mode filter
+      // against categoryAssignedAt here rather than relying on the upstream
+      // messageDate-filtered fetch.
+      const matchesAssignedDate = () => {
+        if (dateFilter.mode === 'none') return true;
+        const assignedDayKey = getPTDateKey(categoryAssignedAt);
+        if (!assignedDayKey) return false;
+        if (dateFilter.mode === 'single' && dateFilter.single) {
+          return assignedDayKey === dateFilter.single;
+        }
+        if (dateFilter.mode === 'range') {
+          let matches = true;
+          if (dateFilter.from) matches = matches && assignedDayKey >= dateFilter.from;
+          if (dateFilter.to) matches = matches && assignedDayKey <= dateFilter.to;
+          return matches;
+        }
+        return true;
+      };
+
+      if (!matchesAssignedDate()) return;
+
       if (meta?.category === MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT) {
         groupedMessages[MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT].push(enrichedThread);
       }
@@ -5717,6 +5742,7 @@ function ComplianceBoardPage() {
     const lastMessageText = item.messageText || item.lastMessage || '';
     const unreadCount = item.unreadCount || 0;
     const messageDate = item.lastDate || item.lastMessageDate || item.messageDate;
+    const draggedDate = item.categoryAssignedAt || item._conversationMeta?.categoryAssignedAt || null;
     const uniqueId = item._id || item.orderId || `${item.buyerUsername}-${item.itemId}`;
 
     return (
@@ -5812,6 +5838,32 @@ function ComplianceBoardPage() {
             >
               {lastMessageText}
             </Typography>
+          )}
+
+          {draggedDate && (
+            <Stack direction="row" alignItems="center" spacing={0.5} mb={0.5}>
+              <Box
+                sx={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: '3px',
+                  bgcolor: '#3b82f6',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '0.6rem',
+                  color: '#fff',
+                  fontWeight: 700,
+                  flexShrink: 0
+                }}
+                title="Dragged date"
+              >
+                D
+              </Box>
+              <Typography variant="caption" color="text.secondary">
+                Dragged: {formatDateSoldPT(draggedDate)}
+              </Typography>
+            </Stack>
           )}
 
           <Stack direction="row" justifyContent="space-between" alignItems="center">
@@ -6800,6 +6852,7 @@ function ComplianceBoardPage() {
     const lastMessageText = cleanMessagePreviewText(item.messageText || item.lastMessage || '');
     const unreadCount = item.unreadCount || 0;
     const messageDate = item.lastDate || item.lastMessageDate || item.messageDate;
+    const draggedDate = item.categoryAssignedAt || item._conversationMeta?.categoryAssignedAt || null;
     const overdueInfo = item._overdueInfo;
 
     return (
@@ -6911,6 +6964,33 @@ function ComplianceBoardPage() {
                 />
               )}
             </Stack>
+
+            {/* Dragged / Assigned Date */}
+            {draggedDate && (
+              <Stack direction="row" alignItems="center" spacing={0.5}>
+                <Box
+                  sx={{
+                    width: 14,
+                    height: 14,
+                    borderRadius: '3px',
+                    bgcolor: '#3b82f6',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '0.6rem',
+                    color: '#fff',
+                    fontWeight: 700,
+                    flexShrink: 0
+                  }}
+                  title="Dragged date"
+                >
+                  D
+                </Box>
+                <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.75rem' }}>
+                  Dragged: {formatDateSoldPT(draggedDate)}
+                </Typography>
+              </Stack>
+            )}
 
             {/* Timestamp */}
             <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.75rem' }}>

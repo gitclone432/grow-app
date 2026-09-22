@@ -20588,6 +20588,13 @@ router.post('/conversation-meta', requireAuth, async (req, res) => {
       ConversationMeta.findOne(query).lean(),
       getAuditUsername(req)
     ]);
+
+    // Track when this conversation was (re)assigned into its current category,
+    // so board columns can show/filter by "dragged" date like Issue Hub order cards.
+    if (category && category !== existing?.category) {
+      updateData.categoryAssignedAt = new Date();
+    }
+
     const changeEntries = buildMetaChangeEntries(existing, updateData, changedBy);
 
     const update = { $set: updateData };
@@ -20677,7 +20684,13 @@ router.post('/conversation-meta/batch', requireAuth, async (req, res) => {
     const results = {};
     metas.forEach((meta) => {
       const compositeKey = meta.orderId ? `o:${meta.orderId}` : `b:${meta.buyerUsername}|${meta.itemId}`;
-      results[compositeKey] = meta;
+      // Records saved before categoryAssignedAt existed have it as null - fall
+      // back to updatedAt so the "Dragged" date/filter never silently drops
+      // pre-existing cards (matches the fallback in /conversation-meta/assigned-board).
+      results[compositeKey] = {
+        ...meta,
+        categoryAssignedAt: meta.categoryAssignedAt || meta.updatedAt || null,
+      };
     });
 
     res.json({ results });
@@ -20694,6 +20707,8 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
       sellerId = '',
       searchOrderId = '',
       searchBuyerName = '',
+      dateFrom = '',
+      dateTo = '',
       limit = 500
     } = req.query;
 
@@ -20703,6 +20718,17 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
 
     if (sellerId && mongoose.Types.ObjectId.isValid(sellerId)) {
       match.seller = new mongoose.Types.ObjectId(sellerId);
+    }
+
+    // Records saved before categoryAssignedAt existed have it as null - fall
+    // back to updatedAt via $expr so pre-existing cards aren't silently
+    // dropped by a date-range match against a field that was never set.
+    let dateMatchExpr = null;
+    if (dateFrom || dateTo) {
+      const exprAnd = [];
+      if (dateFrom) exprAnd.push({ $gte: ['$__effectiveAssignedAt', getPTDayBoundsUTC(dateFrom).start] });
+      if (dateTo) exprAnd.push({ $lte: ['$__effectiveAssignedAt', getPTDayBoundsUTC(dateTo).end] });
+      dateMatchExpr = exprAnd.length > 1 ? { $and: exprAnd } : exprAnd[0];
     }
 
     if (searchOrderId?.trim()) {
@@ -20716,6 +20742,17 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
 
     const pipeline = [
       { $match: match },
+    ];
+
+    if (dateMatchExpr) {
+      pipeline.push(
+        { $addFields: { __effectiveAssignedAt: { $ifNull: ['$categoryAssignedAt', '$updatedAt'] } } },
+        { $match: { $expr: dateMatchExpr } },
+        { $unset: '__effectiveAssignedAt' }
+      );
+    }
+
+    pipeline.push(
       { $sort: { updatedAt: -1 } },
       {
         $lookup: {
@@ -20841,17 +20878,19 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
           caseStatus: 1,
           pickedUpBy: 1,
           updatedAt: 1,
+          categoryAssignedAt: { $ifNull: ['$categoryAssignedAt', '$updatedAt'] },
           _conversationMeta: {
             _id: '$_id',
             category: '$category',
             caseStatus: '$caseStatus',
             status: '$status',
             pickedUpBy: '$pickedUpBy',
-            updatedAt: '$updatedAt'
+            updatedAt: '$updatedAt',
+            categoryAssignedAt: { $ifNull: ['$categoryAssignedAt', '$updatedAt'] }
           }
         }
       }
-    ];
+    );
 
     if (buyerRegex) {
       pipeline.push({
