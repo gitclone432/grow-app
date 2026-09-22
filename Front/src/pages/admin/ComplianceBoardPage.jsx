@@ -318,6 +318,36 @@ const getAlertThreadMergeKey = (thread) => {
   return `seller:${sellerId}|buyer:${buyerUsername}|item:${itemId || 'DIRECT_MESSAGE'}`;
 };
 
+// Merges a single incoming thread into a Map keyed by getMessageKey, taking
+// the max unreadCount across duplicate records instead of naive last-write-
+// wins overwrite. Used by board-building code paths (fetchIssueHubData,
+// fetchMessages) that combine threads from multiple sources (commerce/legacy
+// /ebay/chat/threads + /ebay/conversation-meta/assigned-board) into a single
+// Map keyed by order/conversation - a plain `Map.set` there let whichever
+// source was spread in last clobber a correct nonzero unreadCount from an
+// earlier source with a stale/zero one. Mirrors the unreadCount handling in
+// mergeAlertThreads (see the Math.max below at that function).
+const mergeThreadIntoMap = (map, keyFn, thread) => {
+  const key = keyFn(thread);
+  const existing = map.get(key);
+  if (!existing) {
+    map.set(key, thread);
+    return;
+  }
+  map.set(key, {
+    ...existing,
+    ...thread,
+    unreadCount: Math.max(Number(existing?.unreadCount) || 0, Number(thread?.unreadCount) || 0),
+    messageUnreadCount: Math.max(Number(existing?.messageUnreadCount) || 0, Number(thread?.messageUnreadCount) || 0),
+    lastBuyerMessageAt: existing?.lastBuyerMessageAt && thread?.lastBuyerMessageAt
+      ? (new Date(existing.lastBuyerMessageAt) > new Date(thread.lastBuyerMessageAt) ? existing.lastBuyerMessageAt : thread.lastBuyerMessageAt)
+      : (existing?.lastBuyerMessageAt || thread?.lastBuyerMessageAt || null),
+    lastSellerMessageAt: existing?.lastSellerMessageAt && thread?.lastSellerMessageAt
+      ? (new Date(existing.lastSellerMessageAt) > new Date(thread.lastSellerMessageAt) ? existing.lastSellerMessageAt : thread.lastSellerMessageAt)
+      : (existing?.lastSellerMessageAt || thread?.lastSellerMessageAt || null),
+  });
+};
+
 const mergeAlertThreads = (threads = []) => {
   const byKey = new Map();
 
@@ -771,6 +801,13 @@ function ComplianceBoardPage() {
   const [alertPreviewItems, setAlertPreviewItems] = useState(null);
   const [alertPreviewLoading, setAlertPreviewLoading] = useState(false);
   const [allMessagesForAlerts, setAllMessagesForAlerts] = useState([]);
+  // True while fetchMessagesForAlerts() has an in-flight request and no data
+  // has ever been loaded yet this session. Lets the Unread Messages / Overdue
+  // Replies tiles show a "still loading" placeholder instead of a hard 0 -
+  // without this, a fresh direct load of Return/Cancellation/INR renders 0
+  // for however long the (heavy) alert fetch takes, which looks identical to
+  // "confirmed no unread/overdue messages" even though data is on the way.
+  const [alertsLoading, setAlertsLoading] = useState(false);
   const [chatAgents, setChatAgents] = useState([]);
   const [savingPickedUpByKey, setSavingPickedUpByKey] = useState('');
   const [savingTrackingIdReturnId, setSavingTrackingIdReturnId] = useState('');
@@ -996,9 +1033,12 @@ function ComplianceBoardPage() {
   };
 
   const getThreadActivityTimestamp = (thread) => {
-    const value = thread?.lastDate
+    const value = thread?.latestMessage?.createdDate
+      || thread?.lastDate
       || thread?.lastMessageDate
       || thread?.messageDate
+      || thread?.updatedDate
+      || thread?.lastSyncedAt
       || thread?.updatedAt
       || thread?.createdAt;
     if (!value) return 0;
@@ -1422,7 +1462,7 @@ function ComplianceBoardPage() {
       ...ensureArray(messagesResponse.data?.threads),
       ...ensureArray(assignedResponse.data?.threads),
     ].forEach((thread) => {
-      threadMap.set(getMessageKey(thread), thread);
+      mergeThreadIntoMap(threadMap, getMessageKey, thread);
     });
 
     const threads = Array.from(threadMap.values()).filter(matchesMessageFilters);
@@ -2881,8 +2921,12 @@ function ComplianceBoardPage() {
   const fetchMessagesForAlerts = async () => {
     const requestId = alertMessagesRequestRef.current + 1;
     alertMessagesRequestRef.current = requestId;
+    setAlertsLoading(true);
 
     try {
+      const alertRequestTimeout = HEAVY_BOARD_CATEGORIES.has(selectedCategory)
+        ? HEAVY_BOARD_REQUEST_TIMEOUT_MS
+        : ALERT_REQUEST_TIMEOUT_MS;
       const baseParams = {
         page: 1,
         limit: MESSAGE_THREAD_LIMIT,
@@ -2897,26 +2941,56 @@ function ComplianceBoardPage() {
         baseParams.sellerId = selectedSeller;
       }
 
-      const [commerceResult, legacyResult] = await Promise.allSettled([
+      const [commerceResult, legacyResult, assignedResult] = await Promise.allSettled([
         api.get('/ebay/chat/threads', {
           params: { ...baseParams, source: 'commerce' },
-          timeout: ALERT_REQUEST_TIMEOUT_MS,
+          timeout: alertRequestTimeout,
         }),
         api.get('/ebay/chat/threads', {
           params: { ...baseParams, source: 'legacy' },
-          timeout: ALERT_REQUEST_TIMEOUT_MS,
-        })
+          timeout: alertRequestTimeout,
+        }),
+        dateFilter.mode === 'none'
+          ? api.get('/ebay/conversation-meta/assigned-board', {
+              params: {
+                limit: 500,
+                ...buildBoardFilterParams(),
+              },
+              timeout: alertRequestTimeout,
+            })
+          : Promise.resolve({ data: { threads: [] } })
       ]);
 
-      if (commerceResult.status === 'rejected' && legacyResult.status === 'rejected') {
+      const commerceThreads = ensureArray(commerceResult.status === 'fulfilled' ? commerceResult.value.data?.threads : []);
+      const legacyThreads = ensureArray(legacyResult.status === 'fulfilled' ? legacyResult.value.data?.threads : []);
+      const assignedThreads = ensureArray(assignedResult.status === 'fulfilled' ? assignedResult.value.data?.threads : []);
+
+      if (commerceResult.status === 'rejected' && legacyResult.status === 'rejected' && assignedResult.status !== 'fulfilled') {
         throw commerceResult.reason;
       }
 
+      if (commerceResult.status === 'rejected') {
+        console.warn('Commerce alert threads unavailable:', commerceResult.reason);
+      }
+
+      if (legacyResult.status === 'rejected') {
+        console.warn('Legacy alert threads unavailable:', legacyResult.reason);
+      }
+
       const threads = mergeAlertThreads([
-        ...ensureArray(commerceResult.status === 'fulfilled' ? commerceResult.value.data?.threads : []),
-        ...ensureArray(legacyResult.status === 'fulfilled' ? legacyResult.value.data?.threads : []),
+        ...commerceThreads,
+        ...legacyThreads,
+        ...assignedThreads,
       ]).filter(matchesAlertMessageFilters);
-      const threadMetaResults = await fetchConversationMetaForThreads(threads, ALERT_REQUEST_TIMEOUT_MS);
+
+      if (threads.length === 0) {
+        if (requestId === alertMessagesRequestRef.current) {
+          setAllMessagesForAlerts([]);
+        }
+        return;
+      }
+
+      const threadMetaResults = await fetchConversationMetaForThreads(threads, alertRequestTimeout);
       const enrichedThreads = mergeAlertThreads(threadMetaResults.map(({ thread, meta }) => ({
         ...thread,
         _conversationMeta: meta || thread._conversationMeta || null,
@@ -2926,12 +3000,18 @@ function ComplianceBoardPage() {
         pickedUpBy: meta?.pickedUpBy || thread.pickedUpBy || null,
       })));
 
-      if (requestId !== alertMessagesRequestRef.current) return;
-      setAllMessagesForAlerts(enrichedThreads);
+      if (requestId === alertMessagesRequestRef.current) {
+        setAllMessagesForAlerts(enrichedThreads);
+      }
     } catch (err) {
       console.warn('Failed to fetch messages for alerts:', err);
-      if (requestId !== alertMessagesRequestRef.current) return;
-      setAllMessagesForAlerts([]);
+    } finally {
+      // Only the most recently-issued request gets to flip the loading flag
+      // off, so a superseded (stale) request finishing late can't mask the
+      // newer request that's still in flight.
+      if (requestId === alertMessagesRequestRef.current) {
+        setAlertsLoading(false);
+      }
     }
   };
 
@@ -3003,7 +3083,7 @@ function ComplianceBoardPage() {
         ...ensureArray(threadsResponse.data?.threads),
         ...ensureArray(assignedResponse.data?.threads)
       ].forEach((thread) => {
-        threadMap.set(getMessageKey(thread), thread);
+        mergeThreadIntoMap(threadMap, getMessageKey, thread);
       });
       const threads = Array.from(threadMap.values()).filter(matchesMessageFilters);
       
@@ -3631,6 +3711,34 @@ function ComplianceBoardPage() {
     return Number.isNaN(ms) ? null : ms;
   };
 
+  // Prefer the server-computed lastBuyerMessageAt/lastSellerMessageAt (from the
+  // assigned-board aggregation) since it tracks each side's timestamp
+  // independently. Commerce/legacy-sourced threads don't have those fields, so
+  // fall back to inferring from the single latest-message record instead.
+  const isLastMessageFromSeller = (msg) => {
+    if (msg.lastBuyerMessageAt || msg.lastSellerMessageAt) {
+      const buyerMs = parseTimeMs(msg.lastBuyerMessageAt) || 0;
+      const sellerMs = parseTimeMs(msg.lastSellerMessageAt) || 0;
+      return sellerMs > buyerMs;
+    }
+    const senderUsername = msg.latestMessage?.senderUsername || msg.lastSenderUsername;
+    const buyerUsername = msg.buyerUsername || msg.otherPartyUsername;
+    if (senderUsername && buyerUsername) return senderUsername !== buyerUsername;
+    if (typeof msg.sender === 'string') return msg.sender.toUpperCase() !== 'BUYER';
+    return false;
+  };
+
+  const getLastMessageTime = (msg) => {
+    if (msg.lastBuyerMessageAt) return parseTimeMs(msg.lastBuyerMessageAt);
+    const lastTime = parseTimeMs(
+      msg.latestMessage?.createdDate
+        || msg.lastDate || msg.lastMessageDate || msg.messageDate
+        || msg.updatedDate || msg.lastSyncedAt
+    );
+    if (!lastTime) return null;
+    return isLastMessageFromSeller(msg) ? null : lastTime;
+  };
+
   const getOverdueMessages = () => {
     const nowMs = Date.now();
     const allBoardMessages = selectedCategory === 'order_communication' || selectedCategory === 'issue_hub'
@@ -3638,19 +3746,17 @@ function ComplianceBoardPage() {
       : getBoardAlertThreads();
 
     return allBoardMessages.filter((msg) => {
-      const lastBuyerMessageTime = parseTimeMs(
-        msg.lastBuyerMessageAt || msg.lastDate || msg.lastMessageDate || msg.messageDate
-      );
-      if (!lastBuyerMessageTime) return false;
+      const lastMessageTime = getLastMessageTime(msg);
+      if (!lastMessageTime) return false;
+      if (isLastMessageFromSeller(msg)) return false;
 
-      const lastSellerMessageTime = parseTimeMs(msg.lastSellerMessageAt);
-      if (lastSellerMessageTime && lastSellerMessageTime >= lastBuyerMessageTime) return false;
-
-      const elapsedMs = nowMs - lastBuyerMessageTime;
+      const elapsedMs = nowMs - lastMessageTime;
       return elapsedMs > MESSAGE_REPLY_SLA_MS;
     }).map((msg) => {
-      const lastBuyerMessageTimeValue = msg.lastBuyerMessageAt || msg.lastDate || msg.lastMessageDate || msg.messageDate;
-      const lastBuyerMessageTime = parseTimeMs(lastBuyerMessageTimeValue);
+      const lastBuyerMessageTimeValue = msg.lastBuyerMessageAt
+        || msg.latestMessage?.createdDate || msg.lastDate || msg.lastMessageDate || msg.messageDate
+        || msg.updatedDate || msg.lastSyncedAt;
+      const lastBuyerMessageTime = getLastMessageTime(msg);
       const elapsedMs = nowMs - lastBuyerMessageTime;
       return {
         ...msg,
@@ -4029,8 +4135,16 @@ function ComplianceBoardPage() {
     });
   };
 
+  // While allMessagesForAlerts hasn't been populated yet (this session's
+  // very first alert fetch, still in flight) the Unread Messages / Overdue
+  // Replies tiles would otherwise render a bare "0" that's indistinguishable
+  // from "confirmed zero" - flag them as pending so the UI can show a
+  // placeholder instead.
+  const isAlertDataPending = () => alertsLoading && allMessagesForAlerts.length === 0;
+
   const getAlertsForCurrentBoard = () => {
     const overdueMessages = getOverdueMessages();
+    const alertDataPending = isAlertDataPending();
     
     if (selectedCategory === 'issue_hub') {
       return ISSUE_HUB_OPTIONS.map((option) => ({
@@ -4050,7 +4164,7 @@ function ComplianceBoardPage() {
         { id: MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE, label: 'Return / Refund / Replace', color: '#8b5cf6', count: messages[MESSAGE_CATEGORIES.RETURN_REFUND_REPLACE]?.length || 0, type: 'stat' },
         { id: MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT, label: 'Issue with Product', color: '#ea580c', count: messages[MESSAGE_CATEGORIES.ISSUE_WITH_PRODUCT]?.length || 0, type: 'stat' },
         { id: MESSAGE_CATEGORIES.INQUIRY, label: 'Inquiry', color: BRAND_GREEN, count: messages[MESSAGE_CATEGORIES.INQUIRY]?.length || 0, type: 'stat' },
-        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
+        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert', pending: alertDataPending },
       ];
     }
 
@@ -4071,8 +4185,8 @@ function ComplianceBoardPage() {
         { id: COLUMN_STATUS.REPLACEMENT, label: 'Replacement', color: '#0f766e', count: getStatusCount(COLUMN_STATUS.REPLACEMENT), type: 'stat' },
         { id: RETURN_LABEL_OVERDUE_ALERT_ID, label: '48h Not Moved', color: '#dc2626', count: getOverdueCount(RETURN_LABEL_OVERDUE_ALERT_ID, overdueReturnLabelOrders.length), type: 'alert' },
         { id: PAYMENT_STATUS_OVERDUE_ALERT_ID, label: 'Payment Status', color: '#b91c1c', count: getOverdueCount(PAYMENT_STATUS_OVERDUE_ALERT_ID, overduePaymentStatusOrders.length), type: 'alert' },
-        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadReturnMessages, type: 'alert' },
-        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#7f1d1d', count: overdueMessages.length, type: 'alert' },
+        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadReturnMessages, type: 'alert', pending: alertDataPending },
+        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#7f1d1d', count: overdueMessages.length, type: 'alert', pending: alertDataPending },
       ];
     }
 
@@ -4090,8 +4204,8 @@ function ComplianceBoardPage() {
         // shown in the box.
         { id: COLUMN_STATUS.ACCEPTED, label: 'Accepted', color: BRAND_GREEN, count: getColumnCount(COLUMN_STATUS.ACCEPTED), type: 'stat' },
         { id: COLUMN_STATUS.DECLINED, label: 'Declined', color: BRAND_ORANGE, count: getColumnCount(COLUMN_STATUS.DECLINED), type: 'stat' },
-        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadCancellationMessages, type: 'alert' },
-        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
+        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadCancellationMessages, type: 'alert', pending: alertDataPending },
+        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert', pending: alertDataPending },
       ];
     }
 
@@ -4109,8 +4223,8 @@ function ComplianceBoardPage() {
         { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED, label: 'Not Refunded but Resolved', color: BRAND_BLUE, count: getStatusCount(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED), type: 'stat' },
         { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN, label: 'Win', color: '#06b6d4', count: getStatusCount(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_WIN), type: 'stat' },
         { id: COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE, label: 'Loose', color: '#f97316', count: getStatusCount(COLUMN_STATUS.INR_NOT_REFUNDED_RESOLVED_LOOSE), type: 'stat' },
-        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadInrMessages, type: 'alert' },
-        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert' },
+        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: unreadInrMessages, type: 'alert', pending: alertDataPending },
+        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert', pending: alertDataPending },
       ];
     }
 
@@ -7174,7 +7288,18 @@ function ComplianceBoardPage() {
       }}
     >
       <span>{alert.label}</span>
-      <Chip label={alert.count} size="small" sx={{ bgcolor: activeId === alert.id ? '#fff' : alert.color, color: activeId === alert.id ? alert.color : '#fff', fontWeight: 700, height: 22 }} />
+      <Chip
+        label={alert.pending ? '…' : alert.count}
+        title={alert.pending ? 'Still loading message data - counts will update shortly' : undefined}
+        size="small"
+        sx={{
+          bgcolor: activeId === alert.id ? '#fff' : alert.color,
+          color: activeId === alert.id ? alert.color : '#fff',
+          fontWeight: 700,
+          height: 22,
+          opacity: alert.pending ? 0.6 : 1,
+        }}
+      />
     </Button>
   );
 

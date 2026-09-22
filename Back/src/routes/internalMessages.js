@@ -490,7 +490,7 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
       .sort({ messageDate: 1 });
 
     // Mark unread messages (from others) as read by the current user
-    await InternalMessage.updateMany(
+    const readResult = await InternalMessage.updateMany(
       {
         conversationId: conversation._id,
         sender: { $ne: currentUserId },
@@ -498,6 +498,10 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
       },
       { $push: { readBy: { user: currentUserId, readAt: new Date() } } }
     );
+
+    if (readResult.modifiedCount > 0) {
+      emitToUsers([currentUserId], 'conversation_updated', { conversationId: conversation._id, read: true });
+    }
 
     res.json(messages.map(shapeMessage));
   } catch (err) {

@@ -20791,6 +20791,12 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
                 lastDate: { $first: '$messageDate' },
                 sender: { $first: '$sender' },
                 messageType: { $first: '$messageType' },
+                lastBuyerMessageAt: {
+                  $max: { $cond: [{ $eq: ['$sender', 'BUYER'] }, '$messageDate', null] }
+                },
+                lastSellerMessageAt: {
+                  $max: { $cond: [{ $eq: ['$sender', 'SELLER'] }, '$messageDate', null] }
+                },
                 unreadCount: {
                   $sum: { $cond: [{ $and: [{ $eq: ['$read', false] }, { $eq: ['$sender', 'BUYER'] }] }, 1, 0] }
                 }
@@ -20823,6 +20829,8 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
           },
           lastMessage: '$messageInfo.lastMessage',
           lastDate: { $ifNull: ['$messageInfo.lastDate', '$updatedAt'] },
+          lastBuyerMessageAt: '$messageInfo.lastBuyerMessageAt',
+          lastSellerMessageAt: '$messageInfo.lastSellerMessageAt',
           sender: '$messageInfo.sender',
           messageType: '$messageInfo.messageType',
           actualMessageType: {

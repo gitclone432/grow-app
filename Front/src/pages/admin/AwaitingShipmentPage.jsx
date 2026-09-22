@@ -58,6 +58,7 @@ import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerMo
 import {
   findRemarkTemplateText,
   loadRemarkTemplates,
+  remarkOptionsFromTemplates,
   saveRemarkTemplates
 } from '../../constants/remarkTemplates';
 import AwaitingShipmentSkeleton from '../../components/skeletons/AwaitingShipmentSkeleton';
@@ -234,6 +235,9 @@ function ManualTrackingCell({ order, onSaved, onCopy, onNotify }) {
     const cleanNumber = trackingNumber.trim().toUpperCase();
     if (cleanNumber.startsWith('9')) return 'USPS';
     if (cleanNumber.startsWith('1Z')) return 'UPS';
+    if (cleanNumber.startsWith('8')) return 'FEDEX';
+    if (cleanNumber.startsWith('3')) return 'AUSTRALIA_POST';
+    if (cleanNumber.startsWith('1')) return 'TNT_AUSTRALIA';
     return null;
   };
 
@@ -1696,12 +1700,9 @@ export default function AwaitingShipmentPage() {
                   }}
                 >
                   <MenuItem value=""><em>All Remarks</em></MenuItem>
-                  <MenuItem value="Delivered">Delivered</MenuItem>
-                  <MenuItem value="Shipped">Shipped</MenuItem>
-                  <MenuItem value="Not yet shipped">Not yet shipped</MenuItem>
-                  <MenuItem value="Processing">Processing</MenuItem>
-                  <MenuItem value="Delayed">Delayed</MenuItem>
-                  <MenuItem value="Alternative cancellation message">Alternative cancellation message</MenuItem>
+                  {remarkOptionsFromTemplates(remarkTemplates).map((option) => (
+                    <MenuItem key={option._id} value={option.name}>{option.name}</MenuItem>
+                  ))}
                   <MenuItem value="__NO_REMARK__">No Remark</MenuItem>
                 </Select>
               </FormControl>
