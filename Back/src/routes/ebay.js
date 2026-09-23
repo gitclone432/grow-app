@@ -20403,6 +20403,76 @@ function buildMetaChangeEntries(existing, updates, changedBy) {
   return entries;
 }
 
+function getConversationMetaAssignedAtValue(meta = {}) {
+  if (meta?.categoryAssignedAt) return meta.categoryAssignedAt;
+
+  const currentCategory = String(meta?.category || '').trim();
+  if (currentCategory && Array.isArray(meta.changeLog)) {
+    for (let index = meta.changeLog.length - 1; index >= 0; index -= 1) {
+      const entry = meta.changeLog[index];
+      if (
+        entry?.field === 'About' &&
+        String(entry?.newValue || '').trim() === currentCategory &&
+        entry?.changedAt
+      ) {
+        return entry.changedAt;
+      }
+    }
+  }
+
+  return currentCategory ? (meta?.updatedAt || null) : null;
+}
+
+function buildConversationMetaAssignedAtExpr({
+  categoryField = '$category',
+  categoryAssignedAtField = '$categoryAssignedAt',
+  changeLogField = '$changeLog',
+  updatedAtField = '$updatedAt',
+} = {}) {
+  return {
+    $let: {
+      vars: {
+        currentCategory: { $ifNull: [categoryField, ''] },
+        matchingAssignedChanges: {
+          $map: {
+            input: {
+              $filter: {
+                input: { $ifNull: [changeLogField, []] },
+                as: 'entry',
+                cond: {
+                  $and: [
+                    { $eq: ['$$entry.field', 'About'] },
+                    { $eq: [{ $ifNull: ['$$entry.newValue', ''] }, { $ifNull: [categoryField, ''] }] }
+                  ]
+                }
+              }
+            },
+            as: 'entry',
+            in: '$$entry.changedAt'
+          }
+        }
+      },
+      in: {
+        $cond: [
+          { $ne: ['$$currentCategory', ''] },
+          {
+            $ifNull: [
+              categoryAssignedAtField,
+              {
+                $ifNull: [
+                  { $arrayElemAt: ['$$matchingAssignedChanges', -1] },
+                  updatedAtField
+                ]
+              }
+            ]
+          },
+          null
+        ]
+      }
+    }
+  };
+}
+
 // complianceBoardStatus values that represent a human's manual placement on
 // the Order Fulfillment board (via drag-and-drop). These must never be
 // be lost when the same order's conversation gets tagged into another board's
@@ -20638,8 +20708,15 @@ router.get('/conversation-meta/single', requireAuth, async (req, res) => {
       query.orderId = null;
     }
 
-    const meta = await ConversationMeta.findOne(query);
-    res.json(meta || {}); // Return empty object if not found (cleaner for frontend)
+    const meta = await ConversationMeta.findOne(query).lean();
+    if (!meta) {
+      return res.json({});
+    }
+
+    res.json({
+      ...meta,
+      categoryAssignedAt: getConversationMetaAssignedAtValue(meta)
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -20684,12 +20761,9 @@ router.post('/conversation-meta/batch', requireAuth, async (req, res) => {
     const results = {};
     metas.forEach((meta) => {
       const compositeKey = meta.orderId ? `o:${meta.orderId}` : `b:${meta.buyerUsername}|${meta.itemId}`;
-      // Records saved before categoryAssignedAt existed have it as null - fall
-      // back to updatedAt so the "Dragged" date/filter never silently drops
-      // pre-existing cards (matches the fallback in /conversation-meta/assigned-board).
       results[compositeKey] = {
         ...meta,
-        categoryAssignedAt: meta.categoryAssignedAt || meta.updatedAt || null,
+        categoryAssignedAt: getConversationMetaAssignedAtValue(meta),
       };
     });
 
@@ -20720,9 +20794,6 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
       match.seller = new mongoose.Types.ObjectId(sellerId);
     }
 
-    // Records saved before categoryAssignedAt existed have it as null - fall
-    // back to updatedAt via $expr so pre-existing cards aren't silently
-    // dropped by a date-range match against a field that was never set.
     let dateMatchExpr = null;
     if (dateFrom || dateTo) {
       const exprAnd = [];
@@ -20746,7 +20817,7 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
 
     if (dateMatchExpr) {
       pipeline.push(
-        { $addFields: { __effectiveAssignedAt: { $ifNull: ['$categoryAssignedAt', '$updatedAt'] } } },
+        { $addFields: { __effectiveAssignedAt: buildConversationMetaAssignedAtExpr() } },
         { $match: { $expr: dateMatchExpr } },
         { $unset: '__effectiveAssignedAt' }
       );
@@ -20878,7 +20949,7 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
           caseStatus: 1,
           pickedUpBy: 1,
           updatedAt: 1,
-          categoryAssignedAt: { $ifNull: ['$categoryAssignedAt', '$updatedAt'] },
+          categoryAssignedAt: buildConversationMetaAssignedAtExpr(),
           _conversationMeta: {
             _id: '$_id',
             category: '$category',
@@ -20886,7 +20957,7 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
             status: '$status',
             pickedUpBy: '$pickedUpBy',
             updatedAt: '$updatedAt',
-            categoryAssignedAt: { $ifNull: ['$categoryAssignedAt', '$updatedAt'] }
+            categoryAssignedAt: buildConversationMetaAssignedAtExpr()
           }
         }
       }
@@ -20918,6 +20989,23 @@ function parseConversationManagementDateRange(query) {
   const singleDate = query.creationDate || query.date;
   const dateFrom = query.creationDateFrom || query.dateFrom || singleDate;
   const dateTo = query.creationDateTo || query.dateTo || singleDate;
+
+  const range = {};
+  if (dateFrom) {
+    const { start } = getPTDayBoundsUTC(dateFrom);
+    range.$gte = start;
+  }
+  if (dateTo) {
+    const { end } = getPTDayBoundsUTC(dateTo);
+    range.$lte = end;
+  }
+  return range;
+}
+
+function parseConversationManagementAssignedDateRange(query) {
+  const singleDate = query.assignedDate || query.assignedAtDate;
+  const dateFrom = query.assignedDateFrom || query.assignedAtFrom || singleDate;
+  const dateTo = query.assignedDateTo || query.assignedAtTo || singleDate;
 
   const range = {};
   if (dateFrom) {
@@ -21022,6 +21110,7 @@ function buildConversationManagementBasePipeline(query = {}) {
         notes: 1,
         fulfillmentNotes: { $ifNull: [{ $arrayElemAt: ['$orderInfo.fulfillmentNotes', 0] }, null] },
         pickedUpBy: 1,
+        categoryAssignedAt: buildConversationMetaAssignedAtExpr(),
         updatedAt: 1,
         creationDate: {
           $ifNull: [
@@ -21088,6 +21177,11 @@ function buildConversationManagementBasePipeline(query = {}) {
   const creationDateRange = parseConversationManagementDateRange(query);
   if (creationDateRange.$gte || creationDateRange.$lte) {
     postLookupMatch.creationDate = creationDateRange;
+  }
+
+  const assignedDateRange = parseConversationManagementAssignedDateRange(query);
+  if (assignedDateRange.$gte || assignedDateRange.$lte) {
+    postLookupMatch.categoryAssignedAt = assignedDateRange;
   }
 
   if (search && search.trim()) {

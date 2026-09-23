@@ -1125,6 +1125,7 @@ export default function ConversationManagementPage() {
     { id: 'seller', label: 'Seller' },
     { id: 'orderId', label: 'Order ID' },
     { id: 'creationDate', label: 'Date Sold' },
+    { id: 'assignedDate', label: 'Assigned Date' },
     { id: 'username', label: 'Buyer ID' },
     { id: 'buyerName', label: 'Buyer Name' },
     { id: 'buyerSla', label: 'Buyer SLA' },
@@ -1153,6 +1154,10 @@ export default function ConversationManagementPage() {
   const [singleDate, setSingleDate] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [assignedDateFilterMode, setAssignedDateFilterMode] = useState('none');
+  const [assignedSingleDate, setAssignedSingleDate] = useState('');
+  const [assignedDateFrom, setAssignedDateFrom] = useState('');
+  const [assignedDateTo, setAssignedDateTo] = useState('');
 
   useEffect(() => {
     fetchAgents();
@@ -1171,7 +1176,7 @@ export default function ConversationManagementPage() {
 
   useEffect(() => {
     fetchItems();
-  }, [currentPage, debouncedSearch, filterSeller, filterAbout, filterCase, filterPickedUpBy, filterBuyerSla, dateFilterMode, singleDate, dateFrom, dateTo]);
+  }, [currentPage, debouncedSearch, filterSeller, filterAbout, filterCase, filterPickedUpBy, filterBuyerSla, dateFilterMode, singleDate, dateFrom, dateTo, assignedDateFilterMode, assignedSingleDate, assignedDateFrom, assignedDateTo]);
 
   function buildListParams() {
     const params = {
@@ -1193,6 +1198,13 @@ export default function ConversationManagementPage() {
       if (dateFrom) params.creationDateFrom = dateFrom;
       if (dateTo) params.creationDateTo = dateTo;
     }
+    if (assignedDateFilterMode === 'single' && assignedSingleDate) {
+      params.assignedDate = assignedSingleDate;
+    }
+    if (assignedDateFilterMode === 'range') {
+      if (assignedDateFrom) params.assignedDateFrom = assignedDateFrom;
+      if (assignedDateTo) params.assignedDateTo = assignedDateTo;
+    }
 
     return params;
   }
@@ -1207,8 +1219,10 @@ export default function ConversationManagementPage() {
     if (filterBuyerSla !== 'All') count += 1;
     if (dateFilterMode === 'single' && singleDate) count += 1;
     if (dateFilterMode === 'range' && (dateFrom || dateTo)) count += 1;
+    if (assignedDateFilterMode === 'single' && assignedSingleDate) count += 1;
+    if (assignedDateFilterMode === 'range' && (assignedDateFrom || assignedDateTo)) count += 1;
     return count;
-  }, [searchText, filterSeller, filterAbout, filterCase, filterPickedUpBy, dateFilterMode, singleDate, dateFrom, dateTo]);
+  }, [searchText, filterSeller, filterAbout, filterCase, filterPickedUpBy, filterBuyerSla, dateFilterMode, singleDate, dateFrom, dateTo, assignedDateFilterMode, assignedSingleDate, assignedDateFrom, assignedDateTo]);
 
   const pageStats = useMemo(() => {
     let overdue = 0;
@@ -1232,6 +1246,10 @@ export default function ConversationManagementPage() {
     setSingleDate('');
     setDateFrom('');
     setDateTo('');
+    setAssignedDateFilterMode('none');
+    setAssignedSingleDate('');
+    setAssignedDateFrom('');
+    setAssignedDateTo('');
     setCurrentPage(1);
   }
 
@@ -1318,6 +1336,10 @@ export default function ConversationManagementPage() {
         creationDate: {
           label: 'Date Sold',
           value: (item) => formatCreationDate(item.creationDate)
+        },
+        assignedDate: {
+          label: 'Assigned Date',
+          value: (item) => formatCreationDate(item.categoryAssignedAt)
         },
         username: {
           label: 'Buyer ID',
@@ -1672,10 +1694,10 @@ export default function ConversationManagementPage() {
           </Grid>
           <Grid item xs={12} sm={6} md={2}>
             <FormControl fullWidth size="small" sx={filterFieldSx}>
-              <InputLabel>Date Filter</InputLabel>
+              <InputLabel>Date Sold Filter</InputLabel>
               <Select
                 value={dateFilterMode}
-                label="Date Filter"
+                label="Date Sold Filter"
                 onChange={(e) => {
                   const nextMode = e.target.value;
                   setDateFilterMode(nextMode);
@@ -1687,7 +1709,7 @@ export default function ConversationManagementPage() {
                   setCurrentPage(1);
                 }}
               >
-                <MenuItem value="none">No Date Filter</MenuItem>
+                <MenuItem value="none">No Date Sold Filter</MenuItem>
                 <MenuItem value="single">Single Date</MenuItem>
                 <MenuItem value="range">Date Range</MenuItem>
               </Select>
@@ -1744,6 +1766,80 @@ export default function ConversationManagementPage() {
               </Grid>
             </>
           )}
+          <Grid item xs={12} sm={6} md={2}>
+            <FormControl fullWidth size="small" sx={filterFieldSx}>
+              <InputLabel>Assigned Date Filter</InputLabel>
+              <Select
+                value={assignedDateFilterMode}
+                label="Assigned Date Filter"
+                onChange={(e) => {
+                  const nextMode = e.target.value;
+                  setAssignedDateFilterMode(nextMode);
+                  if (nextMode !== 'single') setAssignedSingleDate('');
+                  if (nextMode !== 'range') {
+                    setAssignedDateFrom('');
+                    setAssignedDateTo('');
+                  }
+                  setCurrentPage(1);
+                }}
+              >
+                <MenuItem value="none">No Assigned Date Filter</MenuItem>
+                <MenuItem value="single">Single Date</MenuItem>
+                <MenuItem value="range">Date Range</MenuItem>
+              </Select>
+            </FormControl>
+          </Grid>
+          {assignedDateFilterMode === 'single' && (
+            <Grid item xs={12} sm={6} md={2}>
+              <TextField
+                fullWidth
+                size="small"
+                type="date"
+                label="Assigned Date"
+                value={assignedSingleDate}
+                onChange={(e) => {
+                  setAssignedSingleDate(e.target.value);
+                  setCurrentPage(1);
+                }}
+                InputLabelProps={{ shrink: true }}
+                sx={filterFieldSx}
+              />
+            </Grid>
+          )}
+          {assignedDateFilterMode === 'range' && (
+            <>
+              <Grid item xs={12} sm={6} md={2}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  type="date"
+                  label="Assigned From"
+                  value={assignedDateFrom}
+                  onChange={(e) => {
+                    setAssignedDateFrom(e.target.value);
+                    setCurrentPage(1);
+                  }}
+                  InputLabelProps={{ shrink: true }}
+                  sx={filterFieldSx}
+                />
+              </Grid>
+              <Grid item xs={12} sm={6} md={2}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  type="date"
+                  label="Assigned To"
+                  value={assignedDateTo}
+                  onChange={(e) => {
+                    setAssignedDateTo(e.target.value);
+                    setCurrentPage(1);
+                  }}
+                  InputLabelProps={{ shrink: true }}
+                  sx={filterFieldSx}
+                />
+              </Grid>
+            </>
+          )}
         </Grid>
       </Paper>
 
@@ -1787,6 +1883,7 @@ export default function ConversationManagementPage() {
                   {visibleColumns.includes('seller') && <TableCell sx={tableHeaderCellSx}>Seller</TableCell>}
                   {visibleColumns.includes('orderId') && <TableCell sx={tableHeaderCellSx}>Order ID</TableCell>}
                   {visibleColumns.includes('creationDate') && <TableCell sx={tableHeaderCellSx}>Date Sold</TableCell>}
+                  {visibleColumns.includes('assignedDate') && <TableCell sx={tableHeaderCellSx}>Assigned Date</TableCell>}
                   {visibleColumns.includes('username') && <TableCell sx={tableHeaderCellSx}>Buyer ID</TableCell>}
                   {visibleColumns.includes('buyerName') && <TableCell sx={tableHeaderCellSx}>Buyer Name</TableCell>}
                   {visibleColumns.includes('buyerSla') && <TableCell sx={tableHeaderCellSx}>Buyer SLA</TableCell>}
@@ -1837,6 +1934,11 @@ export default function ConversationManagementPage() {
                       {visibleColumns.includes('creationDate') && (
                         <TableCell sx={{ ...tableBodyCellSx, color: 'text.secondary', fontSize: '0.8rem' }}>
                           {formatCreationDate(item.creationDate)}
+                        </TableCell>
+                      )}
+                      {visibleColumns.includes('assignedDate') && (
+                        <TableCell sx={{ ...tableBodyCellSx, color: 'text.secondary', fontSize: '0.8rem' }}>
+                          {formatCreationDate(item.categoryAssignedAt)}
                         </TableCell>
                       )}
                       {visibleColumns.includes('username') && (
