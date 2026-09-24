@@ -1691,6 +1691,9 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
                 <MenuItem value="">
                   <em style={{ color: '#aaa' }}>- Select -</em>
                 </MenuItem>
+                <MenuItem value="__NO_REMARK__">
+                  No Remark
+                </MenuItem>
                 {(remarkOptions || []).map((option) => (
                   <MenuItem key={option._id} value={option.name}>
                     {option.name}

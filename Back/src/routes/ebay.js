@@ -16379,6 +16379,84 @@ router.post('/chat/mark-read', requireAuth, async (req, res) => {
   }
 });
 
+router.post('/chat/mark-attended', requireAuth, async (req, res) => {
+  const { sellerId, orderId, buyerUsername, itemId } = req.body;
+
+  try {
+    const query = buildBuyerConversationMatch({ orderId, buyerUsername, itemId });
+    if (!query) {
+      return res.status(400).json({ error: 'Invalid query params' });
+    }
+
+    if (!sellerId || !mongoose.Types.ObjectId.isValid(sellerId)) {
+      return res.status(400).json({ error: 'Valid sellerId is required' });
+    }
+
+    const now = new Date();
+    let resolvedBuyerUsername = buyerUsername;
+    let resolvedItemId = itemId;
+
+    if (orderId) {
+      const resolvedOrder = await Order.findOne({ orderId: String(orderId) })
+        .select('buyer.username lineItems.legacyItemId')
+        .lean();
+
+      if (resolvedOrder?.buyer?.username) {
+        resolvedBuyerUsername = String(resolvedOrder.buyer.username).trim();
+      }
+      if (!resolvedItemId && resolvedOrder?.lineItems?.[0]?.legacyItemId) {
+        resolvedItemId = String(resolvedOrder.lineItems[0].legacyItemId).trim();
+      }
+    }
+
+    if (!orderId && (!resolvedBuyerUsername || !resolvedItemId)) {
+      return res.status(400).json({ error: 'buyerUsername and itemId are required when orderId is missing' });
+    }
+
+    const metaQuery = { seller: new mongoose.Types.ObjectId(sellerId) };
+    if (orderId) {
+      metaQuery.orderId = String(orderId).trim();
+    } else {
+      metaQuery.buyerUsername = String(resolvedBuyerUsername).trim();
+      metaQuery.itemId = String(resolvedItemId).trim();
+      metaQuery.orderId = null;
+    }
+
+    const metaUpdate = {
+      seller: new mongoose.Types.ObjectId(sellerId),
+      buyerUsername: String(resolvedBuyerUsername || '').trim(),
+      orderId: orderId ? String(orderId).trim() : null,
+      itemId: String(resolvedItemId || '').trim(),
+      attendedAt: now,
+    };
+
+    const [result, convResult, meta] = await Promise.all([
+      Message.updateMany(
+        { ...query, sender: 'BUYER', read: false },
+        { read: true }
+      ),
+      EbayMessageConversation.updateMany(query, { unreadCount: 0 }),
+      ConversationMeta.findOneAndUpdate(
+        metaQuery,
+        { $set: metaUpdate },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      )
+    ]);
+
+    console.log('[MARK-ATTENDED] Updated messages:', result.modifiedCount, 'Updated conversations:', convResult.modifiedCount, 'Meta:', meta?._id || null);
+
+    res.json({
+      success: true,
+      modifiedCount: result.modifiedCount,
+      conversationModifiedCount: convResult.modifiedCount,
+      attendedAt: now,
+      meta,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ===== BUYER MESSAGES ENDPOINTS =====
 
 // Fetch buyer messages/inquiries from eBay Post-Order API and store in DB
@@ -20938,7 +21016,7 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
           lastMessage: '$messageInfo.lastMessage',
           lastDate: { $ifNull: ['$messageInfo.lastDate', '$updatedAt'] },
           lastBuyerMessageAt: '$messageInfo.lastBuyerMessageAt',
-          lastSellerMessageAt: '$messageInfo.lastSellerMessageAt',
+          lastSellerMessageAt: { $max: ['$messageInfo.lastSellerMessageAt', '$attendedAt'] },
           sender: '$messageInfo.sender',
           messageType: '$messageInfo.messageType',
           actualMessageType: {
@@ -20949,6 +21027,7 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
           caseStatus: 1,
           pickedUpBy: 1,
           updatedAt: 1,
+          attendedAt: 1,
           categoryAssignedAt: buildConversationMetaAssignedAtExpr(),
           _conversationMeta: {
             _id: '$_id',
@@ -20956,6 +21035,7 @@ router.get('/conversation-meta/assigned-board', requireAuth, async (req, res) =>
             caseStatus: '$caseStatus',
             status: '$status',
             pickedUpBy: '$pickedUpBy',
+            attendedAt: '$attendedAt',
             updatedAt: '$updatedAt',
             categoryAssignedAt: buildConversationMetaAssignedAtExpr()
           }

@@ -13,6 +13,25 @@ import MessageIcon from '@mui/icons-material/Message';
 import CloseIcon from '@mui/icons-material/Close';
 import api from '../../lib/api.js';
 
+const TEAM_CHAT_IST_FORMAT = {
+  timeZone: 'Asia/Kolkata',
+  month: 'short',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit'
+};
+
+function formatTeamChatTimestamp(value) {
+  if (!value) return 'N/A';
+  return `${new Date(value).toLocaleString('en-US', TEAM_CHAT_IST_FORMAT)} IST`;
+}
+
+function summarizeReplyBody(body, maxLength = 120) {
+  const compact = String(body || '').replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, maxLength - 1)}...`;
+}
+
 // Distinct colors per sender so group threads with >2 participants stay legible
 const SENDER_COLORS = ['#e3f2fd', '#f3e5f5', '#e8f5e9', '#fff3e0', '#fce4ec', '#ede7f6'];
 function colorForSender(senderId, participants) {
@@ -237,7 +256,7 @@ export default function InternalMessagesAdminPage() {
                               {conv.messageCount} messages
                             </Typography>
                             <Typography variant="caption" color="text.secondary">
-                              {new Date(conv.lastMessageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} PT
+                              {formatTeamChatTimestamp(conv.lastMessageDate)}
                             </Typography>
                           </Stack>
                         </Stack>
@@ -394,6 +413,16 @@ export default function InternalMessagesAdminPage() {
                                 borderRadius: 2
                               }}
                             >
+                              {msg.replyTo && (
+                                <Box sx={{ mb: 1, px: 1, py: 0.75, borderLeft: '3px solid', borderColor: 'primary.main', bgcolor: 'rgba(25,118,210,0.08)', borderRadius: 1 }}>
+                                  <Typography variant="caption" sx={{ display: 'block', fontWeight: 700, color: 'primary.main' }}>
+                                    Replying to {msg.replyTo.sender?.username || 'Former user'}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    {summarizeReplyBody(msg.replyTo.body)}
+                                  </Typography>
+                                </Box>
+                              )}
                               <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
                                 {msg.body}
                               </Typography>
@@ -422,7 +451,7 @@ export default function InternalMessagesAdminPage() {
                               color="text.secondary"
                               sx={{ textAlign: isUser1 ? 'left' : 'right' }}
                             >
-                              {new Date(msg.messageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} PT
+                              {formatTeamChatTimestamp(msg.messageDate)}
                             </Typography>
                           </Stack>
                         </Box>
@@ -439,10 +468,10 @@ export default function InternalMessagesAdminPage() {
                     <strong>Total Messages:</strong> {messages.length}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    <strong>First Message:</strong> {messages[0] ? new Date(messages[0].messageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' PT' : 'N/A'}
+                    <strong>First Message:</strong> {messages[0] ? formatTeamChatTimestamp(messages[0].messageDate) : 'N/A'}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    <strong>Last Message:</strong> {messages[messages.length - 1] ? new Date(messages[messages.length - 1].messageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' PT' : 'N/A'}
+                    <strong>Last Message:</strong> {messages[messages.length - 1] ? formatTeamChatTimestamp(messages[messages.length - 1].messageDate) : 'N/A'}
                   </Typography>
                 </Stack>
               </Box>

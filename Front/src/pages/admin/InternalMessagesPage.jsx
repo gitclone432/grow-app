@@ -16,10 +16,30 @@ import PersonAddIcon from '@mui/icons-material/PersonAdd';
 import PersonRemoveIcon from '@mui/icons-material/PersonRemove';
 import LogoutIcon from '@mui/icons-material/Logout';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
+import ReplyIcon from '@mui/icons-material/Reply';
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings';
 import RemoveModeratorIcon from '@mui/icons-material/RemoveModerator';
 import api from '../../lib/api.js';
 import { onSocketEvent } from '../../lib/socket.js';
+
+const TEAM_CHAT_IST_FORMAT = {
+  timeZone: 'Asia/Kolkata',
+  month: 'short',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit'
+};
+
+function formatTeamChatTimestamp(value) {
+  if (!value) return '';
+  return `${new Date(value).toLocaleString('en-US', TEAM_CHAT_IST_FORMAT)} IST`;
+}
+
+function summarizeReplyBody(body, maxLength = 120) {
+  const compact = String(body || '').replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, maxLength - 1)}...`;
+}
 
 function readStoredUser() {
   try {
@@ -53,6 +73,12 @@ function normalizeMessage(message) {
   return {
     ...message,
     sender: message.sender || { _id: null, username: 'Former user', role: 'unknown' },
+    replyTo: message.replyTo
+      ? {
+          ...message.replyTo,
+          sender: message.replyTo.sender || { _id: null, username: 'Former user', role: 'unknown' },
+        }
+      : null,
     mentions: (message.mentions || []).filter((mention) => mention && mention._id),
   };
 }
@@ -123,6 +149,7 @@ export default function InternalMessagesPage() {
   // File attachments
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
+  const [replyingTo, setReplyingTo] = useState(null);
   const fileInputRef = useRef(null);
 
   // Refs
@@ -270,6 +297,7 @@ export default function InternalMessagesPage() {
     setAttachments([]);
     setMentionIds([]);
     setMentionQuery(null);
+    setReplyingTo(null);
   }
 
   async function handleSendMessage() {
@@ -282,7 +310,8 @@ export default function InternalMessagesPage() {
         conversationId: selectedConversation.conversationId,
         body: newMessage,
         mediaUrls: attachments.map((a) => a.url),
-        mentions: mentionIds
+        mentions: mentionIds,
+        replyToMessageId: replyingTo?._id || undefined,
       });
 
       const sentMessage = normalizeMessage(data);
@@ -296,6 +325,11 @@ export default function InternalMessagesPage() {
     } finally {
       setSending(false);
     }
+  }
+
+  function handleReplyToMessage(message) {
+    setReplyingTo(message);
+    setTimeout(() => textFieldRef.current?.focus(), 0);
   }
 
   async function searchUsers(query, setter, setLoadingFn) {
@@ -590,7 +624,7 @@ export default function InternalMessagesPage() {
                         </Typography>
                         {conv.lastMessageDate && (
                           <Typography variant="caption" color="text.secondary">
-                            {new Date(conv.lastMessageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} PT
+                            {formatTeamChatTimestamp(conv.lastMessageDate)}
                           </Typography>
                         )}
                       </Stack>
@@ -703,6 +737,26 @@ export default function InternalMessagesPage() {
                           elevation={1}
                           sx={{ p: 1.5, bgcolor: isMe ? '#1976d2' : '#ffffff', color: isMe ? '#fff' : 'text.primary', borderRadius: 2 }}
                         >
+                          {msg.replyTo && (
+                            <Box
+                              sx={{
+                                mb: 1,
+                                px: 1,
+                                py: 0.75,
+                                borderLeft: '3px solid',
+                                borderColor: isMe ? 'rgba(255,255,255,0.7)' : 'primary.main',
+                                bgcolor: isMe ? 'rgba(255,255,255,0.14)' : 'rgba(25,118,210,0.08)',
+                                borderRadius: 1,
+                              }}
+                            >
+                              <Typography variant="caption" sx={{ display: 'block', fontWeight: 700, color: isMe ? 'rgba(255,255,255,0.92)' : 'primary.main' }}>
+                                Replying to {msg.replyTo.sender?.username || 'Former user'}
+                              </Typography>
+                              <Typography variant="caption" sx={{ display: 'block', color: isMe ? 'rgba(255,255,255,0.82)' : 'text.secondary' }}>
+                                {summarizeReplyBody(msg.replyTo.body)}
+                              </Typography>
+                            </Box>
+                          )}
                           <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
                             {renderBodyWithMentions(msg.body, selectedConversation.participants)}
                           </Typography>
@@ -729,9 +783,14 @@ export default function InternalMessagesPage() {
                             </Box>
                           )}
                         </Paper>
-                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, textAlign: isMe ? 'right' : 'left' }}>
-                          {new Date(msg.messageDate).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} PT
-                        </Typography>
+                        <Stack direction="row" spacing={0.5} alignItems="center" justifyContent={isMe ? 'flex-end' : 'flex-start'} sx={{ mt: 0.5 }}>
+                          <Typography variant="caption" color="text.secondary" sx={{ textAlign: isMe ? 'right' : 'left' }}>
+                            {formatTeamChatTimestamp(msg.messageDate)}
+                          </Typography>
+                          <IconButton size="small" onClick={() => handleReplyToMessage(msg)} sx={{ p: 0.25 }}>
+                            <ReplyIcon sx={{ fontSize: 15 }} />
+                          </IconButton>
+                        </Stack>
                       </Box>
                     );
                   })}
@@ -762,6 +821,24 @@ export default function InternalMessagesPage() {
                     <Chip key={idx} label={file.name} onDelete={() => handleRemoveAttachment(idx)} size="small" />
                   ))}
                 </Box>
+              )}
+
+              {replyingTo && (
+                <Paper variant="outlined" sx={{ mb: 1, px: 1.25, py: 0.9, bgcolor: '#f8fafc' }}>
+                  <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography variant="caption" sx={{ display: 'block', fontWeight: 700, color: 'primary.main' }}>
+                        Replying to {replyingTo.sender?.username || 'Former user'}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', wordBreak: 'break-word' }}>
+                        {summarizeReplyBody(replyingTo.body)}
+                      </Typography>
+                    </Box>
+                    <IconButton size="small" onClick={() => setReplyingTo(null)} sx={{ p: 0.25 }}>
+                      <CloseIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Stack>
+                </Paper>
               )}
 
               <Stack direction="row" spacing={1}>

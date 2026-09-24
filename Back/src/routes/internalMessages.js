@@ -70,6 +70,7 @@ function sanitizeMentions(mentions) {
 
 function shapeMessage(message) {
   const senderId = asUserId(message.sender?._id || message.sender);
+  const replySenderId = asUserId(message.replyTo?.sender?._id || message.replyTo?.sender);
   return {
     ...message.toObject(),
     sender: message.sender
@@ -83,6 +84,24 @@ function shapeMessage(message) {
           username: 'Former user',
           role: 'unknown',
         },
+    replyTo: message.replyTo
+      ? {
+          _id: asUserId(message.replyTo._id),
+          body: message.replyTo.body || '',
+          messageDate: message.replyTo.messageDate || null,
+          sender: message.replyTo.sender
+            ? {
+                _id: replySenderId,
+                username: message.replyTo.sender.username || 'Former user',
+                role: message.replyTo.sender.role || 'unknown',
+              }
+            : {
+                _id: null,
+                username: 'Former user',
+                role: 'unknown',
+              },
+        }
+      : null,
     mentions: sanitizeMentions(message.mentions).map((mention) => ({
       _id: asUserId(mention._id || mention),
       username: mention.username || 'Former user',
@@ -486,6 +505,7 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
 
     const messages = await InternalMessage.find({ conversationId: conversation._id })
       .populate('sender', 'username role')
+      .populate({ path: 'replyTo', populate: { path: 'sender', select: 'username role' } })
       .populate('mentions', 'username role')
       .sort({ messageDate: 1 });
 
@@ -513,18 +533,33 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
 // 9. SEND MESSAGE
 router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) => {
   try {
-    const { conversationId, body, mediaUrls, mentions } = req.body;
+    const { conversationId, body, mediaUrls, mentions, replyToMessageId } = req.body;
     const currentUserId = req.user.userId;
 
     const { conversation, forbidden } = await loadConversationForUser(conversationId, currentUserId, req.user.role);
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
     if (forbidden) return res.status(403).json({ error: 'Forbidden: Not your conversation' });
 
+    let replyTo = null;
+    if (replyToMessageId) {
+      if (!mongoose.isValidObjectId(replyToMessageId)) {
+        return res.status(400).json({ error: 'Invalid reply target' });
+      }
+      replyTo = await InternalMessage.findOne({
+        _id: replyToMessageId,
+        conversationId: conversation._id,
+      }).select('_id');
+      if (!replyTo) {
+        return res.status(404).json({ error: 'Reply target not found in this conversation' });
+      }
+    }
+
     const newMessage = await InternalMessage.create({
       conversationId: conversation._id,
       sender: currentUserId,
       body,
       mediaUrls: mediaUrls || [],
+      replyTo: replyTo?._id || null,
       mentions: mentions || [],
       readBy: [{ user: currentUserId, readAt: new Date() }],
       messageDate: new Date()
@@ -535,6 +570,7 @@ router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) 
     await conversation.save();
 
     await newMessage.populate('sender', 'username role');
+    await newMessage.populate({ path: 'replyTo', populate: { path: 'sender', select: 'username role' } });
     await newMessage.populate('mentions', 'username role');
 
     const recipientIds = conversation.participants
@@ -624,6 +660,7 @@ router.get('/admin/conversation/:conversationId', requireAuth, requirePageAccess
 
     const messages = await InternalMessage.find({ conversationId })
       .populate('sender', 'username role')
+      .populate({ path: 'replyTo', populate: { path: 'sender', select: 'username role' } })
       .populate('mentions', 'username role')
       .sort({ messageDate: 1 });
 

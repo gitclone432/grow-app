@@ -810,6 +810,7 @@ function ComplianceBoardPage() {
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [chatAgents, setChatAgents] = useState([]);
   const [savingPickedUpByKey, setSavingPickedUpByKey] = useState('');
+  const [markingAttendedKey, setMarkingAttendedKey] = useState('');
   const [savingTrackingIdReturnId, setSavingTrackingIdReturnId] = useState('');
   const [trackingIdInput, setTrackingIdInput] = useState({});
 
@@ -1083,7 +1084,7 @@ function ComplianceBoardPage() {
   );
 
   const getUnreadAlertCount = () => (
-    getUnreadAlertThreads().reduce((total, thread) => total + Math.max(0, Number(thread?.unreadCount) || 0), 0)
+    getUnreadAlertThreads().length
   );
 
   const matchesBoardOrderFilters = (order) => {
@@ -5568,6 +5569,37 @@ function ComplianceBoardPage() {
     setSelectedOrderForMessage(null);
   };
 
+  const handleMarkMessageAttended = async (item) => {
+    const messageKey = getMessageKey(item);
+    const payload = {
+      sellerId: String(item?.sellerId || item?.seller?._id || item?.seller || '').trim(),
+      orderId: String(item?.orderId || item?.originalOrderId || item?.caseOrderId || item?.legacyOrderId || '').trim(),
+      buyerUsername: String(item?.buyerUsername || item?.buyer?.username || '').trim(),
+      itemId: String(item?.itemId || item?.itemNumber || item?.lineItems?.[0]?.legacyItemId || 'DIRECT_MESSAGE').trim(),
+    };
+
+    if (!payload.orderId && (!payload.buyerUsername || !payload.itemId)) {
+      setSnackbar({ open: true, message: 'Unable to mark attended: missing conversation identifiers' });
+      return;
+    }
+
+    if (!payload.sellerId) {
+      setSnackbar({ open: true, message: 'Unable to mark attended: missing seller id' });
+      return;
+    }
+
+    setMarkingAttendedKey(messageKey);
+    try {
+      await api.post('/ebay/chat/mark-attended', payload);
+      await handleMessageSent(payload);
+      setSnackbar({ open: true, message: 'Message marked attended' });
+    } catch (err) {
+      setSnackbar({ open: true, message: `Failed to mark attended: ${err.response?.data?.error || err.message}` });
+    } finally {
+      setMarkingAttendedKey('');
+    }
+  };
+
   const handleMessageSent = async (messageData) => {
     // When a message is sent from ChatModal and marked as read, update local state
     // No need for full refresh since backend now properly updates EbayMessageConversation.unreadCount
@@ -5587,20 +5619,22 @@ function ComplianceBoardPage() {
         : Boolean(buyerUsername && itemId && itemBuyer === String(buyerUsername).trim() && itemItemId === String(itemId).trim());
     };
 
+    const clearReplyAlertState = (item) => (
+      matchesMessageTarget(item)
+        ? {
+            ...item,
+            hasUnreadBuyerMessage: false,
+            messageUnreadCount: 0,
+            unreadCount: 0,
+            lastSellerMessageAt: sentAt,
+          }
+        : item
+    );
+
     setOrders((prevOrders) => {
       const updated = {};
       Object.keys(prevOrders).forEach((columnId) => {
-        updated[columnId] = (prevOrders[columnId] || []).map((item) => (
-          matchesMessageTarget(item)
-            ? {
-                ...item,
-                hasUnreadBuyerMessage: false,
-                messageUnreadCount: 0,
-                unreadCount: 0,
-                lastSellerMessageAt: sentAt,
-              }
-            : item
-        ));
+        updated[columnId] = (prevOrders[columnId] || []).map(clearReplyAlertState);
       });
       return updated;
     });
@@ -5608,30 +5642,37 @@ function ComplianceBoardPage() {
     setMessages(prevMessages => {
       const updated = { ...prevMessages };
       Object.keys(updated).forEach(category => {
-        updated[category] = (updated[category] || []).map(item => {
+        updated[category] = (updated[category] || []).map((item) => {
           if (!matchesMessageTarget(item)) return item;
           console.log('[COMPLIANCE-BOARD] Message sent - Setting unreadCount to 0 for:', item.buyerUsername);
-          return {
-            ...item,
-            unreadCount: 0,
-            messageUnreadCount: 0,
-            hasUnreadBuyerMessage: false,
-            lastSellerMessageAt: sentAt,
-          };
+          return clearReplyAlertState(item);
         });
       });
       return updated;
     });
 
+    setAllMessagesForAlerts((prev) => (prev || []).map(clearReplyAlertState));
+    setAlertPreviewItems((prev) => (Array.isArray(prev) ? prev.map(clearReplyAlertState) : prev));
+    setStatsDetailsModal((prev) => {
+      if (!prev?.open) return prev;
+      if (prev.statType === UNREAD_MESSAGES_ALERT_ID) {
+        return {
+          ...prev,
+          items: (prev.items || []).filter((item) => !matchesMessageTarget(item)),
+        };
+      }
+      if (prev.statType === MESSAGE_OVERDUE_ALERT_ID) {
+        return {
+          ...prev,
+          items: (prev.items || []).map(clearReplyAlertState).filter((item) => !matchesMessageTarget(item)),
+        };
+      }
+      return prev;
+    });
+
     setSelectedOrderForMessage((prev) => (
       prev && matchesMessageTarget(prev)
-        ? {
-            ...prev,
-            unreadCount: 0,
-            messageUnreadCount: 0,
-            hasUnreadBuyerMessage: false,
-            lastSellerMessageAt: sentAt,
-          }
+        ? clearReplyAlertState(prev)
         : prev
     ));
   };
@@ -5870,16 +5911,32 @@ function ComplianceBoardPage() {
             <Typography variant="caption" color="text.secondary">
               {messageDate ? format(new Date(messageDate), 'MMM dd, yyyy HH:mm') : ''}
             </Typography>
-            <IconButton
-              size="small"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleOpenMessageDialog(item);
-              }}
-              sx={{ color: BRAND_BLUE }}
-            >
-              <ChatIcon sx={{ fontSize: 16 }} />
-            </IconButton>
+            <Stack direction="row" spacing={0.5} alignItems="center">
+              <Button
+                size="small"
+                variant="outlined"
+                color="success"
+                disabled={markingAttendedKey === uniqueId}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleMarkMessageAttended(item);
+                }}
+                startIcon={markingAttendedKey === uniqueId ? <CircularProgress size={12} color="inherit" /> : <CheckCircleIcon sx={{ fontSize: 14 }} />}
+                sx={{ minWidth: 0, px: 1, py: 0.25, fontSize: '0.68rem', fontWeight: 700, textTransform: 'none' }}
+              >
+                Mark Attended
+              </Button>
+              <IconButton
+                size="small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleOpenMessageDialog(item);
+                }}
+                sx={{ color: BRAND_BLUE }}
+              >
+                <ChatIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Stack>
           </Stack>
         </CardContent>
       </Card>
@@ -6963,6 +7020,20 @@ function ComplianceBoardPage() {
                   sx={{ fontSize: '0.75rem', height: 24, fontWeight: 700 }}
                 />
               )}
+              <Button
+                size="small"
+                variant="outlined"
+                color="success"
+                disabled={markingAttendedKey === getMessageKey(item)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleMarkMessageAttended(item);
+                }}
+                startIcon={markingAttendedKey === getMessageKey(item) ? <CircularProgress size={12} color="inherit" /> : <CheckCircleIcon sx={{ fontSize: 14 }} />}
+                sx={{ fontSize: '0.72rem', height: 24, fontWeight: 700, textTransform: 'none', px: 1 }}
+              >
+                Mark Attended
+              </Button>
             </Stack>
 
             {/* Dragged / Assigned Date */}
