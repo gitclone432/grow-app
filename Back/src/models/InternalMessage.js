@@ -13,6 +13,8 @@ const InternalMessageSchema = new mongoose.Schema(
 
     // Optional attachments (images/files)
     mediaUrls: [{ type: String }],
+    // Optional reply target for threaded chat replies
+    replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'InternalMessage', default: null },
 
     // Users @mentioned in this message
     mentions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],

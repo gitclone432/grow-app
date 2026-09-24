@@ -30,6 +30,10 @@ const ConversationMetaSchema = new mongoose.Schema(
     // Who picked up the conversation
     pickedUpBy: { type: String, default: null },
 
+    // Manual attendance marker for message-alert workflows. When set, the
+    // board treats the conversation as attended even without a seller reply.
+    attendedAt: { type: Date, default: null },
+
     // Resolution Details
     notes: { type: String, default: '' },
     resolvedAt: Date,

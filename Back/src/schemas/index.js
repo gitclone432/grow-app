@@ -201,6 +201,7 @@ export const sendMessageSchema = z.object({
   body: z.string().min(1, 'Message body is required'),
   mediaUrls: z.array(z.string()).optional(),
   mentions: z.array(z.string()).optional(),
+  replyToMessageId: z.string().optional(),
 });
 
 export const createDmSchema = z.object({
