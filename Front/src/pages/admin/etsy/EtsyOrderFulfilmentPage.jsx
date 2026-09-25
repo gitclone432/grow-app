@@ -45,6 +45,7 @@ import {
   ETSY_COLUMN_SELECTOR_OPTIONS,
   DEFAULT_VISIBLE_ETSY_COLUMNS,
   ETSY_REGION_OPTIONS,
+  REMARK_OPTIONS,
   ETSY_ORDER_FULFILMENT_HIDDEN_COLUMNS,
   loadVisibleEtsyColumns,
   saveVisibleEtsyColumns,
@@ -131,6 +132,11 @@ function matchesDateFilter(order, {
 function matchesRegionFilter(order, regionFilter) {
   if (!regionFilter) return true;
   return String(order.region || '').trim().toUpperCase() === regionFilter.toUpperCase();
+}
+
+function matchesValueFilter(order, field, expectedValue) {
+  if (!field || !expectedValue) return true;
+  return String(order?.[field] || '').trim() === expectedValue;
 }
 
 function parseSortableTime(value) {
@@ -334,6 +340,17 @@ export default function EtsyOrderFulfilmentPage({
   initialSingleDate = '',
   noFilteredResultsMessage = 'No orders match the selected filters.',
   headerSupplement = null,
+  showRemarkFilter = false,
+  remarkFilterField = 'remark',
+  showSecondarySingleDateFilter = false,
+  secondarySingleDateField = 'dateSold',
+  secondarySingleDateLabel = 'Date of Sold',
+  initialSecondarySingleDate = '',
+  secondaryDateFilterMode = 'single',
+  allowSecondaryDateModeToggle = false,
+  secondaryDateFromLabel = 'Date from',
+  secondaryDateToLabel = 'Date to',
+  columnBehaviorOverrides = {},
 } = {}) {
   const theme = useTheme();
   const isSmallMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -353,7 +370,12 @@ export default function EtsyOrderFulfilmentPage({
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [selectedDate, setSelectedDate] = useState(initialSingleDate);
+  const [selectedSecondaryDate, setSelectedSecondaryDate] = useState(initialSecondarySingleDate);
+  const [activeSecondaryDateFilterMode, setActiveSecondaryDateFilterMode] = useState(secondaryDateFilterMode);
+  const [secondaryDateFrom, setSecondaryDateFrom] = useState('');
+  const [secondaryDateTo, setSecondaryDateTo] = useState('');
   const [selectedRegion, setSelectedRegion] = useState('');
+  const [selectedRemark, setSelectedRemark] = useState('');
   const [error, setError] = useState('');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
   const [savingCells, setSavingCells] = useState({});
@@ -405,11 +427,14 @@ export default function EtsyOrderFulfilmentPage({
         const labeled = columnLabelOverrides[column.key]
           ? { ...column, label: columnLabelOverrides[column.key] }
           : column;
-        return labeled.key === 'amazonAccount'
+        const withOptions = labeled.key === 'amazonAccount'
           ? { ...labeled, options: ['', ...supplierAccountNames] }
           : labeled;
+        return columnBehaviorOverrides[withOptions.key]
+          ? { ...withOptions, ...columnBehaviorOverrides[withOptions.key] }
+          : withOptions;
       }),
-    [supplierAccountNames, hiddenKeys, columnLabelOverrides]
+    [supplierAccountNames, hiddenKeys, columnLabelOverrides, columnBehaviorOverrides]
   );
 
   const visibleColumnsSet = useMemo(() => new Set(effectiveVisibleColumns), [effectiveVisibleColumns]);
@@ -522,6 +547,14 @@ export default function EtsyOrderFulfilmentPage({
     setSelectedDate(initialSingleDate);
   }, [initialSingleDate]);
 
+  useEffect(() => {
+    setSelectedSecondaryDate(initialSecondarySingleDate);
+  }, [initialSecondarySingleDate]);
+
+  useEffect(() => {
+    setActiveSecondaryDateFilterMode(secondaryDateFilterMode);
+  }, [secondaryDateFilterMode]);
+
   const filteredOrders = useMemo(
     () => orders.filter((order) => (
       matchesDateFilter(order, {
@@ -531,9 +564,35 @@ export default function EtsyOrderFulfilmentPage({
         dateTo,
         selectedDate,
       })
+      && (!showSecondarySingleDateFilter || matchesDateFilter(order, {
+        field: secondarySingleDateField,
+        mode: activeSecondaryDateFilterMode,
+        dateFrom: secondaryDateFrom,
+        dateTo: secondaryDateTo,
+        selectedDate: selectedSecondaryDate,
+      }))
       && (!showRegionFilter || matchesRegionFilter(order, selectedRegion))
+      && (!showRemarkFilter || matchesValueFilter(order, remarkFilterField, selectedRemark))
     )),
-    [orders, dateFilterField, dateFilterMode, dateFrom, dateTo, selectedDate, selectedRegion, showRegionFilter]
+    [
+      orders,
+      dateFilterField,
+      dateFilterMode,
+      dateFrom,
+      dateTo,
+      selectedDate,
+      showSecondarySingleDateFilter,
+      secondarySingleDateField,
+      activeSecondaryDateFilterMode,
+      selectedSecondaryDate,
+      secondaryDateFrom,
+      secondaryDateTo,
+      selectedRegion,
+      showRegionFilter,
+      showRemarkFilter,
+      remarkFilterField,
+      selectedRemark,
+    ]
   );
 
   const sortColumn = useMemo(
@@ -587,7 +646,17 @@ export default function EtsyOrderFulfilmentPage({
 
   useEffect(() => {
     setPage(1);
-  }, [dateFilterMode, dateFrom, dateTo, selectedDate, selectedRegion]);
+  }, [
+    dateFilterMode,
+    dateFrom,
+    dateTo,
+    selectedDate,
+    selectedSecondaryDate,
+    secondaryDateFrom,
+    secondaryDateTo,
+    selectedRegion,
+    selectedRemark,
+  ]);
 
   const totalPages = Math.max(1, Math.ceil(sortedOrders.length / ROWS_PER_PAGE));
 
@@ -776,13 +845,26 @@ export default function EtsyOrderFulfilmentPage({
     ? Boolean(selectedDate)
     : Boolean(dateFrom || dateTo);
 
-  const hasActiveFilters = hasActiveDateFilter || (showRegionFilter && Boolean(selectedRegion));
+  const hasActiveSecondaryDateFilter = !showSecondarySingleDateFilter
+    ? false
+    : activeSecondaryDateFilterMode === 'single'
+      ? Boolean(selectedSecondaryDate)
+      : Boolean(secondaryDateFrom || secondaryDateTo);
+
+  const hasActiveFilters = hasActiveDateFilter
+    || hasActiveSecondaryDateFilter
+    || (showRegionFilter && Boolean(selectedRegion))
+    || (showRemarkFilter && Boolean(selectedRemark));
 
   const handleClearFilters = () => {
     setDateFrom('');
     setDateTo('');
     setSelectedDate('');
+    setSelectedSecondaryDate('');
+    setSecondaryDateFrom('');
+    setSecondaryDateTo('');
     setSelectedRegion('');
+    setSelectedRemark('');
   };
 
   const selectStorePrompt = allowImport || allowCreate
@@ -959,6 +1041,59 @@ export default function EtsyOrderFulfilmentPage({
               </>
             )}
 
+            {showSecondarySingleDateFilter && (
+              <>
+                {allowSecondaryDateModeToggle && (
+                  <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 170 } }}>
+                    <InputLabel id="etsy-secondary-date-mode-label">Date of Sold</InputLabel>
+                    <Select
+                      labelId="etsy-secondary-date-mode-label"
+                      value={activeSecondaryDateFilterMode}
+                      label="Date of Sold"
+                      onChange={(e) => setActiveSecondaryDateFilterMode(e.target.value)}
+                      disabled={!selectedStoreId}
+                    >
+                      <MenuItem value="single">Single Date</MenuItem>
+                      <MenuItem value="range">Range</MenuItem>
+                    </Select>
+                  </FormControl>
+                )}
+
+                {activeSecondaryDateFilterMode === 'single' ? (
+                  <TextField
+                    size="small"
+                    type="date"
+                    label={secondarySingleDateLabel}
+                    value={selectedSecondaryDate}
+                    onChange={(e) => setSelectedSecondaryDate(e.target.value)}
+                    InputLabelProps={{ shrink: true }}
+                    sx={{ minWidth: { xs: '100%', sm: 180 } }}
+                  />
+                ) : (
+                  <>
+                    <TextField
+                      size="small"
+                      type="date"
+                      label={secondaryDateFromLabel}
+                      value={secondaryDateFrom}
+                      onChange={(e) => setSecondaryDateFrom(e.target.value)}
+                      InputLabelProps={{ shrink: true }}
+                      sx={{ minWidth: { xs: '100%', sm: 160 } }}
+                    />
+                    <TextField
+                      size="small"
+                      type="date"
+                      label={secondaryDateToLabel}
+                      value={secondaryDateTo}
+                      onChange={(e) => setSecondaryDateTo(e.target.value)}
+                      InputLabelProps={{ shrink: true }}
+                      sx={{ minWidth: { xs: '100%', sm: 160 } }}
+                    />
+                  </>
+                )}
+              </>
+            )}
+
             {showRegionFilter && (
               <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 140 } }}>
                 <InputLabel id="etsy-region-filter-label">Region</InputLabel>
@@ -973,6 +1108,26 @@ export default function EtsyOrderFulfilmentPage({
                   {ETSY_REGION_OPTIONS.map((region) => (
                     <MenuItem key={region} value={region}>
                       {region}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
+
+            {showRemarkFilter && (
+              <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 170 } }}>
+                <InputLabel id="etsy-remark-filter-label">Remark</InputLabel>
+                <Select
+                  labelId="etsy-remark-filter-label"
+                  value={selectedRemark}
+                  label="Remark"
+                  onChange={(e) => setSelectedRemark(e.target.value)}
+                  disabled={!selectedStoreId}
+                >
+                  <MenuItem value="">All Remarks</MenuItem>
+                  {REMARK_OPTIONS.map((remark) => (
+                    <MenuItem key={remark} value={remark}>
+                      {remark}
                     </MenuItem>
                   ))}
                 </Select>
