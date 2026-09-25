@@ -11825,11 +11825,44 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
     const orders = orderIds.length
       ? await Order.find(
         { $or: [{ orderId: { $in: orderIds } }, { legacyOrderId: { $in: orderIds } }] },
-        { _id: 1, orderId: 1, legacyOrderId: 1, productName: 1, creationDate: 1, dateSold: 1, shipByDate: 1, purchaseMarketplaceId: 1, remark: 1, fulfillmentNotes: 1, amazonAccount: 1, azOrderId: 1 }
+        {
+          _id: 1,
+          orderId: 1,
+          legacyOrderId: 1,
+          productName: 1,
+          creationDate: 1,
+          dateSold: 1,
+          shipByDate: 1,
+          purchaseMarketplaceId: 1,
+          remark: 1,
+          fulfillmentNotes: 1,
+          amazonAccount: 1,
+          azOrderId: 1,
+          itemNumber: 1,
+          lineItems: 1,
+          shippingFullName: 1,
+          shippingAddressLine1: 1,
+          shippingAddressLine2: 1,
+          shippingCity: 1,
+          shippingState: 1,
+          shippingPostalCode: 1,
+          shippingCountry: 1,
+        }
       ).lean()
       : [];
+    const itemImageMap = await loadItemImageMap([
+      ...orders,
+      ...cancellations.map((c) => ({
+        itemNumber: c.itemId || '',
+        lineItems: c.itemId ? [{ legacyItemId: c.itemId }] : [],
+      })),
+    ]);
     const orderMap = {};
     orders.forEach((o) => {
+      const firstLineItem = Array.isArray(o.lineItems) ? o.lineItems[0] : null;
+      const resolvedItemId = String(
+        o.itemNumber || firstLineItem?.legacyItemId || firstLineItem?.itemId || ''
+      ).trim();
       const payload = { 
         _id: o._id.toString(), // Include Order MongoDB _id for API calls
         productName: o.productName,
@@ -11839,7 +11872,23 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         remark: o.remark || '', // Get remark from Order (same field as FulfillmentDashboard)
         notes: o.fulfillmentNotes || '', // Get notes from Order (same field as FulfillmentDashboard)
         amazonAccount: o.amazonAccount || null,
-        amazonOrderId: o.azOrderId || ''
+        amazonOrderId: o.azOrderId || '',
+        itemNumber: o.itemNumber || '',
+        sku: extractOrderSku(o),
+        lineItems: Array.isArray(o.lineItems) ? o.lineItems : [],
+        itemImageUrl:
+          firstLineItem?.imageUrl
+          || firstLineItem?.image?.imageUrl
+          || firstLineItem?.thumbnailImages?.[0]?.imageUrl
+          || itemImageMap.get(resolvedItemId)
+          || '',
+        shippingFullName: o.shippingFullName || '',
+        shippingAddressLine1: o.shippingAddressLine1 || '',
+        shippingAddressLine2: o.shippingAddressLine2 || '',
+        shippingCity: o.shippingCity || '',
+        shippingState: o.shippingState || '',
+        shippingPostalCode: o.shippingPostalCode || '',
+        shippingCountry: o.shippingCountry || '',
       };
       if (o.orderId) orderMap[o.orderId] = payload;
       if (o.legacyOrderId) orderMap[o.legacyOrderId] = payload;
@@ -11847,6 +11896,9 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
 
     const rows = cancellations.map((c) => {
       const key = c.orderId || c.legacyOrderId;
+      const resolvedItemId = String(
+        orderMap[key]?.itemNumber || c.itemId || orderMap[key]?.lineItems?.[0]?.legacyItemId || ''
+      ).trim();
       return {
         ...c,
         orderDbId: orderMap[key]?._id, // Include Order._id for consistency with FulfillmentDashboard endpoint
@@ -11857,7 +11909,18 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         remark: orderMap[key]?.remark || '', // Use remark from Order (same field as FulfillmentDashboard)
         notes: orderMap[key]?.notes || '', // Use notes from Order (same field as FulfillmentDashboard)
         amazonAccount: orderMap[key]?.amazonAccount || null,
-        amazonOrderId: orderMap[key]?.amazonOrderId || ''
+        amazonOrderId: orderMap[key]?.amazonOrderId || '',
+        itemNumber: orderMap[key]?.itemNumber || '',
+        sku: orderMap[key]?.sku || '',
+        lineItems: orderMap[key]?.lineItems || [],
+        itemImageUrl: orderMap[key]?.itemImageUrl || itemImageMap.get(resolvedItemId) || '',
+        shippingFullName: orderMap[key]?.shippingFullName || '',
+        shippingAddressLine1: orderMap[key]?.shippingAddressLine1 || '',
+        shippingAddressLine2: orderMap[key]?.shippingAddressLine2 || '',
+        shippingCity: orderMap[key]?.shippingCity || '',
+        shippingState: orderMap[key]?.shippingState || '',
+        shippingPostalCode: orderMap[key]?.shippingPostalCode || '',
+        shippingCountry: orderMap[key]?.shippingCountry || '',
       };
     });
 

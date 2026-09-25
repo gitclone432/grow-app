@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   Box,
   Table,
@@ -29,9 +29,13 @@ import {
   DialogContent,
   DialogActions,
   TextField,
+  Link,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import CancelIcon from '@mui/icons-material/Cancel';
+import CloseIcon from '@mui/icons-material/Close';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ChatIcon from '@mui/icons-material/Chat';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -40,6 +44,11 @@ import HighlightOffIcon from '@mui/icons-material/HighlightOff';
 import AttachFileIcon from '@mui/icons-material/AttachFile';
 import SendIcon from '@mui/icons-material/Send';
 import VisibilityIcon from '@mui/icons-material/Visibility';
+import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
+import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
+import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
+import NavigateNextIcon from '@mui/icons-material/NavigateNext';
 import api from '../../lib/api';
 import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
@@ -219,9 +228,406 @@ const headerSx = {
   '& .MuiTableSortLabel-icon': { color: 'rgba(255,255,255,0.7) !important' },
 };
 
+function ImageDialog({ open, onClose, images }) {
+  const theme = useTheme();
+  const isMobileDialog = useMediaQuery(theme.breakpoints.down('sm'));
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  useEffect(() => {
+    if (open) {
+      setCurrentIndex(0);
+    }
+  }, [open]);
+
+  const handleNext = () => {
+    setCurrentIndex((prev) => (prev + 1) % images.length);
+  };
+
+  const handlePrev = () => {
+    setCurrentIndex((prev) => (prev - 1 + images.length) % images.length);
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth fullScreen={isMobileDialog}>
+      <DialogTitle sx={{ p: { xs: 1.5, sm: 2 } }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Typography variant="h6" sx={{ fontSize: { xs: '1rem', sm: '1.25rem' } }}>
+            Images ({images.length ? currentIndex + 1 : 0}/{images.length})
+          </Typography>
+          <IconButton onClick={onClose} size="small">
+            <CloseIcon />
+          </IconButton>
+        </Stack>
+      </DialogTitle>
+      <DialogContent sx={{ p: { xs: 1, sm: 2 } }}>
+        {images.length > 0 ? (
+          <Box>
+            <Box
+              sx={{
+                width: '100%',
+                height: { xs: 'calc(100vh - 200px)', sm: 500 },
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                bgcolor: 'grey.100',
+                borderRadius: 1,
+                mb: 2,
+                position: 'relative',
+              }}
+            >
+              <img
+                src={images[currentIndex]}
+                alt={`Item ${currentIndex + 1}`}
+                style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+              />
+
+              {images.length > 1 && isMobileDialog && (
+                <>
+                  <IconButton
+                    onClick={handlePrev}
+                    sx={{
+                      position: 'absolute',
+                      left: 4,
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      bgcolor: 'rgba(255,255,255,0.8)',
+                      '&:hover': { bgcolor: 'rgba(255,255,255,0.9)' },
+                    }}
+                  >
+                    <NavigateBeforeIcon />
+                  </IconButton>
+                  <IconButton
+                    onClick={handleNext}
+                    sx={{
+                      position: 'absolute',
+                      right: 4,
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      bgcolor: 'rgba(255,255,255,0.8)',
+                      '&:hover': { bgcolor: 'rgba(255,255,255,0.9)' },
+                    }}
+                  >
+                    <NavigateNextIcon />
+                  </IconButton>
+                </>
+              )}
+            </Box>
+
+            {images.length > 1 && !isMobileDialog && (
+              <Stack direction="row" justifyContent="space-between" sx={{ mb: 2 }}>
+                <Button onClick={handlePrev} startIcon={<NavigateBeforeIcon />} variant="outlined">
+                  Previous
+                </Button>
+                <Button onClick={handleNext} endIcon={<NavigateNextIcon />} variant="outlined">
+                  Next
+                </Button>
+              </Stack>
+            )}
+
+            {images.length > 1 && (
+              <Stack
+                direction="row"
+                spacing={0.5}
+                sx={{
+                  overflowX: 'auto',
+                  pb: 1,
+                  justifyContent: { xs: 'flex-start', sm: 'center' },
+                  flexWrap: { xs: 'nowrap', sm: 'wrap' },
+                }}
+              >
+                {images.map((img, idx) => (
+                  <Box
+                    key={idx}
+                    onClick={() => setCurrentIndex(idx)}
+                    sx={{
+                      width: { xs: 60, sm: 80 },
+                      height: { xs: 60, sm: 80 },
+                      cursor: 'pointer',
+                      border: idx === currentIndex ? '3px solid' : '1px solid',
+                      borderColor: idx === currentIndex ? 'primary.main' : 'grey.300',
+                      borderRadius: 1,
+                      overflow: 'hidden',
+                      flexShrink: 0,
+                      '&:hover': { borderColor: 'primary.main', opacity: 0.8 },
+                    }}
+                  >
+                    <img
+                      src={img}
+                      alt={`Thumbnail ${idx + 1}`}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    />
+                  </Box>
+                ))}
+              </Stack>
+            )}
+          </Box>
+        ) : (
+          <Alert severity="info">No images available for this item</Alert>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function hasUnreadBuyerMessage(row) {
   return Boolean(row?.hasUnreadBuyerMessage || Number(row?.messageUnreadCount) > 0);
 }
+
+function getLineItemSku(item) {
+  return String(item?.sku || item?.SKU || item?.sellerSku || item?.customLabel || '').trim();
+}
+
+function getCancellationSkus(row) {
+  if (Array.isArray(row?.lineItems) && row.lineItems.length > 0) {
+    return row.lineItems.map((item) => getLineItemSku(item)).filter(Boolean);
+  }
+  return row?.sku ? [String(row.sku).trim()] : [];
+}
+
+function getCancellationImageUrl(row) {
+  if (row?.itemImageUrl) return row.itemImageUrl;
+  const firstLineItem = Array.isArray(row?.lineItems) ? row.lineItems[0] : null;
+  return firstLineItem?.imageUrl || firstLineItem?.image?.imageUrl || firstLineItem?.thumbnailImages?.[0]?.imageUrl || '';
+}
+
+function getCancellationAddressLines(row) {
+  const cityState = [row?.shippingCity, row?.shippingState].filter(Boolean).join(', ');
+  return [
+    row?.shippingFullName || row?.buyerLoginName || row?.buyerUsername || '',
+    row?.shippingAddressLine1 || '',
+    row?.shippingAddressLine2 || '',
+    [cityState, row?.shippingPostalCode].filter(Boolean).join(' '),
+    row?.shippingCountry || '',
+  ].filter((value) => Boolean(String(value || '').trim()));
+}
+
+const ProductNameCell = React.memo(function ProductNameCell({ row, onCopy, onViewImages, thumbnailUrl, imageCount = 0, loadingImages = false }) {
+  const lineItems = Array.isArray(row.lineItems) && row.lineItems.length > 0
+    ? row.lineItems
+    : [{
+      title: row.itemTitle || row.productName || '-',
+      legacyItemId: row.itemId || row.itemNumber || '',
+      sku: row.sku || '',
+      quantity: 1,
+    }];
+  const previewUrl = thumbnailUrl || getCancellationImageUrl(row);
+
+  return (
+    <TableCell sx={{ minWidth: 320, maxWidth: 420, pr: 1 }}>
+      <Stack spacing={0.5} sx={{ py: 0.35 }}>
+        {lineItems.map((item, index) => {
+          const title = item.title || row.itemTitle || row.productName || '-';
+          const itemId = String(item.legacyItemId || item.itemId || row.itemId || row.itemNumber || '').trim();
+          const sku = getLineItemSku(item) || row.sku || '';
+          const quantity = Number(item.quantity) > 0 ? Number(item.quantity) : 1;
+
+          return (
+            <Box
+              key={`${row.cancelId || row._id || row.orderId || 'row'}-${itemId || index}`}
+              sx={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 0.75,
+                borderBottom: index < lineItems.length - 1 ? '1px dashed rgba(0,0,0,0.1)' : 'none',
+                pb: index < lineItems.length - 1 ? 0.5 : 0,
+              }}
+            >
+              <Chip
+                label={`x${quantity}`}
+                size="small"
+                color={quantity > 1 ? 'warning' : 'default'}
+                sx={{
+                  height: 20,
+                  minWidth: 30,
+                  fontWeight: 'bold',
+                  fontSize: '0.7rem',
+                  borderRadius: 1,
+                }}
+              />
+
+              {index === 0 && (previewUrl || loadingImages) ? (
+                <Box
+                  onClick={() => onViewImages(row)}
+                  sx={{
+                    width: 34,
+                    height: 34,
+                    cursor: 'pointer',
+                    border: '1px solid',
+                    borderColor: 'grey.300',
+                    borderRadius: 1,
+                    overflow: 'hidden',
+                    flexShrink: 0,
+                    '&:hover': {
+                      borderColor: 'primary.main',
+                      boxShadow: 1,
+                    },
+                    position: 'relative',
+                  }}
+                >
+                  {previewUrl ? (
+                    <img
+                      src={previewUrl}
+                      alt={title}
+                      loading="lazy"
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    />
+                  ) : null}
+                  {imageCount > 1 && (
+                    <Chip
+                      label={`+${imageCount - 1}`}
+                      size="small"
+                      sx={{
+                        position: 'absolute',
+                        bottom: 1,
+                        right: 1,
+                        height: 14,
+                        fontSize: '0.55rem',
+                        bgcolor: 'rgba(0,0,0,0.7)',
+                        color: 'white',
+                        '& .MuiChip-label': { px: 0.35 },
+                      }}
+                    />
+                  )}
+                  {loadingImages && (
+                    <Box
+                      sx={{
+                        position: 'absolute',
+                        inset: 0,
+                        bgcolor: 'rgba(255,255,255,0.8)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <CircularProgress size={16} />
+                    </Box>
+                  )}
+                </Box>
+              ) : null}
+
+              <Box sx={{ flex: 1, overflow: 'hidden' }}>
+                <Tooltip title={title} arrow placement="top">
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      lineHeight: 1.2,
+                      fontSize: '0.8125rem',
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    {title}
+                  </Typography>
+                </Tooltip>
+                <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.25 }} flexWrap="wrap" useFlexGap>
+                  {itemId ? (
+                    <Link
+                      href={`https://www.ebay.com/itm/${itemId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      underline="hover"
+                      sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.3 }}
+                    >
+                      <Typography variant="caption" color="primary.main" sx={{ fontSize: '0.65rem', fontWeight: 500 }}>
+                        ID: {itemId}
+                      </Typography>
+                      <OpenInNewIcon sx={{ fontSize: 11, color: 'primary.main' }} />
+                    </Link>
+                  ) : null}
+                  {sku ? (
+                    <Stack direction="row" spacing={0.15} alignItems="center">
+                      <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 500, color: 'text.secondary' }}>
+                        SKU: {sku}
+                      </Typography>
+                      <IconButton
+                        size="small"
+                        onClick={() => onCopy(sku)}
+                        aria-label="copy sku"
+                        sx={{ p: 0.15 }}
+                      >
+                        <ContentCopyIcon sx={{ fontSize: 11 }} />
+                      </IconButton>
+                    </Stack>
+                  ) : null}
+                </Stack>
+              </Box>
+
+              <IconButton
+                size="small"
+                onClick={() => onCopy(title)}
+                aria-label="copy product title"
+                sx={{ mt: -0.5, p: 0.35 }}
+              >
+                <ContentCopyIcon sx={{ fontSize: '0.9rem' }} />
+              </IconButton>
+            </Box>
+          );
+        })}
+      </Stack>
+    </TableCell>
+  );
+});
+
+const ShippingAddressCell = React.memo(function ShippingAddressCell({ row, expanded, onToggle, onCopy }) {
+  const lines = getCancellationAddressLines(row);
+  const buyerName = lines[0] || '-';
+
+  return (
+    <TableCell sx={{ minWidth: 260, maxWidth: 320 }}>
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+        <Button
+          variant="text"
+          size="small"
+          onClick={onToggle}
+          sx={{
+            justifyContent: 'space-between',
+            textTransform: 'none',
+            px: 0,
+            minWidth: 0,
+            color: 'primary.main',
+            alignSelf: 'flex-start',
+            '&:hover': { backgroundColor: 'transparent' },
+          }}
+          endIcon={expanded ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
+        >
+          {buyerName}
+        </Button>
+        {expanded ? (
+          <Stack spacing={0.35} sx={{ mt: 0.25 }}>
+            {lines.map((line, index) => (
+              <Box key={`${row.cancelId || row._id || row.orderId || 'row'}-address-${index}`} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <Tooltip title={line || '-'} arrow>
+                  <Typography
+                    variant={index === 0 ? 'body2' : 'caption'}
+                    sx={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      flex: 1,
+                      fontWeight: index === 0 ? 500 : 400,
+                    }}
+                  >
+                    {line || '-'}
+                  </Typography>
+                </Tooltip>
+                <IconButton
+                  size="small"
+                  onClick={() => onCopy(line)}
+                  aria-label={index === 0 ? 'copy buyer name' : 'copy shipping address'}
+                  sx={{ p: 0.25, flexShrink: 0 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Box>
+            ))}
+          </Stack>
+        ) : null}
+      </Box>
+    </TableCell>
+  );
+});
 
 export default function CancellationSearchPage({
   dateFilter: dateFilterProp,
@@ -263,7 +669,15 @@ export default function CancellationSearchPage({
   const [remarkAttachments, setRemarkAttachments] = useState([]);
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [selectedDetailsRow, setSelectedDetailsRow] = useState(null);
+  const [expandedShippingId, setExpandedShippingId] = useState(null);
+  const [loadingImages, setLoadingImages] = useState({});
+  const [itemImages, setItemImages] = useState({});
+  const [imageDialogOpen, setImageDialogOpen] = useState(false);
+  const [selectedImages, setSelectedImages] = useState([]);
   const fileInputRefRemark = useRef(null);
+  const thumbnailFetchStarted = useRef(new Set());
+  const itemImagesRef = useRef(itemImages);
+  itemImagesRef.current = itemImages;
   const limit = 25;
 
   function clearBuyerMessageIndicator(payload = {}) {
@@ -292,6 +706,8 @@ export default function CancellationSearchPage({
     { id: 'orderId', label: 'Order ID' },
     { id: 'dateSold', label: 'Date Sold' },
     { id: 'shipBy', label: 'Ship By' },
+    { id: 'productName', label: 'Product Name' },
+    { id: 'shippingAddress', label: 'Shipping Address' },
     { id: 'seller', label: 'Seller' },
     { id: 'buyerLoginName', label: 'buyerLoginName' },
     { id: 'itemId', label: 'itemId' },
@@ -457,6 +873,123 @@ export default function CancellationSearchPage({
       setSortDir('asc');
     }
   };
+
+  const fetchThumbnail = useCallback(async (row) => {
+    const rowId = row._id || row.cancelId;
+    const itemId = row.itemId || row.itemNumber || row.lineItems?.[0]?.legacyItemId;
+    const sellerId = row.seller?._id || row.seller;
+
+    if (getCancellationImageUrl(row)) {
+      setItemImages((prev) => prev[rowId]
+        ? prev
+        : { ...prev, [rowId]: { thumbnail: getCancellationImageUrl(row), images: null, count: 0 } });
+      return;
+    }
+    if (!itemId || !sellerId || thumbnailFetchStarted.current.has(rowId)) {
+      return;
+    }
+    thumbnailFetchStarted.current.add(rowId);
+
+    try {
+      const { data } = await api.get(`/ebay/item-images/${itemId}?sellerId=${sellerId}&thumbnail=true`);
+      const url = data?.images?.[0] || data?.thumbnail || '';
+      if (url) {
+        setItemImages((prev) => ({
+          ...prev,
+          [rowId]: {
+            ...(prev[rowId] || {}),
+            thumbnail: url,
+            count: Number(data?.total || (data?.images?.length || 0)),
+          },
+        }));
+      }
+    } catch (thumbError) {
+      console.error('Error fetching cancellation thumbnail:', thumbError);
+    }
+  }, []);
+
+  const fetchAllImages = useCallback(async (row) => {
+    const rowId = row._id || row.cancelId;
+    const itemId = row.itemId || row.itemNumber || row.lineItems?.[0]?.legacyItemId;
+    const sellerId = row.seller?._id || row.seller;
+
+    if (itemImagesRef.current[rowId]?.images) {
+      return itemImagesRef.current[rowId].images;
+    }
+    if (!itemId || !sellerId) {
+      const fallbackImage = getCancellationImageUrl(row);
+      return fallbackImage ? [fallbackImage] : [];
+    }
+
+    setLoadingImages((prev) => ({ ...prev, [rowId]: true }));
+    try {
+      const { data } = await api.get(`/ebay/item-images/${itemId}?sellerId=${sellerId}`);
+      const allImages = Array.isArray(data?.images) ? data.images : [];
+      setItemImages((prev) => ({
+        ...prev,
+        [rowId]: {
+          ...(prev[rowId] || {}),
+          thumbnail: prev[rowId]?.thumbnail || allImages[0] || getCancellationImageUrl(row) || '',
+          images: allImages,
+          count: allImages.length,
+        },
+      }));
+      return allImages;
+    } catch (imageError) {
+      console.error('Error fetching cancellation images:', imageError);
+      const fallbackImage = getCancellationImageUrl(row);
+      return fallbackImage ? [fallbackImage] : [];
+    } finally {
+      setLoadingImages((prev) => ({ ...prev, [rowId]: false }));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!rows.length) return;
+
+    let cancelled = false;
+    let idleId;
+    let timeoutId;
+
+    const run = () => {
+      const queue = rows.filter((row) => {
+        const rowId = row._id || row.cancelId;
+        const itemId = row.itemId || row.itemNumber || row.lineItems?.[0]?.legacyItemId;
+        const sellerId = row.seller?._id || row.seller;
+        return itemId && sellerId && !thumbnailFetchStarted.current.has(rowId);
+      });
+
+      const concurrency = 3;
+      (async () => {
+        while (!cancelled && queue.length) {
+          const batch = queue.splice(0, concurrency);
+          await Promise.all(batch.map((row) => fetchThumbnail(row)));
+        }
+      })();
+    };
+
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(run, { timeout: 400 });
+    } else {
+      timeoutId = window.setTimeout(run, 120);
+    }
+
+    return () => {
+      cancelled = true;
+      if (idleId != null && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+      if (timeoutId != null) window.clearTimeout(timeoutId);
+    };
+  }, [rows, fetchThumbnail]);
+
+  const handleViewImages = useCallback(async (row) => {
+    const images = await fetchAllImages(row);
+    if (images.length > 0) {
+      setSelectedImages(images);
+      setImageDialogOpen(true);
+    }
+  }, [fetchAllImages]);
 
   const formatDate = (dateStr, marketplaceId) => {
     if (!dateStr) return '-';
@@ -961,6 +1494,8 @@ export default function CancellationSearchPage({
                 'Order ID': (r) => r.orderId || r.legacyOrderId || '',
                 'Date Sold': (r) => formatDate(r.dateSold, r.purchaseMarketplaceId),
                 'Ship By': (r) => formatDate(r.shipByDate, r.purchaseMarketplaceId),
+                'Product Name': (r) => r.itemTitle || r.productName || '',
+                'Shipping Address': (r) => getCancellationAddressLines(r).join(', '),
                 Seller: (r) => r.seller?.user?.username || '',
                 buyerLoginName: (r) => r.buyerLoginName || r.buyerUsername || '',
                 itemId: 'itemId',
@@ -1023,6 +1558,8 @@ export default function CancellationSearchPage({
                 {visibleColumns.includes('orderId') && <TableCell sx={headerSx}>Order ID</TableCell>}
                 {visibleColumns.includes('dateSold') && <TableCell sx={headerSx}>Date Sold</TableCell>}
                 {visibleColumns.includes('shipBy') && <TableCell sx={headerSx}>Ship By</TableCell>}
+                {visibleColumns.includes('productName') && <TableCell sx={headerSx}>Product Name</TableCell>}
+                {visibleColumns.includes('shippingAddress') && <TableCell sx={headerSx}>Shipping Address</TableCell>}
                 {visibleColumns.includes('seller') && <TableCell sx={headerSx}>Seller</TableCell>}
                 {visibleColumns.includes('buyerLoginName') && <TableCell sx={headerSx}>buyerLoginName</TableCell>}
                 {visibleColumns.includes('itemId') && <TableCell sx={headerSx}>itemId</TableCell>}
@@ -1112,6 +1649,24 @@ export default function CancellationSearchPage({
                     )}
                     {visibleColumns.includes('shipBy') && (
                       <TableCell>{formatDate(row.shipByDate, row.purchaseMarketplaceId)}</TableCell>
+                    )}
+                    {visibleColumns.includes('productName') && (
+                      <ProductNameCell
+                        row={row}
+                        onCopy={handleCopy}
+                        onViewImages={handleViewImages}
+                        thumbnailUrl={itemImages[row._id || row.cancelId]?.thumbnail}
+                        imageCount={itemImages[row._id || row.cancelId]?.count || 0}
+                        loadingImages={Boolean(loadingImages[row._id || row.cancelId])}
+                      />
+                    )}
+                    {visibleColumns.includes('shippingAddress') && (
+                      <ShippingAddressCell
+                        row={row}
+                        expanded={expandedShippingId === (row.cancelId || row._id)}
+                        onToggle={() => setExpandedShippingId((prev) => prev === (row.cancelId || row._id) ? null : (row.cancelId || row._id))}
+                        onCopy={handleCopy}
+                      />
                     )}
                     {visibleColumns.includes('seller') && (
                       <TableCell>{row.seller?.user?.username || '-'}</TableCell>
@@ -1329,6 +1884,12 @@ export default function CancellationSearchPage({
           onMessageSent={clearBuyerMessageIndicator}
         />
       )}
+
+      <ImageDialog
+        open={imageDialogOpen}
+        onClose={() => setImageDialogOpen(false)}
+        images={selectedImages}
+      />
 
       {/* Remark message confirmation dialog */}
       <Dialog

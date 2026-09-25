@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import {
   Box,
   IconButton,
@@ -214,6 +215,8 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
   const signColor = column.colorBySign ? signedMoneyColor(value) : null;
   const cellAlign = column.align || 'left';
   const justifyContent = cellAlign === 'right' ? 'flex-end' : cellAlign === 'center' ? 'center' : 'flex-start';
+  const canEdit = !disabled && !saving && !column.computed;
+  const editTrigger = column.editTrigger || 'click';
 
   if (column.inputType === 'select' && column.alwaysEdit) {
     return (
@@ -295,7 +298,7 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
           component="span"
           display="block"
           onClick={() => {
-            if (!disabled && !saving && !column.computed) setEditing(true);
+            if (canEdit && editTrigger === 'click') setEditing(true);
           }}
           sx={{
             minHeight: compact ? 20 : 28,
@@ -304,7 +307,7 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
             textAlign: cellAlign,
             width: cellAlign === 'center' || cellAlign === 'right' ? '100%' : 'auto',
             flex: cellAlign === 'left' ? 1 : undefined,
-            cursor: disabled || saving || column.computed ? 'default' : 'pointer',
+            cursor: canEdit && editTrigger === 'click' ? 'pointer' : 'default',
             opacity: saving ? 0.6 : 1,
             minWidth: 0,
             maxWidth: '100%',
@@ -340,6 +343,20 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
         >
           {displayLabel}
         </Typography>
+        {canEdit && editTrigger === 'button' && (
+          <IconButton
+            size="small"
+            aria-label={`Edit ${column.label}`}
+            disabled={disabled || saving}
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditing(true);
+            }}
+            sx={{ p: compact ? 0.125 : 0.25, flexShrink: 0 }}
+          >
+            <EditOutlinedIcon sx={{ fontSize: compact ? 12 : 14 }} />
+          </IconButton>
+        )}
         {canCopy && (
           <IconButton
             size="small"

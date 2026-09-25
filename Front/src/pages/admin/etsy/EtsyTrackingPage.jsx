@@ -174,12 +174,20 @@ export default function EtsyTrackingPage() {
         allowImport={false}
         allowCreate={false}
         allowDelete={false}
-        showRegionFilter={false}
+        showRegionFilter
         dateFilterField="shipBy"
         dateFilterMode="single"
         singleDateLabel="Ship By"
         initialSingleDate={todayIst}
-        noFilteredResultsMessage="No orders match the selected ship-by date."
+        showSecondarySingleDateFilter
+        secondarySingleDateField="dateSold"
+        allowSecondaryDateModeToggle
+        secondaryDateFilterMode="range"
+        secondaryDateFromLabel="Date of Sold from"
+        secondaryDateToLabel="Date of Sold to"
+        showRemarkFilter
+        columnBehaviorOverrides={{ trackingId: { editTrigger: 'button' } }}
+        noFilteredResultsMessage="No orders match the selected filters."
         headerSupplement={copyMessagePanel}
       />
       <Snackbar
