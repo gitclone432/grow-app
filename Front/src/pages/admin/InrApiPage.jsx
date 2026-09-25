@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Badge,
@@ -16,6 +16,7 @@ import {
   InputAdornment,
   InputLabel,
   MenuItem,
+  Pagination,
   Select,
   Snackbar,
   Stack,
@@ -29,8 +30,11 @@ import {
   TextField,
   Tooltip,
   Typography,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import GavelIcon from '@mui/icons-material/Gavel';
+import CloseIcon from '@mui/icons-material/Close';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
@@ -43,6 +47,8 @@ import AttachFileIcon from '@mui/icons-material/AttachFile';
 import InfoIcon from '@mui/icons-material/Info';
 import SendIcon from '@mui/icons-material/Send';
 import DownloadIcon from '@mui/icons-material/Download';
+import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
+import NavigateNextIcon from '@mui/icons-material/NavigateNext';
 import api from '../../lib/api';
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
@@ -91,8 +97,156 @@ const actionCellSx = {
   pr: 0.75,
 };
 
+const ROWS_PER_PAGE = 50;
+
 function hasUnreadBuyerMessage(row) {
   return Boolean(row?.hasUnreadBuyerMessage || Number(row?.messageUnreadCount) > 0);
+}
+
+function ImageDialog({ open, onClose, images, title }) {
+  const theme = useTheme();
+  const isMobileDialog = useMediaQuery(theme.breakpoints.down('sm'));
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  useEffect(() => {
+    if (open) setCurrentIndex(0);
+  }, [open]);
+
+  const handleNext = () => {
+    setCurrentIndex((prev) => (prev + 1) % images.length);
+  };
+
+  const handlePrev = () => {
+    setCurrentIndex((prev) => (prev - 1 + images.length) % images.length);
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth fullScreen={isMobileDialog}>
+      <DialogTitle sx={{ p: { xs: 1.5, sm: 2 } }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography variant="h6" sx={{ fontSize: { xs: '1rem', sm: '1.25rem' } }}>
+              Images ({images.length ? currentIndex + 1 : 0}/{images.length})
+            </Typography>
+            {title ? (
+              <Typography variant="caption" color="text.secondary" noWrap>
+                {title}
+              </Typography>
+            ) : null}
+          </Box>
+          <IconButton onClick={onClose} size="small">
+            <CloseIcon />
+          </IconButton>
+        </Stack>
+      </DialogTitle>
+      <DialogContent sx={{ p: { xs: 1, sm: 2 } }}>
+        {images.length > 0 ? (
+          <Box>
+            <Box
+              sx={{
+                width: '100%',
+                height: { xs: 'calc(100vh - 220px)', sm: 500 },
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                bgcolor: 'grey.100',
+                borderRadius: 1,
+                mb: 2,
+                position: 'relative',
+              }}
+            >
+              <img
+                src={images[currentIndex]}
+                alt={`Item ${currentIndex + 1}`}
+                style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+              />
+
+              {images.length > 1 && isMobileDialog && (
+                <>
+                  <IconButton
+                    onClick={handlePrev}
+                    sx={{
+                      position: 'absolute',
+                      left: 4,
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      bgcolor: 'rgba(255,255,255,0.8)',
+                      '&:hover': { bgcolor: 'rgba(255,255,255,0.9)' },
+                    }}
+                  >
+                    <NavigateBeforeIcon />
+                  </IconButton>
+                  <IconButton
+                    onClick={handleNext}
+                    sx={{
+                      position: 'absolute',
+                      right: 4,
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      bgcolor: 'rgba(255,255,255,0.8)',
+                      '&:hover': { bgcolor: 'rgba(255,255,255,0.9)' },
+                    }}
+                  >
+                    <NavigateNextIcon />
+                  </IconButton>
+                </>
+              )}
+            </Box>
+
+            {images.length > 1 && !isMobileDialog && (
+              <Stack direction="row" justifyContent="space-between" sx={{ mb: 2 }}>
+                <Button onClick={handlePrev} startIcon={<NavigateBeforeIcon />} variant="outlined">
+                  Previous
+                </Button>
+                <Button onClick={handleNext} endIcon={<NavigateNextIcon />} variant="outlined">
+                  Next
+                </Button>
+              </Stack>
+            )}
+
+            {images.length > 1 && (
+              <Stack
+                direction="row"
+                spacing={0.5}
+                sx={{
+                  overflowX: 'auto',
+                  pb: 1,
+                  justifyContent: { xs: 'flex-start', sm: 'center' },
+                  flexWrap: { xs: 'nowrap', sm: 'wrap' },
+                }}
+              >
+                {images.map((img, idx) => (
+                  <Box
+                    key={idx}
+                    onClick={() => setCurrentIndex(idx)}
+                    sx={{
+                      width: { xs: 60, sm: 80 },
+                      height: { xs: 60, sm: 80 },
+                      cursor: 'pointer',
+                      border: idx === currentIndex ? '3px solid' : '1px solid',
+                      borderColor: idx === currentIndex ? 'primary.main' : 'grey.300',
+                      borderRadius: 1,
+                      overflow: 'hidden',
+                      flexShrink: 0,
+                      '&:hover': { borderColor: 'primary.main', opacity: 0.8 },
+                    }}
+                  >
+                    <img
+                      src={img}
+                      alt={`Thumbnail ${idx + 1}`}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    />
+                  </Box>
+                ))}
+              </Stack>
+            )}
+          </Box>
+        ) : (
+          <Alert severity="info">No images available for this item</Alert>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 /**
@@ -1075,6 +1229,15 @@ function rowItemPictureUrl(row) {
   return '';
 }
 
+function rowItemTitle(row) {
+  return row?.itemTitle
+    || row?.productName
+    || row?.rawData?.itemTitle
+    || row?.rawData?.lineItems?.[0]?.title
+    || rowItemId(row)
+    || 'Item';
+}
+
 function asReasonValue(value) {
   if (value == null) return '';
   if (typeof value === 'object') {
@@ -1684,7 +1847,14 @@ export default function InrApiPage({
   const [editableRemarkMessage, setEditableRemarkMessage] = useState('');
   const [remarkAttachments, setRemarkAttachments] = useState([]);
   const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
+  const [imageDialog, setImageDialog] = useState({ open: false, title: '', images: [] });
+  const [loadingImageId, setLoadingImageId] = useState('');
+  const [itemImages, setItemImages] = useState({});
+  const [page, setPage] = useState(1);
   const fileInputRefRemark = useRef(null);
+  const thumbnailFetchStarted = useRef(new Set());
+  const itemImagesRef = useRef(itemImages);
+  itemImagesRef.current = itemImages;
 
   const rows = useMemo(() => {
     const combined = [
@@ -1703,6 +1873,100 @@ export default function InrApiPage({
     });
     return filtered.sort((a, b) => compareRows(a, b, sortBy, sortDir));
   }, [inquiries, cases, disputes, sourceFilter, marketplaceFilter, workflowFilter, outcomeFilter, statusFilter, typeFilter, idSearch, sortBy, sortDir]);
+
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(rows.length / ROWS_PER_PAGE)),
+    [rows.length]
+  );
+
+  const paginatedRows = useMemo(() => {
+    const start = (page - 1) * ROWS_PER_PAGE;
+    return rows.slice(start, start + ROWS_PER_PAGE);
+  }, [rows, page]);
+
+  const fetchThumbnail = useCallback(async (row) => {
+    const imageKey = String(rowIssueId(row) || rowOrderId(row) || rowItemId(row) || '');
+    const itemId = rowItemId(row);
+    const sellerId = sellerKey(row);
+    const fallbackImage = rowItemPictureUrl(row);
+
+    if (!imageKey) return;
+    if (fallbackImage) {
+      setItemImages((prev) => prev[imageKey]
+        ? prev
+        : { ...prev, [imageKey]: { thumbnail: fallbackImage, images: null, count: 0 } });
+    }
+    if (!itemId || !sellerId || thumbnailFetchStarted.current.has(imageKey)) {
+      return;
+    }
+    thumbnailFetchStarted.current.add(imageKey);
+
+    try {
+      const { data } = await api.get(`/ebay/item-images/${itemId}?sellerId=${sellerId}&thumbnail=true`);
+      const thumbnail = data?.images?.[0] || data?.thumbnail || '';
+      if (thumbnail) {
+        setItemImages((prev) => ({
+          ...prev,
+          [imageKey]: {
+            ...(prev[imageKey] || {}),
+            thumbnail,
+            count: Number(data?.total || (Array.isArray(data?.images) ? data.images.length : 0)),
+          },
+        }));
+      }
+    } catch (error) {
+      console.error('Error fetching INR thumbnail:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    setPage(1);
+  }, [sourceFilter, marketplaceFilter, workflowFilter, outcomeFilter, statusFilter, typeFilter, idSearch, sortBy, sortDir, sellerFilter]);
+
+  useEffect(() => {
+    if (page > totalPages) {
+      setPage(totalPages);
+    }
+  }, [page, totalPages]);
+
+  useEffect(() => {
+    if (!paginatedRows.length) return;
+
+    let cancelled = false;
+    let idleId;
+    let timeoutId;
+
+    const run = () => {
+      const queue = paginatedRows.filter((row) => {
+        const imageKey = String(rowIssueId(row) || rowOrderId(row) || rowItemId(row) || '');
+        const itemId = rowItemId(row);
+        const sellerId = sellerKey(row);
+        return imageKey && itemId && sellerId && !thumbnailFetchStarted.current.has(imageKey);
+      });
+
+      const concurrency = 3;
+      (async () => {
+        while (!cancelled && queue.length) {
+          const batch = queue.splice(0, concurrency);
+          await Promise.all(batch.map((row) => fetchThumbnail(row)));
+        }
+      })();
+    };
+
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(run, { timeout: 400 });
+    } else {
+      timeoutId = window.setTimeout(run, 120);
+    }
+
+    return () => {
+      cancelled = true;
+      if (idleId != null && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+      if (timeoutId != null) window.clearTimeout(timeoutId);
+    };
+  }, [paginatedRows, fetchThumbnail]);
 
   const statuses = useMemo(() => {
     const combined = [
@@ -1778,7 +2042,7 @@ export default function InrApiPage({
   async function loadStored() {
     setLoading(true);
     setError('');
-    const params = { limit: 500 };
+    const params = { limit: 200 };
     if (sellerFilter) params.sellerId = sellerFilter;
     
     // Add date filter parameters
@@ -1875,6 +2139,7 @@ export default function InrApiPage({
       } catch {
         // tracking enrich is best-effort; search results still load
       }
+
       const errors = [];
       const inr = inrRes.status === 'fulfilled' ? inrRes.value.data : null;
       const pd = disputeRes.status === 'fulfilled' ? disputeRes.value.data : null;
@@ -1906,6 +2171,71 @@ export default function InrApiPage({
       setFetching(false);
     }
   }
+
+  const handleOpenItemImages = useCallback(async (row) => {
+    const itemId = rowItemId(row);
+    const sellerId = sellerKey(row);
+    const fallbackImage = rowItemPictureUrl(row);
+    const dialogTitle = rowItemTitle(row);
+    const imageKey = String(rowIssueId(row) || rowOrderId(row) || itemId || '');
+
+    if (itemImagesRef.current[imageKey]?.images?.length) {
+      setImageDialog({ open: true, title: dialogTitle, images: itemImagesRef.current[imageKey].images });
+      return;
+    }
+
+    if (!itemId || !sellerId) {
+      const cachedThumbnail = itemImagesRef.current[imageKey]?.thumbnail || fallbackImage;
+      if (cachedThumbnail) {
+        setImageDialog({ open: true, title: dialogTitle, images: [cachedThumbnail] });
+      } else {
+        setSnackbar({ open: true, severity: 'info', message: 'No images available for this item' });
+      }
+      return;
+    }
+
+    setLoadingImageId(imageKey);
+    try {
+      const { data } = await api.get(`/ebay/item-images/${itemId}?sellerId=${sellerId}`);
+      const images = Array.isArray(data?.images) && data.images.length > 0
+        ? data.images
+        : ((itemImagesRef.current[imageKey]?.thumbnail || fallbackImage)
+          ? [itemImagesRef.current[imageKey]?.thumbnail || fallbackImage]
+          : []);
+
+      if (images.length === 0) {
+        setSnackbar({ open: true, severity: 'info', message: 'No images available for this item' });
+        return;
+      }
+
+      setItemImages((prev) => ({
+        ...prev,
+        [imageKey]: {
+          ...(prev[imageKey] || {}),
+          thumbnail: prev[imageKey]?.thumbnail || images[0] || fallbackImage || '',
+          images,
+          count: images.length,
+        },
+      }));
+
+      setImageDialog({ open: true, title: dialogTitle, images });
+    } catch (err) {
+      const images = (itemImagesRef.current[imageKey]?.thumbnail || fallbackImage)
+        ? [itemImagesRef.current[imageKey]?.thumbnail || fallbackImage]
+        : [];
+      if (images.length > 0) {
+        setImageDialog({ open: true, title: dialogTitle, images });
+      } else {
+        setSnackbar({
+          open: true,
+          severity: 'error',
+          message: err?.response?.data?.error || err?.message || 'Failed to load item images',
+        });
+      }
+    } finally {
+      setLoadingImageId('');
+    }
+  }, []);
 
   async function openDetail(row) {
     const id = row.caseId;
@@ -2468,7 +2798,7 @@ export default function InrApiPage({
               </TableRow>
             </TableHead>
             <TableBody>
-              {rows.map((row) => {
+              {paginatedRows.map((row) => {
                 const tracking = getShipmentTracking(row);
                 const dueDate = rowDueDate(row);
                 const workflow = inquiryWorkflow(row);
@@ -2550,26 +2880,68 @@ export default function InrApiPage({
                   <TableCell sx={denseCellSx}>
                     {(() => {
                       const itemId = rowItemId(row);
-                      const picture = rowItemPictureUrl(row);
+                      const imageLoadKey = String(rowIssueId(row) || rowOrderId(row) || itemId || '');
+                      const picture = itemImages[imageLoadKey]?.thumbnail || rowItemPictureUrl(row);
+                      const imageCount = itemImages[imageLoadKey]?.count || 0;
                       return (
                         <Stack direction="row" spacing={0.75} alignItems="center">
                           {picture ? (
                             <Box
-                              component="img"
-                              src={picture}
-                              alt=""
-                              referrerPolicy="no-referrer"
                               sx={{
                                 width: 36,
                                 height: 36,
-                                objectFit: 'cover',
                                 borderRadius: 0.5,
                                 border: '1px solid',
                                 borderColor: 'divider',
                                 flexShrink: 0,
                                 bgcolor: 'grey.100',
+                                overflow: 'hidden',
+                                cursor: 'pointer',
+                                position: 'relative',
+                                '&:hover': { borderColor: 'primary.main' },
                               }}
-                            />
+                              onClick={() => handleOpenItemImages(row)}
+                            >
+                              <Box
+                                component="img"
+                                src={picture}
+                                alt={rowItemTitle(row)}
+                                referrerPolicy="no-referrer"
+                                loading="lazy"
+                                decoding="async"
+                                sx={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                              />
+                                {imageCount > 1 && (
+                                  <Chip
+                                    label={`+${imageCount - 1}`}
+                                    size="small"
+                                    sx={{
+                                      position: 'absolute',
+                                      bottom: 1,
+                                      right: 1,
+                                      height: 14,
+                                      fontSize: '0.55rem',
+                                      bgcolor: 'rgba(0,0,0,0.7)',
+                                      color: 'white',
+                                      '& .MuiChip-label': { px: 0.35 },
+                                    }}
+                                  />
+                                )}
+                              {loadingImageId === imageLoadKey && (
+                                <Box
+                                  sx={{
+                                    position: 'absolute',
+                                    inset: 0,
+                                    bgcolor: 'rgba(255,255,255,0.75)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                  }}
+                                >
+                                  <CircularProgress size={16} />
+                                </Box>
+                              )}
+                            </Box>
                           ) : null}
                           <Stack spacing={0.1} sx={{ minWidth: 0 }}>
                             <CopyText value={itemId} />
@@ -2746,6 +3118,21 @@ export default function InrApiPage({
           </Table>
         </TableContainer>
       )}
+
+      {!loading && rows.length > 0 ? (
+        <Stack direction="row" justifyContent="space-between" alignItems="center" mt={1.5}>
+          <Typography variant="body2" color="text.secondary">
+            Showing {((page - 1) * ROWS_PER_PAGE) + 1}-{Math.min(page * ROWS_PER_PAGE, rows.length)} of {rows.length}
+          </Typography>
+          <Pagination
+            count={totalPages}
+            page={page}
+            onChange={(_event, nextPage) => setPage(nextPage)}
+            color="primary"
+            size="small"
+          />
+        </Stack>
+      ) : null}
 
       <Dialog
         open={shipDialog.open}
@@ -2976,6 +3363,13 @@ export default function InrApiPage({
           onMessageSent={clearBuyerMessageIndicator}
         />
       )}
+
+      <ImageDialog
+        open={imageDialog.open}
+        onClose={() => setImageDialog({ open: false, title: '', images: [] })}
+        images={imageDialog.images}
+        title={imageDialog.title}
+      />
 
       <Dialog
         open={Boolean(pendingRemarkUpdate)}
