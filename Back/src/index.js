@@ -49,6 +49,8 @@ import compatibilityRoutes from './routes/compatibility.js';
 import listingCompletionsRoutes from './routes/listingCompletions.js';
 
 import ebayRoutes, { resumeRunningAutoCompatibilityBatches } from './routes/ebay.js';
+import precheckBlockedBrandsRoutes from './routes/precheckBlockedBrands.js';
+import { seedPrecheckBlockedBrands } from './utils/precheckBlockedBrands.js';
 import skuIndexRoutes from './routes/skuIndex.js';
 import { initializeSkuIndexSyncState } from './lib/skuIndexSync.js';
 import bestOffersRoutes from './routes/bestOffers.js';
@@ -290,6 +292,7 @@ app.use('/api/template-listings', skuSellerProfitRoutes);
 app.use('/api/template-listings', templateListingsRoutes);
 // Top-level alias: GET /api/precheck-usage-summary
 app.use('/api', asinPrecheckRoutes);
+app.use('/api/precheck-blocked-brands', precheckBlockedBrandsRoutes);
 app.use('/api/amazon-stock-checks', amazonStockChecksRoutes);
 app.use('/api/feature-permissions', featurePermissionsRoutes);
 app.use('/api/end-listing-logs', endListingLogsRoutes);
@@ -387,6 +390,12 @@ connectToDatabase()
     // Initialize scheduled jobs (e.g., daily timer auto-stop)
     initializeScheduledJobs().catch((e) => {
       console.error('Failed to initialize scheduled jobs:', e?.message || e);
+    });
+
+    // Import the former hard-coded ASIN precheck excluded-brands list the
+    // first time this boots against an empty collection.
+    seedPrecheckBlockedBrands().catch((e) => {
+      console.error('Failed to seed precheck blocked brands:', e?.message || e);
     });
 
     // Start image cache auto-cleanup (removes expired entries every 10 minutes)

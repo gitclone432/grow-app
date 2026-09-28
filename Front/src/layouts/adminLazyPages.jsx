@@ -125,6 +125,7 @@ export const AsinPrecheckPage = lazy(() => import('../pages/admin/AsinPrecheckPa
 export const AsinSourcingPage = lazy(() => import('../pages/admin/AsinSourcingPage.jsx'));
 export const SourcingRulesPage = lazy(() => import('../pages/admin/SourcingRulesPage.jsx'));
 export const AsinPrecheckStatsPage = lazy(() => import('../pages/admin/AsinPrecheckStatsPage.jsx'));
+export const AsinPrecheckExclusionsPage = lazy(() => import('../pages/admin/AsinPrecheckExclusionsPage.jsx'));
 export const ListingDirectoryPage = lazy(() => import('../pages/admin/ListingDirectoryPage.jsx'));
 export const TemplateDirectoryPage = lazy(() => import('../pages/admin/TemplateDirectoryPage.jsx'));
 export const TemplateDatabasePage = lazy(() => import('../pages/admin/TemplateDatabasePage.jsx'));

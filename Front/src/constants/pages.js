@@ -31,7 +31,7 @@ export const SUBMENUS = {
     id: 'templateListing',
     name: 'Template Listing',
     category: 'listingResearch',
-    pages: ['ManageTemplates', 'AsinSourcing', 'SourcingRules', 'SelectSellerLab', 'AmazonSearch', 'AsinPrecheck', 'AsinPrecheckStats', 'AmazonPiSourceColumns', 'ListingsDatabase', 'ListingDirectory', 'TemplateDirectory'],
+    pages: ['ManageTemplates', 'AsinSourcing', 'SourcingRules', 'SelectSellerLab', 'AmazonSearch', 'AsinPrecheck', 'AsinPrecheckStats', 'AsinPrecheckExclusions', 'AmazonPiSourceColumns', 'ListingsDatabase', 'ListingDirectory', 'TemplateDirectory'],
   },
   asinImporter: {
     id: 'asinImporter',
@@ -86,6 +86,7 @@ export const PAGE_REGISTRY = [
   { id: 'AmazonSearch', name: 'Amazon Search', path: '/amazon-search', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'listingadmin', 'lister', 'advancelister', 'trainee'] },
   { id: 'AsinPrecheck', name: 'ASIN Precheck', path: '/asin-precheck', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'lister', 'advancelister', 'trainee'] },
   { id: 'AsinPrecheckStats', name: 'ASIN Precheck Stats', path: '/asin-precheck-stats', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin'] },
+  { id: 'AsinPrecheckExclusions', name: 'Precheck Exclusions', path: '/asin-precheck-exclusions', category: 'listingResearch', submenu: 'templateListing', defaultRoles: ['superadmin', 'lister', 'advancelister', 'trainee'] },
   { id: 'PrecheckAiUsage', name: 'Precheck AI Usage', path: '/precheck-ai-usage', category: 'listingResearch', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'AiListingUsage', name: 'AI Listing Usage', path: '/ai-listing-usage', category: 'listingResearch', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'DailyListingComparison', name: 'Daily Listing Comparison', path: '/daily-listing-comparison', category: 'listingResearch', defaultRoles: ['superadmin', 'listingadmin'] },

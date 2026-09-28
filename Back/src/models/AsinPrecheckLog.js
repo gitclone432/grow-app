@@ -15,7 +15,9 @@ const AsinPrecheckLogSchema = new mongoose.Schema(
     // Missing-stock-info re-fetches made during this batch (see
     // scrapingdogProduct.js availability retry) and how many recovered info.
     availabilityRetryCount: { type: Number, default: 0 },
-    availabilityRetrySuccessCount: { type: Number, default: 0 }
+    availabilityRetrySuccessCount: { type: Number, default: 0 },
+    // ASINs in this batch dropped for an excluded brand (see PrecheckBlockedAsin).
+    blockedCount: { type: Number, default: 0 }
   },
   { timestamps: true }
 );

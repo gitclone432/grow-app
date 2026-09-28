@@ -47,6 +47,7 @@ import {
   uniqueTemplatesForPicker,
 } from '../../lib/listingTemplatesCache.js';
 import AdminPageShell from '../../components/AdminPageShell.jsx';
+import PrecheckBlockedBrandsDialog from '../../components/PrecheckBlockedBrandsDialog.jsx';
 import { BRAND_DARK, BRAND_YELLOW, BRAND_YELLOW_DARK } from '../../constants/brandTheme.js';
 import { dashboardSignatureTokens } from '../../theme/appTheme.js';
 import { tableHeaderCellSx, tableContainerSx, yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
@@ -165,8 +166,11 @@ export default function AsinPrecheckPage() {
   const [rows, setRows] = useState([]);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [blockedItems, setBlockedItems] = useState([]);
+  const [blockedBrandsManagerOpen, setBlockedBrandsManagerOpen] = useState(false);
   const [imagePreview, setImagePreview] = useState(null);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
+  const [listingStatusChoiceOpen, setListingStatusChoiceOpen] = useState(false);
   const [filters, setFilters] = useState(savedPreferences.filters);
   const [keywordDraft, setKeywordDraft] = useState(savedPreferences.filters.keyword || '');
   const [keywordIntent, setKeywordIntent] = useState('included');
@@ -452,6 +456,7 @@ export default function AsinPrecheckPage() {
 
     setRows(prev => [...prev, ...initialRows]);
     setProgress({ current: 0, total: asinsToCheck.length });
+    setBlockedItems([]);
     setRunning(true);
     setSetupOpen(false);
     setAsinInput('');
@@ -492,6 +497,13 @@ export default function AsinPrecheckPage() {
             break;
           case 'item':
             updateRow(message.item);
+            setProgress({ current: message.progress || 0, total: message.total || asinsToCheck.length });
+            break;
+          case 'item_blocked':
+            // Dropped for an excluded brand before it ever became a row —
+            // remove its placeholder instead of leaving it stuck "fetching".
+            setRows(prev => prev.filter(row => row.asin !== message.asin));
+            setBlockedItems(prev => [...prev, message]);
             setProgress({ current: message.progress || 0, total: message.total || asinsToCheck.length });
             break;
           case 'complete':
@@ -584,7 +596,16 @@ export default function AsinPrecheckPage() {
     }
   };
 
-  const continueToAddListings = () => {
+  const openListingStatusChoice = () => {
+    const asins = finalRows.map(row => row.asin);
+    if (asins.length === 0) {
+      setError('Select or include at least one non-excluded ASIN to continue');
+      return;
+    }
+    setListingStatusChoiceOpen(true);
+  };
+
+  const continueToAddListings = (listingStatus = 'active') => {
     const asins = finalRows.map(row => row.asin);
     if (asins.length === 0) {
       setError('Select or include at least one non-excluded ASIN to continue');
@@ -601,11 +622,12 @@ export default function AsinPrecheckPage() {
       createdAt: Date.now()
     }));
 
+    setListingStatusChoiceOpen(false);
     setRows([]);
     setSelectedIds(new Set());
     setProgress({ current: 0, total: 0 });
     setAsinInput('');
-    navigate(`/admin/select-seller-lab?templateId=${templateId}&sellerId=${sellerId}&fromAsinPrecheck=${nonce}`);
+    navigate(`/admin/select-seller-lab?templateId=${templateId}&sellerId=${sellerId}&fromAsinPrecheck=${nonce}&status=${listingStatus}`);
   };
 
   const visibleCompletedRows = visibleRows.filter(isRowComplete);
@@ -693,7 +715,7 @@ export default function AsinPrecheckPage() {
                 </Button>
                 <Button
                   variant="contained"
-                  onClick={continueToAddListings}
+                  onClick={openListingStatusChoice}
                   disabled={finalRows.length === 0}
                   startIcon={<PlayIcon />}
                   sx={yellowFilledButtonSx}
@@ -729,6 +751,20 @@ export default function AsinPrecheckPage() {
               <Chip label={`Excluded: ${excludedCount}`} color="warning" variant="outlined" />
               <Chip label={`Selected: ${selectedIds.size}`} sx={{ bgcolor: alpha(BRAND_YELLOW, 0.24), fontWeight: 700 }} />
               <Chip label={`Final: ${finalRows.length}`} sx={{ bgcolor: alpha(BRAND_DARK, 0.08), fontWeight: 700 }} />
+              {blockedItems.length > 0 && (
+                <Chip
+                  label={`Dropped (excluded brand): ${blockedItems.length}`}
+                  color="error"
+                  variant="outlined"
+                  onClick={() => setBlockedBrandsManagerOpen(true)}
+                />
+              )}
+              <Chip
+                label="Excluded Brands"
+                variant="outlined"
+                onClick={() => setBlockedBrandsManagerOpen(true)}
+                sx={{ cursor: 'pointer' }}
+              />
             </Stack>
 
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', md: 'center' }}>
@@ -1288,6 +1324,30 @@ export default function AsinPrecheckPage() {
           <Button onClick={() => setDiscardConfirmOpen(false)}>Cancel</Button>
           <Button variant="contained" color="error" onClick={discardSelected}>
             Discard
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <PrecheckBlockedBrandsDialog
+        open={blockedBrandsManagerOpen}
+        onClose={() => setBlockedBrandsManagerOpen(false)}
+      />
+
+      <Dialog open={listingStatusChoiceOpen} onClose={() => setListingStatusChoiceOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Generate Listings As</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            Send {finalRows.length} ASIN{finalRows.length === 1 ? '' : 's'} to the listing lab as Active
+            (goes live on eBay) or Draft (saved for review before listing).
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setListingStatusChoiceOpen(false)}>Cancel</Button>
+          <Button variant="outlined" onClick={() => continueToAddListings('draft')}>
+            Draft
+          </Button>
+          <Button variant="contained" onClick={() => continueToAddListings('active')} sx={yellowFilledButtonSx}>
+            Active
           </Button>
         </DialogActions>
       </Dialog>
