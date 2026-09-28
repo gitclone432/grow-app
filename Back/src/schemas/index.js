@@ -353,6 +353,16 @@ export const updateFeaturePermissionSchema = z.object({
   allowedUserIds: z.array(objectIdSchema),
 });
 
+// ── Precheck blocked brands ──────────────────────────────────────────────────
+
+export const precheckBlockedBrandSchema = z.object({
+  brands: z.union([
+    z.string().trim().min(1, 'At least one brand is required'),
+    z.array(z.string()).min(1, 'At least one brand is required'),
+  ]),
+  note: z.string().trim().max(500, 'Note is too long').optional(),
+});
+
 // ── User category targets ────────────────────────────────────────────────────
 
 const USER_CATEGORY_TARGET_MARKETPLACES = ['US', 'UK', 'AU', 'Canada'];

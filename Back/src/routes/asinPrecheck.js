@@ -7,12 +7,14 @@ import ListingTemplate from '../models/ListingTemplate.js';
 import AsinPrecheckLog from '../models/AsinPrecheckLog.js';
 import ApiUsage from '../models/ApiUsage.js';
 import AiListingRun from '../models/AiListingRun.js';
+import PrecheckBlockedAsin from '../models/PrecheckBlockedAsin.js';
 import { fetchAmazonData, getTemplateOverlayFetchOptions } from '../utils/asinAutofill.js';
 import { generateSKUFromASIN } from '../utils/skuGenerator.js';
 import { getEffectiveTemplate } from '../utils/templateMerger.js';
 import { classifyEbayMotorsTitle } from '../lib/ebayMotorsClassifier.js';
 import { searchAmazonAsins } from '../utils/amazonSearchScraper.js';
 import { getBaseSku, getPrecheckEnrichment, MARKETPLACE_TIMEZONES, loadActiveSkuSet } from '../utils/asinPrecheckCore.js';
+import { loadPrecheckBlockList, findBlockedBrand } from '../utils/precheckBlockedBrands.js';
 
 const router = express.Router();
 
@@ -238,9 +240,12 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
       if (heartbeat) clearInterval(heartbeat);
     });
 
-    const [seller, template] = await Promise.all([
+    // The blocked-brand list is read once here and applied to every ASIN in
+    // this run, so a brand added from the UI takes effect on the next run.
+    const [seller, template, blockList] = await Promise.all([
       Seller.findById(sellerId).select('_id').lean(),
-      getEffectiveTemplate(templateId, sellerId)
+      getEffectiveTemplate(templateId, sellerId),
+      loadPrecheckBlockList()
     ]);
 
     if (!seller || !template) {
@@ -253,11 +258,12 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
     // Log this batch for the Precheck Stats page (counts by country/date/user/
     // seller). Fire-and-forget: a failed log never blocks the precheck. The
     // doc is kept so per-item retry counters can be added to it below.
+    const precheckRegion = ['US', 'UK', 'CA', 'AU'].includes(region) ? region : 'US';
     const precheckLogPromise = AsinPrecheckLog.create({
       user: req.user?.userId || null,
       seller: sellerId,
       template: templateId,
-      region: ['US', 'UK', 'CA', 'AU'].includes(region) ? region : 'US',
+      region: precheckRegion,
       asins,
       asinCount: asins.length
     }).catch((error) => {
@@ -314,6 +320,48 @@ router.get('/asin-precheck-stream', requireAuthSSE, async (req, res) => {
               { $inc: { availabilityRetryCount: 1, availabilityRetrySuccessCount: retrySucceeded ? 1 : 0 } }
             ).catch((err) => console.error('[ASIN Precheck] Failed to log retry:', err.message));
           });
+        }
+
+        // Checked before the eBay Motors classifier so a blocked ASIN never
+        // spends an AI call. The client drops the row on this event; `brand`
+        // is the excluded-list entry that matched, `matchedOn` whether it was
+        // found in the brand or the seller ("Sold by") field.
+        const blocked = findBlockedBrand({ brand: amazonData.brand, soldBy: amazonData.soldBy }, blockList);
+        if (blocked) {
+          sendSse({
+            type: 'item_blocked',
+            asin,
+            id: `asin-precheck-${asin}`,
+            brand: blocked.display,
+            matchedOn: blocked.field,
+            amazonBrand: amazonData.brand || '',
+            amazonSoldBy: amazonData.soldBy || '',
+            title: amazonData.title || '',
+            progress: ++completed,
+            total: asins.length
+          });
+
+          // Durable record of the exclusion, plus a per-batch count on the
+          // stats log. Fire-and-forget: a failed write never blocks the run.
+          precheckLogPromise.then((logDoc) => {
+            PrecheckBlockedAsin.create({
+              asin,
+              brand: blocked.display,
+              matchedOn: blocked.field,
+              amazonBrand: amazonData.brand || '',
+              amazonSoldBy: amazonData.soldBy || '',
+              title: amazonData.title || '',
+              region: precheckRegion,
+              user: req.user?.userId || null,
+              seller: sellerId,
+              template: templateId,
+              precheckLog: logDoc?._id || null
+            }).catch((err) => console.error('[ASIN Precheck] Failed to record excluded ASIN:', err.message));
+            if (!logDoc) return;
+            AsinPrecheckLog.updateOne({ _id: logDoc._id }, { $inc: { blockedCount: 1 } })
+              .catch((err) => console.error('[ASIN Precheck] Failed to count excluded ASIN:', err.message));
+          });
+          return;
         }
 
         const sourceData = buildAmazonSourceData(amazonData);

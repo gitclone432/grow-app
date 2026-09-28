@@ -85,6 +85,7 @@ export const PAGE_DEFAULT_ROLES = {
   'SellerTemplatesLab': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'AsinPrecheck': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'AsinPrecheckStats': ['superadmin'],
+  'AsinPrecheckExclusions': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'SourcingRules': ['superadmin', 'listingadmin'],
   'TemplateListingsLab': ['superadmin', 'lister', 'advancelister', 'trainee'],
   'ListingDirectory': ['superadmin', 'lister', 'advancelister', 'trainee'],
