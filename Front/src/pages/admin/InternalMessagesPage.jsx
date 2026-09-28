@@ -117,6 +117,7 @@ export default function InternalMessagesPage() {
   const [conversations, setConversations] = useState([]);
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [messageSearchQuery, setMessageSearchQuery] = useState('');
   const [newMessage, setNewMessage] = useState('');
   const [loadingConversations, setLoadingConversations] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -286,6 +287,7 @@ export default function InternalMessagesPage() {
 
   async function handleConversationSelect(conversation) {
     setSelectedConversation(conversation);
+    setMessageSearchQuery('');
     if (isMobile || isTablet) {
       setSidebarOpen(false);
     }
@@ -423,6 +425,21 @@ export default function InternalMessagesPage() {
     if (!mentionQuery) return others;
     return others.filter((participant) => participant.username?.toLowerCase().startsWith(mentionQuery.toLowerCase()));
   }, [mentionQuery, selectedConversation, myId]);
+
+  const normalizedMessageSearchQuery = messageSearchQuery.trim().toLowerCase();
+
+  const visibleMessages = useMemo(() => {
+    if (!normalizedMessageSearchQuery) return messages;
+
+    return messages.filter((message) => {
+      const senderName = message.sender?.username?.toLowerCase() || '';
+      const body = String(message.body || '').toLowerCase();
+      const replyBody = String(message.replyTo?.body || '').toLowerCase();
+      return senderName.includes(normalizedMessageSearchQuery)
+        || body.includes(normalizedMessageSearchQuery)
+        || replyBody.includes(normalizedMessageSearchQuery);
+    });
+  }, [messages, normalizedMessageSearchQuery]);
 
   function handleMessageInputChange(e) {
     const value = e.target.value;
@@ -668,32 +685,58 @@ export default function InternalMessagesPage() {
           <>
             {/* Chat Header */}
             <Box sx={{ p: { xs: 1.5, md: 2 }, bgcolor: '#f5f5f5', borderBottom: 1, borderColor: 'divider' }}>
-              <Stack direction="row" alignItems="center" spacing={2}>
-                {(isMobile || isTablet) && (
-                  <IconButton onClick={() => { setSelectedConversation(null); setSidebarOpen(true); }} size="small">
-                    <CloseIcon />
-                  </IconButton>
-                )}
-                <Avatar sx={{ bgcolor: selectedConversation.type === 'group' ? 'secondary.main' : 'primary.main' }}>
-                  {selectedConversation.type === 'group' ? <GroupIcon /> : <PersonIcon />}
-                </Avatar>
-                <Box sx={{ flex: 1 }}>
-                  <Typography variant="subtitle1" fontWeight="bold">
-                    {selectedConversation.displayName}
-                  </Typography>
-                  {selectedConversation.type === 'group' ? (
-                    <Typography variant="caption" color="text.secondary">
-                      {selectedConversation.participants?.length || 0} members
-                    </Typography>
-                  ) : (
-                    <Chip label={selectedConversation.otherUser?.role} size="small" sx={{ height: 20, fontSize: '0.7rem' }} />
+              <Stack spacing={1.5}>
+                <Stack direction="row" alignItems="center" spacing={2}>
+                  {(isMobile || isTablet) && (
+                    <IconButton onClick={() => { setSelectedConversation(null); setSidebarOpen(true); }} size="small">
+                      <CloseIcon />
+                    </IconButton>
                   )}
-                </Box>
-                {selectedConversation.type === 'group' && (
-                  <IconButton onClick={(e) => setHeaderMenuAnchor(e.currentTarget)}>
-                    <MoreVertIcon />
-                  </IconButton>
-                )}
+                  <Avatar sx={{ bgcolor: selectedConversation.type === 'group' ? 'secondary.main' : 'primary.main' }}>
+                    {selectedConversation.type === 'group' ? <GroupIcon /> : <PersonIcon />}
+                  </Avatar>
+                  <Box sx={{ flex: 1 }}>
+                    <Typography variant="subtitle1" fontWeight="bold">
+                      {selectedConversation.displayName}
+                    </Typography>
+                    {selectedConversation.type === 'group' ? (
+                      <Typography variant="caption" color="text.secondary">
+                        {selectedConversation.participants?.length || 0} members
+                      </Typography>
+                    ) : (
+                      <Chip label={selectedConversation.otherUser?.role} size="small" sx={{ height: 20, fontSize: '0.7rem' }} />
+                    )}
+                  </Box>
+                  {selectedConversation.type === 'group' && (
+                    <IconButton onClick={(e) => setHeaderMenuAnchor(e.currentTarget)}>
+                      <MoreVertIcon />
+                    </IconButton>
+                  )}
+                </Stack>
+
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', sm: 'center' }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    placeholder="Search in this chat..."
+                    value={messageSearchQuery}
+                    onChange={(e) => setMessageSearchQuery(e.target.value)}
+                    InputProps={{
+                      startAdornment: <SearchIcon sx={{ color: 'text.secondary', mr: 1 }} />,
+                      endAdornment: messageSearchQuery ? (
+                        <IconButton size="small" onClick={() => setMessageSearchQuery('')} edge="end">
+                          <CloseIcon fontSize="small" />
+                        </IconButton>
+                      ) : null,
+                    }}
+                    sx={{ bgcolor: '#fff', borderRadius: 1 }}
+                  />
+                  {messageSearchQuery && (
+                    <Typography variant="caption" color="text.secondary" sx={{ minWidth: 'fit-content' }}>
+                      {visibleMessages.length} match{visibleMessages.length === 1 ? '' : 'es'}
+                    </Typography>
+                  )}
+                </Stack>
               </Stack>
             </Box>
 
@@ -719,8 +762,11 @@ export default function InternalMessagesPage() {
                   {messages.length === 0 && (
                     <Alert severity="info">Start the conversation by typing a message below!</Alert>
                   )}
+                  {messages.length > 0 && visibleMessages.length === 0 && (
+                    <Alert severity="info">No messages match your search.</Alert>
+                  )}
 
-                  {messages.map((msg) => {
+                  {visibleMessages.map((msg) => {
                     const isMe = msg.sender?._id === myId;
                     const isGroup = selectedConversation.type === 'group';
                     return (
