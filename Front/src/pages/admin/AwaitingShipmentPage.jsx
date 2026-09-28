@@ -33,6 +33,7 @@ import {
   Fade,
   Switch,
   TableSortLabel,
+  Checkbox,
 } from '@mui/material';
 import LocalShippingIcon from '@mui/icons-material/LocalShipping';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -598,6 +599,9 @@ export default function AwaitingShipmentPage() {
   const [visibleColumns, setVisibleColumns] = useState([
     'seller', 'orderId', 'marketplace', 'dateSold', 'shipBy', 'deliveryDate', 'productName', 'buyerName', 'shippingAddress', 'trackingNumber', 'trackingId', 'arriving', 'notes'
   ]); // Default specific to Awaiting Shipment needs, or use ALL_COLUMNS.map(c => c.id)
+  const [selectedOrderIds, setSelectedOrderIds] = useState([]);
+  const [bulkManualTracking, setBulkManualTracking] = useState('');
+  const [savingBulkManualTracking, setSavingBulkManualTracking] = useState(false);
 
   const formatCurrency = (value) => {
     if (value === null || value === undefined || value === '') return '-';
@@ -612,6 +616,11 @@ export default function AwaitingShipmentPage() {
 
   // REF: To prevent unnecessary re-fetches
   const lastFetchedParams = useRef('');
+
+  useEffect(() => {
+    const validIds = new Set(orders.map((order) => order._id));
+    setSelectedOrderIds((prev) => prev.filter((id) => validIds.has(id)));
+  }, [orders]);
 
   // 1. Fetch Sellers on Mount
   useEffect(() => {
@@ -819,6 +828,108 @@ export default function AwaitingShipmentPage() {
   const showSnack = (severity, message) => {
     setSnack({ open: true, severity, message });
     setTimeout(() => setSnack(prev => ({ ...prev, open: false })), 2500);
+  };
+
+  const toggleOrderSelection = (orderId) => {
+    setSelectedOrderIds((prev) => (
+      prev.includes(orderId)
+        ? prev.filter((id) => id !== orderId)
+        : [...prev, orderId]
+    ));
+  };
+
+  const visibleOrderIds = orders.map((order) => order._id).filter(Boolean);
+  const allVisibleSelected = visibleOrderIds.length > 0 && visibleOrderIds.every((id) => selectedOrderIds.includes(id));
+  const someVisibleSelected = visibleOrderIds.some((id) => selectedOrderIds.includes(id));
+
+  const handleToggleSelectAllVisible = (event) => {
+    const checked = event.target.checked;
+    setSelectedOrderIds((prev) => {
+      if (checked) {
+        return [...new Set([...prev, ...visibleOrderIds])];
+      }
+      return prev.filter((id) => !visibleOrderIds.includes(id));
+    });
+  };
+
+  const handleBulkManualTrackingApply = async () => {
+    const trackingValue = bulkManualTracking.trim();
+    if (!trackingValue) {
+      showSnack('error', 'Manual tracking is required');
+      return;
+    }
+
+    if (selectedOrderIds.length === 0) {
+      showSnack('error', 'Select at least one order');
+      return;
+    }
+
+    const selectedOrdersInView = orders.filter((order) => selectedOrderIds.includes(order._id));
+    const parsedTrackingValues = trackingValue
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    if (parsedTrackingValues.length > 1 && parsedTrackingValues.length !== selectedOrdersInView.length) {
+      showSnack('error', `You entered ${parsedTrackingValues.length} tracking numbers for ${selectedOrdersInView.length} selected orders`);
+      return;
+    }
+
+    const trackingByOrderId = new Map(
+      selectedOrdersInView.map((order, index) => [
+        order._id,
+        parsedTrackingValues.length > 1 ? parsedTrackingValues[index] : trackingValue,
+      ])
+    );
+
+    setSavingBulkManualTracking(true);
+    try {
+      const results = await Promise.allSettled(
+        selectedOrdersInView.map((order) => (
+          api.patch(`/ebay/orders/${order._id}/manual-tracking`, {
+            manualTrackingNumber: trackingByOrderId.get(order._id),
+          })
+        ))
+      );
+
+      const successIds = [];
+      const failures = [];
+
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled' && result.value?.data?.success) {
+          successIds.push(selectedOrdersInView[index]._id);
+          return;
+        }
+
+        const message = result.status === 'rejected'
+          ? result.reason?.response?.data?.error || result.reason?.message || 'Update failed'
+          : 'Update failed';
+        failures.push(message);
+      });
+
+      if (successIds.length > 0) {
+        const successIdSet = new Set(successIds);
+        setOrders((prev) => prev.map((order) => (
+          successIdSet.has(order._id)
+            ? { ...order, manualTrackingNumber: trackingByOrderId.get(order._id) || order.manualTrackingNumber }
+            : order
+        )));
+      }
+
+      if (failures.length === 0) {
+        showSnack('success', `Manual tracking applied to ${successIds.length} order${successIds.length === 1 ? '' : 's'}`);
+        setSelectedOrderIds([]);
+        setBulkManualTracking('');
+      } else if (successIds.length > 0) {
+        showSnack('warning', `Updated ${successIds.length} order${successIds.length === 1 ? '' : 's'}; ${failures.length} failed`);
+      } else {
+        showSnack('error', failures[0] || 'Failed to update manual tracking');
+      }
+    } catch (err) {
+      showSnack('error', err?.response?.data?.error || 'Failed to update manual tracking');
+    } finally {
+      setSavingBulkManualTracking(false);
+    }
   };
 
   const handleSaveRemarkTemplates = async (nextTemplates) => {
@@ -1768,6 +1879,56 @@ export default function AwaitingShipmentPage() {
             </Stack>
           </Box>
 
+          {selectedOrderIds.length > 0 && (
+            <Box
+              sx={{
+                mb: 2,
+                p: 2,
+                borderRadius: 2,
+                border: '1px solid',
+                borderColor: 'warning.main',
+                bgcolor: 'rgba(245, 200, 66, 0.10)',
+              }}
+            >
+              <Stack
+                direction={{ xs: 'column', lg: 'row' }}
+                spacing={2}
+                alignItems={{ xs: 'stretch', lg: 'center' }}
+              >
+                <Typography variant="body2" sx={{ minWidth: 180, fontWeight: 600 }}>
+                  {selectedOrderIds.length} order{selectedOrderIds.length === 1 ? '' : 's'} selected
+                </Typography>
+                <TextField
+                  size="small"
+                  label="Bulk Manual Tracking"
+                  value={bulkManualTracking}
+                  onChange={(e) => setBulkManualTracking(e.target.value)}
+                  placeholder="One number or comma-separated per row"
+                  helperText="Use commas to assign sequentially from top row to bottom row."
+                  sx={{ minWidth: { xs: '100%', sm: 280 } }}
+                />
+                <Stack direction="row" spacing={1}>
+                  <Button
+                    variant="contained"
+                    onClick={handleBulkManualTrackingApply}
+                    disabled={savingBulkManualTracking || !bulkManualTracking.trim()}
+                    sx={yellowFilledButtonSx}
+                  >
+                    {savingBulkManualTracking ? 'Applying...' : 'Apply to Selected'}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    onClick={() => setSelectedOrderIds([])}
+                    disabled={savingBulkManualTracking}
+                    sx={yellowOutlinedButtonSx}
+                  >
+                    Clear Selection
+                  </Button>
+                </Stack>
+              </Stack>
+            </Box>
+          )}
+
           {error && (
             <Typography color="error" sx={{ mb: 2 }}>{error}</Typography>
           )}
@@ -1813,6 +1974,24 @@ export default function AwaitingShipmentPage() {
               >
                 <TableHead>
                   <TableRow>
+                    <TableCell
+                      padding="checkbox"
+                      sx={{
+                        ...tableHeaderCellSx,
+                        position: 'sticky',
+                        top: 0,
+                        zIndex: 101,
+                        width: 56,
+                      }}
+                    >
+                      <Checkbox
+                        checked={allVisibleSelected}
+                        indeterminate={!allVisibleSelected && someVisibleSelected}
+                        onChange={handleToggleSelectAllVisible}
+                        inputProps={{ 'aria-label': 'select all visible orders' }}
+                        size="small"
+                      />
+                    </TableCell>
                     {ALL_COLUMNS.filter(c => visibleColumns.includes(c.id)).map(col => {
                       const headerSx = {
                         ...tableHeaderCellSx,
@@ -1846,7 +2025,23 @@ export default function AwaitingShipmentPage() {
                 </TableHead>
                 <TableBody>
                   {orders.map((order, idx) => (
-                    <TableRow key={order._id || idx} sx={tableBodyRowSx}>
+                    <TableRow
+                      key={order._id || idx}
+                      sx={{
+                        ...tableBodyRowSx,
+                        ...(selectedOrderIds.includes(order._id)
+                          ? { backgroundColor: 'rgba(25, 118, 210, 0.08)' }
+                          : null),
+                      }}
+                    >
+                      <TableCell padding="checkbox">
+                        <Checkbox
+                          checked={selectedOrderIds.includes(order._id)}
+                          onChange={() => toggleOrderSelection(order._id)}
+                          inputProps={{ 'aria-label': `select order ${order.orderId || idx}` }}
+                          size="small"
+                        />
+                      </TableCell>
                       {ALL_COLUMNS.filter(c => visibleColumns.includes(c.id)).map(col => (
                         <TableCell
                           key={col.id}
