@@ -426,16 +426,42 @@ function buildBuyerConversationMatch({ orderId, buyerUsername, itemId }) {
   return null;
 }
 
-async function clearBuyerUnreadState({ orderId, buyerUsername, itemId }) {
+function buildCommerceConversationMatch({ sellerId, conversationId, orderId }) {
+  const normalizedConversationId = normalizeMessageMatchValue(conversationId);
+  if (normalizedConversationId) {
+    const query = { conversationId: normalizedConversationId };
+    if (sellerId && mongoose.Types.ObjectId.isValid(String(sellerId))) {
+      query.seller = new mongoose.Types.ObjectId(String(sellerId));
+    }
+    return query;
+  }
+
+  const normalizedOrderId = normalizeMessageMatchValue(orderId);
+  if (normalizedOrderId) {
+    return { orderId: normalizedOrderId };
+  }
+
+  return null;
+}
+
+async function clearBuyerUnreadState({ sellerId, conversationId, orderId, buyerUsername, itemId }) {
   const messageMatch = buildBuyerConversationMatch({ orderId, buyerUsername, itemId });
-  if (!messageMatch) return;
+  const conversationMatch = buildCommerceConversationMatch({ sellerId, conversationId, orderId });
+  if (!messageMatch && !conversationMatch) return;
 
   await Promise.all([
-    Message.updateMany(
-      { ...messageMatch, sender: 'BUYER', read: false },
-      { read: true }
-    ),
-    EbayMessageConversation.updateMany(messageMatch, { unreadCount: 0 })
+    messageMatch
+      ? Message.updateMany(
+          { ...messageMatch, sender: 'BUYER', read: false },
+          { read: true }
+        )
+      : Promise.resolve({ modifiedCount: 0 }),
+    conversationMatch
+      ? EbayMessageConversation.updateMany(conversationMatch, {
+          unreadCount: 0,
+          'latestMessage.readStatus': 'READ'
+        })
+      : Promise.resolve({ modifiedCount: 0 })
   ]);
 }
 
@@ -476,6 +502,7 @@ async function trackSellerMessage({
   });
 
   await clearBuyerUnreadState({
+    sellerId: normalizedSellerId,
     orderId: normalizedOrderId,
     buyerUsername: normalizedBuyer,
     itemId: normalizedItemId,
@@ -16455,26 +16482,40 @@ router.get('/chat/search-order', requireAuth, async (req, res) => {
 
 // 7. MARK CONVERSATION AS UNREAD
 router.post('/chat/mark-unread', requireAuth, async (req, res) => {
-  const { orderId, buyerUsername, itemId } = req.body;
+  const { sellerId, conversationId, orderId, buyerUsername, itemId } = req.body;
 
   try {
-    let query = {};
-    if (orderId) {
-      query.orderId = orderId;
-    } else if (buyerUsername && itemId) {
-      query.buyerUsername = buyerUsername;
-      query.itemId = itemId;
-    } else {
+    const messageQuery = buildBuyerConversationMatch({ orderId, buyerUsername, itemId });
+    const conversationQuery = buildCommerceConversationMatch({ sellerId, conversationId, orderId });
+    if (!messageQuery && !conversationQuery) {
       return res.status(400).json({ error: 'Invalid query params' });
     }
 
-    // Mark buyer messages as unread
-    const result = await Message.updateMany(
-      { ...query, sender: 'BUYER' },
-      { read: false }
-    );
+    const buyerMessageCount = messageQuery
+      ? await Message.countDocuments({ ...messageQuery, sender: 'BUYER' })
+      : 0;
 
-    res.json({ success: true, modifiedCount: result.modifiedCount });
+    const [result, convResult] = await Promise.all([
+      messageQuery
+        ? Message.updateMany(
+            { ...messageQuery, sender: 'BUYER' },
+            { read: false }
+          )
+        : Promise.resolve({ modifiedCount: 0 }),
+      conversationQuery
+        ? EbayMessageConversation.updateMany(conversationQuery, {
+            unreadCount: buyerMessageCount,
+            'latestMessage.readStatus': buyerMessageCount > 0 ? 'UNREAD' : 'READ'
+          })
+        : Promise.resolve({ modifiedCount: 0 })
+    ]);
+
+    res.json({
+      success: true,
+      modifiedCount: result.modifiedCount,
+      conversationModifiedCount: convResult.modifiedCount,
+      unreadCount: buyerMessageCount
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -16482,20 +16523,28 @@ router.post('/chat/mark-unread', requireAuth, async (req, res) => {
 
 // 8. MARK CONVERSATION AS READ
 router.post('/chat/mark-read', requireAuth, async (req, res) => {
-  const { orderId, buyerUsername, itemId } = req.body;
+  const { sellerId, conversationId, orderId, buyerUsername, itemId } = req.body;
 
   try {
     const query = buildBuyerConversationMatch({ orderId, buyerUsername, itemId });
-    if (!query) {
+    const conversationQuery = buildCommerceConversationMatch({ sellerId, conversationId, orderId });
+    if (!query && !conversationQuery) {
       return res.status(400).json({ error: 'Invalid query params' });
     }
 
     const [result, convResult] = await Promise.all([
-      Message.updateMany(
-        { ...query, sender: 'BUYER', read: false },
-        { read: true }
-      ),
-      EbayMessageConversation.updateMany(query, { unreadCount: 0 })
+      query
+        ? Message.updateMany(
+            { ...query, sender: 'BUYER', read: false },
+            { read: true }
+          )
+        : Promise.resolve({ modifiedCount: 0 }),
+      conversationQuery
+        ? EbayMessageConversation.updateMany(conversationQuery, {
+            unreadCount: 0,
+            'latestMessage.readStatus': 'READ'
+          })
+        : Promise.resolve({ modifiedCount: 0 })
     ]);
 
     console.log('[MARK-READ] Updated messages:', result.modifiedCount, 'Updated conversations:', convResult.modifiedCount);

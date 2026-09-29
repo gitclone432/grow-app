@@ -523,6 +523,8 @@ export default function ChatModal({
       // This prevents confusion and avoids the need to manually click "Mark Read" after replying
       try {
         const payload = {
+          sellerId,
+          conversationId: resolvedConversationId || conversationIdProp || undefined,
           orderId: resolvedOrderId || orderId,
           buyerUsername,
           itemId

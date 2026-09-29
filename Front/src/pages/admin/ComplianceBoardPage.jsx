@@ -4307,14 +4307,7 @@ function ComplianceBoardPage() {
     if (selectedCategory === 'order_fulfillment') {
       statusOrders = statusOrders.filter(order => !isOrderCancelledForFulfillment(order));
     }
-    
-    if (selectedCategory === 'return_refund' && status === COLUMN_STATUS.CASE_OPENED) {
-      const baseCount = boardSourceCounts.caseOpenedReturnRequests ?? orders[status]?.length ?? 0;
-      if (showOnlyUnreadMessages) {
-        return statusOrders.length;
-      }
-      return baseCount;
-    }
+
     return statusOrders.length;
   };
 

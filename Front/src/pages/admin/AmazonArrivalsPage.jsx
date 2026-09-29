@@ -50,6 +50,7 @@ import { tableContainerSx, tableHeaderCellSx, tableBodyRowSx, yellowOutlinedButt
 import {
   findRemarkTemplateText,
   loadRemarkTemplates,
+  remarkOptionsFromTemplates,
   saveRemarkTemplates
 } from '../../constants/remarkTemplates';
 import AmazonArrivalsSkeleton from '../../components/skeletons/AmazonArrivalsSkeleton';
@@ -263,6 +264,7 @@ export default function AmazonArrivalsPage() {
   const [searchMarketplace, setSearchMarketplace] = useState('');
   const [amazonAccounts, setAmazonAccounts] = useState([]);
   const [selectedAmazonAccount, setSelectedAmazonAccount] = useState('');
+  const [selectedRemark, setSelectedRemark] = useState('');
   const [arrivalDateFrom, setArrivalDateFrom] = useState('');
   const [arrivalDateTo, setArrivalDateTo] = useState('');
   const [editingArrivalDate, setEditingArrivalDate] = useState({}); // { [orderId]: 'YYYY-MM-DD' }
@@ -339,7 +341,7 @@ export default function AmazonArrivalsPage() {
   useEffect(() => {
     filtersChangedRef.current = true;
     setPage(1);
-  }, [selectedSeller, debouncedOrderId, searchMarketplace, selectedAmazonAccount, sortBy, sortDir, arrivalDateFrom, arrivalDateTo]);
+  }, [selectedSeller, debouncedOrderId, searchMarketplace, selectedAmazonAccount, selectedRemark, sortBy, sortDir, arrivalDateFrom, arrivalDateTo]);
 
   // 4. Fetch Orders (skip intermediate fetch when filters force page→1)
   useEffect(() => {
@@ -347,7 +349,7 @@ export default function AmazonArrivalsPage() {
     filtersChangedRef.current = false;
     fetchOrders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, selectedSeller, debouncedOrderId, searchMarketplace, selectedAmazonAccount, sortBy, sortDir, arrivalDateFrom, arrivalDateTo]);
+  }, [page, selectedSeller, debouncedOrderId, searchMarketplace, selectedAmazonAccount, selectedRemark, sortBy, sortDir, arrivalDateFrom, arrivalDateTo]);
 
   async function fetchOrders({ force = false } = {}) {
     // Build Params Object
@@ -365,6 +367,7 @@ export default function AmazonArrivalsPage() {
     if (selectedSeller) params.sellerId = selectedSeller;
     if (searchMarketplace) params.searchMarketplace = searchMarketplace;
     if (selectedAmazonAccount) params.amazonAccount = selectedAmazonAccount;
+    if (selectedRemark) params.remark = selectedRemark;
     if (arrivalDateFrom) params.arrivalStartDate = arrivalDateFrom;
     if (arrivalDateTo) params.arrivalEndDate = arrivalDateTo;
 
@@ -825,6 +828,23 @@ export default function AmazonArrivalsPage() {
                     {acc.name}
                   </MenuItem>
                 ))}
+              </Select>
+            </FormControl>
+
+            <FormControl size="small" sx={{ flex: '1 1 160px', minWidth: 140, maxWidth: 220 }}>
+              <InputLabel>Remark</InputLabel>
+              <Select
+                value={selectedRemark}
+                label="Remark"
+                onChange={(e) => setSelectedRemark(e.target.value)}
+              >
+                <MenuItem value="">All Remarks</MenuItem>
+                {remarkOptionsFromTemplates(remarkTemplates).map((option) => (
+                  <MenuItem key={option._id} value={option.name}>
+                    {option.name}
+                  </MenuItem>
+                ))}
+                <MenuItem value="__NO_REMARK__">No Remark</MenuItem>
               </Select>
             </FormControl>
 
