@@ -4,7 +4,7 @@ import { calculateOrderAmazonFinancials } from './exchangeRateUtils.js';
 export const MANUAL_FULFILLMENT_ALLOWED_FIELDS = [
   'amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId',
   'amazonRefund', 'cardName', 'resolution', 'remark', 'alreadyInUse', 'remarkMessageSent',
-  'fulfillmentNotes', 'trackingNumber',
+  'fulfillmentNotes', 'trackingNumber', 'manualTrackingNumber',
 ];
 
 function recalculateUSDFields(order) {

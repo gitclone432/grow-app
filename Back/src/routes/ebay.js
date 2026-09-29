@@ -3509,6 +3509,67 @@ async function extractTrackingNumber(fulfillmentHrefs, accessToken) {
   }
 }
 
+async function verifyEbayTrackingUpload({ ebayOrderId, accessToken, expectedTrackingNumber, logPrefix = '[Upload Tracking]' }) {
+  let verifiedOrder = null;
+  let verifiedTrackingNumber = null;
+  const delays = [100, 1000, 1000, 2000, 3000];
+
+  for (const delay of delays) {
+    if (delay > 100) await new Promise((resolve) => setTimeout(resolve, delay));
+
+    try {
+      const verifyRes = await axios.get(
+        `https://api.ebay.com/sell/fulfillment/v1/order/${ebayOrderId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        }
+      );
+
+      const data = verifyRes.data;
+      const hasFulfillmentHrefs = data.fulfillmentHrefs && data.fulfillmentHrefs.length > 0;
+      const isFulfilled = data.orderFulfillmentStatus === 'FULFILLED';
+
+      if (!isFulfilled || !hasFulfillmentHrefs) continue;
+
+      verifiedTrackingNumber = await extractTrackingNumber(data.fulfillmentHrefs, accessToken);
+      const normalizedExpected = String(expectedTrackingNumber || '').trim();
+      const normalizedVerified = String(verifiedTrackingNumber || '').trim();
+      const trackingMatches = !normalizedExpected || !normalizedVerified || normalizedExpected === normalizedVerified;
+
+      if (trackingMatches) {
+        verifiedOrder = data;
+        console.log(`${logPrefix} ✅ Verified successfully after ~${delay}ms`);
+        break;
+      }
+    } catch (err) {
+      console.warn(`${logPrefix} Verification attempt failed: ${err.message}`);
+    }
+  }
+
+  return {
+    isVerified: Boolean(verifiedOrder),
+    verifiedOrder,
+    verifiedTrackingNumber,
+  };
+}
+
+async function persistTrackingUploadResult(order, { trackingNumber, verifiedOrder }) {
+  const normalizedTrackingNumber = String(trackingNumber || '').trim();
+  order.trackingNumber = normalizedTrackingNumber;
+  order.manualTrackingNumber = normalizedTrackingNumber;
+  order.orderFulfillmentStatus = verifiedOrder?.orderFulfillmentStatus || 'FULFILLED';
+
+  if (Array.isArray(verifiedOrder?.fulfillmentHrefs) && verifiedOrder.fulfillmentHrefs.length > 0) {
+    order.fulfillmentHrefs = verifiedOrder.fulfillmentHrefs;
+  }
+
+  await order.save();
+}
+
 async function connectSellerToEbayOAuthCode({ userId, code }) {
   const normalizedCode = normalizeEbayOAuthCode(code);
   if (!normalizedCode) {
@@ -6561,6 +6622,8 @@ router.patch('/orders/:orderId/manual-tracking', async (req, res) => {
 router.post('/orders/:orderId/upload-tracking', async (req, res) => {
   const { orderId } = req.params;
   const { trackingNumber, shippingCarrier = 'USPS' } = req.body;
+  let order = null;
+  let ebayOrderId = null;
 
   if (!trackingNumber || !trackingNumber.trim()) {
     return res.status(400).json({ error: 'Missing tracking number' });
@@ -6568,7 +6631,7 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
 
   try {
     // Find the order in our database
-    const order = await findOrderByIdOrOrderId(orderId, 'seller');
+    order = await findOrderByIdOrOrderId(orderId, 'seller');
 
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
@@ -6586,7 +6649,7 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
     }
 
     // Get the eBay orderId (not our MongoDB _id)
-    const ebayOrderId = order.orderId || order.legacyOrderId;
+    ebayOrderId = order.orderId || order.legacyOrderId;
     if (!ebayOrderId) {
       return res.status(400).json({ error: 'Order missing eBay order ID' });
     }
@@ -6637,47 +6700,12 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
     // Instead of waiting 7 seconds blindly, we check immediately and then retry a few times.
     console.log(`[Upload Tracking] Verifying tracking was applied (Smart Polling)...`);
 
-    let isVerified = false;
-    let verifiedOrder = null;
-
-    // Polling Schedule: 0s, 1s, 2s, 4s, 7s (Total ~7-8s max wait, but usually instant)
-    const delays = [100, 1000, 1000, 2000, 3000];
-
-    for (const delay of delays) {
-      if (delay > 100) await new Promise(r => setTimeout(r, delay));
-
-      try {
-        const verifyRes = await axios.get(
-          `https://api.ebay.com/sell/fulfillment/v1/order/${ebayOrderId}`,
-          {
-            headers: {
-              'Authorization': `Bearer ${order.seller.ebayTokens.access_token}`,
-              'Content-Type': 'application/json',
-              'Accept': 'application/json'
-            }
-          }
-        );
-
-        const data = verifyRes.data;
-        const hasFulfillmentHrefs = data.fulfillmentHrefs && data.fulfillmentHrefs.length > 0;
-        const isFulfilled = data.orderFulfillmentStatus === 'FULFILLED';
-
-        // Check specifically if OUR tracking number is present
-        // (Sometimes order is fulfilled but with an old tracking number)
-        // We verify if fulfillmentHrefs are present, which implies SOME tracking exists.
-        // Deep verification of the exact number is hard without following the hrefs, 
-        // but status=FULFILLED + hasHrefs is usually strong enough.
-
-        if (isFulfilled && hasFulfillmentHrefs) {
-          verifiedOrder = data;
-          isVerified = true;
-          console.log(`[Upload Tracking] ✅ Verified successfully after ~${delay}ms`);
-          break; // Exit loop immediately on success
-        }
-      } catch (err) {
-        console.warn(`[Upload Tracking] Verification attempt failed: ${err.message}`);
-      }
-    }
+    const { isVerified, verifiedOrder, verifiedTrackingNumber } = await verifyEbayTrackingUpload({
+      ebayOrderId,
+      accessToken: order.seller.ebayTokens.access_token,
+      expectedTrackingNumber: trackingNumber,
+      logPrefix: '[Upload Tracking]',
+    });
 
     // STRICT VALIDATION: Only save to DB if eBay confirmed tracking was applied
     if (!isVerified || !verifiedOrder) {
@@ -6696,11 +6724,10 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
     console.log(`[Upload Tracking] ✅ VERIFIED: Tracking successfully applied to eBay order`);
 
     // UPDATE DATABASE: Only save when eBay confirms success
-    order.trackingNumber = trackingNumber.trim();
-    order.manualTrackingNumber = trackingNumber.trim();
-    order.orderFulfillmentStatus = 'FULFILLED';
-
-    await order.save();
+    await persistTrackingUploadResult(order, {
+      trackingNumber: verifiedTrackingNumber || trackingNumber,
+      verifiedOrder,
+    });
 
     console.log(`[Upload Tracking] 💾 Database updated successfully for order ${ebayOrderId}`);
 
@@ -6712,18 +6739,63 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('[Upload Tracking] ❌ Error:', err.response?.data || err.message);
+    const errors = err.response?.data?.errors || null;
+    const errorString = errors ? JSON.stringify(errors).toLowerCase() : '';
+    const isDuplicateMarkedShipped = (
+      order &&
+      ebayOrderId &&
+      errorString.includes('tracking number already exists') &&
+      errorString.includes('marked as shipped')
+    );
+
+    if (isDuplicateMarkedShipped) {
+      console.warn('[Upload Tracking] Duplicate tracking reported by eBay, attempting shipped-order recovery:', err.response?.data);
+    } else {
+      console.error('[Upload Tracking] ❌ Error:', err.response?.data || err.message);
+    }
 
     // Provide detailed error message with specific handling for common issues
     let errorMessage = 'Failed to upload tracking to eBay';
     let errorType = 'UPLOAD_ERROR';
 
-    if (err.response?.data?.errors) {
-      const errors = err.response.data.errors;
+    if (errors) {
       errorMessage = errors.map(e => e.message).join(', ');
 
       // Check for specific error types
-      const errorString = JSON.stringify(errors).toLowerCase();
+      if (
+        isDuplicateMarkedShipped
+      ) {
+        const { isVerified, verifiedOrder, verifiedTrackingNumber } = await verifyEbayTrackingUpload({
+          ebayOrderId,
+          accessToken: order.seller?.ebayTokens?.access_token,
+          expectedTrackingNumber: trackingNumber,
+          logPrefix: '[Upload Tracking duplicate recovery]',
+        });
+
+        await persistTrackingUploadResult(order, {
+          trackingNumber: verifiedTrackingNumber || trackingNumber,
+          verifiedOrder: verifiedOrder || {
+            orderFulfillmentStatus: 'FULFILLED',
+            fulfillmentHrefs: order.fulfillmentHrefs,
+          },
+        });
+
+        console.log(
+          isVerified
+            ? `[Upload Tracking] ✅ Recovered duplicate-tracking response as shipped order ${ebayOrderId}`
+            : `[Upload Tracking] ⚠️ Duplicate-tracking response trusted as shipped before verification completed for order ${ebayOrderId}`
+        );
+
+        return res.json({
+          success: true,
+          recovered: true,
+          verificationDeferred: !isVerified,
+          message: `Tracking was already present on eBay and the order is marked as shipped via ${shippingCarrier}.`,
+          order,
+          ebayResponse: err.response.data
+        });
+      }
+
       if (errorString.includes('tracking') || errorString.includes('invalid')) {
         errorType = 'INVALID_TRACKING';
         errorMessage = '❌ ' + errorMessage + '\n\nPlease verify:\n- Tracking number format is correct\n- Carrier selection matches the tracking number\n- Tracking number is not already used for another order';
@@ -12739,18 +12811,16 @@ router.get('/stored-inr-cases', async (req, res) => {
     let dateQuery = { $gte: COMPLIANCE_BOARD_MIN_DATE };
     
     if (dateFrom) {
-      const fromDate = new Date(dateFrom);
-      if (!isNaN(fromDate.getTime())) {
-        dateQuery.$gte = new Date(Math.max(fromDate.getTime(), COMPLIANCE_BOARD_MIN_DATE.getTime()));
+      const { start } = getPTDayBoundsUTC(dateFrom);
+      if (!Number.isNaN(start.getTime())) {
+        dateQuery.$gte = new Date(Math.max(start.getTime(), COMPLIANCE_BOARD_MIN_DATE.getTime()));
       }
     }
     
     if (dateTo) {
-      const toDate = new Date(dateTo);
-      if (!isNaN(toDate.getTime())) {
-        // Set to end of day in UTC
-        toDate.setUTCHours(23, 59, 59, 999);
-        dateQuery.$lte = toDate;
+      const { end } = getPTDayBoundsUTC(dateTo);
+      if (!Number.isNaN(end.getTime())) {
+        dateQuery.$lte = end;
       }
     } else {
       // If no explicit end date, default to today's end
@@ -13404,16 +13474,15 @@ router.get('/stored-case-management', requireAuth, requirePageAccess('Disputes')
     if (dateFrom || dateTo) {
       const dateQuery = {};
       if (dateFrom) {
-        const fromDate = new Date(dateFrom);
-        if (!isNaN(fromDate.getTime())) {
-          dateQuery.$gte = fromDate;
+        const { start } = getPTDayBoundsUTC(dateFrom);
+        if (!Number.isNaN(start.getTime())) {
+          dateQuery.$gte = start;
         }
       }
       if (dateTo) {
-        const toDate = new Date(dateTo);
-        if (!isNaN(toDate.getTime())) {
-          toDate.setUTCHours(23, 59, 59, 999);
-          dateQuery.$lte = toDate;
+        const { end } = getPTDayBoundsUTC(dateTo);
+        if (!Number.isNaN(end.getTime())) {
+          dateQuery.$lte = end;
         }
       }
       if (Object.keys(dateQuery).length > 0) {
@@ -14075,16 +14144,15 @@ router.get('/stored-payment-disputes', async (req, res) => {
     if (dateFrom || dateTo) {
       const dateQuery = {};
       if (dateFrom) {
-        const fromDate = new Date(dateFrom);
-        if (!isNaN(fromDate.getTime())) {
-          dateQuery.$gte = fromDate;
+        const { start } = getPTDayBoundsUTC(dateFrom);
+        if (!Number.isNaN(start.getTime())) {
+          dateQuery.$gte = start;
         }
       }
       if (dateTo) {
-        const toDate = new Date(dateTo);
-        if (!isNaN(toDate.getTime())) {
-          toDate.setUTCHours(23, 59, 59, 999);
-          dateQuery.$lte = toDate;
+        const { end } = getPTDayBoundsUTC(dateTo);
+        if (!Number.isNaN(end.getTime())) {
+          dateQuery.$lte = end;
         }
       }
       if (Object.keys(dateQuery).length > 0) {

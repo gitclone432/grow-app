@@ -192,6 +192,17 @@ function getTrackingIdValue(order) {
   return String(order?.notes || '').trim();
 }
 
+function detectTrackingCarrier(trackingNumber) {
+  if (!trackingNumber) return null;
+  const cleanNumber = trackingNumber.trim().toUpperCase();
+  if (cleanNumber.startsWith('9')) return 'USPS';
+  if (cleanNumber.startsWith('1Z')) return 'UPS';
+  if (cleanNumber.startsWith('8')) return 'FEDEX';
+  if (cleanNumber.startsWith('3')) return 'AUSTRALIA_POST';
+  if (cleanNumber.startsWith('1')) return 'TNT_AUSTRALIA';
+  return null;
+}
+
 // Helper to get unique item IDs from order
 function getUniqueItemIds(order) {
   if (!order.lineItems || order.lineItems.length === 0) return [];
@@ -234,17 +245,6 @@ function ManualTrackingCell({ order, onSaved, onCopy, onNotify }) {
       }
     }
   }, [order.manualTrackingNumber, anchorEl, multipleItems, uniqueItemIds]);
-
-  const detectCarrier = (trackingNumber) => {
-    if (!trackingNumber) return null;
-    const cleanNumber = trackingNumber.trim().toUpperCase();
-    if (cleanNumber.startsWith('9')) return 'USPS';
-    if (cleanNumber.startsWith('1Z')) return 'UPS';
-    if (cleanNumber.startsWith('8')) return 'FEDEX';
-    if (cleanNumber.startsWith('3')) return 'AUSTRALIA_POST';
-    if (cleanNumber.startsWith('1')) return 'TNT_AUSTRALIA';
-    return null;
-  };
 
   const handleClick = (event) => {
     setAnchorEl(event.currentTarget);
@@ -430,7 +430,7 @@ function ManualTrackingCell({ order, onSaved, onCopy, onNotify }) {
               onChange={(e) => {
                 const newValue = e.target.value;
                 setValue(newValue);
-                const detected = detectCarrier(newValue);
+                const detected = detectTrackingCarrier(newValue);
                 if (detected) setCarrier(detected);
               }}
               autoFocus
@@ -455,7 +455,7 @@ function ManualTrackingCell({ order, onSaved, onCopy, onNotify }) {
                         value={individualTracking[itemId]?.trackingNumber || ''}
                         onChange={(e) => {
                           const newValue = e.target.value;
-                          const detected = detectCarrier(newValue);
+                          const detected = detectTrackingCarrier(newValue);
                           setIndividualTracking(prev => ({
                             ...prev,
                             [itemId]: {
@@ -801,29 +801,38 @@ export default function AwaitingShipmentPage() {
 
     try {
       const results = await Promise.allSettled(
-        readyOrders.map(({ order, trackingIdValue }) =>
-          api.patch(`/ebay/orders/${order._id}/manual-fields`, { trackingNumber: trackingIdValue })
-        )
+        readyOrders.map(({ order, trackingIdValue }) => {
+          const detectedCarrier = detectTrackingCarrier(trackingIdValue) || 'USPS';
+          return api.post(`/ebay/orders/${order._id}/upload-tracking`, {
+            trackingNumber: trackingIdValue,
+            shippingCarrier: detectedCarrier,
+          });
+        })
       );
 
-      const nextTrackingNumbers = new Map();
+      const nextUploadedTracking = new Map();
       let successCount = 0;
       let failedCount = 0;
 
       results.forEach((result, index) => {
         const { order, trackingIdValue } = readyOrders[index];
         if (result.status === 'fulfilled' && result.value?.data?.success) {
-          nextTrackingNumbers.set(order._id, trackingIdValue);
+          nextUploadedTracking.set(order._id, trackingIdValue);
           successCount += 1;
         } else {
           failedCount += 1;
         }
       });
 
-      if (nextTrackingNumbers.size > 0) {
+      if (nextUploadedTracking.size > 0) {
         setOrders((prev) => prev.map((order) => (
-          nextTrackingNumbers.has(order._id)
-            ? { ...order, trackingNumber: nextTrackingNumbers.get(order._id) }
+          nextUploadedTracking.has(order._id)
+            ? {
+                ...order,
+                manualTrackingNumber: nextUploadedTracking.get(order._id),
+                trackingNumber: nextUploadedTracking.get(order._id),
+                orderFulfillmentStatus: 'FULFILLED',
+              }
             : order
         )));
       }
@@ -833,19 +842,19 @@ export default function AwaitingShipmentPage() {
 
       if (successCount > 0 && failedCount === 0) {
         const skippedSuffix = skippedCount > 0 ? `, ${skippedCount} skipped` : '';
-        showSnack('success', `Tracking Number filled for ${successCount} row(s)${skippedSuffix}`);
+        showSnack('success', `Tracking uploaded to eBay for ${successCount} row(s)${skippedSuffix}`);
         return;
       }
 
       if (successCount > 0) {
         const skippedSuffix = skippedCount > 0 ? `, ${skippedCount} skipped` : '';
-        showSnack('warning', `Updated ${successCount} row(s), ${failedCount} failed${skippedSuffix}`);
+        showSnack('warning', `Uploaded ${successCount} row(s), ${failedCount} failed${skippedSuffix}`);
         return;
       }
 
-      showSnack('error', 'Bulk Tracking Upload failed for all selected rows');
+      showSnack('error', 'Bulk Tracking Upload to eBay failed for all selected rows');
     } catch (error) {
-      showSnack('error', error?.response?.data?.error || 'Bulk Tracking Upload failed');
+      showSnack('error', error?.response?.data?.error || 'Bulk Tracking Upload to eBay failed');
     } finally {
       setBulkTrackingUploading(false);
     }
