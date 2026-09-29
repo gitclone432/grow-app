@@ -1468,6 +1468,8 @@ export default function BuyerChatPage() {
     setMarkingUnread(true);
     try {
       const payload = {
+        sellerId: selectedThread.sellerId,
+        conversationId: selectedThread.conversationId,
         orderId: selectedThread.orderId,
         buyerUsername: selectedThread.buyerUsername,
         itemId: selectedThread.itemId
@@ -1515,6 +1517,8 @@ export default function BuyerChatPage() {
     setMarkingRead(true);
     try {
       const payload = {
+        sellerId: selectedThread.sellerId,
+        conversationId: selectedThread.conversationId,
         orderId: selectedThread.orderId,
         buyerUsername: selectedThread.buyerUsername,
         itemId: selectedThread.itemId
