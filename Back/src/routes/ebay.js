@@ -3565,7 +3565,10 @@ async function verifyEbayTrackingUpload({ ebayOrderId, accessToken, expectedTrac
       verifiedTrackingNumber = await extractTrackingNumber(data.fulfillmentHrefs, accessToken);
       const normalizedExpected = String(expectedTrackingNumber || '').trim();
       const normalizedVerified = String(verifiedTrackingNumber || '').trim();
-      const trackingMatches = !normalizedExpected || !normalizedVerified || normalizedExpected === normalizedVerified;
+      // Require an actual matching tracking number back from eBay; a missing/blank
+      // value must NOT be treated as a match, otherwise duplicate-tracking rejections
+      // (silently dropped by eBay) get falsely marked as verified.
+      const trackingMatches = !normalizedExpected || (Boolean(normalizedVerified) && normalizedExpected === normalizedVerified);
 
       if (trackingMatches) {
         verifiedOrder = data;
@@ -6774,9 +6777,18 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
       errorString.includes('tracking number already exists') &&
       errorString.includes('marked as shipped')
     );
+    // eBay rejects a tracking number that is already in use elsewhere (another order/seller).
+    // This must NOT be silently accepted - reject it here too.
+    const isDuplicateTrackingUsed = (
+      errorString.includes('already used') ||
+      errorString.includes('already been used') ||
+      (errorString.includes('duplicate') && errorString.includes('tracking'))
+    );
 
     if (isDuplicateMarkedShipped) {
       console.warn('[Upload Tracking] Duplicate tracking reported by eBay, attempting shipped-order recovery:', err.response?.data);
+    } else if (isDuplicateTrackingUsed) {
+      console.warn('[Upload Tracking] Tracking number already used elsewhere, rejecting:', err.response?.data);
     } else {
       console.error('[Upload Tracking] ❌ Error:', err.response?.data || err.message);
     }
@@ -6799,31 +6811,33 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
           logPrefix: '[Upload Tracking duplicate recovery]',
         });
 
-        await persistTrackingUploadResult(order, {
-          trackingNumber: verifiedTrackingNumber || trackingNumber,
-          verifiedOrder: verifiedOrder || {
-            orderFulfillmentStatus: 'FULFILLED',
-            fulfillmentHrefs: order.fulfillmentHrefs,
-          },
-        });
+        // Only trust this recovery path when eBay actually confirms the SAME tracking
+        // number is attached to THIS order. Otherwise treat it as a rejection so we
+        // don't record a tracking number our DB thinks succeeded but eBay refused.
+        if (isVerified && verifiedOrder) {
+          await persistTrackingUploadResult(order, {
+            trackingNumber: verifiedTrackingNumber || trackingNumber,
+            verifiedOrder,
+          });
 
-        console.log(
-          isVerified
-            ? `[Upload Tracking] ✅ Recovered duplicate-tracking response as shipped order ${ebayOrderId}`
-            : `[Upload Tracking] ⚠️ Duplicate-tracking response trusted as shipped before verification completed for order ${ebayOrderId}`
-        );
+          console.log(`[Upload Tracking] ✅ Recovered duplicate-tracking response as shipped order ${ebayOrderId}`);
 
-        return res.json({
-          success: true,
-          recovered: true,
-          verificationDeferred: !isVerified,
-          message: `Tracking was already present on eBay and the order is marked as shipped via ${shippingCarrier}.`,
-          order,
-          ebayResponse: err.response.data
-        });
-      }
+          return res.json({
+            success: true,
+            recovered: true,
+            message: `Tracking was already present on eBay and the order is marked as shipped via ${shippingCarrier}.`,
+            order,
+            ebayResponse: err.response.data
+          });
+        }
 
-      if (errorString.includes('tracking') || errorString.includes('invalid')) {
+        console.warn(`[Upload Tracking] ⚠️ Could not verify duplicate-tracking recovery for order ${ebayOrderId}; rejecting instead of trusting it.`);
+        errorType = 'DUPLICATE_TRACKING';
+        errorMessage = `Tracking number "${trackingNumber}" is already used and could not be verified on this order. It may already be used by another order or seller on eBay.`;
+      } else if (isDuplicateTrackingUsed) {
+        errorType = 'DUPLICATE_TRACKING';
+        errorMessage = `Tracking number "${trackingNumber}" is already used by another order or seller on eBay. Please use a different tracking number.`;
+      } else if (errorString.includes('tracking') || errorString.includes('invalid')) {
         errorType = 'INVALID_TRACKING';
         errorMessage = '❌ ' + errorMessage + '\n\nPlease verify:\n- Tracking number format is correct\n- Carrier selection matches the tracking number\n- Tracking number is not already used for another order';
       } else if (errorString.includes('already') || errorString.includes('fulfilled')) {
@@ -6838,6 +6852,7 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
     } else if (err.message) {
       errorMessage = err.message;
     }
+
 
     // Log detailed error for debugging
     console.error('[Upload Tracking] Error Details:', {
@@ -16505,6 +16520,7 @@ router.post('/chat/mark-unread', requireAuth, async (req, res) => {
       conversationQuery
         ? EbayMessageConversation.updateMany(conversationQuery, {
             unreadCount: buyerMessageCount,
+            manualReadAt: null,
             'latestMessage.readStatus': buyerMessageCount > 0 ? 'UNREAD' : 'READ'
           })
         : Promise.resolve({ modifiedCount: 0 })
@@ -16542,6 +16558,7 @@ router.post('/chat/mark-read', requireAuth, async (req, res) => {
       conversationQuery
         ? EbayMessageConversation.updateMany(conversationQuery, {
             unreadCount: 0,
+            manualReadAt: new Date(),
             'latestMessage.readStatus': 'READ'
           })
         : Promise.resolve({ modifiedCount: 0 })
@@ -16615,7 +16632,7 @@ router.post('/chat/mark-attended', requireAuth, async (req, res) => {
         { ...query, sender: 'BUYER', read: false },
         { read: true }
       ),
-      EbayMessageConversation.updateMany(query, { unreadCount: 0 }),
+      EbayMessageConversation.updateMany(query, { unreadCount: 0, manualReadAt: now }),
       ConversationMeta.findOneAndUpdate(
         metaQuery,
         { $set: metaUpdate },

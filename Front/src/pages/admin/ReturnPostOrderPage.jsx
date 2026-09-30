@@ -1501,12 +1501,13 @@ export default function ReturnPostOrderPage({
           </Tooltip>
 
           <FormControl size="small" sx={{ minWidth: 140 }}>
-            <InputLabel>Seller</InputLabel>
+            <InputLabel shrink>Seller</InputLabel>
             <Select
               value={sellerFilter}
               label="Seller"
               onChange={(e) => setSellerFilter(e.target.value)}
               displayEmpty
+              notched
             >
               <MenuItem value="">All Sellers</MenuItem>
               {sellers.map((s) => (
@@ -1528,6 +1529,7 @@ export default function ReturnPostOrderPage({
               <MenuItem value="RETURN_REQUESTED">RETURN_REQUESTED</MenuItem>
               <MenuItem value="ITEM_READY_TO_SHIP">ITEM_READY_TO_SHIP</MenuItem>
               <MenuItem value="RETURN_LABEL_PENDING">RETURN_LABEL_PENDING</MenuItem>
+              <MenuItem value="ITEM_SHIPPED">ITEM_SHIPPED</MenuItem>
               <MenuItem value="CLOSED">CLOSED</MenuItem>
             </Select>
           </FormControl>

@@ -2022,6 +2022,40 @@ export async function upsertCommerceConversationCache(seller, conv, { buyerUsern
   const refType = String(normalized.referenceType || '').trim().toUpperCase();
   const refId = String(normalized.referenceId || '').trim();
 
+  // eBay's own unreadCount only reflects whether the buyer's message was read
+  // on eBay's side, which our "Mark Read" action never touches. Blindly copying
+  // it here used to resurrect conversations we had already marked read locally
+  // as soon as the next auto-sync ran. manualReadAt is the authoritative signal
+  // set by the mark-read/mark-unread endpoints; a message-id/date comparison is
+  // kept as a fallback for older rows that predate that field.
+  const existing = await EbayMessageConversation.findOne(
+    { seller: seller._id, conversationId, conversationType: normalized.conversationType || 'FROM_MEMBERS' }
+  ).select('unreadCount manualReadAt latestMessage.messageId latestMessage.createdDate').lean();
+
+  const existingLatestId = String(existing?.latestMessage?.messageId || '').trim();
+  const incomingLatestId = String(latest?.messageId || '').trim();
+  const existingLatestDate = existing?.latestMessage?.createdDate
+    ? new Date(existing.latestMessage.createdDate).getTime()
+    : 0;
+  const incomingLatestDate = latest?.createdDate ? new Date(latest.createdDate).getTime() : 0;
+
+  const isNewMessage = existing
+    ? (incomingLatestId && incomingLatestId !== existingLatestId) ||
+      (!incomingLatestId && incomingLatestDate > existingLatestDate)
+    : true;
+
+  // A conversation manually marked read stays read until a message newer than
+  // that action arrives - regardless of what eBay's own summary still reports.
+  const manualReadAt = existing?.manualReadAt ? new Date(existing.manualReadAt).getTime() : 0;
+  const hasNewerMessageThanManualRead = manualReadAt > 0 && incomingLatestDate > manualReadAt;
+  const respectManualRead = manualReadAt > 0 && !hasNewerMessageThanManualRead;
+
+  const resolvedUnreadCount = respectManualRead
+    ? 0
+    : (isNewMessage || hasNewerMessageThanManualRead)
+      ? Number(normalized.unreadCount) || 0
+      : Number(existing?.unreadCount) || 0;
+
   const doc = {
     seller: seller._id,
     conversationId,
@@ -2031,7 +2065,8 @@ export async function upsertCommerceConversationCache(seller, conv, { buyerUsern
     otherPartyUsername: buyer || '',
     referenceType: normalized.referenceType || '',
     referenceId: normalized.referenceId || '',
-    unreadCount: Number(normalized.unreadCount) || 0,
+    unreadCount: resolvedUnreadCount,
+    ...(hasNewerMessageThanManualRead ? { manualReadAt: null } : {}),
     latestMessage: latest
       ? {
           messageId: latest.messageId || '',
