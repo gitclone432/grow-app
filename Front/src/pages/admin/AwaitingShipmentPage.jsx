@@ -605,6 +605,7 @@ export default function AwaitingShipmentPage() {
   ]); // Default specific to Awaiting Shipment needs, or use ALL_COLUMNS.map(c => c.id)
   const [selectedOrderIds, setSelectedOrderIds] = useState([]);
   const [bulkTrackingUploading, setBulkTrackingUploading] = useState(false);
+  const [trackingUploadErrors, setTrackingUploadErrors] = useState({}); // { [orderId]: message }
 
   const formatCurrency = (value) => {
     if (value === null || value === undefined || value === '') return '-';
@@ -813,6 +814,8 @@ export default function AwaitingShipmentPage() {
       const nextUploadedTracking = new Map();
       let successCount = 0;
       let failedCount = 0;
+      let duplicateCount = 0;
+      const nextTrackingErrors = {};
 
       results.forEach((result, index) => {
         const { order, trackingIdValue } = readyOrders[index];
@@ -821,6 +824,13 @@ export default function AwaitingShipmentPage() {
           successCount += 1;
         } else {
           failedCount += 1;
+          const responseData = result.reason?.response?.data;
+          if (responseData?.errorType === 'DUPLICATE_TRACKING' || responseData?.errorType === 'TRACKING_NOT_APPLIED') {
+            duplicateCount += 1;
+            nextTrackingErrors[order._id] = `Tracking "${trackingIdValue}" is already used - rejected by eBay`;
+          } else {
+            nextTrackingErrors[order._id] = responseData?.error || 'Tracking upload failed';
+          }
         }
       });
 
@@ -837,6 +847,13 @@ export default function AwaitingShipmentPage() {
         )));
       }
 
+      // Clear stale errors for rows that just succeeded, and record new failures
+      setTrackingUploadErrors((prev) => {
+        const next = { ...prev, ...nextTrackingErrors };
+        nextUploadedTracking.forEach((_, orderId) => { delete next[orderId]; });
+        return next;
+      });
+
       const skippedCount = selectedCount - readyOrders.length;
       setSelectedOrderIds([]);
 
@@ -846,19 +863,22 @@ export default function AwaitingShipmentPage() {
         return;
       }
 
+      const duplicateSuffix = duplicateCount > 0 ? ` (${duplicateCount} already used - rejected by eBay)` : '';
+
       if (successCount > 0) {
         const skippedSuffix = skippedCount > 0 ? `, ${skippedCount} skipped` : '';
-        showSnack('warning', `Uploaded ${successCount} row(s), ${failedCount} failed${skippedSuffix}`);
+        showSnack('warning', `Uploaded ${successCount} row(s), ${failedCount} failed${duplicateSuffix}${skippedSuffix}`);
         return;
       }
 
-      showSnack('error', 'Bulk Tracking Upload to eBay failed for all selected rows');
+      showSnack('error', `Bulk Tracking Upload to eBay failed for all selected rows${duplicateSuffix}`);
     } catch (error) {
       showSnack('error', error?.response?.data?.error || 'Bulk Tracking Upload to eBay failed');
     } finally {
       setBulkTrackingUploading(false);
     }
   };
+
 
   async function fetchAwaitingOrders() {
     setError('');
@@ -1547,9 +1567,16 @@ export default function AwaitingShipmentPage() {
             order={order}
             onSaved={(newNotes) => {
               setOrders(prev => prev.map(o => (o._id === order._id ? { ...o, notes: newNotes } : o)));
+              setTrackingUploadErrors((prev) => {
+                if (!(order._id in prev)) return prev;
+                const next = { ...prev };
+                delete next[order._id];
+                return next;
+              });
             }}
             onNotify={showSnack}
             fieldLabel="Tracking ID"
+            errorText={trackingUploadErrors[order._id] || ''}
           />
         );
       case 'messagingStatus':
@@ -2179,7 +2206,8 @@ function NotesCell({
   fieldLabel = 'Notes',
   valueKey = 'notes',
   endpoint = 'notes',
-  payloadKey = 'notes'
+  payloadKey = 'notes',
+  errorText = ''
 }) {
   const [editing, setEditing] = React.useState(false);
   const [viewOpen, setViewOpen] = React.useState(false);
@@ -2264,6 +2292,11 @@ function NotesCell({
           <Button size="small" onClick={startEdit} sx={{ alignSelf: 'flex-start' }}>
             {noteText ? `Edit ${fieldLabel}` : `Add ${fieldLabel}`}
           </Button>
+          {errorText && (
+            <Typography variant="caption" color="error" sx={{ fontWeight: 600, whiteSpace: 'normal' }}>
+              ⚠️ {errorText}
+            </Typography>
+          )}
         </Box>
       )}
 

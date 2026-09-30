@@ -30,6 +30,10 @@ const EbayMessageConversationSchema = new mongoose.Schema(
     referenceId: { type: String, default: '', index: true },
     orderId: { type: String, default: '', index: true },
     unreadCount: { type: Number, default: 0 },
+    // Set whenever an agent explicitly marks this conversation read/unread.
+    // Authoritative override so background eBay syncs can't silently revive
+    // a conversation as unread just because eBay's own copy is still unread.
+    manualReadAt: { type: Date, default: null },
     latestMessage: { type: LatestMessageSchema, default: null },
     ebayCreatedDate: { type: Date, default: null },
     ebayUpdatedDate: { type: Date, default: null },
