@@ -1530,6 +1530,7 @@ export default function ReturnPostOrderPage({
               <MenuItem value="ITEM_READY_TO_SHIP">ITEM_READY_TO_SHIP</MenuItem>
               <MenuItem value="RETURN_LABEL_PENDING">RETURN_LABEL_PENDING</MenuItem>
               <MenuItem value="ITEM_SHIPPED">ITEM_SHIPPED</MenuItem>
+              <MenuItem value="ITEM_DELIVERED">ITEM_DELIVERED</MenuItem>
               <MenuItem value="CLOSED">CLOSED</MenuItem>
             </Select>
           </FormControl>
