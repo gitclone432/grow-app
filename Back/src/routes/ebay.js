@@ -11462,18 +11462,7 @@ export async function scheduledFetchCancellations() {
             newCount++;
           }
 
-          // Keep Order.cancelState in sync — the Awaiting Shipment / Fulfillment
-          // list pages read this flat field, not the Cancellation collection.
-          if (cancelData.cancelState && cancelData.orderId) {
-            try {
-              await Order.updateOne(
-                { seller: seller._id, orderId: cancelData.orderId },
-                { $set: { cancelState: cancelData.cancelState } }
-              );
-            } catch (syncErr) {
-              console.warn(`[Fetch Cancellations] Failed to sync Order.cancelState for ${cancelData.orderId}:`, syncErr.message);
-            }
-          }
+          // Order.cancelState is owned by the order sync (Fulfillment API); the Post-Order lifecycle value must not overwrite it.
         }
 
         return {
