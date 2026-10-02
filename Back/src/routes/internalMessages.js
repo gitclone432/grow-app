@@ -160,9 +160,11 @@ async function shapeConversation(conversation, currentUserId) {
   );
 
   const isGroup = conversation.type === 'group';
+  const isSelfChat = !isGroup && participants.length === 1 && asUserId(participants[0]._id) === String(currentUserId);
+  const otherUser = isSelfChat ? participants[0] : (otherParticipants[0] || null);
   const displayName = isGroup
     ? conversation.name
-    : (otherParticipants[0]?.username || 'Unknown');
+    : (isSelfChat ? `${participants[0].username} (You)` : (otherParticipants[0]?.username || 'Unknown'));
 
   const unreadCount = await InternalMessage.countDocuments({
     conversationId: conversation._id,
@@ -177,9 +179,10 @@ async function shapeConversation(conversation, currentUserId) {
     displayName,
     avatarUrl: conversation.avatarUrl,
     participants,
-    otherUser: !isGroup ? (otherParticipants[0] || null) : null,
+    otherUser: !isGroup ? otherUser : null,
     admins: isGroup ? computeEffectiveAdminIds(conversation) : [],
     createdBy: conversation.createdBy ? conversation.createdBy.toString() : null,
+    pinned: (conversation.pinnedBy || []).some((id) => id.toString() === String(currentUserId)),
     lastMessage: conversation.lastMessage?.body || null,
     lastMessageDate: conversation.lastMessageAt,
     unreadCount,
@@ -224,9 +227,33 @@ router.get('/conversations', requireAuth, async (req, res) => {
       conversations.map((conv) => shapeConversation(conv, currentUserId))
     );
 
+    // Pinned chats first; the sort is stable so recency order is kept within each group
+    shaped.sort((a, b) => Number(b.pinned) - Number(a.pinned));
+
     res.json(shaped);
   } catch (err) {
     console.error('Get conversations error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PIN / UNPIN a conversation for the current user
+router.post('/conversations/:id/pin', requireAuth, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId;
+    const { conversation, forbidden } = await loadConversationForUser(req.params.id, currentUserId, req.user.role);
+    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    if (forbidden) return res.status(403).json({ error: 'Forbidden: Not your conversation' });
+
+    const pinned = req.body?.pinned !== false;
+    await Conversation.updateOne(
+      { _id: conversation._id },
+      pinned ? { $addToSet: { pinnedBy: currentUserId } } : { $pull: { pinnedBy: currentUserId } }
+    );
+
+    res.json({ pinned });
+  } catch (err) {
+    console.error('Pin conversation error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -237,22 +264,23 @@ router.post('/conversations/dm', requireAuth, validate(createDmSchema), async (r
     const { recipientId } = req.body;
     const currentUserId = req.user.userId;
 
-    if (recipientId === currentUserId) {
-      return res.status(400).json({ error: 'Cannot start a conversation with yourself' });
-    }
+    const isSelf = String(recipientId) === String(currentUserId);
 
     const recipient = await User.findById(recipientId).select('_id');
     if (!recipient) return res.status(404).json({ error: 'User not found' });
 
+    // Self chat is a dm with a single participant (the user)
     let conversation = await Conversation.findOne({
       type: 'dm',
-      participants: { $all: [currentUserId, recipientId], $size: 2 },
+      participants: isSelf
+        ? { $all: [currentUserId], $size: 1 }
+        : { $all: [currentUserId, recipientId], $size: 2 },
     });
 
     if (!conversation) {
       conversation = await Conversation.create({
         type: 'dm',
-        participants: [currentUserId, recipientId],
+        participants: isSelf ? [currentUserId] : [currentUserId, recipientId],
         createdBy: currentUserId,
         lastMessageAt: new Date(),
       });

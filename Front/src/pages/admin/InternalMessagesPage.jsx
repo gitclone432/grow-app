@@ -19,6 +19,8 @@ import MoreVertIcon from '@mui/icons-material/MoreVert';
 import ReplyIcon from '@mui/icons-material/Reply';
 import AdminPanelSettingsIcon from '@mui/icons-material/AdminPanelSettings';
 import RemoveModeratorIcon from '@mui/icons-material/RemoveModerator';
+import PushPinIcon from '@mui/icons-material/PushPin';
+import PushPinOutlinedIcon from '@mui/icons-material/PushPinOutlined';
 import api from '../../lib/api.js';
 import { onSocketEvent } from '../../lib/socket.js';
 
@@ -199,10 +201,49 @@ export default function InternalMessagesPage() {
     loadConversations();
   }, []);
 
-  // Scroll to bottom when messages change
+  // Scroll on conversation switch, own sends, or when already at the bottom; otherwise just count unseen messages
+  const lastScrollSigRef = useRef('');
+  const prevMessageCountRef = useRef(0);
+  const atBottomRef = useRef(true);
+  const [unseenCount, setUnseenCount] = useState(0);
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    const last = messages[messages.length - 1];
+    const convId = String(selectedConversation?.conversationId || '');
+    const sig = `${convId}|${messages.length}|${last?._id || ''}`;
+    if (sig === lastScrollSigRef.current) return;
+    const prevConvId = lastScrollSigRef.current.split('|')[0];
+    const prevCount = prevMessageCountRef.current;
+    lastScrollSigRef.current = sig;
+    prevMessageCountRef.current = messages.length;
+    if (messageSearchQuery.trim()) return;
+
+    if (prevConvId !== convId) {
+      setUnseenCount(0);
+      atBottomRef.current = true;
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      return;
+    }
+    const added = messages.length - prevCount;
+    if (added <= 0) return;
+    if (last?.sender?._id === myId || atBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    } else {
+      setUnseenCount((c) => c + added);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, selectedConversation?.conversationId]);
+
+  function handleMessagesScroll(e) {
+    const el = e.currentTarget;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    atBottomRef.current = atBottom;
+    if (atBottom) setUnseenCount(0);
+  }
+
+  function jumpToLatest() {
+    setUnseenCount(0);
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }
 
   // Real-time: new messages / conversation changes via socket, with polling as a fallback safety-net
   useEffect(() => {
@@ -239,10 +280,6 @@ export default function InternalMessagesPage() {
     };
   }, [selectedConversation]);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
   // API Functions
   async function loadConversations() {
     setLoadingConversations(true);
@@ -260,6 +297,17 @@ export default function InternalMessagesPage() {
       console.error('Failed to load conversations:', err);
     } finally {
       setLoadingConversations(false);
+    }
+  }
+
+  async function handleTogglePin(conv, e) {
+    e?.stopPropagation();
+    const nextPinned = !conv.pinned;
+    try {
+      await api.post(`/internal-messages/conversations/${conv.conversationId}/pin`, { pinned: nextPinned });
+      await loadConversations();
+    } catch (err) {
+      alert('Failed to update pin: ' + (err.response?.data?.error || err.message));
     }
   }
 
@@ -350,12 +398,13 @@ export default function InternalMessagesPage() {
     }
   }
 
-  async function startNewConversation() {
+  async function startNewConversation(selfChat = false) {
     setSavingChat(true);
     try {
       if (newChatMode === 'dm') {
-        if (!selectedUser) return;
-        const { data } = await api.post('/internal-messages/conversations/dm', { recipientId: selectedUser._id });
+        const recipientId = selfChat === true ? myId : selectedUser?._id;
+        if (!recipientId) return;
+        const { data } = await api.post('/internal-messages/conversations/dm', { recipientId });
         await loadConversations();
         setSelectedConversation(normalizeConversation(data));
         await loadMessages(data.conversationId);
@@ -644,6 +693,14 @@ export default function InternalMessagesPage() {
                             {formatTeamChatTimestamp(conv.lastMessageDate)}
                           </Typography>
                         )}
+                        <IconButton
+                          size="small"
+                          title={conv.pinned ? 'Unpin chat' : 'Pin chat'}
+                          onClick={(e) => handleTogglePin(conv, e)}
+                          sx={{ p: 0.25, ml: 0.5 }}
+                        >
+                          {conv.pinned ? <PushPinIcon sx={{ fontSize: 16 }} color="primary" /> : <PushPinOutlinedIcon sx={{ fontSize: 16 }} />}
+                        </IconButton>
                       </Stack>
                     }
                     secondary={
@@ -752,7 +809,7 @@ export default function InternalMessagesPage() {
             </Menu>
 
             {/* Messages Area */}
-            <Box sx={{ flex: 1, p: 2, overflowY: 'auto', bgcolor: '#f0f2f5' }}>
+            <Box onScroll={handleMessagesScroll} sx={{ flex: 1, p: 2, overflowY: 'auto', bgcolor: '#f0f2f5' }}>
               {loadingMessages ? (
                 <Box display="flex" justifyContent="center" mt={4}>
                   <CircularProgress />
@@ -847,6 +904,15 @@ export default function InternalMessagesPage() {
 
             {/* Input Area */}
             <Box sx={{ p: 2, borderTop: 1, borderColor: 'divider', bgcolor: '#fff', position: 'relative' }}>
+              {unseenCount > 0 && (
+                <Chip
+                  color="primary"
+                  label={`${unseenCount} new message${unseenCount === 1 ? '' : 's'} ↓`}
+                  onClick={jumpToLatest}
+                  sx={{ position: 'absolute', bottom: '100%', right: 16, mb: 1, cursor: 'pointer', boxShadow: 3 }}
+                />
+              )}
+
               {/* @mention suggestions */}
               {mentionQuery !== null && mentionCandidates.length > 0 && (
                 <Paper elevation={4} sx={{ position: 'absolute', bottom: '100%', left: 16, mb: 0.5, maxHeight: 200, overflowY: 'auto', zIndex: 10 }}>
@@ -942,6 +1008,19 @@ export default function InternalMessagesPage() {
             <ToggleButton value="group">New Group</ToggleButton>
           </ToggleButtonGroup>
 
+          {newChatMode === 'dm' && (
+            <Button
+              fullWidth
+              variant="outlined"
+              startIcon={<PersonIcon />}
+              disabled={savingChat}
+              onClick={() => startNewConversation(true)}
+              sx={{ mb: 2, justifyContent: 'flex-start' }}
+            >
+              Message Yourself
+            </Button>
+          )}
+
           {newChatMode === 'dm' ? (
             <Autocomplete
               options={searchResults}
@@ -996,7 +1075,7 @@ export default function InternalMessagesPage() {
           <Button onClick={closeNewChatDialog}>Cancel</Button>
           <Button
             variant="contained"
-            onClick={startNewConversation}
+            onClick={() => startNewConversation()}
             disabled={savingChat || (newChatMode === 'dm' ? !selectedUser : !groupName.trim() || groupMembers.length === 0)}
           >
             {savingChat ? <CircularProgress size={20} /> : (newChatMode === 'dm' ? 'Start Chat' : 'Create Group')}

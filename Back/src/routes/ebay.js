@@ -33,6 +33,7 @@ import ActiveListing from '../models/ActiveListing.js';
 import CustomerServiceMetricSnapshot from '../models/CustomerServiceMetricSnapshot.js';
 import SellerStandardsProfileSnapshot from '../models/SellerStandardsProfileSnapshot.js';
 import CashflowEntry from '../models/CashflowEntry.js';
+import StoreProfitabilityBreakeven from '../models/StoreProfitabilityBreakeven.js';
 import SyncAllSellersLock from '../models/SyncAllSellersLock.js';
 import SyncAllSellersStatusCache from '../models/SyncAllSellersStatusCache.js';
 import FitmentCache from '../models/FitmentCache.js';
@@ -32750,6 +32751,184 @@ router.get('/cashflow', requireAuth, requirePageAccess('Cashflow'), async (req, 
     res.json(results);
   } catch (err) {
     console.error('[Cashflow] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function storeOverviewMonthlyPriceUsd(level, termValue, termUnit) {
+  const months = String(termUnit || '').toUpperCase() === 'YEAR'
+    ? Number(termValue) * 12
+    : Number(termValue);
+  const key = String(level || '').trim().toLowerCase();
+  if (!key || !Number.isFinite(months) || months <= 0) return null;
+
+  if (key.includes('featured') || key.includes('premium')) {
+    if (months === 1) return 74.95;
+    if (months === 12) return 59.95;
+    return 59.95;
+  }
+  if (key.includes('anchor')) {
+    if (months === 1) return 349.95;
+    if (months === 12) return 299.95;
+    return 299.95;
+  }
+  return null;
+}
+
+// Store profitability: per-seller revenue, expense, profit, breakeven margin (selected vs previous month)
+router.get('/store-profitability', requireAuth, requirePageAccess('StoreProfitability'), async (req, res) => {
+  try {
+    const now = new Date();
+    const month = /^\d{4}-\d{2}$/.test(req.query.month || '')
+      ? req.query.month
+      : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    const inrRate = Number(req.query.inrRate);
+    const usdToInrRate = Number.isFinite(inrRate) && inrRate > 0 ? inrRate : 83;
+    const [y, m] = month.split('-').map(Number);
+    const prevYm = m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+    const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const { start } = getPTDayBoundsUTC(`${prevYm}-01`);
+    const { end } = getPTDayBoundsUTC(`${month}-${String(lastDay).padStart(2, '0')}`);
+
+    // Same filters as /seller-analytics
+    const orders = await Order.find({
+      dateSold: { $gte: start, $lte: end },
+      $and: [
+        { $or: [{ orderPaymentStatus: { $exists: false } }, { orderPaymentStatus: null }, { orderPaymentStatus: { $nin: ['FULLY_REFUNDED', 'PARTIALLY_REFUNDED'] } }] },
+        { $or: [{ cancelState: { $exists: false } }, { cancelState: null }, { cancelState: { $nin: FINAL_CANCELLED_STATES } }] },
+        { $or: [{ 'cancelStatus.cancelState': { $exists: false } }, { 'cancelStatus.cancelState': null }, { 'cancelStatus.cancelState': { $nin: FINAL_CANCELLED_STATES } }] },
+        { $or: [{ subtotal: { $gte: 3 } }, { subtotalUSD: { $gte: 3 } }] },
+        { amazonAccount: { $exists: true, $nin: [null, ''] } }
+      ]
+    })
+      .select([
+        'seller', 'dateSold', 'creationDate', 'purchaseMarketplaceId',
+        'subtotal', 'shipping', 'salesTax', 'discount', 'transactionFees', 'adFeeGeneral',
+        'orderEarnings', 'orderTotal', 'pricingSummary',
+        'tds', 'tid', 'net', 'pBalanceINR', 'ebayExchangeRate',
+        'beforeTax', 'estimatedTax', 'amazonTotalINR', 'amazonExchangeRate', 'totalCC', 'profit',
+      ].join(' '))
+      .lean();
+
+    const sellerIds = [...new Set(orders.map((o) => String(o.seller)))];
+    const sellerDocs = await Seller.find({ _id: { $in: sellerIds } })
+      .populate('user', 'username')
+      .select('_id user ebayTokens')
+      .lean(false);
+    const nameById = new Map(sellerDocs.map((s) => [String(s._id), s.user?.username || String(s._id)]));
+    const overviewResults = await Promise.all(
+      sellerDocs.map(async (seller) => {
+        const { row } = await fetchStoreOverviewForSeller(seller, { forceRefresh: false });
+        return [String(seller._id), row];
+      })
+    );
+    const overviewById = new Map(overviewResults);
+    const manualBreakevens = await StoreProfitabilityBreakeven.find({
+      seller: { $in: sellerIds },
+      month: { $in: [month, prevYm] }
+    }).lean();
+    const breakevenByKey = new Map(
+      manualBreakevens.map((entry) => [`${String(entry.seller)}:${entry.month}`, Number(entry.amount) || 0])
+    );
+
+    const stores = new Map();
+    const blank = () => ({ revenue: 0, cog: 0, profit: 0 });
+    for (const id of sellerIds) {
+      const sellerOrders = orders.filter((o) => String(o.seller) === id);
+      const monthly = await buildSellerAnalyticsFromOrders(sellerOrders, 'month');
+      const pick = (ym) => {
+        const row = monthly.find((r) => r.period === ym);
+        return row
+          ? { revenue: row.totalPBalanceINR, cog: row.totalAmazonCosts + row.totalCreditCardFees, profit: row.totalProfit }
+          : blank();
+      };
+      const overview = overviewById.get(id);
+      const storeFeesUsd = storeOverviewMonthlyPriceUsd(
+        overview?.subscriptionLevel,
+        overview?.termValue,
+        overview?.termUnit
+      );
+      const storeFeesInr = storeFeesUsd == null ? null : storeFeesUsd * usdToInrRate;
+      stores.set(id, {
+        sellerId: id,
+        store: nameById.get(id) || id,
+        cur: pick(month),
+        prev: pick(prevYm),
+        manualBreakeven: breakevenByKey.get(`${id}:${month}`) ?? null,
+        previousManualBreakeven: breakevenByKey.get(`${id}:${prevYm}`) ?? null,
+        storeFeesUsd,
+        storeFeesInr,
+      });
+    }
+
+    const r2 = (v) => Math.round(v * 100) / 100;
+    const rows = [...stores.values()].map((row) => {
+      const currentManual = row.manualBreakeven == null ? null : r2(row.manualBreakeven);
+      const previousManual = row.previousManualBreakeven == null ? null : r2(row.previousManualBreakeven);
+      const storeFees = row.storeFeesInr == null ? 0 : row.storeFeesInr;
+      const marginCurrent = r2(row.cur.revenue - (currentManual || 0) - row.cur.cog - storeFees);
+      const marginPrevious = r2(row.prev.revenue - (previousManual || 0) - row.prev.cog - storeFees);
+      return {
+        sellerId: row.sellerId,
+        store: row.store,
+        revenue: r2(row.cur.revenue),
+        breakevenPoint: currentManual,
+        breakevenPointPrevious: previousManual,
+        cog: r2(row.cur.cog),
+        storeFees: row.storeFeesInr == null ? null : r2(row.storeFeesInr),
+        storeFeesUsd: row.storeFeesUsd == null ? null : r2(row.storeFeesUsd),
+        profit: r2(row.cur.profit),
+        breakevenMarginCurrent: marginCurrent,
+        breakevenMarginPrevious: marginPrevious,
+        marginOfSafety: currentManual > 0 ? r2((marginCurrent / currentManual) * 100) : null
+      };
+    }).filter((r) => r.revenue !== 0 || r.cog !== 0 || r.storeFees !== null || r.breakevenPoint !== null)
+      .sort((a, b) => a.store.localeCompare(b.store));
+
+    res.json({ month, inrRate: usdToInrRate, rows });
+  } catch (err) {
+    console.error('[Store Profitability] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/store-profitability/breakeven', requireAuth, requirePageAccess('StoreProfitability'), async (req, res) => {
+  try {
+    const { sellerId, month, amount } = req.body || {};
+
+    if (!sellerId || !/^\d{4}-\d{2}$/.test(String(month || ''))) {
+      return res.status(400).json({ error: 'sellerId and month are required' });
+    }
+
+    if (amount === '' || amount == null) {
+      await StoreProfitabilityBreakeven.findOneAndDelete({ seller: sellerId, month: String(month) });
+      return res.json({ success: true, amount: null });
+    }
+
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount)) {
+      return res.status(400).json({ error: 'amount must be a valid number' });
+    }
+
+    const entry = await StoreProfitabilityBreakeven.findOneAndUpdate(
+      { seller: sellerId, month: String(month) },
+      {
+        $set: {
+          amount: numericAmount,
+          updatedBy: req.user.userId,
+        },
+        $setOnInsert: {
+          seller: sellerId,
+          month: String(month),
+          createdBy: req.user.userId,
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({ success: true, amount: entry.amount });
+  } catch (err) {
+    console.error('[Store Profitability Breakeven] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
