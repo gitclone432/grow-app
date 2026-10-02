@@ -1918,6 +1918,10 @@ function FulfillmentDashboard() {
   const [fetchingCancelStatus, setFetchingCancelStatus] = useState({});
   const [bulkRefreshingCancelStatus, setBulkRefreshingCancelStatus] = useState(false);
   const [bulkRefreshProgress, setBulkRefreshProgress] = useState({ done: 0, total: 0 });
+  const [cancelRangeDialogOpen, setCancelRangeDialogOpen] = useState(false);
+  const [cancelRangeFrom, setCancelRangeFrom] = useState('');
+  const [cancelRangeTo, setCancelRangeTo] = useState('');
+  const [cancelRangeLoading, setCancelRangeLoading] = useState(false);
 
   // Auto-message state
   const [autoMessageLoading, setAutoMessageLoading] = useState(false);
@@ -3635,6 +3639,35 @@ function FulfillmentDashboard() {
   }, [orders, bulkRefreshingCancelStatus, fetchCancelStatusForOrder]);
 
   // Recalculate Earnings for all orders of selected seller
+  const handleUpdateCancelStatusByDate = async () => {
+    const from = cancelRangeFrom;
+    const to = cancelRangeTo || cancelRangeFrom;
+    if (!from) return;
+    setCancelRangeLoading(true);
+    try {
+      const { data } = await api.post('/ebay/orders/bulk-fetch-cancel-status', {
+        startDate: from,
+        endDate: to,
+        ...(selectedSeller ? { sellerId: selectedSeller } : {}),
+      });
+      setCancelRangeDialogOpen(false);
+      await fetchOrders();
+      setSnackbarMsg(
+        `Cancel status: ${data.total} orders checked, ${data.updated} updated, ${data.unchanged} unchanged` +
+        `${data.failed ? `, ${data.failed} failed` : ''}${data.skipped ? `, ${data.skipped} skipped` : ''}`
+      );
+      setSnackbarSeverity(data.failed ? 'warning' : 'success');
+      setSnackbarOpen(true);
+    } catch (e) {
+      setSnackbarMsg(e?.response?.data?.error || 'Failed to update cancel status');
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setCancelRangeLoading(false);
+    }
+  };
+
+  // Recalculate Earnings for all orders of selected seller
   const recalculateEarnings = async () => {
     const SINCE_DATE = '2026-02-28';
     const scopeMsg = selectedSeller
@@ -4554,6 +4587,12 @@ function FulfillmentDashboard() {
                       >
                         {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
                       </MenuItem>
+                      <MenuItem
+                        onClick={() => { setMoreActionsAnchor(null); setCancelRangeDialogOpen(true); }}
+                        disabled={cancelRangeLoading}
+                      >
+                        Update Cancel Status
+                      </MenuItem>
                     </Menu>
                   </>
                 )}
@@ -4751,6 +4790,12 @@ function FulfillmentDashboard() {
                           disabled={recalcAmazonLoading}
                         >
                           {recalcAmazonLoading ? 'Recalculating...' : 'Recalc Amazon'}
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => { setMoreActionsAnchor(null); setCancelRangeDialogOpen(true); }}
+                          disabled={cancelRangeLoading}
+                        >
+                          Update Cancel Status
                         </MenuItem>
                       </Menu>
                     </>
@@ -6485,6 +6530,52 @@ function FulfillmentDashboard() {
           </DialogActions>
         </Dialog>
 
+        <Dialog
+          open={cancelRangeDialogOpen}
+          onClose={() => !cancelRangeLoading && setCancelRangeDialogOpen(false)}
+          maxWidth="xs"
+          fullWidth
+        >
+          <DialogTitle>Update Cancel Status</DialogTitle>
+          <DialogContent>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Re-checks cancel status from eBay for orders sold in the range. Leave "To" empty for a single date.
+              {selectedSeller ? ' Limited to the selected seller.' : ' Applies to all sellers.'}
+            </Typography>
+            <Stack spacing={2}>
+              <TextField
+                type="date"
+                label="From"
+                size="small"
+                value={cancelRangeFrom}
+                onChange={(e) => setCancelRangeFrom(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                disabled={cancelRangeLoading}
+              />
+              <TextField
+                type="date"
+                label="To (optional)"
+                size="small"
+                value={cancelRangeTo}
+                onChange={(e) => setCancelRangeTo(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                inputProps={{ min: cancelRangeFrom || undefined }}
+                disabled={cancelRangeLoading}
+              />
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setCancelRangeDialogOpen(false)} disabled={cancelRangeLoading}>Cancel</Button>
+            <Button
+              variant="contained"
+              onClick={handleUpdateCancelStatusByDate}
+              disabled={!cancelRangeFrom || cancelRangeLoading}
+              startIcon={cancelRangeLoading ? <CircularProgress size={16} color="inherit" /> : null}
+            >
+              {cancelRangeLoading ? 'Updating...' : 'Update'}
+            </Button>
+          </DialogActions>
+        </Dialog>
 
         {/* Snackbar for polling results */}
         <Snackbar
