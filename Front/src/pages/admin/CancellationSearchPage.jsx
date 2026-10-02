@@ -674,6 +674,7 @@ export default function CancellationSearchPage({
   const [itemImages, setItemImages] = useState({});
   const [imageDialogOpen, setImageDialogOpen] = useState(false);
   const [selectedImages, setSelectedImages] = useState([]);
+  const [csvDialog, setCsvDialog] = useState({ open: false, from: '', to: '', busy: false, error: '' });
   const fileInputRefRemark = useRef(null);
   const thumbnailFetchStarted = useRef(new Set());
   const itemImagesRef = useRef(itemImages);
@@ -792,6 +793,82 @@ export default function CancellationSearchPage({
       setError(e.response?.data?.error || e.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  function buildCancellationCsv(list) {
+    return prepareCSVData(list, {
+      'Cancel ID': 'cancelId',
+      'Order ID': (r) => r.orderId || r.legacyOrderId || '',
+      'Date Sold': (r) => formatDate(r.dateSold, r.purchaseMarketplaceId),
+      'Ship By': (r) => formatDate(r.shipByDate, r.purchaseMarketplaceId),
+      'Product Name': (r) => r.itemTitle || r.productName || '',
+      'Shipping Address': (r) => getCancellationAddressLines(r).join(', '),
+      Seller: (r) => r.seller?.user?.username || '',
+      buyerLoginName: (r) => r.buyerLoginName || r.buyerUsername || '',
+      itemId: 'itemId',
+      respondType: 'respondType',
+      Status: 'cancelStatus',
+      State: 'cancelState',
+      Reason: 'cancelReason',
+      Requestor: 'requestorType',
+      Amount: (r) => (r.requestRefundAmount?.value
+        ? `${r.requestRefundAmount.currency || 'USD'} ${r.requestRefundAmount.value}`
+        : ''),
+      Marketplace: 'marketplaceId',
+      'Request Date': (r) => formatDate(r.cancelRequestDate, r.purchaseMarketplaceId),
+      'Seller Response Due': (r) => formatDate(r.sellerResponseDueDate, r.purchaseMarketplaceId),
+      Remark: 'remark',
+    });
+  }
+
+  function openCsvDialog() {
+    const single = dateFilter.mode === 'single' ? dateFilter.single : '';
+    setCsvDialog({
+      open: true,
+      from: single || (dateFilter.mode === 'range' ? dateFilter.from : '') || '',
+      to: single || (dateFilter.mode === 'range' ? dateFilter.to : '') || '',
+      busy: false,
+      error: '',
+    });
+  }
+
+  // Downloads every cancellation (all pages) requested within the chosen dates, honouring the other filters.
+  async function downloadCsvByDate() {
+    const { from, to } = csvDialog;
+    if (!from && !to) {
+      setCsvDialog((prev) => ({ ...prev, error: 'Choose a from and/or to date' }));
+      return;
+    }
+    setCsvDialog((prev) => ({ ...prev, busy: true, error: '' }));
+    try {
+      const params = { limit: 200, sortBy, sortDir };
+      if (sellerFilter) params.sellerId = sellerFilter;
+      if (statusFilter) params.status = statusFilter;
+      if (stateFilter) params.state = stateFilter;
+      if (orderIdFilter) params.orderId = orderIdFilter;
+      if (shipByDateFilter) params.shipByDate = shipByDateFilter;
+      if (from) params.startDate = from;
+      if (to) params.endDate = to;
+
+      const all = [];
+      let pageNum = 1;
+      let pages = 1;
+      do {
+        const res = await api.get('/ebay/stored-cancellations', { params: { ...params, page: pageNum } });
+        all.push(...(res.data.cancellations || []));
+        pages = res.data.pagination?.totalPages || 1;
+        pageNum += 1;
+      } while (pageNum <= pages);
+
+      if (all.length === 0) {
+        setCsvDialog((prev) => ({ ...prev, busy: false, error: 'No cancellations found for the chosen dates' }));
+        return;
+      }
+      downloadCSV(buildCancellationCsv(all), `Cancellation_Search_${from || 'start'}_to_${to || 'end'}`);
+      setCsvDialog((prev) => ({ ...prev, open: false, busy: false }));
+    } catch (e) {
+      setCsvDialog((prev) => ({ ...prev, busy: false, error: e.response?.data?.error || e.message }));
     }
   }
 
@@ -1488,35 +1565,60 @@ export default function CancellationSearchPage({
             sx={yellowOutlinedButtonSx}
             startIcon={<DownloadIcon />}
             disabled={rows.length === 0}
-            onClick={() => {
-              const csvData = prepareCSVData(rows, {
-                'Cancel ID': 'cancelId',
-                'Order ID': (r) => r.orderId || r.legacyOrderId || '',
-                'Date Sold': (r) => formatDate(r.dateSold, r.purchaseMarketplaceId),
-                'Ship By': (r) => formatDate(r.shipByDate, r.purchaseMarketplaceId),
-                'Product Name': (r) => r.itemTitle || r.productName || '',
-                'Shipping Address': (r) => getCancellationAddressLines(r).join(', '),
-                Seller: (r) => r.seller?.user?.username || '',
-                buyerLoginName: (r) => r.buyerLoginName || r.buyerUsername || '',
-                itemId: 'itemId',
-                respondType: 'respondType',
-                Status: 'cancelStatus',
-                State: 'cancelState',
-                Reason: 'cancelReason',
-                Requestor: 'requestorType',
-                Amount: (r) => (r.requestRefundAmount?.value
-                  ? `${r.requestRefundAmount.currency || 'USD'} ${r.requestRefundAmount.value}`
-                  : ''),
-                Marketplace: 'marketplaceId',
-                'Request Date': (r) => formatDate(r.cancelRequestDate, r.purchaseMarketplaceId),
-                'Seller Response Due': (r) => formatDate(r.sellerResponseDueDate, r.purchaseMarketplaceId),
-                Remark: 'remark',
-              });
-              downloadCSV(csvData, 'Cancellation_Search');
-            }}
+            onClick={() => downloadCSV(buildCancellationCsv(rows), 'Cancellation_Search')}
           >
             CSV ({rows.length})
           </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            sx={yellowOutlinedButtonSx}
+            startIcon={<DownloadIcon />}
+            onClick={openCsvDialog}
+          >
+            CSV by Date
+          </Button>
+          <Dialog open={csvDialog.open} onClose={() => !csvDialog.busy && setCsvDialog((p) => ({ ...p, open: false }))} maxWidth="xs" fullWidth>
+            <DialogTitle>Download CSV by Date</DialogTitle>
+            <DialogContent>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Downloads all cancellations requested in the chosen dates, using the current seller, status, state and order filters.
+              </Typography>
+              <Stack direction="row" spacing={2}>
+                <TextField
+                  label="From"
+                  type="date"
+                  size="small"
+                  fullWidth
+                  value={csvDialog.from}
+                  onChange={(e) => setCsvDialog((p) => ({ ...p, from: e.target.value }))}
+                  InputLabelProps={{ shrink: true }}
+                />
+                <TextField
+                  label="To"
+                  type="date"
+                  size="small"
+                  fullWidth
+                  value={csvDialog.to}
+                  onChange={(e) => setCsvDialog((p) => ({ ...p, to: e.target.value }))}
+                  InputLabelProps={{ shrink: true }}
+                />
+              </Stack>
+              {csvDialog.error ? <Alert severity="error" sx={{ mt: 2 }}>{csvDialog.error}</Alert> : null}
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setCsvDialog((p) => ({ ...p, open: false }))} disabled={csvDialog.busy}>Cancel</Button>
+              <Button
+                variant="contained"
+                sx={yellowFilledButtonSx}
+                onClick={downloadCsvByDate}
+                disabled={csvDialog.busy}
+                startIcon={csvDialog.busy ? <CircularProgress size={16} /> : <DownloadIcon />}
+              >
+                Download
+              </Button>
+            </DialogActions>
+          </Dialog>
           <ColumnSelector
             allColumns={ALL_COLUMNS}
             visibleColumns={visibleColumns}

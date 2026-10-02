@@ -85,6 +85,7 @@ export const CardFundRequestsPage = lazy(() => import('../pages/admin/CardFundRe
 export const CardBalanceRecordsPage = lazy(() => import('../pages/admin/CardBalanceRecordsPage.jsx'));
 export const InvoiceUploadPage = lazy(() => import('../pages/admin/InvoiceUploadPage.jsx'));
 export const StoreSubscriptionPage = lazy(() => import('../pages/admin/StoreSubscriptionPage.jsx'));
+export const StoreProfitabilityPage = lazy(() => import('../pages/admin/StoreProfitabilityPage.jsx'));
 export const CompatibilityDashboard = lazy(() => import('../pages/compatibility/CompatibilityDashboard.jsx'));
 export const EditListingsDashboard = lazy(() => import('../pages/listings/EditListingsDashboard.jsx'));
 export const ConversationManagementPage = lazy(() => import('../pages/admin/ConversationManagementPage.jsx'));

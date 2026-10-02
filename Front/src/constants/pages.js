@@ -118,6 +118,7 @@ export const PAGE_REGISTRY = [
   { id: 'Cashflow', name: 'Gross & Net', path: '/cashflow', category: 'finance', defaultRoles: ['superadmin'] },
   { id: 'InvoiceUpload', name: 'Invoice Upload', path: '/invoice-upload', category: 'finance', defaultRoles: ['superadmin'] },
   { id: 'Affiliate', name: 'Store Subscription', path: '/store-subscriptions', category: 'finance', defaultRoles: ['superadmin'] },
+  { id: 'StoreProfitability', name: 'Store Profitability', path: '/store-profitability', category: 'finance', defaultRoles: ['superadmin'] },
   { id: 'Salary', name: 'Salary Page', path: '/salary', category: 'finance', defaultRoles: ['superadmin'] },
   { id: 'AllOrdersSheet', name: 'All Orders USD', path: '/all-orders-sheet', category: 'finance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'PriceChangeHistory', name: 'Price Change History', path: '/price-change-history', category: 'finance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },

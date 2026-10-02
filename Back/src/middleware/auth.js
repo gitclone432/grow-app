@@ -158,6 +158,7 @@ export const PAGE_DEFAULT_ROLES = {
   'FinancesTransactionSummary': ['superadmin', 'listingadmin'],
   'FinancesTransactions': ['superadmin', 'listingadmin'],
   'FinancesPayoutGroups': ['superadmin', 'listingadmin'],
+  'StoreProfitability': ['superadmin'],
   'Discounts': ['superadmin', 'listingadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // HR & Management

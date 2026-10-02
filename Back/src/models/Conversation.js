@@ -17,6 +17,9 @@ const ConversationSchema = new mongoose.Schema(
     // (see isGroupAdmin() in routes/internalMessages.js) so nobody gets locked out.
     admins: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 
+    // Users who pinned this chat to the top of their own list
+    pinnedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+
     // Denormalized for fast sidebar listing without re-aggregating messages
     lastMessage: {
       body: { type: String, default: null },
