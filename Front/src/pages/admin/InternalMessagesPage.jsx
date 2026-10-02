@@ -153,6 +153,7 @@ export default function InternalMessagesPage() {
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
+  const [pinnedDialogOpen, setPinnedDialogOpen] = useState(false);
   const fileInputRef = useRef(null);
 
   // Refs
@@ -256,7 +257,11 @@ export default function InternalMessagesPage() {
       }
       loadConversations();
     });
-    const offConversationUpdated = onSocketEvent('conversation_updated', () => {
+    const offConversationUpdated = onSocketEvent('conversation_updated', (payload) => {
+      if (payload?.pinChanged && selectedConversation
+        && String(payload.conversationId) === String(selectedConversation.conversationId)) {
+        loadMessages(selectedConversation.conversationId, false);
+      }
       loadConversations();
     });
     return () => {
@@ -377,6 +382,26 @@ export default function InternalMessagesPage() {
     }
   }
 
+  async function handleToggleMessagePin(message) {
+    const nextPinned = !message.pinnedAt;
+    try {
+      const { data } = await api.post(`/internal-messages/messages/${message._id}/pin`, { pinned: nextPinned });
+      setMessages((prev) => prev.map((m) => (m._id === message._id
+        ? { ...m, pinnedAt: data.pinnedAt, pinnedBy: data.pinnedBy }
+        : m)));
+    } catch (err) {
+      alert('Failed to update pin: ' + (err.response?.data?.error || err.message));
+    }
+  }
+
+  function jumpToMessage(messageId) {
+    setPinnedDialogOpen(false);
+    setMessageSearchQuery('');
+    setTimeout(() => {
+      document.getElementById(`team-msg-${messageId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+  }
+
   function handleReplyToMessage(message) {
     setReplyingTo(message);
     setTimeout(() => textFieldRef.current?.focus(), 0);
@@ -476,6 +501,14 @@ export default function InternalMessagesPage() {
   }, [mentionQuery, selectedConversation, myId]);
 
   const normalizedMessageSearchQuery = messageSearchQuery.trim().toLowerCase();
+
+  // Most recently pinned first; the first entry is the one shown in the banner
+  const pinnedMessages = useMemo(
+    () => messages
+      .filter((m) => m.pinnedAt)
+      .sort((a, b) => new Date(b.pinnedAt) - new Date(a.pinnedAt)),
+    [messages]
+  );
 
   const visibleMessages = useMemo(() => {
     if (!normalizedMessageSearchQuery) return messages;
@@ -808,6 +841,34 @@ export default function InternalMessagesPage() {
               </MenuItem>
             </Menu>
 
+            {/* Pinned message banner: latest pin, with access to all pins */}
+            {pinnedMessages.length > 0 && (
+              <Box sx={{ px: 2, py: 0.75, bgcolor: '#fff8e1', borderBottom: 1, borderColor: 'divider' }}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <PushPinIcon sx={{ fontSize: 18 }} color="warning" />
+                  <Box
+                    sx={{ flex: 1, minWidth: 0, cursor: 'pointer' }}
+                    onClick={() => jumpToMessage(pinnedMessages[0]._id)}
+                  >
+                    <Typography variant="caption" sx={{ display: 'block', fontWeight: 700 }}>
+                      Pinned by {pinnedMessages[0].sender?.username || 'Former user'}
+                    </Typography>
+                    <Typography variant="body2" noWrap>
+                      {summarizeReplyBody(pinnedMessages[0].body, 160)}
+                    </Typography>
+                  </Box>
+                  {pinnedMessages.length > 1 && (
+                    <Button size="small" onClick={() => setPinnedDialogOpen(true)}>
+                      View all ({pinnedMessages.length})
+                    </Button>
+                  )}
+                  <IconButton size="small" title="Unpin" onClick={() => handleToggleMessagePin(pinnedMessages[0])}>
+                    <CloseIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </Stack>
+              </Box>
+            )}
+
             {/* Messages Area */}
             <Box onScroll={handleMessagesScroll} sx={{ flex: 1, p: 2, overflowY: 'auto', bgcolor: '#f0f2f5' }}>
               {loadingMessages ? (
@@ -829,6 +890,7 @@ export default function InternalMessagesPage() {
                     return (
                       <Box
                         key={msg._id}
+                        id={`team-msg-${msg._id}`}
                         sx={{ alignSelf: isMe ? 'flex-end' : 'flex-start', maxWidth: { xs: '85%', sm: '75%', md: '70%' } }}
                       >
                         {isGroup && !isMe && (
@@ -892,6 +954,16 @@ export default function InternalMessagesPage() {
                           </Typography>
                           <IconButton size="small" onClick={() => handleReplyToMessage(msg)} sx={{ p: 0.25 }}>
                             <ReplyIcon sx={{ fontSize: 15 }} />
+                          </IconButton>
+                          <IconButton
+                            size="small"
+                            title={msg.pinnedAt ? 'Unpin message' : 'Pin message'}
+                            onClick={() => handleToggleMessagePin(msg)}
+                            sx={{ p: 0.25 }}
+                          >
+                            {msg.pinnedAt
+                              ? <PushPinIcon sx={{ fontSize: 15 }} color="warning" />
+                              : <PushPinOutlinedIcon sx={{ fontSize: 15 }} />}
                           </IconButton>
                         </Stack>
                       </Box>
@@ -992,6 +1064,36 @@ export default function InternalMessagesPage() {
           </Box>
         )}
       </Paper>
+
+      {/* All pinned messages */}
+      <Dialog open={pinnedDialogOpen} onClose={() => setPinnedDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Pinned messages ({pinnedMessages.length})</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1.5}>
+            {pinnedMessages.map((m) => (
+              <Paper key={m._id} variant="outlined" sx={{ p: 1.25 }}>
+                <Stack direction="row" spacing={1} alignItems="flex-start">
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                      {m.sender?.username || 'Former user'} · sent {formatTeamChatTimestamp(m.messageDate)} · pinned {formatTeamChatTimestamp(m.pinnedAt)}
+                    </Typography>
+                    <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {m.body}
+                    </Typography>
+                  </Box>
+                  <Button size="small" onClick={() => jumpToMessage(m._id)}>Go to</Button>
+                  <IconButton size="small" title="Unpin" onClick={() => handleToggleMessagePin(m)}>
+                    <PushPinIcon sx={{ fontSize: 16 }} color="warning" />
+                  </IconButton>
+                </Stack>
+              </Paper>
+            ))}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPinnedDialogOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* New Chat Dialog */}
       <Dialog open={newChatOpen} onClose={closeNewChatDialog} maxWidth="sm" fullWidth>

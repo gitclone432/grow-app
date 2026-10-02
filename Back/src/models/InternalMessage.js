@@ -28,7 +28,11 @@ const InternalMessageSchema = new mongoose.Schema(
     ],
 
     // Timestamp
-    messageDate: { type: Date, default: Date.now }
+    messageDate: { type: Date, default: Date.now },
+
+    // Pinned for everyone in the conversation; the latest pinnedAt is the one shown on open
+    pinnedAt: { type: Date, default: null },
+    pinnedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
   },
   { timestamps: true }
 );

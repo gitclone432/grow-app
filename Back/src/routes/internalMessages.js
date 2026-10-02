@@ -558,6 +558,38 @@ router.get('/messages/:conversationId', requireAuth, async (req, res) => {
   }
 });
 
+// 8b. PIN / UNPIN A MESSAGE (visible to everyone in the conversation)
+router.post('/messages/:messageId/pin', requireAuth, async (req, res) => {
+  try {
+    const currentUserId = req.user.userId;
+    if (!mongoose.isValidObjectId(req.params.messageId)) {
+      return res.status(400).json({ error: 'Invalid message id' });
+    }
+    const message = await InternalMessage.findById(req.params.messageId);
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+
+    const { conversation, forbidden } = await loadConversationForUser(message.conversationId, currentUserId, req.user.role);
+    if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+    if (forbidden) return res.status(403).json({ error: 'Forbidden: Not your conversation' });
+
+    const pinned = req.body?.pinned !== false;
+    message.pinnedAt = pinned ? new Date() : null;
+    message.pinnedBy = pinned ? currentUserId : null;
+    await message.save();
+
+    emitToUsers(
+      getConversationParticipantIds(conversation).filter((id) => id !== String(currentUserId)),
+      'conversation_updated',
+      { conversationId: conversation._id, pinChanged: true }
+    );
+
+    res.json({ messageId: message._id, pinnedAt: message.pinnedAt, pinnedBy: message.pinnedBy });
+  } catch (err) {
+    console.error('Pin message error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 9. SEND MESSAGE
 router.post('/send', requireAuth, validate(sendMessageSchema), async (req, res) => {
   try {
