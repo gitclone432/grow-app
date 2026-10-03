@@ -18,6 +18,8 @@ import {
   Typography,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
+import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import api from '../../lib/api';
 
 function formatInr(value) {
@@ -46,6 +48,31 @@ function currentMonthValue() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
+function shiftYmString(ym, shift) {
+  const [yy, mm] = String(ym).split('-').map(Number);
+  let ny = yy;
+  let nm = mm + Number(shift);
+  while (nm <= 0) {
+    nm += 12;
+    ny -= 1;
+  }
+  while (nm > 12) {
+    nm -= 12;
+    ny += 1;
+  }
+  return `${ny}-${String(nm).padStart(2, '0')}`;
+}
+
+function monthLabel(ym) {
+  try {
+    const [y, m] = String(ym).split('-').map(Number);
+    const d = new Date(y, m - 1, 1);
+    return new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' }).format(d);
+  } catch (e) {
+    return ym;
+  }
+}
+
 const headCellSx = {
   fontWeight: 700,
   textAlign: 'center',
@@ -62,7 +89,15 @@ const bodyCellSx = {
 
 export default function StoreProfitabilityPage() {
   const [month, setMonth] = useState(currentMonthValue());
-  const [inrRate, setInrRate] = useState('83');
+  const [inrRate, setInrRate] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem('storeProfitabilityInrRate');
+      return stored != null ? stored : '83';
+    } catch (e) {
+      return '83';
+    }
+  });
+  const [globalBreakeven, setGlobalBreakeven] = useState('');
   const [rows, setRows] = useState([]);
   const [draftBreakeven, setDraftBreakeven] = useState({});
   const [savingIds, setSavingIds] = useState({});
@@ -83,7 +118,11 @@ export default function StoreProfitabilityPage() {
       const nextRows = Array.isArray(data?.rows) ? data.rows : [];
       setRows(nextRows);
       if (!silent) {
-        setInrRate(String(data?.inrRate || activeRate || '83'));
+        const newRate = String(data?.inrRate ?? activeRate ?? '83');
+        setInrRate(newRate);
+        try {
+          window.localStorage.setItem('storeProfitabilityInrRate', newRate);
+        } catch (e) {}
         setDraftBreakeven(
           nextRows.reduce((acc, row) => {
             acc[row.sellerId] = row.breakevenPoint == null ? '' : String(row.breakevenPoint);
@@ -130,11 +169,12 @@ export default function StoreProfitabilityPage() {
       acc.cog += Number(row.cog) || 0;
       acc.storeFees += Number(row.storeFees) || 0;
       acc.profit += Number(row.profit) || 0;
+      acc.profitPrev1 += Number(row.profitPrev1) || 0;
+      acc.profitPrev2 += Number(row.profitPrev2) || 0;
       acc.marginCurrent += Number(row.breakevenMarginCurrent) || 0;
-      acc.marginPrevious += Number(row.breakevenMarginPrevious) || 0;
       return acc;
     },
-    { revenue: 0, manualBreakeven: 0, cog: 0, storeFees: 0, profit: 0, marginCurrent: 0, marginPrevious: 0 }
+    { revenue: 0, manualBreakeven: 0, cog: 0, storeFees: 0, profit: 0, profitPrev1: 0, profitPrev2: 0, marginCurrent: 0 }
   );
 
   const totalMos = totals.manualBreakeven > 0 ? (totals.marginCurrent / totals.manualBreakeven) * 100 : null;
@@ -177,6 +217,29 @@ export default function StoreProfitabilityPage() {
             onBlur={() => loadRows(month, inrRate)}
             inputProps={{ min: '1', step: '0.01' }}
           />
+          <TextField
+            label="Breakeven (Apply to all sellers)"
+            type="number"
+            size="small"
+            value={globalBreakeven}
+            onChange={(e) => setGlobalBreakeven(e.target.value)}
+            onBlur={async () => {
+              const raw = globalBreakeven ?? '';
+              if (raw === '') return;
+              const num = Number(raw);
+              if (!Number.isFinite(num)) return;
+              try {
+                setLoading(true);
+                await api.put('/ebay/store-profitability/breakeven/all', { month, amount: num });
+                await loadRows(month, inrRate);
+              } catch (err) {
+                setError(err.response?.data?.error || 'Failed to apply breakeven to all');
+              } finally {
+                setLoading(false);
+              }
+            }}
+            inputProps={{ min: '0', step: '0.01' }}
+          />
           <Button
             variant="outlined"
             startIcon={loading ? <CircularProgress size={16} /> : <RefreshIcon />}
@@ -198,28 +261,29 @@ export default function StoreProfitabilityPage() {
               <TableCell rowSpan={2} sx={{ ...headCellSx, bgcolor: headBg('primary') }}>Store (Sellers)</TableCell>
               <TableCell rowSpan={2} sx={{ ...headCellSx, bgcolor: headBg('info') }}>Revenue</TableCell>
               <TableCell colSpan={3} sx={{ ...headCellSx, bgcolor: headBg('secondary') }}>Expense</TableCell>
-              <TableCell rowSpan={2} sx={{ ...headCellSx, bgcolor: headBg('success') }}>Profit</TableCell>
-              <TableCell colSpan={2} sx={{ ...headCellSx, bgcolor: headBg('warning') }}>Breakeven Margin</TableCell>
+              <TableCell colSpan={3} sx={{ ...headCellSx, bgcolor: headBg('success') }}>Profit</TableCell>
+              <TableCell rowSpan={2} sx={{ ...headCellSx, bgcolor: headBg('warning') }}>Breakeven Margin</TableCell>
               <TableCell rowSpan={2} sx={{ ...headCellSx, bgcolor: headBg('primary') }}>% Margin of Safety</TableCell>
             </TableRow>
             <TableRow>
               <TableCell sx={{ ...headCellSx, bgcolor: headBg('secondary'), top: 37 }}>Breakeven Point</TableCell>
               <TableCell sx={{ ...headCellSx, bgcolor: headBg('secondary'), top: 37 }}>COG</TableCell>
               <TableCell sx={{ ...headCellSx, bgcolor: headBg('secondary'), top: 37 }}>Store Fees</TableCell>
-              <TableCell sx={{ ...headCellSx, bgcolor: headBg('warning'), top: 37 }}>Current Month</TableCell>
-              <TableCell sx={{ ...headCellSx, bgcolor: headBg('warning'), top: 37 }}>Previous Month</TableCell>
+              <TableCell sx={{ ...headCellSx, bgcolor: headBg('success'), top: 37 }}>{monthLabel(shiftYmString(month, -2))}</TableCell>
+              <TableCell sx={{ ...headCellSx, bgcolor: headBg('success'), top: 37 }}>{monthLabel(shiftYmString(month, -1))}</TableCell>
+              <TableCell sx={{ ...headCellSx, bgcolor: headBg('success'), top: 37 }}>{monthLabel(month)}</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {loading ? (
               <TableRow>
-                <TableCell colSpan={9} align="center" sx={bodyCellSx}>
+                <TableCell colSpan={10} align="center" sx={bodyCellSx}>
                   <CircularProgress size={24} />
                 </TableCell>
               </TableRow>
             ) : rows.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} align="center" sx={bodyCellSx}>No data found for this month.</TableCell>
+                <TableCell colSpan={10} align="center" sx={bodyCellSx}>No data found for this month.</TableCell>
               </TableRow>
             ) : (
               rows.map((row) => (
@@ -267,11 +331,40 @@ export default function StoreProfitabilityPage() {
                       <Typography variant="caption" color="text.secondary">{formatUsd(row.storeFeesUsd)}</Typography>
                     ) : null}
                   </TableCell>
-                  <TableCell sx={{ ...bodyCellSx, color: Number(row.profit) < 0 ? 'error.main' : 'success.main', fontWeight: 700 }} align="right">
-                    {formatInr(row.profit)}
+                  <TableCell sx={bodyCellSx} align="right">{formatInr(row.profitPrev2)}</TableCell>
+                  <TableCell sx={bodyCellSx} align="right">
+                    <Stack alignItems="flex-end" spacing={0.3}>
+                      <Typography variant="body2" sx={{ color: Number(row.profitPrev1) < 0 ? 'error.main' : 'success.main', fontWeight: 700 }}>{formatInr(row.profitPrev1)}</Typography>
+                      {row.profitPrev2 != null && Number(row.profitPrev2) !== 0 ? (() => {
+                        const prev = Number(row.profitPrev2) || 0;
+                        const cur = Number(row.profitPrev1) || 0;
+                        const pct = prev === 0 ? null : ((cur - prev) / Math.abs(prev)) * 100;
+                        if (pct == null) return null;
+                        return (
+                          <Typography component="span" variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', color: pct >= 0 ? 'success.main' : 'error.main' }}>
+                            {pct >= 0 ? <ArrowUpwardIcon fontSize="small" /> : <ArrowDownwardIcon fontSize="small" />}{Math.abs(pct).toFixed(2)}%
+                          </Typography>
+                        );
+                      })() : null}
+                    </Stack>
+                  </TableCell>
+                  <TableCell sx={bodyCellSx} align="right">
+                    <Stack alignItems="flex-end" spacing={0.3}>
+                      <Typography variant="body2" sx={{ color: Number(row.profit) < 0 ? 'error.main' : 'success.main', fontWeight: 900 }}>{formatInr(row.profit)}</Typography>
+                      {row.profitPrev1 != null && Number(row.profitPrev1) !== 0 ? (() => {
+                        const prev = Number(row.profitPrev1) || 0;
+                        const cur = Number(row.profit) || 0;
+                        const pct = prev === 0 ? null : ((cur - prev) / Math.abs(prev)) * 100;
+                        if (pct == null) return null;
+                        return (
+                          <Typography component="span" variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', color: pct >= 0 ? 'success.main' : 'error.main' }}>
+                            {pct >= 0 ? <ArrowUpwardIcon fontSize="small" /> : <ArrowDownwardIcon fontSize="small" />}{Math.abs(pct).toFixed(2)}%
+                          </Typography>
+                        );
+                      })() : null}
+                    </Stack>
                   </TableCell>
                   <TableCell sx={bodyCellSx} align="right">{formatInr(row.breakevenMarginCurrent)}</TableCell>
-                  <TableCell sx={bodyCellSx} align="right">{formatInr(row.breakevenMarginPrevious)}</TableCell>
                   <TableCell sx={{ ...bodyCellSx, color: Number(row.marginOfSafety) < 0 ? 'error.main' : 'text.primary' }} align="right">
                     {formatPercent(row.marginOfSafety)}
                   </TableCell>
@@ -285,9 +378,10 @@ export default function StoreProfitabilityPage() {
                 <TableCell sx={bodyCellSx} align="right">{formatInr(totals.manualBreakeven)}</TableCell>
                 <TableCell sx={bodyCellSx} align="right">{formatInr(totals.cog)}</TableCell>
                 <TableCell sx={bodyCellSx} align="right">{formatInr(totals.storeFees)}</TableCell>
+                <TableCell sx={bodyCellSx} align="right">{formatInr(totals.profitPrev2)}</TableCell>
+                <TableCell sx={bodyCellSx} align="right">{formatInr(totals.profitPrev1)}</TableCell>
                 <TableCell sx={bodyCellSx} align="right">{formatInr(totals.profit)}</TableCell>
                 <TableCell sx={bodyCellSx} align="right">{formatInr(totals.marginCurrent)}</TableCell>
-                <TableCell sx={bodyCellSx} align="right">{formatInr(totals.marginPrevious)}</TableCell>
                 <TableCell sx={bodyCellSx} align="right">{formatPercent(totalMos)}</TableCell>
               </TableRow>
             ) : null}

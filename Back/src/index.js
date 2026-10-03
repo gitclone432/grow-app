@@ -8,6 +8,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import mongoSanitize from 'express-mongo-sanitize';
+import rateLimit from 'express-rate-limit';
 import { setServers } from 'dns';
 // Set DNS to use Google's DNS servers to resolve MongoDB Atlas
 setServers(['8.8.8.8', '8.8.4.4']);
@@ -49,12 +50,7 @@ import compatibilityRoutes from './routes/compatibility.js';
 import listingCompletionsRoutes from './routes/listingCompletions.js';
 
 import ebayRoutes, { resumeRunningAutoCompatibilityBatches } from './routes/ebay.js';
-import precheckBlockedBrandsRoutes from './routes/precheckBlockedBrands.js';
-import { seedPrecheckBlockedBrands } from './utils/precheckBlockedBrands.js';
-import skuIndexRoutes from './routes/skuIndex.js';
-import { initializeSkuIndexSyncState } from './lib/skuIndexSync.js';
 import bestOffersRoutes from './routes/bestOffers.js';
-import discountsRoutes from './routes/discounts.js';
 import sellersRoutes from './routes/sellers.js';
 import employeeProfilesRoutes from './routes/employeeProfiles.js';
 import storeWiseTasksRoutes from './routes/storeWiseTasks.js';
@@ -67,13 +63,8 @@ import ordersRoutes from './routes/orders.js';
 import uploadRoutes from './routes/upload.js';
 import creditCardRoutes from './routes/creditCards.js';
 import creditCardNameRoutes from './routes/creditCardNames.js';
-import cardFundRequestsRoutes from './routes/cardFundRequests.js';
-import cardBalanceRecordsRoutes from './routes/cardBalanceRecords.js';
-import exchangeRateRoutes from './routes/exchangeRate.js';
 import orderQtyExcludeLegacyRoutes from './routes/orderQtyExcludeLegacy.js';
 import cronJobsRoutes from './routes/cronJobs.js';
-import infraUsageRoutes from './routes/infraUsage.js';
-import sourcingRulesRoutes from './routes/sourcingRules.js';
 import scraperTestRoutes from './routes/scraperTest.js';
 import imageOverlaySettingsRoutes from './routes/imageOverlaySettings.js';
 import gmailTestRoutes from './routes/gmailTest.js';
@@ -89,21 +80,11 @@ import transactionRoutes from './routes/transactions.js';
 import bankAccountRoutes from './routes/bankAccounts.js';
 import columnPresetRoutes from './routes/columnPresets.js';
 import amazonLookupRoutes from './routes/amazonLookup.js';
-import amazonSearchRoutes from './routes/amazonSearch.js';
 import productUmbrellaRoutes from './routes/productUmbrellas.js';
 import customColumnsRoutes from './routes/customColumns.js';
 import amazonPiSourceColumnsRoutes from './routes/amazonPiSourceColumns.js';
 import listingTemplateRoutes from './routes/listingTemplates.js';
 import templateListingsRoutes from './routes/templateListings.js';
-import asinPrecheckRoutes from './routes/asinPrecheck.js';
-import skuSellerProfitRoutes from './routes/skuSellerProfit.js';
-import amazonStockChecksRoutes, { resumeRunningAmazonStockCheckRuns } from './routes/amazonStockChecks.js';
-import featurePermissionsRoutes from './routes/featurePermissions.js';
-import endListingLogsRoutes from './routes/endListingLogs.js';
-import manualEndListingsRoutes from './routes/manualEndListings.js';
-import dailyListingComparisonRoutes from './routes/dailyListingComparison.js';
-import activeListingTiersRoutes from './routes/activeListingTiers.js';
-import expiringListingsRoutes from './routes/expiringListings.js';
 import templateOverridesRoutes from './routes/templateOverrides.js';
 import sellerPricingConfigRoutes from './routes/sellerPricingConfig.js';
 import accountHealthRoutes from './routes/accountHealth.js';
@@ -111,7 +92,6 @@ import chatTemplatesRoutes from './routes/chatTemplates.js';
 import remarkTemplatesRoutes from './routes/remarkTemplates.js';
 import extraExpensesRoutes from './routes/extraExpenses.js';
 import cashCreditRoutes from './routes/cashCredit.js';
-import dailyCardExpensesRoutes from './routes/dailyCardExpenses.js';
 import revenueRoutes from './routes/revenue.js';
 import leavesRoutes from './routes/leaves.js';
 import asinDirectoryRoutes from './routes/asinDirectory.js';
@@ -119,9 +99,7 @@ import asinListCategoriesRoutes from './routes/asinListCategories.js';
 import asinListRangesRoutes from './routes/asinListRanges.js';
 import asinListProductsRoutes from './routes/asinListProducts.js';
 import csvStorageRoutes from './routes/csvStorage.js';
-import sellerUploadLimitsRoutes from './routes/sellerUploadLimits.js';
 import attendanceRoutes from './routes/attendance.js';
-import meetingsRoutes from './routes/meetings.js';
 import userSellersRoutes from './routes/userSellers.js';
 import salaryRoutes from './routes/salary.js';
 import aiRoutes from './routes/ai.js';
@@ -131,45 +109,17 @@ import listingStatsRoutes from './routes/listingStats.js';
 import itemCategoryMapRoutes from './routes/itemCategoryMap.js';
 import microOrdersRoutes from './routes/microOrders.js';
 import etsyOrderFulfilmentRoutes from './routes/etsyOrderFulfilment.js';
-import etsyProfitSheetRoutes from './routes/etsyProfitSheet.js';
-import etsyTrackingRoutes from './routes/etsyTracking.js';
 import etsyProductsRoutes from './routes/etsyProducts.js';
 import etsyStoresRoutes from './routes/etsyStores.js';
-import etsyDailyOrdersRoutes from './routes/etsyDailyOrders.js';
-import ebayBuyRoutes from './routes/ebayBuy.js';
-import invoiceRoutes from './routes/invoices.js';
-import userCategoryTargetsRoutes from './routes/userCategoryTargets.js';
 import { initializeScheduledJobs } from './scheduledJobs.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger.js';
 import imageCache from './lib/imageCache.js';
-import http from 'http';
-import { initSocket } from './lib/socket.js';
 
 const app = express();
 
-app.use(helmet({
-  contentSecurityPolicy: {
-    useDefaults: true,
-    directives: {
-      // Allow item images from eBay/Amazon/etc. (and any https host) — the default
-      // 'self' data: img-src blocks all external product/order images in the UI.
-      imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
-    },
-  },
-}));
-app.use(compression({
-  filter: (req, res) => {
-    // Gzip buffers the whole response, which blocks EventSource item-by-item updates
-    // and leaves Review Generated Listings stuck on "loading".
-    const accept = String(req.headers.accept || '');
-    const contentType = String(res.getHeader('Content-Type') || '');
-    if (accept.includes('text/event-stream') || contentType.includes('text/event-stream')) {
-      return false;
-    }
-    return compression.filter(req, res);
-  },
-}));
+app.use(helmet());
+app.use(compression());
 // CORS: allowed origins are driven by CLIENT_ORIGIN env var (comma-separated) + localhost defaults
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
@@ -236,13 +186,7 @@ app.use('/api/compatibility', compatibilityRoutes);
 app.use('/api/listing-completions', listingCompletionsRoutes);
 
 app.use('/api/ebay', ebayRoutes);
-app.use('/api/ebay', skuIndexRoutes);
 app.use('/api/ebay', bestOffersRoutes);
-app.use('/api/ebay', discountsRoutes);
-app.use('/api/ebay', manualEndListingsRoutes);
-app.use('/api/ebay', dailyListingComparisonRoutes);
-app.use('/api/ebay', activeListingTiersRoutes);
-app.use('/api/ebay', expiringListingsRoutes);
 app.use('/api/sellers', sellersRoutes);
 app.use('/api/employee-profiles', employeeProfilesRoutes);
 app.use('/api/store-wise-tasks', storeWiseTasksRoutes);
@@ -254,16 +198,10 @@ app.use('/api/orders', ordersRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/credit-cards', creditCardRoutes);
 app.use('/api/credit-card-names', creditCardNameRoutes);
-app.use('/api/card-fund-requests', cardFundRequestsRoutes);
-app.use('/api/card-balance-records', cardBalanceRecordsRoutes);
-app.use('/api/exchange-rate', exchangeRateRoutes);
 app.use('/api/order-qty-exclude-legacy', orderQtyExcludeLegacyRoutes);
 app.use('/api/cron-jobs', cronJobsRoutes);
-app.use('/api/infra', infraUsageRoutes);
-app.use('/api/sourcing-rules', sourcingRulesRoutes);
 // Intentionally not named *scraper* — some browser extensions block those URLs as false positives.
 app.use('/api/amazon-debug-scrape', scraperTestRoutes);
-app.use('/api/debug-scrape', scraperTestRoutes);
 app.use('/api/image-overlay-settings', imageOverlaySettingsRoutes);
 app.use('/api/gmail-test', gmailTestRoutes);
 app.use('/api/description-template-gallery', descriptionTemplateGalleryRoutes);
@@ -278,24 +216,13 @@ app.use('/api/transactions', transactionRoutes);
 app.use('/api/bank-accounts', bankAccountRoutes);
 app.use('/api/column-presets', columnPresetRoutes);
 app.use('/api/amazon-lookup', amazonLookupRoutes);
-app.use('/api/amazon-search', amazonSearchRoutes);
-// Alias without "amazon" in the path — some browser extensions block /amazon-* URLs.
-app.use('/api/product-search', amazonSearchRoutes);
 app.use('/api/product-umbrellas', productUmbrellaRoutes);
 app.use('/api/custom-columns', customColumnsRoutes);
 app.use('/api/amazon-pi-source-columns', amazonPiSourceColumnsRoutes);
 // Alias without "amazon" in the path — some browser extensions block /amazon-* URLs.
 app.use('/api/pi-source-columns', amazonPiSourceColumnsRoutes);
 app.use('/api/listing-templates', listingTemplateRoutes);
-app.use('/api/template-listings', asinPrecheckRoutes);
-app.use('/api/template-listings', skuSellerProfitRoutes);
 app.use('/api/template-listings', templateListingsRoutes);
-// Top-level alias: GET /api/precheck-usage-summary
-app.use('/api', asinPrecheckRoutes);
-app.use('/api/precheck-blocked-brands', precheckBlockedBrandsRoutes);
-app.use('/api/amazon-stock-checks', amazonStockChecksRoutes);
-app.use('/api/feature-permissions', featurePermissionsRoutes);
-app.use('/api/end-listing-logs', endListingLogsRoutes);
 app.use('/api/template-overrides', templateOverridesRoutes);
 app.use('/api/seller-pricing-config', sellerPricingConfigRoutes);
 app.use('/api/account-health', accountHealthRoutes);
@@ -303,7 +230,6 @@ app.use('/api/chat-templates', chatTemplatesRoutes);
 app.use('/api/remark-templates', remarkTemplatesRoutes);
 app.use('/api/extra-expenses', extraExpensesRoutes);
 app.use('/api/cash-credit', cashCreditRoutes);
-app.use('/api/daily-card-expenses', dailyCardExpensesRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/leaves', leavesRoutes);
 app.use('/api/asin-directory', asinDirectoryRoutes);
@@ -311,12 +237,10 @@ app.use('/api/asin-list-categories', asinListCategoriesRoutes);
 app.use('/api/asin-list-ranges', asinListRangesRoutes);
 app.use('/api/asin-list-products', asinListProductsRoutes);
 app.use('/api/csv-storage', csvStorageRoutes);
-app.use('/api/seller-upload-limits', sellerUploadLimitsRoutes);
 // Nomenclature note:
 // `/api/attendance` is a legacy endpoint name kept for compatibility;
 // it serves working-hours tracking behavior (timer sessions), not traditional attendance management.
 app.use('/api/attendance', attendanceRoutes);
-app.use('/api/meetings', meetingsRoutes);
 app.use('/api/user-sellers', userSellersRoutes);
 app.use('/api/salary', salaryRoutes);
 app.use('/api/ai', aiRoutes);
@@ -327,14 +251,8 @@ app.use('/api/listing-stats', listingStatsRoutes);
 app.use('/api/item-category-map', itemCategoryMapRoutes);
 app.use('/api/micro-orders', microOrdersRoutes);
 app.use('/api/etsy/order-fulfilment', etsyOrderFulfilmentRoutes);
-app.use('/api/etsy/profit-sheet', etsyProfitSheetRoutes);
-app.use('/api/etsy/tracking', etsyTrackingRoutes);
 app.use('/api/etsy/products', etsyProductsRoutes);
 app.use('/api/etsy/stores', etsyStoresRoutes);
-app.use('/api/etsy', etsyDailyOrdersRoutes);
-app.use('/api/ebay-buy', ebayBuyRoutes);
-app.use('/api/invoices', invoiceRoutes);
-app.use('/api/user-category-targets', userCategoryTargetsRoutes);
 
 // Optional: same-origin production — serve Vite build (see Dockerfile / deployment-plan.md)
 if (process.env.SERVE_FRONTEND === 'true') {
@@ -392,20 +310,11 @@ connectToDatabase()
       console.error('Failed to initialize scheduled jobs:', e?.message || e);
     });
 
-    // Import the former hard-coded ASIN precheck excluded-brands list the
-    // first time this boots against an empty collection.
-    seedPrecheckBlockedBrands().catch((e) => {
-      console.error('Failed to seed precheck blocked brands:', e?.message || e);
-    });
-
     // Start image cache auto-cleanup (removes expired entries every 10 minutes)
     imageCache.startAutoCleanup();
 
-    const server = http.createServer(app);
-    initSocket(server, ALLOWED_ORIGINS);
-
-    server.listen(port, () => {
-      console.log(`API listening on :${port} (Socket.IO attached)`);
+    app.listen(port, () => {
+      console.log(`API listening on :${port}`);
 
       // Resume any auto-compat batches that were left 'running' due to a previous server crash/restart
       resumeRunningAutoCompatibilityBatches()
@@ -416,20 +325,6 @@ connectToDatabase()
         })
         .catch((e) => {
           console.error('[AutoCompat] Failed to resume running batches:', e.message);
-        });
-
-      initializeSkuIndexSyncState().catch((e) => {
-        console.error('[SKU Index Sync] Failed to initialize startup state:', e.message);
-      });
-
-      resumeRunningAmazonStockCheckRuns()
-        .then((resumed) => {
-          if (resumed > 0) {
-            console.log(`[Amazon Stock Check] Resumed ${resumed} run(s) after server restart`);
-          }
-        })
-        .catch((e) => {
-          console.error('[Amazon Stock Check] Failed to resume runs:', e.message);
         });
     });
   })

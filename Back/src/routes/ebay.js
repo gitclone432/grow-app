@@ -32785,9 +32785,23 @@ router.get('/store-profitability', requireAuth, requirePageAccess('StoreProfitab
     const inrRate = Number(req.query.inrRate);
     const usdToInrRate = Number.isFinite(inrRate) && inrRate > 0 ? inrRate : 83;
     const [y, m] = month.split('-').map(Number);
-    const prevYm = m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+    const shiftYm = (year, mon, shift) => {
+      let ny = Number(year);
+      let nm = Number(mon) + Number(shift);
+      while (nm <= 0) {
+        nm += 12;
+        ny -= 1;
+      }
+      while (nm > 12) {
+        nm -= 12;
+        ny += 1;
+      }
+      return `${ny}-${String(nm).padStart(2, '0')}`;
+    };
+    const prevYm = shiftYm(y, m, -1);
+    const prev2Ym = shiftYm(y, m, -2);
     const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
-    const { start } = getPTDayBoundsUTC(`${prevYm}-01`);
+    const { start } = getPTDayBoundsUTC(`${prev2Ym}-01`);
     const { end } = getPTDayBoundsUTC(`${month}-${String(lastDay).padStart(2, '0')}`);
 
     // Same filters as /seller-analytics
@@ -32854,6 +32868,7 @@ router.get('/store-profitability', requireAuth, requirePageAccess('StoreProfitab
         store: nameById.get(id) || id,
         cur: pick(month),
         prev: pick(prevYm),
+        prev2: pick(prev2Ym),
         manualBreakeven: breakevenByKey.get(`${id}:${month}`) ?? null,
         previousManualBreakeven: breakevenByKey.get(`${id}:${prevYm}`) ?? null,
         storeFeesUsd,
@@ -32878,6 +32893,8 @@ router.get('/store-profitability', requireAuth, requirePageAccess('StoreProfitab
         storeFees: row.storeFeesInr == null ? null : r2(row.storeFeesInr),
         storeFeesUsd: row.storeFeesUsd == null ? null : r2(row.storeFeesUsd),
         profit: r2(row.cur.profit),
+        profitPrev1: r2(row.prev.profit),
+        profitPrev2: r2(row.prev2.profit),
         breakevenMarginCurrent: marginCurrent,
         breakevenMarginPrevious: marginPrevious,
         marginOfSafety: currentManual > 0 ? r2((marginCurrent / currentManual) * 100) : null
@@ -32929,6 +32946,49 @@ router.put('/store-profitability/breakeven', requireAuth, requirePageAccess('Sto
     res.json({ success: true, amount: entry.amount });
   } catch (err) {
     console.error('[Store Profitability Breakeven] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Apply breakeven amount to all sellers for a month
+router.put('/store-profitability/breakeven/all', requireAuth, requirePageAccess('StoreProfitability'), async (req, res) => {
+  try {
+    const { month, amount } = req.body || {};
+
+    if (!/^[0-9]{4}-[0-9]{2}$/.test(String(month || ''))) {
+      return res.status(400).json({ error: 'month is required and must be YYYY-MM' });
+    }
+
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount)) {
+      return res.status(400).json({ error: 'amount must be a valid number' });
+    }
+
+    // Get all sellers and upsert breakeven for each
+    const sellers = await Seller.find({}).select('_id').lean();
+    if (!Array.isArray(sellers) || sellers.length === 0) {
+      return res.json({ success: true, updated: 0 });
+    }
+
+    const ops = sellers.map((s) => ({
+      updateOne: {
+        filter: { seller: String(s._id), month: String(month) },
+        update: {
+          $set: { amount: numericAmount, updatedBy: req.user.userId },
+          $setOnInsert: { seller: String(s._id), month: String(month), createdBy: req.user.userId }
+        },
+        upsert: true,
+      }
+    }));
+
+    if (ops.length > 0) {
+      const result = await StoreProfitabilityBreakeven.bulkWrite(ops, { ordered: false });
+      return res.json({ success: true, result: { matched: result.matchedCount, modified: result.modifiedCount, upserted: result.upsertedCount } });
+    }
+
+    res.json({ success: true, updated: 0 });
+  } catch (err) {
+    console.error('[Store Profitability Breakeven All] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
