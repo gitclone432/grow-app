@@ -82,15 +82,15 @@ const getStatusColor = (status) => {
 };
 
 const getShippingAddressFields = (order = {}) => {
-  const regAddress = order.buyer?.buyerRegistrationAddress || {};
+  // Ship-to fields only; the buyer's registration address is a different address and must not be mixed in.
   return {
-    fullName: order.shippingFullName || regAddress.fullName || order.buyer?.username || '',
-    line1: order.shippingAddressLine1 || order.buyerAddress || regAddress.contactAddress?.addressLine1 || '',
-    line2: order.shippingAddressLine2 || regAddress.contactAddress?.addressLine2 || '',
-    city: order.shippingCity || regAddress.contactAddress?.city || '',
-    state: order.shippingState || regAddress.contactAddress?.stateOrProvince || '',
-    postalCode: order.shippingPostalCode || regAddress.contactAddress?.postalCode || '',
-    country: order.shippingCountry || regAddress.contactAddress?.country || '',
+    fullName: order.shippingFullName || order.buyer?.username || '',
+    line1: order.shippingAddressLine1 || order.buyerAddress || '',
+    line2: order.shippingAddressLine2 || '',
+    city: order.shippingCity || '',
+    state: order.shippingState || '',
+    postalCode: order.shippingPostalCode || '',
+    country: order.shippingCountry || '',
     phone: '0000000000'
   };
 };

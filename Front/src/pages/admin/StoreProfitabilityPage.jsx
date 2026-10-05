@@ -83,20 +83,21 @@ const headCellSx = {
 
 const headBg = (key) => (theme) => theme.palette[key].main;
 
+// Light red highlight for a month whose profit dropped vs the previous month (same rule as the red % arrow)
+const droppedCellSx = { bgcolor: 'rgba(221, 42, 29, 0.29)' };
+const profitDropped = (prev, cur) => {
+  const p = Number(prev) || 0;
+  if (prev == null || p === 0) return false;
+  return ((Number(cur) || 0) - p) / Math.abs(p) < 0;
+};
+
 const bodyCellSx = {
   verticalAlign: 'middle',
 };
 
 export default function StoreProfitabilityPage() {
   const [month, setMonth] = useState(currentMonthValue());
-  const [inrRate, setInrRate] = useState(() => {
-    try {
-      const stored = window.localStorage.getItem('storeProfitabilityInrRate');
-      return stored != null ? stored : '83';
-    } catch (e) {
-      return '83';
-    }
-  });
+  const [inrRate, setInrRate] = useState('83'); // saved per month in MongoDB; loaded from the API
   const [globalBreakeven, setGlobalBreakeven] = useState('');
   const [rows, setRows] = useState([]);
   const [draftBreakeven, setDraftBreakeven] = useState({});
@@ -120,9 +121,6 @@ export default function StoreProfitabilityPage() {
       if (!silent) {
         const newRate = String(data?.inrRate ?? activeRate ?? '83');
         setInrRate(newRate);
-        try {
-          window.localStorage.setItem('storeProfitabilityInrRate', newRate);
-        } catch (e) {}
         setDraftBreakeven(
           nextRows.reduce((acc, row) => {
             acc[row.sellerId] = row.breakevenPoint == null ? '' : String(row.breakevenPoint);
@@ -137,9 +135,23 @@ export default function StoreProfitabilityPage() {
     }
   }
 
+  // On month change, let the server supply that month's saved rate
   useEffect(() => {
-    loadRows();
+    loadRows(month, '');
   }, [month]);
+
+  async function saveRateAndReload() {
+    const rateValue = Number(inrRate);
+    if (Number.isFinite(rateValue) && rateValue > 0) {
+      try {
+        await api.put('/ebay/store-profitability/rate', { month, rate: rateValue });
+      } catch (err) {
+        setError(err.response?.data?.error || 'Failed to save USD to INR rate');
+        return;
+      }
+    }
+    await loadRows(month, inrRate);
+  }
 
   async function saveBreakeven(sellerId) {
     const rawAmount = draftBreakeven[sellerId] ?? '';
@@ -214,7 +226,7 @@ export default function StoreProfitabilityPage() {
             size="small"
             value={inrRate}
             onChange={(e) => setInrRate(e.target.value)}
-            onBlur={() => loadRows(month, inrRate)}
+            onBlur={saveRateAndReload}
             inputProps={{ min: '1', step: '0.01' }}
           />
           <TextField
@@ -243,7 +255,7 @@ export default function StoreProfitabilityPage() {
           <Button
             variant="outlined"
             startIcon={loading ? <CircularProgress size={16} /> : <RefreshIcon />}
-            onClick={() => loadRows(month, inrRate)}
+            onClick={saveRateAndReload}
             disabled={loading}
           >
             Refresh
@@ -332,7 +344,7 @@ export default function StoreProfitabilityPage() {
                     ) : null}
                   </TableCell>
                   <TableCell sx={bodyCellSx} align="right">{formatInr(row.profitPrev2)}</TableCell>
-                  <TableCell sx={bodyCellSx} align="right">
+                  <TableCell sx={{ ...bodyCellSx, ...(profitDropped(row.profitPrev2, row.profitPrev1) ? droppedCellSx : {}) }} align="right">
                     <Stack alignItems="flex-end" spacing={0.3}>
                       <Typography variant="body2" sx={{ color: Number(row.profitPrev1) < 0 ? 'error.main' : 'success.main', fontWeight: 700 }}>{formatInr(row.profitPrev1)}</Typography>
                       {row.profitPrev2 != null && Number(row.profitPrev2) !== 0 ? (() => {
@@ -348,7 +360,7 @@ export default function StoreProfitabilityPage() {
                       })() : null}
                     </Stack>
                   </TableCell>
-                  <TableCell sx={bodyCellSx} align="right">
+                  <TableCell sx={{ ...bodyCellSx, ...(profitDropped(row.profitPrev1, row.profit) ? droppedCellSx : {}) }} align="right">
                     <Stack alignItems="flex-end" spacing={0.3}>
                       <Typography variant="body2" sx={{ color: Number(row.profit) < 0 ? 'error.main' : 'success.main', fontWeight: 900 }}>{formatInr(row.profit)}</Typography>
                       {row.profitPrev1 != null && Number(row.profitPrev1) !== 0 ? (() => {
