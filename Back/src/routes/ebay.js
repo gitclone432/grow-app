@@ -34,6 +34,7 @@ import CustomerServiceMetricSnapshot from '../models/CustomerServiceMetricSnapsh
 import SellerStandardsProfileSnapshot from '../models/SellerStandardsProfileSnapshot.js';
 import CashflowEntry from '../models/CashflowEntry.js';
 import StoreProfitabilityBreakeven from '../models/StoreProfitabilityBreakeven.js';
+import StoreProfitabilityRate from '../models/StoreProfitabilityRate.js';
 import SyncAllSellersLock from '../models/SyncAllSellersLock.js';
 import SyncAllSellersStatusCache from '../models/SyncAllSellersStatusCache.js';
 import FitmentCache from '../models/FitmentCache.js';
@@ -32782,8 +32783,13 @@ router.get('/store-profitability', requireAuth, requirePageAccess('StoreProfitab
     const month = /^\d{4}-\d{2}$/.test(req.query.month || '')
       ? req.query.month
       : `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    // Rate precedence: explicit ?inrRate override (not saved) > rate saved for this month > latest earlier month's rate > 83
     const inrRate = Number(req.query.inrRate);
-    const usdToInrRate = Number.isFinite(inrRate) && inrRate > 0 ? inrRate : 83;
+    let usdToInrRate = Number.isFinite(inrRate) && inrRate > 0 ? inrRate : null;
+    if (usdToInrRate == null) {
+      const savedRate = await StoreProfitabilityRate.findOne({ month: { $lte: month } }).sort({ month: -1 }).lean();
+      usdToInrRate = savedRate?.rate > 0 ? savedRate.rate : 83;
+    }
     const [y, m] = month.split('-').map(Number);
     const shiftYm = (year, mon, shift) => {
       let ny = Number(year);
@@ -32905,6 +32911,29 @@ router.get('/store-profitability', requireAuth, requirePageAccess('StoreProfitab
     res.json({ month, inrRate: usdToInrRate, rows });
   } catch (err) {
     console.error('[Store Profitability] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Save the USD->INR rate for a month
+router.put('/store-profitability/rate', requireAuth, requirePageAccess('StoreProfitability'), async (req, res) => {
+  try {
+    const { month, rate } = req.body || {};
+    if (!/^\d{4}-\d{2}$/.test(String(month || ''))) {
+      return res.status(400).json({ error: 'month is required and must be YYYY-MM' });
+    }
+    const numericRate = Number(rate);
+    if (!Number.isFinite(numericRate) || numericRate <= 0) {
+      return res.status(400).json({ error: 'rate must be a number greater than 0' });
+    }
+    const entry = await StoreProfitabilityRate.findOneAndUpdate(
+      { month: String(month) },
+      { $set: { rate: numericRate, updatedBy: req.user.userId } },
+      { upsert: true, new: true }
+    );
+    res.json({ success: true, month: entry.month, rate: entry.rate });
+  } catch (err) {
+    console.error('[Store Profitability Rate] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

@@ -1,32 +1,5 @@
 import mongoose from 'mongoose';
 
-// ── Micro-order metrics constants ────────────────────────────────────────────
-const MICRO_MIN         = 0.01;
-const MICRO_MAX         = 3.00;
-const MO_COST_FACTOR    = 90;
-const MO_MARKUP_FACTOR  = 90 * 0.04;
-const MO_IGST_FACTOR    = 90 * 0.04 * 0.18;
-
-/**
- * Upserts an OrderMetrics document for any order whose subtotal falls in the
- * micro-order range (0.01 < subtotal < 3.00).  Called from post-save hooks so
- * every new or updated order is automatically reflected in the Micro Orders page.
- */
-async function syncOrderMetrics(orderId, orderObjectId, subtotal, pBalanceINR) {
-  if (subtotal == null || subtotal <= MICRO_MIN || subtotal >= MICRO_MAX) return;
-  // Lazy-require to avoid circular-dependency issues at module load time
-  const { default: OrderMetrics } = await import('./OrderMetrics.js');
-  const sellerCost      = subtotal * MO_COST_FACTOR;
-  const sellerMarkupFee = subtotal * MO_MARKUP_FACTOR;
-  const sellerIGST      = subtotal * MO_IGST_FACTOR;
-  const profitFake      = (pBalanceINR ?? 0) - sellerCost - sellerMarkupFee - sellerIGST;
-  await OrderMetrics.findOneAndUpdate(
-    { orderId },
-    { $set: { orderId, order: orderObjectId, sellerCost, sellerMarkupFee, sellerIGST, profitFake } },
-    { upsert: true }
-  );
-}
-
 const OrderSchema = new mongoose.Schema(
   {
     seller: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', required: true },
@@ -91,8 +64,15 @@ const OrderSchema = new mongoose.Schema(
       default: 'open'
     }, // Manual status for worksheet tracking
     refunds: Array, // Array of refund objects from paymentSummary.refunds (for display only)
-    // Simple earnings field (auto for non-refunded orders, $0 for FULLY_REFUNDED/PARTIALLY_REFUNDED)
+    // Earnings: PAID from components (AU: totalDueSellerUSD − adFee);
+    // FULLY_REFUNDED → $-0.40;
+    // PARTIALLY_REFUNDED → preRefundEarnings − netRefund + adFeeCredit
     orderEarnings: Number,
+    // Denormalized from paymentSummary.totalDueSeller.value (USD) for list/earnings
+    totalDueSellerUSD: Number,
+    // Frozen at first PARTIALLY_REFUNDED transition (before Finances ad-fee refresh)
+    preRefundOrderEarnings: Number,
+    preRefundAdFeeGeneral: Number,
     trackingNumber: String, // Extracted from fulfillmentHrefs
     manualTrackingNumber: String, // Manually entered tracking number (separate from trackingNumber)
     purchaseMarketplaceId: String, // e.g., EBAY_US, EBAY_AUS, EBAY_Canada
@@ -117,7 +97,7 @@ const OrderSchema = new mongoose.Schema(
     amazonAccount: String,
     amazonAccountAssignmentSource: {
       type: String,
-      enum: ['affiliate', 'fulfillment'],
+      enum: ['affiliate', 'fulfillment', 'store_settings'],
       default: null
     },
     arrivingDate: String,
@@ -137,7 +117,17 @@ const OrderSchema = new mongoose.Schema(
     },
     orderTotal: Number, // Stored order total for sheet editing; defaults to pricingSummary.total.value + salesTax
     // Financial calculations (All Orders Sheet)
-    tds: Number, // Tax Deducted at Source (1% of (pricingSummary.total.value + salesTax))
+    tds: Number, // Tax Deduction at Source — Finances API TAX_DEDUCTION_AT_SOURCE, else 0.1% of subtotal
+    tdsSource: {
+      type: String,
+      enum: ['calculated', 'finances'],
+      default: 'calculated'
+    },
+    // True after a Finances TDS lookup ran (hit or miss). Miss keeps calculated DB TDS — never force $0.
+    tdsFinancesChecked: { type: Boolean, default: false },
+    // True after a Finances ad-fee lookup ran (including a real $0 / no promoted listing fee).
+    adFeeFinancesChecked: { type: Boolean, default: false },
+    financesFeesCheckedAt: { type: Date, default: null },
     tid: { type: Number, default: 0.24 }, // Transaction ID (fixed at $0.24)
     net: Number, // orderEarnings - tds - tid
     pBalanceINR: Number, // net * exchangeRate (for selected marketplace)
@@ -175,6 +165,10 @@ const OrderSchema = new mongoose.Schema(
       }
     },
 
+    /** Queued when Cron Jobs → Set listing qty to 1 is enabled and a new order is imported. */
+    listingQtyUpdatePending: { type: Boolean, default: false },
+    listingQtyUpdatedAt: { type: Date, default: null },
+
     // Already in use flag for Awaiting Shipment
     alreadyInUse: {
       type: String,
@@ -208,15 +202,21 @@ const OrderSchema = new mongoose.Schema(
     complianceBoardStatus: {
       type: String,
       enum: [
-        'todo', 'out_of_stock', 'cancellation', 'address_issue', 'not_fulfilled', 'fulfilled', 'buyer_confirmation',
+        'todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation',
         // Return/Refund statuses
-        'case_opened', 'case_not_opened', 'provide_return_label', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund',
+        'case_opened', 'case_not_opened', 'return_follow_up', 'provide_return_label', 'buyer_drop_off', 'item_delivered', 'partial_refund', 'full_refund', 'replacement',
         // Cancellation statuses
         'cancellation_request', 'accepted', 'declined',
         // INR statuses
-        'inr_case_opened', 'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'
+        'inr_case_opened', 'inr_follow_up', 'inr_tracking_id_upload', 'inr_case_open_ebay_step_in',
+        'inr_fully_refunded', 'inr_partial_refund', 'inr_not_refunded_resolved', 'inr_case_closed'
       ],
       default: 'todo'
+    },
+    orderFulfillmentBoardStatus: {
+      type: String,
+      enum: ['todo', 'out_of_stock', 'cancellation', 'address_issue', 'late_delivery', 'not_fulfilled', 'fulfilled', 'buyer_confirmation'],
+      default: null
     },
     complianceBoardCategories: {
       type: [String],
@@ -228,11 +228,33 @@ const OrderSchema = new mongoose.Schema(
       enum: ['order_communication'],
       default: null
     },
+    // Internal tracking ID for Return board compliance workflow (stores in Follow Up column)
+    complianceBoardTracking: { type: String, default: '' },
+    outOfStockAssignedAt: {
+      type: Date,
+      default: null
+    },
+    cancellationAssignedAt: {
+      type: Date,
+      default: null
+    },
+    addressIssueAssignedAt: {
+      type: Date,
+      default: null
+    },
     returnCaseNotOpenedAssignedAt: {
       type: Date,
       default: null
     },
     returnItemDeliveredAssignedAt: {
+      type: Date,
+      default: null
+    },
+    cancellationCaseNotOpenedAssignedAt: {
+      type: Date,
+      default: null
+    },
+    inrCaseNotOpenedAssignedAt: {
       type: Date,
       default: null
     },
@@ -247,27 +269,16 @@ OrderSchema.index({ seller: 1, dateSold: -1 });
 OrderSchema.index({ seller: 1, lastModifiedDate: -1 });
 OrderSchema.index({ seller: 1, creationDate: -1, lastModifiedDate: -1 }); // Compound index for polling queries
 OrderSchema.index({ dateSold: 1 }); // Index for date range searches
-OrderSchema.index({ subtotal: 1, dateSold: -1 }); // Index for micro-orders range filter + sort
+OrderSchema.index({ subtotal: 1, dateSold: -1 }); // micro-orders range filter + sort
+OrderSchema.index({ sourcingStatus: 1, dateSold: 1 }); // Affiliate daily queue + carry-over
+OrderSchema.index({ dateSold: 1, sourcingStatus: 1 });
+OrderSchema.index({ seller: 1, dateSold: 1 });
 OrderSchema.index({ cancelState: 1, creationDate: -1 }); // Index for cancelled orders queries
 OrderSchema.index({ policyMessageSent: 1, policyMessageDisabled: 1, policyMessageEligibleAt: 1 }); // Index for policy message processing
+OrderSchema.index({ itemNumber: 1, dateSold: -1 });
+OrderSchema.index({ 'lineItems.legacyItemId': 1 });
 OrderSchema.index({ 'lineItems.sku': 1, dateSold: -1 });
 OrderSchema.index({ 'lineItems.SKU': 1, dateSold: -1 });
 OrderSchema.index({ 'lineItems.sellerSku': 1, dateSold: -1 });
-
-// ── Auto-sync OrderMetrics on every save ─────────────────────────────────────
-// Covers Order.create() and doc.save() (main polling phases 1 & 2).
-OrderSchema.post('save', function (doc) {
-  syncOrderMetrics(doc.orderId, doc._id, doc.subtotal, doc.pBalanceINR).catch((err) =>
-    console.error('[OrderMetrics] post-save sync error:', err.message)
-  );
-});
-
-// Covers Order.findOneAndUpdate({ upsert: true }) used in the initial eBay connect flow.
-OrderSchema.post('findOneAndUpdate', function (doc) {
-  if (!doc) return;
-  syncOrderMetrics(doc.orderId, doc._id, doc.subtotal, doc.pBalanceINR).catch((err) =>
-    console.error('[OrderMetrics] post-findOneAndUpdate sync error:', err.message)
-  );
-});
 
 export default mongoose.model('Order', OrderSchema);
