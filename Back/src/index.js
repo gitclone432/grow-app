@@ -118,7 +118,16 @@ import imageCache from './lib/imageCache.js';
 
 const app = express();
 
-app.use(helmet());
+// Helmet's default CSP only allows img-src 'self' data:, which blocks external
+// product images (Amazon/eBay/ImgBB CDNs) when the SPA is served by this server.
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      'img-src': ["'self'", 'data:', 'blob:', 'https:'],
+    },
+  },
+}));
 app.use(compression());
 // CORS: allowed origins are driven by CLIENT_ORIGIN env var (comma-separated) + localhost defaults
 const ALLOWED_ORIGINS = [
