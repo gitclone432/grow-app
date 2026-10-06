@@ -1904,12 +1904,13 @@ export default function InrApiPage({
     try {
       const { data } = await api.get(`/ebay/item-images/${itemId}?sellerId=${sellerId}&thumbnail=true`);
       const thumbnail = data?.images?.[0] || data?.thumbnail || '';
-      if (thumbnail) {
+      if (thumbnail || data?.title) {
         setItemImages((prev) => ({
           ...prev,
           [imageKey]: {
             ...(prev[imageKey] || {}),
-            thumbnail,
+            title: data?.title || prev[imageKey]?.title || '',
+            ...(thumbnail ? { thumbnail } : {}),
             count: Number(data?.total || (Array.isArray(data?.images) ? data.images.length : 0)),
           },
         }));
@@ -2881,6 +2882,8 @@ export default function InrApiPage({
                     {(() => {
                       const itemId = rowItemId(row);
                       const imageLoadKey = String(rowIssueId(row) || rowOrderId(row) || itemId || '');
+                      const rawTitle = rowItemTitle(row);
+                      const itemTitle = itemImages[imageLoadKey]?.title || (rawTitle === 'Item' ? '' : rawTitle);
                       const picture = itemImages[imageLoadKey]?.thumbnail || rowItemPictureUrl(row);
                       const imageCount = itemImages[imageLoadKey]?.count || 0;
                       return (
@@ -2944,7 +2947,46 @@ export default function InrApiPage({
                             </Box>
                           ) : null}
                           <Stack spacing={0.1} sx={{ minWidth: 0 }}>
-                            <CopyText value={itemId} />
+                            {itemId ? (
+                              <Typography
+                                component="a"
+                                href={`https://www.ebay.com/itm/${encodeURIComponent(itemId)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                sx={{
+                                  fontFamily: 'monospace',
+                                  fontSize: '0.72rem',
+                                  color: 'primary.main',
+                                  lineHeight: 1.3,
+                                  textDecoration: 'none',
+                                  '&:hover': { textDecoration: 'underline' },
+                                }}
+                              >
+                                {itemId}
+                              </Typography>
+                            ) : (
+                              <CopyText value={itemId} />
+                            )}
+                            {itemTitle && itemTitle !== itemId && (
+                              <Tooltip title={itemTitle}>
+                                <Typography
+                                  variant="caption"
+                                  sx={{
+                                    fontSize: '0.65rem',
+                                    color: 'text.primary',
+                                    lineHeight: 1.25,
+                                    maxWidth: 170,
+                                    display: '-webkit-box',
+                                    WebkitLineClamp: 2,
+                                    WebkitBoxOrient: 'vertical',
+                                    overflow: 'hidden',
+                                  }}
+                                >
+                                  {itemTitle}
+                                </Typography>
+                              </Tooltip>
+                            )}
                             <Typography variant="caption" sx={{ fontSize: '0.65rem', color: 'text.secondary' }}>
                               {formatAmount(rowItemPrice(row))}
                             </Typography>
