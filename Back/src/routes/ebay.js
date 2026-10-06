@@ -21868,9 +21868,13 @@ router.get('/item-images/:itemId', requireAuth, async (req, res) => {
     // ============================================
     // STEP 4: PREPARE RESPONSE DATA
     // ============================================
+    const titleMatch = xmlText.match(/<Item>[\s\S]*?<Title>([\s\S]*?)<\/Title>/);
+    const title = titleMatch
+      ? titleMatch[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+      : '';
     const responseData = thumbnail === 'true' && images.length > 0
-      ? { images: [images[0]], total: images.length }
-      : { images, total: images.length };
+      ? { images: [images[0]], total: images.length, title }
+      : { images, total: images.length, title };
 
     // ============================================
     // STEP 5: STORE IN CACHE (1 hour TTL)
