@@ -158,7 +158,7 @@ async function enrichINRRowsWithOrderNotesAndRemark(rows = []) {
         { orderId: { $in: orderIds } },
         { legacyOrderId: { $in: orderIds } }
       ]},
-      { orderId: 1, legacyOrderId: 1, notes: 1, fulfillmentNotes: 1, remark: 1 }
+      { orderId: 1, legacyOrderId: 1, notes: 1, fulfillmentNotes: 1, remark: 1, dateSold: 1 }
     )
       .lean();
 
@@ -167,6 +167,7 @@ async function enrichINRRowsWithOrderNotesAndRemark(rows = []) {
       const orderNotesAndRemark = {
         fulfillmentNotes: order.fulfillmentNotes || order.notes || '',
         remark: order.remark || '',
+        dateSold: order.dateSold || null,
       };
       // Map by orderId
       if (order.orderId) {
@@ -188,12 +189,57 @@ async function enrichINRRowsWithOrderNotesAndRemark(rows = []) {
         // This ensures notes and remark are consistent and come from the authoritative source
         fulfillmentNotes: orderData.fulfillmentNotes || row.fulfillmentNotes,
         remark: orderData.remark || row.remark,
+        dateSold: row.dateSold || orderData.dateSold,
       };
     });
   } catch (err) {
     console.warn('[Enrich INR Notes/Remark] Error:', err.message);
     return rows; // Return rows unmodified if enrichment fails
   }
+}
+
+function buildPTDateRange(dateFrom, dateTo) {
+  const range = {};
+  if (dateFrom) {
+    const { start } = getPTDayBoundsUTC(dateFrom);
+    if (!Number.isNaN(start.getTime())) range.$gte = start;
+  }
+  if (dateTo) {
+    const { end } = getPTDayBoundsUTC(dateTo);
+    if (!Number.isNaN(end.getTime())) range.$lte = end;
+  }
+  return Object.keys(range).length > 0 ? range : null;
+}
+
+async function findOrderIdsForSoldDateRange(soldDateFrom, soldDateTo) {
+  const dateSoldRange = buildPTDateRange(soldDateFrom, soldDateTo);
+  if (!dateSoldRange) return null;
+
+  const orders = await Order.find(
+    { dateSold: dateSoldRange },
+    { orderId: 1, legacyOrderId: 1 }
+  ).lean();
+
+  const orderIds = new Set();
+  orders.forEach((order) => {
+    if (order?.orderId) orderIds.add(String(order.orderId));
+    if (order?.legacyOrderId) orderIds.add(String(order.legacyOrderId));
+  });
+  return [...orderIds];
+}
+
+function filterRowsBySoldDate(rows = [], soldDateFrom, soldDateTo) {
+  const dateSoldRange = buildPTDateRange(soldDateFrom, soldDateTo);
+  if (!dateSoldRange) return rows;
+
+  return rows.filter((row) => {
+    if (!row?.dateSold) return false;
+    const soldAt = new Date(row.dateSold);
+    if (Number.isNaN(soldAt.getTime())) return false;
+    if (dateSoldRange.$gte && soldAt < dateSoldRange.$gte) return false;
+    if (dateSoldRange.$lte && soldAt > dateSoldRange.$lte) return false;
+    return true;
+  });
 }
 
 async function enrichCaseLikeRowsWithConversationMeta(rows = []) {
@@ -12834,7 +12880,7 @@ router.post('/fetch-inr-cases', requireAuth, requirePageAccess('Disputes'), asyn
 
 // Get stored INR cases from database
 router.get('/stored-inr-cases', async (req, res) => {
-    const { sellerId, status, caseType, marketplace, limit = 200, dateFrom, dateTo } = req.query;
+    const { sellerId, status, caseType, marketplace, limit = 200, dateFrom, dateTo, soldDateFrom, soldDateTo } = req.query;
 
   try {
     // Minimum date for compliance boards: July 19, 2026
@@ -12881,6 +12927,14 @@ router.get('/stored-inr-cases', async (req, res) => {
         { seller: { $in: sellerIdsForMarket } },
       ];
     }
+    const hasSoldDateFilter = Boolean(soldDateFrom || soldDateTo);
+    if (hasSoldDateFilter) {
+      const soldDateOrderIds = await findOrderIdsForSoldDateRange(soldDateFrom, soldDateTo);
+      if (!soldDateOrderIds || soldDateOrderIds.length === 0) {
+        return res.json({ cases: [], totalCases: 0, totalCount: 0 });
+      }
+      query.orderId = { $in: soldDateOrderIds };
+    }
 
     const cases = await Case.find(query)
       .populate({
@@ -12923,10 +12977,11 @@ router.get('/stored-inr-cases', async (req, res) => {
     const enrichedWithMeta = await enrichCaseLikeRowsWithConversationMeta(withAddress);
     const enrichedWithOrderData = await enrichINRRowsWithOrderNotesAndRemark(enrichedWithMeta);
     const enrichedWithBuyerReplyState = await enrichRowsWithBuyerReplyState(enrichedWithOrderData);
+    const soldDateFilteredRows = filterRowsBySoldDate(enrichedWithBuyerReplyState, soldDateFrom, soldDateTo);
     res.json({
-      cases: enrichedWithBuyerReplyState.map((row) => withParsedTracking(row)),
-      totalCases: enrichedWithBuyerReplyState.length,
-      totalCount,
+      cases: soldDateFilteredRows.map((row) => withParsedTracking(row)),
+      totalCases: soldDateFilteredRows.length,
+      totalCount: hasSoldDateFilter ? soldDateFilteredRows.length : totalCount,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -13497,7 +13552,7 @@ router.post('/fetch-inr-api', requireAuth, requirePageAccess('Disputes'), async 
 
 router.get('/stored-case-management', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
-    const { sellerId, status, caseType, marketplace, limit = 200, dateFrom, dateTo } = req.query;
+    const { sellerId, status, caseType, marketplace, limit = 200, dateFrom, dateTo, soldDateFrom, soldDateTo } = req.query;
     const query = {};
     if (sellerId) query.seller = sellerId;
     if (status) query.status = status;
@@ -13528,6 +13583,14 @@ router.get('/stored-case-management', requireAuth, requirePageAccess('Disputes')
         { marketplaceId: marketplace },
         { seller: { $in: sellerIdsForMarket } },
       ];
+    }
+    const hasSoldDateFilter = Boolean(soldDateFrom || soldDateTo);
+    if (hasSoldDateFilter) {
+      const soldDateOrderIds = await findOrderIdsForSoldDateRange(soldDateFrom, soldDateTo);
+      if (!soldDateOrderIds || soldDateOrderIds.length === 0) {
+        return res.json({ cases: [], totalCases: 0, totalCount: 0 });
+      }
+      query.orderId = { $in: soldDateOrderIds };
     }
 
     const rows = await CaseManagement.find(query)
@@ -13565,10 +13628,11 @@ router.get('/stored-case-management', requireAuth, requirePageAccess('Disputes')
 
     const withAddress = await attachShippingAddressToRows(withOrderIds);
     const enrichedWithOrderData = await enrichINRRowsWithOrderNotesAndRemark(withAddress);
+    const soldDateFilteredRows = filterRowsBySoldDate(enrichedWithOrderData, soldDateFrom, soldDateTo);
     res.json({
-      cases: enrichedWithOrderData.map((row) => withParsedTracking(row)),
-      totalCases: enrichedWithOrderData.length,
-      totalCount: await CaseManagement.countDocuments(query),
+      cases: soldDateFilteredRows.map((row) => withParsedTracking(row)),
+      totalCases: soldDateFilteredRows.length,
+      totalCount: hasSoldDateFilter ? soldDateFilteredRows.length : await CaseManagement.countDocuments(query),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -14165,7 +14229,7 @@ router.post('/fetch-payment-disputes', requireAuth, requirePageAccess('Disputes'
 
 // Get stored Payment Disputes from database
 router.get('/stored-payment-disputes', async (req, res) => {
-  const { sellerId, status, reason, marketplace, limit = 200, dateFrom, dateTo } = req.query;
+  const { sellerId, status, reason, marketplace, limit = 200, dateFrom, dateTo, soldDateFrom, soldDateTo } = req.query;
 
   try {
     let query = {};
@@ -14203,6 +14267,14 @@ router.get('/stored-payment-disputes', async (req, res) => {
         query.seller = { $in: sellerIdsForMarket };
       }
     }
+    const hasSoldDateFilter = Boolean(soldDateFrom || soldDateTo);
+    if (hasSoldDateFilter) {
+      const soldDateOrderIds = await findOrderIdsForSoldDateRange(soldDateFrom, soldDateTo);
+      if (!soldDateOrderIds || soldDateOrderIds.length === 0) {
+        return res.json({ disputes: [], totalDisputes: 0, totalCount: 0 });
+      }
+      query.orderId = { $in: soldDateOrderIds };
+    }
 
     const disputes = await PaymentDispute.find(query)
       .populate({
@@ -14233,7 +14305,12 @@ router.get('/stored-payment-disputes', async (req, res) => {
 
     const withAddress = await attachShippingAddressToRows(rows);
     const enrichedWithOrderData = await enrichINRRowsWithOrderNotesAndRemark(withAddress);
-    res.json({ disputes: enrichedWithOrderData.map((row) => withParsedTracking(row)), totalDisputes: enrichedWithOrderData.length, totalCount });
+    const soldDateFilteredRows = filterRowsBySoldDate(enrichedWithOrderData, soldDateFrom, soldDateTo);
+    res.json({
+      disputes: soldDateFilteredRows.map((row) => withParsedTracking(row)),
+      totalDisputes: soldDateFilteredRows.length,
+      totalCount: hasSoldDateFilter ? soldDateFilteredRows.length : totalCount
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -35130,4 +35207,3 @@ export async function scheduledRunAutoCompatForDate(targetDate, { triggeredBy = 
 }
 
 export default router;
-

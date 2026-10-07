@@ -98,6 +98,7 @@ const actionCellSx = {
 };
 
 const ROWS_PER_PAGE = 50;
+const EMPTY_DATE_SOLD_FILTER = { mode: 'all', single: '', from: '', to: '' };
 
 function hasUnreadBuyerMessage(row) {
   return Boolean(row?.hasUnreadBuyerMessage || Number(row?.messageUnreadCount) > 0);
@@ -384,6 +385,7 @@ const AutoSaveSelect = React.memo(function AutoSaveSelect({ value, options, onSa
 const SORT_COLUMNS = [
   { id: 'seller', label: 'Seller' },
   { id: 'created', label: 'Created (PT)' },
+  { id: 'dateSold', label: 'Date Sold (PT)' },
   { id: 'responseDue', label: 'Due (PT)' },
   { id: 'source', label: 'Issue' },
   { id: 'id', label: 'ID / Order' },
@@ -398,7 +400,7 @@ const SORT_COLUMNS = [
   { id: 'remark', label: 'Remark' },
 ];
 
-const NUMERIC_SORT_COLUMNS = new Set(['claim', 'created', 'responseDue', 'estimateFrom']);
+const NUMERIC_SORT_COLUMNS = new Set(['claim', 'created', 'dateSold', 'responseDue', 'estimateFrom']);
 
 const SHIP_CARRIERS = ['USPS', 'UPS', 'FEDEX', 'DHL', 'AUSTRALIA_POST', 'ROYAL_MAIL', 'CANADA_POST', 'OTHER'];
 
@@ -1154,6 +1156,49 @@ function rowOrderId(row) {
     || '';
 }
 
+function rowDateSold(row) {
+  return row?.dateSold
+    || row?.rawData?.dateSold
+    || null;
+}
+
+function ptDateKey(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(d);
+  const get = (type) => parts.find((part) => part.type === type)?.value || '';
+  const year = get('year');
+  const month = get('month');
+  const day = get('day');
+  return year && month && day ? `${year}-${month}-${day}` : '';
+}
+
+function hasActiveDateSoldFilter(filter) {
+  return (
+    filter?.mode === 'single'
+      ? Boolean(filter?.single)
+      : filter?.mode === 'range' && Boolean(filter?.from || filter?.to)
+  );
+}
+
+function matchesDateSoldFilter(row, filter) {
+  if (!hasActiveDateSoldFilter(filter)) return true;
+  const dateKey = ptDateKey(rowDateSold(row));
+  if (!dateKey) return false;
+  if (filter.mode === 'single') return dateKey === filter.single;
+  if (filter.mode === 'range') {
+    if (filter.from && dateKey < filter.from) return false;
+    if (filter.to && dateKey > filter.to) return false;
+  }
+  return true;
+}
+
 function rowIssueId(row) {
   return row?.caseId
     || row?.paymentDisputeId
@@ -1461,6 +1506,7 @@ function sortValue(row, column) {
     case 'estimateFrom': return dateNumeric(tracking.estimateFromDate);
     case 'trackingUrl': return tracking.trackingURL || '';
     case 'created': return dateNumeric(row.creationDate);
+    case 'dateSold': return dateNumeric(rowDateSold(row));
     case 'responseDue': return dateNumeric(rowDueDate(row));
     default: return '';
   }
@@ -1830,6 +1876,7 @@ export default function InrApiPage({
   const [workflowFilter, setWorkflowFilter] = useState('');
   const [outcomeFilter, setOutcomeFilter] = useState('');
   const [idSearch, setIdSearch] = useState('');
+  const [dateSoldFilter, setDateSoldFilter] = useState(EMPTY_DATE_SOLD_FILTER);
   const [sortBy, setSortBy] = useState('created');
   const [sortDir, setSortDir] = useState('desc');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
@@ -1869,10 +1916,11 @@ export default function InrApiPage({
       if (typeFilter && !reasonMatchesFilter(rowReason(row), typeFilter)) return false;
       if (statusFilter && statusShort(rowStatus(row)) !== statusFilter) return false;
       if (idSearch && !matchesIssueOrOrderId(row, idSearch)) return false;
+      if (!matchesDateSoldFilter(row, dateSoldFilter)) return false;
       return true;
     });
     return filtered.sort((a, b) => compareRows(a, b, sortBy, sortDir));
-  }, [inquiries, cases, disputes, sourceFilter, marketplaceFilter, workflowFilter, outcomeFilter, statusFilter, typeFilter, idSearch, sortBy, sortDir]);
+  }, [inquiries, cases, disputes, sourceFilter, marketplaceFilter, workflowFilter, outcomeFilter, statusFilter, typeFilter, idSearch, dateSoldFilter, sortBy, sortDir]);
 
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(rows.length / ROWS_PER_PAGE)),
@@ -1922,7 +1970,7 @@ export default function InrApiPage({
 
   useEffect(() => {
     setPage(1);
-  }, [sourceFilter, marketplaceFilter, workflowFilter, outcomeFilter, statusFilter, typeFilter, idSearch, sortBy, sortDir, sellerFilter]);
+  }, [sourceFilter, marketplaceFilter, workflowFilter, outcomeFilter, statusFilter, typeFilter, idSearch, dateSoldFilter, sortBy, sortDir, sellerFilter]);
 
   useEffect(() => {
     if (page > totalPages) {
@@ -2027,7 +2075,7 @@ export default function InrApiPage({
 
   useEffect(() => {
     loadStored();
-  }, [sellerFilter]);
+  }, []);
 
   // Helper function to normalize row data from backend
   function normalizeRowData(rows) {
@@ -2053,6 +2101,13 @@ export default function InrApiPage({
     } else if (_dateFilter?.mode === 'range') {
       if (_dateFilter?.from) params.dateFrom = _dateFilter.from;
       if (_dateFilter?.to) params.dateTo = _dateFilter.to;
+    }
+    if (dateSoldFilter.mode === 'single' && dateSoldFilter.single) {
+      params.soldDateFrom = dateSoldFilter.single;
+      params.soldDateTo = dateSoldFilter.single;
+    } else if (dateSoldFilter.mode === 'range') {
+      if (dateSoldFilter.from) params.soldDateFrom = dateSoldFilter.from;
+      if (dateSoldFilter.to) params.soldDateTo = dateSoldFilter.to;
     }
     
     const inquiryParams = { ...params };
@@ -2089,13 +2144,14 @@ export default function InrApiPage({
     const csvData = prepareCSVData(rows, {
       'ID': 'caseId',
       'Order ID': (r) => rowOrderId(r) || r.legacyOrderId || '-',
+      'Date Sold': (r) => formatDate(rowDateSold(r)) || '-',
       'Marketplace': marketplaceLabel,
       'Type': (r) => rowReason(r) || '-',
       'Status': (r) => statusShort(rowStatus(r)) || '-',
       'Seller': (r) => r.seller?.user?.username || '-',
       'Buyer': 'buyerUsername',
       'Item': 'itemTitle',
-      'Created': (r) => formatDate(rowCreatedDate(r)) || '-',
+      'Created': (r) => formatDate(r.creationDate) || '-',
       'Outcome': rowOutcome,
       'Notes': 'notes',
     });
@@ -2555,7 +2611,7 @@ export default function InrApiPage({
   }, [inquiries, cases]);
 
   const hasActiveFilters = Boolean(
-    sellerFilter || statusFilter || typeFilter || marketplaceFilter || sourceFilter || workflowFilter || outcomeFilter || idSearch.trim()
+    sellerFilter || statusFilter || typeFilter || marketplaceFilter || sourceFilter || workflowFilter || outcomeFilter || idSearch.trim() || hasActiveDateSoldFilter(dateSoldFilter)
   );
 
   function clearFilters() {
@@ -2567,6 +2623,7 @@ export default function InrApiPage({
     setWorkflowFilter('');
     setOutcomeFilter('');
     setIdSearch('');
+    setDateSoldFilter(EMPTY_DATE_SOLD_FILTER);
   }
 
   function handleSort(column) {
@@ -2739,6 +2796,51 @@ export default function InrApiPage({
               </MenuItem>
             </Select>
           </FormControl>
+          <FormControl size="small" sx={{ minWidth: 150 }}>
+            <InputLabel>Date Sold</InputLabel>
+            <Select
+              label="Date Sold"
+              value={dateSoldFilter.mode}
+              onChange={(e) => setDateSoldFilter((prev) => ({ ...prev, mode: e.target.value }))}
+            >
+              <MenuItem value="all">All</MenuItem>
+              <MenuItem value="single">Single Date</MenuItem>
+              <MenuItem value="range">Date Range</MenuItem>
+            </Select>
+          </FormControl>
+          {dateSoldFilter.mode === 'single' && (
+            <TextField
+              size="small"
+              label="Date Sold"
+              type="date"
+              value={dateSoldFilter.single}
+              onChange={(e) => setDateSoldFilter((prev) => ({ ...prev, single: e.target.value }))}
+              InputLabelProps={{ shrink: true }}
+              sx={{ minWidth: 170 }}
+            />
+          )}
+          {dateSoldFilter.mode === 'range' && (
+            <>
+              <TextField
+                size="small"
+                label="Sold From"
+                type="date"
+                value={dateSoldFilter.from}
+                onChange={(e) => setDateSoldFilter((prev) => ({ ...prev, from: e.target.value }))}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 170 }}
+              />
+              <TextField
+                size="small"
+                label="Sold To"
+                type="date"
+                value={dateSoldFilter.to}
+                onChange={(e) => setDateSoldFilter((prev) => ({ ...prev, to: e.target.value }))}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 170 }}
+              />
+            </>
+          )}
           <TextField
             size="small"
             label="Issue / Order ID"
@@ -2826,6 +2928,9 @@ export default function InrApiPage({
                   </TableCell>
                   <TableCell sx={denseCellSx}>
                     <DateStack value={row.creationDate} />
+                  </TableCell>
+                  <TableCell sx={denseCellSx}>
+                    <DateStack value={rowDateSold(row)} />
                   </TableCell>
                   <TableCell sx={denseCellSx}>
                     <Tooltip
@@ -3151,7 +3256,7 @@ export default function InrApiPage({
               })}
               {!rows.length && (
                 <TableRow>
-                  <TableCell colSpan={13} align="center" sx={{ py: 4 }}>
+                  <TableCell colSpan={SORT_COLUMNS.length + 1} align="center" sx={{ py: 4 }}>
                     No inquiries, cases, or payment disputes found. Click Fetch from eBay.
                   </TableCell>
                 </TableRow>
