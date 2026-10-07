@@ -162,6 +162,7 @@ export default function DisputesPage({ initialTab = 0 }) {
   const ALL_INR_COLUMNS = [
     { id: 'caseId', label: 'Case ID' },
     { id: 'orderId', label: 'Order ID' },
+    { id: 'dateSold', label: 'Date Sold (PST)' },
     { id: 'type', label: 'Type' },
     { id: 'seller', label: 'Seller' },
     { id: 'buyer', label: 'Buyer' },
@@ -625,6 +626,7 @@ export default function DisputesPage({ initialTab = 0 }) {
     const csvData = prepareCSVData(filteredCases, {
       'Case ID': 'caseId',
       'Order ID': 'orderId',
+      'Date Sold': (c) => formatDate(c.dateSold),
       'Type': 'caseType',
       'Seller': (c) => c.seller?.user?.username || '',
       'Buyer': 'buyerUsername',
@@ -957,9 +959,10 @@ export default function DisputesPage({ initialTab = 0 }) {
                 <TableRow>
             {inrVisibleColumns.includes('caseId') && <TableCell sx={tableHeaderCellSx}>Case ID</TableCell>}
             {inrVisibleColumns.includes('orderId') && <TableCell sx={tableHeaderCellSx}>Order ID</TableCell>}
-            {inrVisibleColumns.includes('type') && <TableCell sx={tableHeaderCellSx}>Type</TableCell>}
-            {inrVisibleColumns.includes('seller') && <TableCell sx={tableHeaderCellSx}>Seller</TableCell>}
-            {inrVisibleColumns.includes('buyer') && <TableCell sx={tableHeaderCellSx}>Buyer</TableCell>}
+              {inrVisibleColumns.includes('dateSold') && <TableCell sx={tableHeaderCellSx}>Date Sold (PST)</TableCell>}
+              {inrVisibleColumns.includes('type') && <TableCell sx={tableHeaderCellSx}>Type</TableCell>}
+              {inrVisibleColumns.includes('seller') && <TableCell sx={tableHeaderCellSx}>Seller</TableCell>}
+              {inrVisibleColumns.includes('buyer') && <TableCell sx={tableHeaderCellSx}>Buyer</TableCell>}
             {inrVisibleColumns.includes('item') && <TableCell sx={tableHeaderCellSx}>Item</TableCell>}
             {inrVisibleColumns.includes('status') && (
               <TableCell sx={tableHeaderCellSx} sortDirection={inrSortBy === 'status' ? inrSortDir : false}>
@@ -1012,6 +1015,11 @@ export default function DisputesPage({ initialTab = 0 }) {
                             </IconButton>
                           ) : null}
                         </Stack>
+                      </TableCell>}
+                      {inrVisibleColumns.includes('dateSold') && <TableCell>
+                        <Typography variant="body2" fontSize="0.75rem">
+                          {formatDate(c.dateSold)}
+                        </Typography>
                       </TableCell>}
                       {inrVisibleColumns.includes('type') && <TableCell>
                         <Chip 
