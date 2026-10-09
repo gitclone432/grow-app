@@ -1,12 +1,14 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
+import PersonOutlineIcon from '@mui/icons-material/PersonOutline';
 import {
   Box,
   IconButton,
   MenuItem,
   Select,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 
@@ -278,7 +280,8 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
 
   if (!editing) {
     const rawText = normalizeDisplayValue(value);
-    const canCopy = column.copyable && rawText && onCopy;
+    const isAddressColumn = column.key === 'address';
+    const canCopy = Boolean((column.copyable || isAddressColumn) && rawText && onCopy);
     const buyerName = column.key === 'address' ? getFirstNonEmptyLine(rawText) : '';
     const canCopyBuyerName = Boolean(buyerName) && onCopy;
 
@@ -358,32 +361,40 @@ const EtsyEditableCell = memo(function EtsyEditableCell({
           </IconButton>
         )}
         {canCopy && (
-          <IconButton
-            size="small"
-            aria-label={`Copy ${column.label}`}
-            disabled={disabled || saving}
-            onClick={(e) => {
-              e.stopPropagation();
-              onCopy(rawText);
-            }}
-            sx={{ p: compact ? 0.125 : 0.25, flexShrink: 0 }}
-          >
-            <ContentCopyIcon sx={{ fontSize: compact ? 12 : 14 }} />
-          </IconButton>
+          <Tooltip title={isAddressColumn ? 'Copy full address' : `Copy ${column.label}`}>
+            <span>
+              <IconButton
+                size="small"
+                aria-label={isAddressColumn ? 'Copy full address' : `Copy ${column.label}`}
+                disabled={disabled || saving}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCopy(rawText, isAddressColumn ? 'Copied full address' : undefined);
+                }}
+                sx={{ p: compact ? 0.125 : 0.25, flexShrink: 0 }}
+              >
+                <ContentCopyIcon sx={{ fontSize: compact ? 12 : 14 }} />
+              </IconButton>
+            </span>
+          </Tooltip>
         )}
         {canCopyBuyerName && (
-          <IconButton
-            size="small"
-            aria-label="Copy buyer name"
-            disabled={disabled || saving}
-            onClick={(e) => {
-              e.stopPropagation();
-              onCopy(buyerName);
-            }}
-            sx={{ p: compact ? 0.125 : 0.25, flexShrink: 0 }}
-          >
-            <ContentCopyIcon sx={{ fontSize: compact ? 12 : 14 }} />
-          </IconButton>
+          <Tooltip title="Copy buyer name">
+            <span>
+              <IconButton
+                size="small"
+                aria-label="Copy buyer name"
+                disabled={disabled || saving}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCopy(buyerName, 'Copied buyer name');
+                }}
+                sx={{ p: compact ? 0.125 : 0.25, flexShrink: 0 }}
+              >
+                <PersonOutlineIcon sx={{ fontSize: compact ? 12 : 14 }} />
+              </IconButton>
+            </span>
+          </Tooltip>
         )}
       </Box>
     );
