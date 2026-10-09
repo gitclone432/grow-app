@@ -811,7 +811,7 @@ export default function EtsyOrderFulfilmentPage({
     }
   }, [orders, storeNameById]);
 
-  const handleCopyCell = useCallback(async (text) => {
+  const handleCopyCell = useCallback(async (text, successMessage) => {
     const value = String(text ?? '').trim();
     if (!value) return;
 
@@ -819,7 +819,7 @@ export default function EtsyOrderFulfilmentPage({
       await navigator.clipboard.writeText(value);
       setSnackbar({
         open: true,
-        message: `Copied: ${value}`,
+        message: successMessage || (value.includes('\n') || value.length > 60 ? 'Copied to clipboard' : `Copied: ${value}`),
         severity: 'success',
       });
     } catch {
