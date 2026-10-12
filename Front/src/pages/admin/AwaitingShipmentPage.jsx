@@ -195,6 +195,7 @@ function getTrackingIdValue(order) {
 function detectTrackingCarrier(trackingNumber) {
   if (!trackingNumber) return null;
   const cleanNumber = trackingNumber.trim().toUpperCase();
+  if (/^[358]\d{11}$/.test(cleanNumber)) return 'FEDEX';
   if (cleanNumber.startsWith('9')) return 'USPS';
   if (cleanNumber.startsWith('1Z')) return 'UPS';
   if (cleanNumber.startsWith('8')) return 'FEDEX';

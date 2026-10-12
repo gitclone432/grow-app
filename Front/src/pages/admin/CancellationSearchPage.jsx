@@ -54,6 +54,7 @@ import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicato
 import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import ChatModal from '../../components/ChatModal';
 import ColumnSelector from '../../components/ColumnSelector';
+import { sellerDisplayName, sortSellersByName } from '../../lib/sellersSort.js';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
 import {
   findRemarkTemplateText,
@@ -227,6 +228,8 @@ const headerSx = {
   '& .MuiTableSortLabel-root.Mui-active': { color: 'inherit' },
   '& .MuiTableSortLabel-icon': { color: 'rgba(255,255,255,0.7) !important' },
 };
+
+const EMPTY_DATE_SOLD_FILTER = { mode: 'all', single: '', from: '', to: '' };
 
 function ImageDialog({ open, onClose, images }) {
   const theme = useTheme();
@@ -645,6 +648,8 @@ export default function CancellationSearchPage({
   const [statusFilter, setStatusFilter] = useState('');
   const [stateFilter, setStateFilter] = useState('');
   const [orderIdFilter, setOrderIdFilter] = useState('');
+  const [dateSoldInput, setDateSoldInput] = useState(EMPTY_DATE_SOLD_FILTER);
+  const [dateSoldFilter, setDateSoldFilter] = useState(EMPTY_DATE_SOLD_FILTER);
   // Ship By filter is intentionally decoupled from the auto-search effect below —
   // shipByDateInput is just the date picker's draft value; shipByDateFilter is
   // what actually gets sent to the API, and only changes on Search click.
@@ -733,6 +738,60 @@ export default function CancellationSearchPage({
     []
   );
   const dateFilter = dateFilterProp ?? internalDateFilter;
+  const sortedSellers = useMemo(() => sortSellersByName(sellers), [sellers]);
+
+  const buildStoredCancellationParams = useCallback((options = {}) => {
+    const {
+      includePage = true,
+      includeLimit = true,
+      pageOverride = page,
+      limitOverride = limit,
+      sellerIdOverride = sellerFilter,
+      dateFilterOverride = dateFilter,
+    } = options;
+    const params = { sortBy, sortDir };
+
+    if (includePage) params.page = pageOverride;
+    if (includeLimit) params.limit = limitOverride;
+    if (sellerIdOverride) params.sellerId = sellerIdOverride;
+    if (statusFilter) params.status = statusFilter;
+    if (stateFilter) params.state = stateFilter;
+    if (orderIdFilter) params.orderId = orderIdFilter;
+    if (shipByDateFilter) params.shipByDate = shipByDateFilter;
+
+    if (dateSoldFilter.mode === 'single' && dateSoldFilter.single) {
+      params.soldDateFrom = dateSoldFilter.single;
+      params.soldDateTo = dateSoldFilter.single;
+    } else if (dateSoldFilter.mode === 'range') {
+      if (dateSoldFilter.from) params.soldDateFrom = dateSoldFilter.from;
+      if (dateSoldFilter.to) params.soldDateTo = dateSoldFilter.to;
+    }
+
+    if (dateFilterOverride.mode === 'single' && dateFilterOverride.single) {
+      params.startDate = dateFilterOverride.single;
+      params.endDate = dateFilterOverride.single;
+    } else if (dateFilterOverride.mode === 'range') {
+      if (dateFilterOverride.from) params.startDate = dateFilterOverride.from;
+      if (dateFilterOverride.to) params.endDate = dateFilterOverride.to;
+    }
+
+    return params;
+  }, [
+    dateFilter,
+    dateSoldFilter.from,
+    dateSoldFilter.mode,
+    dateSoldFilter.single,
+    dateSoldFilter.to,
+    limit,
+    orderIdFilter,
+    page,
+    sellerFilter,
+    shipByDateFilter,
+    sortBy,
+    sortDir,
+    stateFilter,
+    statusFilter,
+  ]);
 
   useEffect(() => {
     api.get('/sellers/all')
@@ -748,42 +807,24 @@ export default function CancellationSearchPage({
 
   useEffect(() => {
     loadStored();
-    // shipByDateFilter (not shipByDateInput) is intentionally included here —
-    // it only changes when the Search button next to it is clicked.
-  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, shipByDateFilter, page, sortBy, sortDir]);
+    // shipByDateFilter and dateSoldFilter are intentionally decoupled from
+    // their draft controls — they only change when Search is clicked.
+  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, dateSoldFilter, shipByDateFilter, page, sortBy, sortDir]);
 
   useEffect(() => {
     setPage(1);
-  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, shipByDateFilter, sortBy, sortDir]);
+  }, [dateFilter, sellerFilter, statusFilter, stateFilter, orderIdFilter, dateSoldFilter, shipByDateFilter, sortBy, sortDir]);
 
-  function handleShipByDateSearch() {
+  function handleSearchFilters() {
     setShipByDateFilter(shipByDateInput);
+    setDateSoldFilter(dateSoldInput);
   }
 
   async function loadStored() {
     setLoading(true);
     setError('');
     try {
-      const params = {
-        page,
-        limit,
-        sortBy,
-        sortDir,
-      };
-      if (sellerFilter) params.sellerId = sellerFilter;
-      if (statusFilter) params.status = statusFilter;
-      if (stateFilter) params.state = stateFilter;
-      if (orderIdFilter) params.orderId = orderIdFilter;
-      if (shipByDateFilter) params.shipByDate = shipByDateFilter;
-
-      if (dateFilter.mode === 'single' && dateFilter.single) {
-        params.startDate = dateFilter.single;
-        params.endDate = dateFilter.single;
-      } else if (dateFilter.mode === 'range') {
-        if (dateFilter.from) params.startDate = dateFilter.from;
-        if (dateFilter.to) params.endDate = dateFilter.to;
-      }
-
+      const params = buildStoredCancellationParams();
       const res = await api.get('/ebay/stored-cancellations', { params });
       setRows(res.data.cancellations || []);
       setTotalPages(res.data.pagination?.totalPages || 1);
@@ -842,12 +883,7 @@ export default function CancellationSearchPage({
     }
     setCsvDialog((prev) => ({ ...prev, busy: true, error: '' }));
     try {
-      const params = { limit: 200, sortBy, sortDir };
-      if (sellerFilter) params.sellerId = sellerFilter;
-      if (statusFilter) params.status = statusFilter;
-      if (stateFilter) params.state = stateFilter;
-      if (orderIdFilter) params.orderId = orderIdFilter;
-      if (shipByDateFilter) params.shipByDate = shipByDateFilter;
+      const params = buildStoredCancellationParams({ includePage: false, limitOverride: 200 });
       if (from) params.startDate = from;
       if (to) params.endDate = to;
 
@@ -920,7 +956,7 @@ export default function CancellationSearchPage({
       setLoading(true);
       try {
         const listRes = await api.get('/ebay/stored-cancellations', {
-          params: { page: 1, limit, sortBy, sortDir, ...(statusFilter ? { status: statusFilter } : {}), ...(stateFilter ? { state: stateFilter } : {}) },
+          params: buildStoredCancellationParams({ pageOverride: 1, sellerIdOverride: '' }),
         });
         setRows(listRes.data.cancellations || []);
         setTotalPages(listRes.data.pagination?.totalPages || 1);
@@ -1470,18 +1506,22 @@ export default function CancellationSearchPage({
             </span>
           </Tooltip>
 
-          <FormControl size="small" sx={{ minWidth: 130 }}>
-            <InputLabel>Seller</InputLabel>
+          <FormControl size="small" sx={{ minWidth: 170 }}>
+            <InputLabel shrink>Seller</InputLabel>
             <Select
               value={sellerFilter}
               onChange={(e) => setSellerFilter(e.target.value)}
               label="Seller"
               displayEmpty
+              renderValue={(value) => {
+                if (!value) return 'All Sellers';
+                return sellerDisplayName(sortedSellers.find((seller) => seller._id === value));
+              }}
             >
               <MenuItem value="">All Sellers</MenuItem>
-              {sellers.map((s) => (
+              {sortedSellers.map((s) => (
                 <MenuItem key={s._id} value={s._id}>
-                  {s.user?.username || s._id}
+                  {sellerDisplayName(s)}
                 </MenuItem>
               ))}
             </Select>
@@ -1524,6 +1564,63 @@ export default function CancellationSearchPage({
             sx={{ minWidth: 140 }}
           />
 
+          <FormControl size="small" sx={{ minWidth: 150 }}>
+            <InputLabel>Date Sold</InputLabel>
+            <Select
+              value={dateSoldInput.mode}
+              onChange={(e) => setDateSoldInput((prev) => ({ ...prev, mode: e.target.value }))}
+              label="Date Sold"
+            >
+              <MenuItem value="all">All</MenuItem>
+              <MenuItem value="single">Single Date</MenuItem>
+              <MenuItem value="range">Date Range</MenuItem>
+            </Select>
+          </FormControl>
+
+          {dateSoldInput.mode === 'single' && (
+            <TextField
+              size="small"
+              type="date"
+              label="Date Sold"
+              value={dateSoldInput.single}
+              onChange={(e) => setDateSoldInput((prev) => ({ ...prev, single: e.target.value }))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSearchFilters();
+              }}
+              InputLabelProps={{ shrink: true }}
+              sx={{ minWidth: 165 }}
+            />
+          )}
+
+          {dateSoldInput.mode === 'range' && (
+            <>
+              <TextField
+                size="small"
+                type="date"
+                label="Sold From"
+                value={dateSoldInput.from}
+                onChange={(e) => setDateSoldInput((prev) => ({ ...prev, from: e.target.value }))}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSearchFilters();
+                }}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 165 }}
+              />
+              <TextField
+                size="small"
+                type="date"
+                label="Sold To"
+                value={dateSoldInput.to}
+                onChange={(e) => setDateSoldInput((prev) => ({ ...prev, to: e.target.value }))}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSearchFilters();
+                }}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 165 }}
+              />
+            </>
+          )}
+
           <TextField
             size="small"
             type="date"
@@ -1531,7 +1628,7 @@ export default function CancellationSearchPage({
             value={shipByDateInput}
             onChange={(e) => setShipByDateInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') handleShipByDateSearch();
+              if (e.key === 'Enter') handleSearchFilters();
             }}
             InputLabelProps={{ shrink: true }}
             sx={{ minWidth: 160 }}
@@ -1540,7 +1637,7 @@ export default function CancellationSearchPage({
             size="small"
             variant="contained"
             sx={yellowFilledButtonSx}
-            onClick={handleShipByDateSearch}
+            onClick={handleSearchFilters}
             disabled={loading}
           >
             Search
