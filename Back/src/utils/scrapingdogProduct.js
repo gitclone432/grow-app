@@ -288,6 +288,125 @@ function hasAvailabilitySignals(data) {
 }
 
 /**
+ * Pull the brand name out of Amazon's brand-browse link:
+ *   /BINQIGOO/b/ref=bl_dp_s_web_1185?...&field-lbr_brands_browse-bin=BINQIGOO
+ * Only the query param is used — it is Amazon's canonical brand string. The
+ * leading path segment is NOT a fallback: Amazon hyphenates it for multi-word
+ * brands (/Barton-Watch-Bands/b/...), and a mangled brand would flow into the
+ * eBay listing, which is worse than "Unbranded".
+ *
+ * The other shape, /stores/<slug>/page/<uuid>, is likewise not parsed: the
+ * slug is the storefront name, which need not match the brand (B0D9VS4PV7 is
+ * brand "SUPFINE" but its store is "Immerseyourselfinyourworld").
+ */
+function brandFromUrl(brandUrl) {
+  const param = String(brandUrl || '').match(/field-lbr_brands_browse-bin=([^&#]+)/);
+  if (!param) return '';
+  try {
+    return decodeURIComponent(param[1].replace(/\+/g, ' '));
+  } catch {
+    return '';
+  }
+}
+
+/** Strip Amazon's byline dressing ("Visit the X Store", "Brand: X"). */
+function cleanBrand(value) {
+  return cleanText(String(value || '').replace(/^Visit the /, '').replace(/ Store$/, '').replace(/^Brand:\s*/i, ''));
+}
+
+/**
+ * Brand as the rest of the app has always seen it: the byline, else the
+ * details table's "Brand" row. Top-level brand is often missing even when
+ * product_information.Brand exists (e.g. B01N5IB20Q) — fall back so we don't
+ * report 'Unbranded' where ScraperAPI reports the real brand.
+ */
+function extractBrand(info, data) {
+  return cleanBrand(data.brand || info.brand || '');
+}
+
+/**
+ * Deeper brand detection, used ONLY by the ASIN precheck's brand exclusion
+ * (surfaced as `detectedBrand`, never as `brand`). Some listings carry no
+ * byline and label the details row "Brand Name" rather than "Brand"
+ * (B0C4JGTCW6, B0CBJVGQ4J — Automotive), so extractBrand() sees nothing and
+ * the listing would slip past an excluded brand. Also reads the brand-browse
+ * link, which Amazon renders even without a byline.
+ *
+ * Kept separate on purpose: `brand` feeds title stripping and the eBay Brand
+ * field, and widening what it returns would change listings that are not
+ * being excluded. A missing brand is a shape problem, not a timing one, so
+ * there is no re-fetch here either. Manufacturer is never used — it is
+ * frequently a different company from the brand.
+ */
+function detectBrand(info, data) {
+  const candidates = [data.brand, info.brand, info.brand_name, brandFromUrl(data.brand_url)];
+  for (const candidate of candidates) {
+    const brand = cleanBrand(candidate);
+    if (brand) return brand;
+  }
+  return '';
+}
+
+/**
+ * The buy-box seller ("Sold by"), surfaced as `soldBy` for the precheck's
+ * brand exclusion only. A brand owner often sells under its own name while
+ * the listing's brand field is blank or generic, so the exclusion list is
+ * checked against this too. `merchant_info` carries the same value on the
+ * responses seen so far; kept as a fallback in case `sold_by` is dropped.
+ */
+function extractSoldBy(data) {
+  return cleanText(String(data.sold_by || data.merchant_info || ''));
+}
+
+/**
+ * detectBrand() + extractSoldBy() for a raw Scrapingdog product response, for
+ * callers that hit the endpoint themselves rather than through the scraper
+ * below — the Amazon Stock Check records these on each item so its Excluded
+ * Brands page can match them against the same list, the same way the precheck
+ * does.
+ *
+ * @returns {{ brand: string, soldBy: string }}
+ */
+export function extractBrandExclusionFields(data) {
+  const payload = data && typeof data === 'object' ? data : {};
+  const info = normalizeProductInformation(payload.product_information);
+  return { brand: detectBrand(info, payload), soldBy: extractSoldBy(payload) };
+}
+
+/**
+ * Buy-box "Ships from" / "Sold by" as the ASIN precheck shows them, from a raw
+ * Scrapingdog product response. Scrapingdog puts them at the top level and
+ * again under purchase_options.single_offer.features. When the seller ships it
+ * themselves Amazon shows one "Shipper / Seller" line instead: there is no
+ * ships_from at all and the sold_by feature carries that heading.
+ *
+ * Shared by the precheck and the Amazon Stock Check (which records shipsFrom
+ * for its Excluded Brands page), so both apply the same Amazon-shipped rule.
+ * `soldBy` here is the display value; the brand exclusion reads extractSoldBy().
+ *
+ * @returns {{ shipsFrom: string, soldBy: string, shipperIsSeller: boolean }}
+ */
+export function extractBuyBoxShipping(data) {
+  const payload = data && typeof data === 'object' ? data : {};
+  const offerFeatures = payload.purchase_options?.single_offer?.features || {};
+  const soldBy = String(payload.sold_by || payload.merchant_info || offerFeatures.sold_by?.text || '').trim();
+  const shipperIsSeller = /shipper/i.test(String(offerFeatures.sold_by?.details?.heading || ''));
+  const shipsFrom = String(
+    payload.ships_from || offerFeatures.ships_from?.text || (shipperIsSeller ? soldBy : '')
+  ).trim();
+  return { shipsFrom, soldBy, shipperIsSeller };
+}
+
+/**
+ * "Amazon", "Amazon.com", "Amazon.co.uk"... A blank Ships From counts as not
+ * Amazon: nothing confirms Amazon ships it. Same rule as the ASIN precheck
+ * page's "Not shipped by Amazon" filter.
+ */
+export function isShipsFromAmazon(shipsFrom) {
+  return /^amazon\b/i.test(String(shipsFrom || '').trim());
+}
+
+/**
  * Main function - Scrape complete Amazon product data using Scrapingdog
  * With intelligent retry and exponential backoff
  * @param {string} asin - Amazon ASIN

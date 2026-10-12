@@ -146,6 +146,7 @@ export const PAGE_DEFAULT_ROLES = {
   'SkuIndexDashboard': ['superadmin', 'listingadmin'],
   'AmazonStockCheck': ['superadmin', 'listingadmin'],
   'SellerSkuStockCheck': ['superadmin', 'listingadmin'],
+  'AmazonStockCheckExcludedBrands': ['superadmin', 'listingadmin'],
   'ExpiringListings': ['superadmin', 'listingadmin'],
   'ActiveListingTiers': ['superadmin', 'listingadmin'],
   'EndListingStats': ['superadmin', 'listingadmin'],

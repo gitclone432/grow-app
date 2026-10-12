@@ -55,6 +55,7 @@ export const DuplicateSkusPage = lazy(() => import('../pages/admin/DuplicateSkus
 export const SkuIndexDashboardPage = lazy(() => import('../pages/admin/SkuIndexDashboardPage.jsx'));
 export const AmazonStockCheckPage = lazy(() => import('../pages/admin/AmazonStockCheckPage.jsx'));
 export const SellerSkuStockCheckPage = lazy(() => import('../pages/admin/SellerSkuStockCheckPage.jsx'));
+export const StockCheckExcludedBrandsPage = lazy(() => import('../pages/admin/StockCheckExcludedBrandsPage.jsx'));
 export const ExpiringListingsPage = lazy(() => import('../pages/admin/ExpiringListingsPage.jsx'));
 export const EndListingStatsPage = lazy(() => import('../pages/admin/EndListingStatsPage.jsx'));
 export const EndListingByDatePage = lazy(() => import('../pages/admin/EndListingByDatePage.jsx'));

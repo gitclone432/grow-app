@@ -34,6 +34,8 @@ import {
   TablePagination,
   TableRow,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography
 } from '@mui/material';
@@ -50,10 +52,15 @@ import CloseIcon from '@mui/icons-material/Close';
 import CancelIcon from '@mui/icons-material/Cancel';
 import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
 import NavigateNextIcon from '@mui/icons-material/NavigateNext';
-import ImageIcon from '@mui/icons-material/Image';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import api from '../../lib/api';
+import { endListingSourceLabel } from '../../constants/endListingSources';
 import PageHeader from '../../components/PageHeader';
+import AsinReviewModal from '../../components/AsinReviewModal';
+import ListingThumb from '../../components/ListingThumb';
+import OrderSparkline from '../../components/OrderSparkline';
+import VerifyResumeButton from '../../components/VerifyResumeButton';
+import useVerifyResumePoint from '../../hooks/useVerifyResumePoint';
 import { BRAND_DARK } from '../../constants/brandTheme';
 
 const AMAZON_STOCK_CHECK_RUN_FEATURE_ID = 'amazonStockCheck.run';
@@ -161,9 +168,18 @@ function getOrderCount(sellerItems) {
   return (sellerItems || []).reduce((sum, row) => sum + (row.orderCount || 0), 0);
 }
 
+// Readable English date, e.g. "Jul 19, 2026, 8:22 PM" (no seconds, no
+// ambiguous all-numeric form).
 function formatDateTime(value) {
   if (!value) return '-';
-  return new Date(value).toLocaleString();
+  return new Date(value).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
 }
 
 function getRunUser(run) {
@@ -172,74 +188,6 @@ function getRunUser(run) {
 
 function getRunScope(run) {
   return `${run.mode} | ${(run.currencies || []).join(', ') || '-'}`;
-}
-
-function formatMonthLabel(monthKey) {
-  const [year, month] = String(monthKey).split('-').map(Number);
-  return new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
-}
-
-// 12-month order-count sparkline: single hue, baseline-anchored bars,
-// per-month tooltip; zero months render as a light stub so the timeline
-// stays readable.
-function OrderSparkline({ monthly = [] }) {
-  if (!monthly.length) return null;
-  const max = Math.max(1, ...monthly.map((m) => m.count));
-  return (
-    <Stack
-      direction="row"
-      spacing="2px"
-      alignItems="flex-end"
-      sx={{ height: 26, px: 0.5 }}
-      aria-label="Orders per month, last 12 months"
-    >
-      {monthly.map((m) => (
-        <Tooltip key={m.month} title={`${formatMonthLabel(m.month)}: ${m.count} order${m.count === 1 ? '' : 's'}`}>
-          <Box
-            sx={{
-              width: 7,
-              height: m.count ? Math.max(4, Math.round((m.count / max) * 24)) : 2,
-              bgcolor: m.count ? '#2563eb' : '#e2e8f0',
-              borderRadius: '1px 1px 0 0'
-            }}
-          />
-        </Tooltip>
-      ))}
-    </Stack>
-  );
-}
-
-function ListingThumb({ url, title }) {
-  if (!url) {
-    return (
-      <Box
-        sx={{
-          width: 48,
-          height: 48,
-          flexShrink: 0,
-          borderRadius: 1,
-          bgcolor: '#f1f5f9',
-          border: '1px solid #e5e7eb',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center'
-        }}
-      >
-        <ImageIcon sx={{ fontSize: 18, color: '#cbd5e1' }} />
-      </Box>
-    );
-  }
-  return (
-    <Box component="a" href={url} target="_blank" rel="noopener noreferrer" sx={{ flexShrink: 0, lineHeight: 0 }}>
-      <Box
-        component="img"
-        src={url}
-        alt={title || 'listing image'}
-        loading="lazy"
-        sx={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 1, border: '1px solid #e5e7eb' }}
-      />
-    </Box>
-  );
 }
 
 // One row per seller-listing carrying the SKU being verified. A SKU shared
@@ -255,7 +203,8 @@ function SellerItemsSection({
   revisedItems,
   onReviseItem,
   selectedIds,
-  onToggleSelect
+  onToggleSelect,
+  failedItems = {}
 }) {
   return (
     <Box>
@@ -271,6 +220,7 @@ function SellerItemsSection({
         const endedInfo = endedItems[row.itemId] || row.endedInfo;
         const revisedInfo = revisedItems[row.itemId] || row.revisedInfo;
         const busy = endingItemId === row.itemId;
+        const failReason = !endedInfo ? failedItems[row.itemId] : null;
         return (
           <Paper key={`${row.sellerId}-${row.itemId}`} variant="outlined" sx={{ p: 1.25, mb: 1, borderRadius: 2 }}>
             <Stack direction="row" spacing={1} alignItems="center">
@@ -321,7 +271,7 @@ function SellerItemsSection({
                 </Button>
               )}
               {endedInfo ? (
-                <Tooltip title={`Ended by ${endedInfo.endedBy || 'unknown'} on ${formatDateTime(endedInfo.endedAt)}`}>
+                <Tooltip title={`Ended by ${endedInfo.endedBy || 'unknown'} on ${formatDateTime(endedInfo.endedAt)}${endedInfo.source ? ` from ${endListingSourceLabel(endedInfo.source)}` : ''}`}>
                   <Chip size="small" color="error" label="Ended" sx={{ fontWeight: 800 }} />
                 </Tooltip>
               ) : (
@@ -357,7 +307,12 @@ function SellerItemsSection({
             </Stack>
             {endedInfo && (
               <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'error.main', fontWeight: 700 }}>
-                Ended by {endedInfo.endedBy || 'unknown'} &middot; {formatDateTime(endedInfo.endedAt)}
+                Ended by {endedInfo.endedBy || 'unknown'} &middot; {formatDateTime(endedInfo.endedAt)}{endedInfo.source && <> &middot; from {endListingSourceLabel(endedInfo.source)}</>}
+              </Typography>
+            )}
+            {failReason && (
+              <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'error.main', fontWeight: 700 }}>
+                End failed: {failReason} — use End Listing to retry
               </Typography>
             )}
             {revisedInfo && (
@@ -407,10 +362,13 @@ export default function AmazonStockCheckPage() {
   const [activeRun, setActiveRun] = useState(null);
   const [items, setItems] = useState([]);
   const [itemCounts, setItemCounts] = useState({});
-  const [pagination, setPagination] = useState({ page: 1, limit: 100, total: 0, totalPages: 1 });
+  const [pagination, setPagination] = useState({ page: 1, limit: 500, total: 0, totalPages: 1 });
   const [loadingEstimate, setLoadingEstimate] = useState(false);
   const [starting, setStarting] = useState(false);
   const [loadingRuns, setLoadingRuns] = useState(false);
+  // True only for user-initiated reloads (card/filter switch, page, seller) —
+  // the 5s background poll stays silent so the table doesn't flash a loader.
+  const [loadingItems, setLoadingItems] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [expandedRows, setExpandedRows] = useState(() => new Set());
@@ -419,6 +377,15 @@ export default function AmazonStockCheckPage() {
   const [reviseTarget, setReviseTarget] = useState(null);
   const [reviseForm, setReviseForm] = useState({ title: '', price: '' });
   const [revising, setRevising] = useState(false);
+  // 'manual' keeps the original title/price-only revise; 'asin' repoints the
+  // listing at a new ASIN using a template, without changing the item ID.
+  const [reviseMode, setReviseMode] = useState('manual');
+  const [reviseAsin, setReviseAsin] = useState('');
+  const [reviseTemplateId, setReviseTemplateId] = useState('');
+  const [reviseTemplates, setReviseTemplates] = useState([]);
+  const [reviseTemplatesLoading, setReviseTemplatesLoading] = useState(false);
+  const [revisePreview, setRevisePreview] = useState(null);
+  const [reviseReviewOpen, setReviseReviewOpen] = useState(false);
 
   const [sellers, setSellers] = useState([]);
   const [sellerFilter, setSellerFilter] = useState(null);
@@ -437,6 +404,12 @@ export default function AmazonStockCheckPage() {
   const [selectedRows, setSelectedRows] = useState(() => new Map());
   const [bulkEnding, setBulkEnding] = useState(false);
   const [bulkEndReviewOpen, setBulkEndReviewOpen] = useState(false);
+  const [bulkEndProgressOpen, setBulkEndProgressOpen] = useState(false);
+  // { total, done, ok } while a bulk end runs; failures carry per-item reasons.
+  const [bulkEndProgress, setBulkEndProgress] = useState(null);
+  const [bulkEndFailures, setBulkEndFailures] = useState([]);
+  // Map<itemId, reason> — last end-listing failure per item, shown beside the row.
+  const [failedItems, setFailedItems] = useState({});
   const [verifyImages, setVerifyImages] = useState({});
   const imageRequestRef = useRef(null);
   const amazonWinRef = useRef(null);
@@ -447,6 +420,14 @@ export default function AmazonStockCheckPage() {
 
   const isRunning = activeRun && ['queued', 'running'].includes(activeRun.status);
   const isPaused = activeRun?.status === 'paused';
+
+  // Where to pick up in the verify list: the row after the furthest one with
+  // a listing ended from this page, whoever ended it (see useVerifyResumePoint).
+  // Only with a seller selected — a whole run is too big to scan.
+  const { resumePoint, live: liveRows, refresh: refreshResumePoint } = useVerifyResumePoint(
+    activeRun?._id && sellerFilter?._id ? `/amazon-stock-checks/runs/${activeRun._id}/resume-point` : null,
+    { filter: activeFilters.join(','), sellerId: sellerFilter?._id || undefined }
+  );
 
   const selectedCurrencyList = useMemo(() => (
     mode === 'custom' ? currencies : ['USD', 'AUD', 'CAD', 'GBP']
@@ -473,8 +454,9 @@ export default function AmazonStockCheckPage() {
     }
   };
 
-  const fetchRun = async (runId) => {
+  const fetchRun = async (runId, { showLoading = false } = {}) => {
     if (!runId) return;
+    if (showLoading) setLoadingItems(true);
     try {
       const sellerId = sellerFilter?._id || undefined;
       const [{ data: runData }, { data: itemsData }] = await Promise.all([
@@ -494,6 +476,9 @@ export default function AmazonStockCheckPage() {
       setPagination((prev) => ({ ...prev, ...(itemsData.pagination || {}) }));
     } catch (err) {
       setError(err.response?.data?.error || err.message || 'Failed to load run details');
+      dropPendingNav();
+    } finally {
+      if (showLoading) setLoadingItems(false);
     }
   };
 
@@ -549,7 +534,7 @@ export default function AmazonStockCheckPage() {
 
   useEffect(() => {
     if (!activeRun?._id) return undefined;
-    fetchRun(activeRun._id);
+    fetchRun(activeRun._id, { showLoading: true });
     if (!['queued', 'running'].includes(activeRun.status)) return undefined;
     const timer = setInterval(() => fetchRun(activeRun._id), 5000);
     return () => clearInterval(timer);
@@ -656,13 +641,23 @@ export default function AmazonStockCheckPage() {
         ...prev,
         [sellerItem.itemId]: {
           endedAt: new Date().toISOString(),
-          endedBy: user?.username || user?.name || user?.email || 'you'
+          endedBy: user?.username || user?.name || user?.email || 'you',
+          source: 'amazon_stock_check'
         }
       }));
+      setFailedItems((prev) => {
+        if (!prev[sellerItem.itemId]) return prev;
+        const next = { ...prev };
+        delete next[sellerItem.itemId];
+        return next;
+      });
       setSuccess(`Ended item ${sellerItem.itemId}`);
+      refreshResumePoint();
       if (activeRun?._id) await fetchRun(activeRun._id);
     } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Failed to end item');
+      const reason = err.response?.data?.error || err.message || 'Failed to end item';
+      setFailedItems((prev) => ({ ...prev, [sellerItem.itemId]: reason }));
+      setError(`Failed to end item ${sellerItem.itemId}: ${reason}`);
     } finally {
       setEndingItemId(null);
     }
@@ -676,6 +671,107 @@ export default function AmazonStockCheckPage() {
       title: sellerItem.title || '',
       price: sellerItem.price ?? ''
     });
+    setReviseMode('manual');
+    setReviseAsin('');
+    setRevisePreview(null);
+    setReviseReviewOpen(false);
+  };
+
+  // Only templates with ASIN automation switched on can generate listing
+  // content, so the picker never offers one that would fail on submit. Fetched
+  // once per page visit, on first open of the dialog, and sorted by name
+  // because the search box is only useful against a predictable order.
+  useEffect(() => {
+    if (!reviseTarget || reviseTemplates.length || reviseTemplatesLoading) return;
+    setReviseTemplatesLoading(true);
+    api.get('/listing-templates')
+      .then(({ data }) => {
+        const usable = (Array.isArray(data) ? data : [])
+          .filter((template) => template.asinAutomation?.enabled)
+          .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        setReviseTemplates(usable);
+        if (usable.length === 1) setReviseTemplateId(usable[0]._id);
+      })
+      .catch((err) => {
+        setReviseTemplates([]);
+        setError(err.response?.data?.error || 'Could not load templates for the revise dialog.');
+      })
+      .finally(() => setReviseTemplatesLoading(false));
+  }, [reviseTarget, reviseTemplates.length, reviseTemplatesLoading]);
+
+  const handleGenerateRevisePreview = async () => {
+    if (!reviseTarget) return;
+    setError('');
+    setSuccess('');
+    setRevising(true);
+    try {
+      const { data } = await api.post('/amazon-stock-checks/revise-listing/preview', {
+        sellerId: reviseTarget.sellerItem.sellerId,
+        itemId: reviseTarget.sellerItem.itemId,
+        asin: reviseAsin.trim().toUpperCase(),
+        templateId: reviseTemplateId,
+        currency: reviseTarget.sellerItem.currency || reviseTarget.item?.currency || 'USD'
+      });
+      // The review modal drops items it considers unsaveable, so a generation
+      // that failed validation has to be reported here — opening the modal
+      // would show a row whose Save button silently does nothing.
+      if (data.errors?.length) {
+        setError(`Could not generate a listing for ${data.asin}: ${data.errors.join('; ')}`);
+        return;
+      }
+      setRevisePreview(data);
+      setReviseReviewOpen(true);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Failed to generate the revise preview');
+    } finally {
+      setRevising(false);
+    }
+  };
+
+  // AsinReviewModal hands back an array; this flow only ever has one item in it.
+  const handleApplyAsinRevise = async (listings) => {
+    if (!reviseTarget || !revisePreview) return;
+    const listing = listings?.[0];
+    if (!listing) {
+      setError('Nothing to revise — the generated listing was dismissed in the review.');
+      setReviseReviewOpen(false);
+      return;
+    }
+
+    setError('');
+    setSuccess('');
+    try {
+      const { data } = await api.post('/amazon-stock-checks/revise-listing/apply', {
+        sellerId: reviseTarget.sellerItem.sellerId,
+        itemId: reviseTarget.sellerItem.itemId,
+        asin: revisePreview.asin,
+        // From the preview, not the picker: the two must not drift.
+        templateId: revisePreview.templateId,
+        listing
+      });
+      setRevisedItems((prev) => ({
+        ...prev,
+        [reviseTarget.sellerItem.itemId]: {
+          revisedAt: new Date().toISOString(),
+          revisedBy: user?.username || user?.name || user?.email || 'you',
+          previousTitle: revisePreview.before?.title || '',
+          newTitle: listing.title || '',
+          previousPrice: revisePreview.before?.price ?? null,
+          newPrice: listing.startPrice != null && listing.startPrice !== '' ? Number(listing.startPrice) : null
+        }
+      }));
+      setReviseReviewOpen(false);
+      setRevisePreview(null);
+      setReviseTarget(null);
+      setSuccess(data.message || `Revised item ${reviseTarget.sellerItem.itemId}`);
+      if (activeRun?._id) await fetchRun(activeRun._id);
+    } catch (err) {
+      // Surfaced on the page rather than swallowed by the modal: when eBay
+      // accepted the revise but the row failed to save, the message is the only
+      // signal that the listing is live and needs reconciling.
+      setError(err.response?.data?.error || err.message || 'Failed to revise listing');
+      setReviseReviewOpen(false);
+    }
   };
 
   const handleReviseListing = async () => {
@@ -800,10 +896,10 @@ export default function AmazonStockCheckPage() {
   };
 
   // The seller listings that are safe to bulk-end for this item's status:
-  // everything for out-of-stock and errors; for low-stock, only when NO
-  // seller carrying this SKU has sold in the last 90 days — if even one
-  // has, the whole SKU is left for manual review, not just the specific
-  // rows with orders.
+  // everything for out-of-stock and errors; for low-stock and unknown stock
+  // text, only when NO seller carrying this SKU has sold in the last 90 days —
+  // if even one has, the whole SKU is left for manual review, not just the
+  // specific rows with orders.
   const getAutoSelectRows = (data) => {
     if (!data) return [];
     // Based on the visible (possibly seller-scoped) rows, not every seller
@@ -813,7 +909,7 @@ export default function AmazonStockCheckPage() {
     if (data.status === 'out_of_stock' || data.status === 'error') {
       return rows.filter((row) => !row.endedInfo);
     }
-    if (data.status === 'low_stock') {
+    if (data.status === 'low_stock' || data.status === 'unknown_stock_text') {
       const hasRecentOrder = rows.some((row) => (row.orderCount90d || 0) > 0);
       if (!hasRecentOrder) return rows.filter((row) => !row.endedInfo);
     }
@@ -875,32 +971,100 @@ export default function AmazonStockCheckPage() {
     amazonWinRef.current = null;
   };
 
-  // Move to the previous/next verifiable row (rows with an ASIN) in the
-  // current filtered list, crossing table pages when needed.
-  const handleVerifyNav = (step) => {
-    for (let i = verifyIndex + step; i >= 0 && i < items.length; i += step) {
-      if (items[i]?.asin) {
-        handleVerify(items[i], i);
-        return;
+  // Closes the Amazon window only while it is still the blank one opened
+  // ahead of a jump to another table page (a window on Amazon can't be read,
+  // so reading it throws and it is left alone).
+  const closeBlankAmazonWindow = () => {
+    const win = amazonWinRef.current;
+    try {
+      if (win && !win.closed && win.location.href === 'about:blank') {
+        win.close();
+        amazonWinRef.current = null;
+      }
+    } catch {
+      // On Amazon — leave it.
+    }
+  };
+
+  // A jump waiting on a table page that failed to load is dropped, with its
+  // blank window — otherwise the next successful poll would open it late.
+  const dropPendingNav = () => {
+    if (!pendingNavRef.current) return;
+    pendingNavRef.current = null;
+    closeBlankAmazonWindow();
+  };
+
+  // Move to the previous/next verifiable row (rows with an ASIN) from
+  // fromIndex in the current filtered list, crossing table pages when needed.
+  // Returns false when there is no such row.
+  const stepFrom = (rows, fromIndex, step) => {
+    for (let i = fromIndex + step; i >= 0 && i < rows.length; i += step) {
+      if (rows[i]?.asin) {
+        handleVerify(rows[i], i);
+        return true;
       }
     }
     if (step > 0 && pagination.page < pagination.totalPages) {
       pendingNavRef.current = 'first';
       setPagination((prev) => ({ ...prev, page: prev.page + 1 }));
-    } else if (step < 0 && pagination.page > 1) {
+      return true;
+    }
+    if (step < 0 && pagination.page > 1) {
       pendingNavRef.current = 'last';
       setPagination((prev) => ({ ...prev, page: prev.page - 1 }));
+      return true;
+    }
+    return false;
+  };
+
+  const handleVerifyNav = (step) => stepFrom(items, verifyIndex, step);
+
+  // Opens a list row named by the resume-point response — that row itself,
+  // or the one after it when `after`. The row is looked up by id on its page;
+  // if the list shifted under it, its old row number is used instead.
+  const openListTarget = (rows, target) => {
+    const foundIndex = rows.findIndex((row) => String(row._id) === target.itemId);
+    const index = foundIndex > -1 ? foundIndex : Math.min(target.offset, rows.length - 1);
+    if (!stepFrom(rows, target.after ? index : index - 1, 1)) {
+      if (amazonWinRef.current && !amazonWinRef.current.closed) amazonWinRef.current.close();
+      amazonWinRef.current = null;
+      setSuccess(`Nothing left to verify after row #${target.position.toLocaleString()} in this list.`);
     }
   };
+
+  const openListRow = (point, { after }) => {
+    if (!point) return;
+    const anchor = point.position - 1;
+    const limit = pagination.limit || 500;
+    const target = { itemId: point.itemId, offset: anchor % limit, position: point.position, after };
+    const page = Math.min(Math.floor(anchor / limit) + 1, pagination.totalPages || 1);
+    // Opened now, while the click still counts as a user gesture, so the
+    // popup blocker allows it even when the row is on a page still to load.
+    openAmazonWindow('about:blank');
+    if (page === pagination.page && items.length) {
+      openListTarget(items, target);
+      return;
+    }
+    pendingNavRef.current = target;
+    setPagination((prev) => ({ ...prev, page }));
+  };
+
+  const resumeVerify = () => openListRow(resumePoint, { after: true });
+  const openFirstLive = () => openListRow(liveRows?.first, { after: false });
 
   useEffect(() => {
     if (!pendingNavRef.current || !items.length) return;
     const direction = pendingNavRef.current;
     pendingNavRef.current = null;
+    if (typeof direction === 'object') {
+      openListTarget(items, direction);
+      return;
+    }
     const indexes = items.map((_, i) => i);
     if (direction === 'last') indexes.reverse();
     const targetIndex = indexes.find((i) => items[i]?.asin);
     if (targetIndex != null) handleVerify(items[targetIndex], targetIndex);
+    else closeBlankAmazonWindow();
   }, [items]);
 
   const hasPrevVerifiable = verifyIndex > -1 && (
@@ -981,6 +1145,9 @@ export default function AmazonStockCheckPage() {
     setSuccess('');
     setBulkEndReviewOpen(false);
     setBulkEnding(true);
+    setBulkEndProgress({ total: rows.length, done: 0, ok: 0 });
+    setBulkEndFailures([]);
+    setBulkEndProgressOpen(true);
     let okCount = 0;
     const failures = [];
     for (const row of rows) {
@@ -999,20 +1166,38 @@ export default function AmazonStockCheckPage() {
           ...prev,
           [row.itemId]: {
             endedAt: new Date().toISOString(),
-            endedBy: user?.username || user?.name || user?.email || 'you'
+            endedBy: user?.username || user?.name || user?.email || 'you',
+            source: 'amazon_stock_check'
           }
         }));
+        setFailedItems((prev) => {
+          if (!prev[row.itemId]) return prev;
+          const next = { ...prev };
+          delete next[row.itemId];
+          return next;
+        });
+        // Drop the ended row from the selection right away; failed rows stay
+        // selected so a retry only re-sends the ones that actually failed.
+        setSelectedRows((prev) => {
+          const next = new Map(prev);
+          next.delete(row.itemId);
+          return next;
+        });
       } catch (err) {
-        failures.push(row.itemId);
+        const reason = err.response?.data?.error || err.message || 'Unknown error';
+        failures.push({ itemId: row.itemId, sku: row.sku || '', sellerName: row.sellerName || '', reason });
+        setBulkEndFailures((prev) => [...prev, { itemId: row.itemId, sku: row.sku || '', sellerName: row.sellerName || '', reason }]);
+        setFailedItems((prev) => ({ ...prev, [row.itemId]: reason }));
       }
+      setBulkEndProgress((prev) => (prev ? { ...prev, done: prev.done + 1, ok: okCount } : prev));
     }
     setEndingItemId(null);
     setBulkEnding(false);
-    setSelectedRows(new Map());
+    if (okCount > 0) refreshResumePoint();
     if (failures.length) {
-      setError(`Ended ${okCount} listing(s); failed for: ${failures.join(', ')}`);
+      setError(`Ended ${okCount} of ${rows.length} listing(s); ${failures.length} failed — see the progress dialog for reasons.`);
     } else {
-      setSuccess(`Ended ${okCount} listing(s).`);
+      setSuccess(`Ended all ${okCount} listing(s).`);
     }
     if (activeRun?._id) await fetchRun(activeRun._id);
   };
@@ -1240,13 +1425,14 @@ export default function AmazonStockCheckPage() {
           sx={{ cursor: 'pointer' }}
           onClick={() => setRecentRunsOpen((prev) => !prev)}
         >
-          <Stack direction="row" spacing={1} alignItems="center">
-            <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>Recent Runs</Typography>
+          <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap">
+            <Typography variant="h6" sx={{ fontWeight: 900 }}>Recent Runs</Typography>
             {activeRun && (
               <Chip
-                size="small"
+                color="primary"
+                variant="outlined"
                 label={`Active: ${getRunScope(activeRun)} · ${formatDateTime(activeRun.createdAt)}`}
-                sx={{ fontWeight: 700 }}
+                sx={{ fontWeight: 800, fontSize: '0.95rem', height: 34, borderWidth: 2 }}
               />
             )}
           </Stack>
@@ -1347,9 +1533,44 @@ export default function AmazonStockCheckPage() {
             sx={{ fontWeight: 800 }}
           />
         ))}
+        <Box sx={{ flex: 1 }} />
+        <VerifyResumeButton
+          resumePoint={resumePoint}
+          live={liveRows}
+          total={pagination.total}
+          onResume={resumeVerify}
+          onOpenFirstLive={openFirstLive}
+          disabled={loadingItems || verifyLoading || bulkEnding}
+        />
       </Stack>
 
-      <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2 }}>
+      <Box sx={{ position: 'relative' }}>
+        {loadingItems && (
+          <Box
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 2,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              bgcolor: 'rgba(255, 255, 255, 0.6)',
+              borderRadius: 2
+            }}
+          >
+            <Stack direction="row" spacing={1.25} alignItems="center" sx={{ bgcolor: '#fff', px: 2, py: 1, borderRadius: 2, boxShadow: 2 }}>
+              <CircularProgress size={20} />
+              <Typography variant="body2" sx={{ fontWeight: 800, color: 'text.secondary' }}>
+                Loading items…
+              </Typography>
+            </Stack>
+          </Box>
+        )}
+        <TableContainer
+          component={Paper}
+          variant="outlined"
+          sx={{ borderRadius: 2, opacity: loadingItems ? 0.55 : 1, transition: 'opacity 0.15s', pointerEvents: loadingItems ? 'none' : 'auto' }}
+        >
             <Table
               size="small"
               sx={{
@@ -1586,7 +1807,9 @@ export default function AmazonStockCheckPage() {
                 {!displayItems.length && (
                   <TableRow>
                     <TableCell colSpan={9} align="center" sx={{ py: 5, color: 'text.secondary' }}>
-                      {activeRun ? 'No rows match the selected card/filter yet.' : 'Start a run to see results.'}
+                      {loadingItems
+                        ? 'Loading items…'
+                        : (activeRun ? 'No rows match the selected card/filter yet.' : 'Start a run to see results.')}
                     </TableCell>
                   </TableRow>
                 )}
@@ -1600,7 +1823,7 @@ export default function AmazonStockCheckPage() {
                 setPagination((prev) => ({ ...prev, page: nextPage + 1 }));
                 setExpandedRows(new Set());
               }}
-              rowsPerPage={pagination.limit || 100}
+              rowsPerPage={pagination.limit || 500}
               onRowsPerPageChange={(event) => {
                 setPagination((prev) => ({
                   ...prev,
@@ -1612,41 +1835,163 @@ export default function AmazonStockCheckPage() {
               rowsPerPageOptions={[25, 50, 100, 250, 500]}
             />
           </TableContainer>
+      </Box>
 
       <Dialog open={!!reviseTarget} onClose={() => setReviseTarget(null)} fullWidth maxWidth="sm">
         <DialogTitle>Revise Listing</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField
-              label="Title"
-              value={reviseForm.title}
-              onChange={(event) => setReviseForm((prev) => ({ ...prev, title: event.target.value }))}
-              inputProps={{ maxLength: 80 }}
-              helperText={`${reviseForm.title.length}/80 characters`}
+            <ToggleButtonGroup
+              size="small"
+              exclusive
               fullWidth
-            />
-            <TextField
-              label="Price"
-              type="number"
-              value={reviseForm.price}
-              onChange={(event) => setReviseForm((prev) => ({ ...prev, price: event.target.value }))}
-              fullWidth
-            />
+              value={reviseMode}
+              onChange={(event, next) => { if (next) setReviseMode(next); }}
+            >
+              <ToggleButton value="manual">Edit title &amp; price</ToggleButton>
+              <ToggleButton value="asin">Revise to a new ASIN</ToggleButton>
+            </ToggleButtonGroup>
+
+            {reviseMode === 'manual' ? (
+              <>
+                <TextField
+                  label="Title"
+                  value={reviseForm.title}
+                  onChange={(event) => setReviseForm((prev) => ({ ...prev, title: event.target.value }))}
+                  inputProps={{ maxLength: 80 }}
+                  helperText={`${reviseForm.title.length}/80 characters`}
+                  fullWidth
+                />
+                <TextField
+                  label="Price"
+                  type="number"
+                  value={reviseForm.price}
+                  onChange={(event) => setReviseForm((prev) => ({ ...prev, price: event.target.value }))}
+                  fullWidth
+                />
+              </>
+            ) : (
+              <>
+                <Alert severity="info" sx={{ '& .MuiAlert-message': { fontSize: 13 } }}>
+                  eBay item <strong>{reviseTarget?.sellerItem?.itemId}</strong> keeps its item ID. Its SKU,
+                  title, description, price, images and item specifics are replaced with the new ASIN&apos;s,
+                  and the new ASIN is saved as its own listing. The current details stay in the database.
+                </Alert>
+
+                <Box sx={{ p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="caption" color="text.secondary">Currently listed</Typography>
+                  <Typography variant="body2" sx={{ mt: 0.5 }}>{reviseTarget?.sellerItem?.title || '—'}</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {reviseTarget?.item?.sku || reviseTarget?.sellerItem?.sku || '—'}
+                    {reviseTarget?.item?.asin ? ` · ${reviseTarget.item.asin}` : ''}
+                    {reviseTarget?.sellerItem?.price != null
+                      ? ` · ${reviseTarget.sellerItem.price} ${reviseTarget.sellerItem.currency || ''}`
+                      : ''}
+                  </Typography>
+                </Box>
+
+                <TextField
+                  label="Seller"
+                  value={reviseTarget?.sellerItem?.sellerName || ''}
+                  InputProps={{ readOnly: true }}
+                  helperText="Detected from the listing"
+                  fullWidth
+                />
+                <TextField
+                  label="New ASIN"
+                  value={reviseAsin}
+                  onChange={(event) => setReviseAsin(event.target.value.toUpperCase())}
+                  placeholder="B0XXXXXXXX"
+                  inputProps={{ maxLength: 10 }}
+                  fullWidth
+                />
+                {/* Autocomplete rather than a plain select: the template list
+                    runs to dozens of entries, and scrolling it to find one is
+                    the slow part of this dialog. */}
+                <Autocomplete
+                  options={reviseTemplates}
+                  loading={reviseTemplatesLoading}
+                  disabled={reviseTemplatesLoading || !reviseTemplates.length}
+                  value={reviseTemplates.find((template) => template._id === reviseTemplateId) || null}
+                  onChange={(event, next) => setReviseTemplateId(next?._id || '')}
+                  getOptionLabel={(option) => option?.name || ''}
+                  isOptionEqualToValue={(option, value) => option._id === value._id}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Template"
+                      placeholder="Type to search…"
+                      helperText={
+                        reviseTemplatesLoading
+                          ? 'Loading templates…'
+                          : (reviseTemplates.length
+                            ? 'Generates the eBay fields from this template'
+                            : 'No templates have ASIN automation enabled')
+                      }
+                    />
+                  )}
+                  fullWidth
+                />
+              </>
+            )}
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setReviseTarget(null)}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={handleReviseListing}
-            disabled={revising}
-            startIcon={revising ? <CircularProgress size={16} color="inherit" /> : undefined}
-            sx={{ backgroundColor: BRAND_DARK }}
-          >
-            Save
-          </Button>
+          {reviseMode === 'manual' ? (
+            <Button
+              variant="contained"
+              onClick={handleReviseListing}
+              disabled={revising}
+              startIcon={revising ? <CircularProgress size={16} color="inherit" /> : undefined}
+              sx={{ backgroundColor: BRAND_DARK }}
+            >
+              Save
+            </Button>
+          ) : (
+            <Button
+              variant="contained"
+              onClick={handleGenerateRevisePreview}
+              disabled={revising || reviseAsin.trim().length !== 10 || !reviseTemplateId}
+              startIcon={revising ? <CircularProgress size={16} color="inherit" /> : undefined}
+              sx={{ backgroundColor: BRAND_DARK }}
+            >
+              {revising ? 'Generating…' : 'Generate from ASIN'}
+            </Button>
+          )}
         </DialogActions>
       </Dialog>
+
+      {/* Step two: the same review surface the ASIN Precheck flow uses, so a
+          revised listing is edited exactly like a newly listed one. */}
+      <AsinReviewModal
+        open={reviseReviewOpen}
+        onClose={() => setReviseReviewOpen(false)}
+        marketplace={revisePreview?.region || 'US'}
+        sellerId={reviseTarget?.sellerItem?.sellerId || null}
+        templateName={reviseTemplates.find((t) => t._id === reviseTemplateId)?.name || ''}
+        templateId={reviseTemplateId || null}
+        previewItems={revisePreview ? [{
+          id: `revise-${revisePreview.itemId}`,
+          asin: revisePreview.asin,
+          sku: revisePreview.newSku,
+          sourceData: revisePreview.sourceData,
+          generatedListing: { ...revisePreview.after, customLabel: revisePreview.newSku },
+          pricingCalculation: revisePreview.pricingCalculation,
+          warnings: revisePreview.warnings || [],
+          errors: revisePreview.errors || [],
+          progressStage: 'complete',
+          status: revisePreview.errors?.length ? 'error' : (revisePreview.warnings?.length ? 'warning' : 'success')
+        }] : []}
+        onSave={handleApplyAsinRevise}
+        templateColumns={[
+          ...(revisePreview?.templateColumns || []).map((col) => ({ ...col, type: 'custom' })),
+          { name: 'title', label: 'Title', type: 'core' },
+          { name: 'description', label: 'Description', type: 'core' },
+          { name: 'startPrice', label: 'Start Price', type: 'core' },
+          { name: 'quantity', label: 'Quantity', type: 'core' }
+        ]}
+      />
 
       <Dialog open={accessDialogOpen} onClose={() => setAccessDialogOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Manage Estimate/Start Access</DialogTitle>
@@ -1691,11 +2036,13 @@ export default function AmazonStockCheckPage() {
         anchor="right"
         variant="persistent"
         open={verifyOpen}
-        // The admin AppBar uses zIndex.drawer + 1, so go one higher or it
-        // covers this panel's header (SKU, prev/next, close button).
-        sx={{ zIndex: (theme) => theme.zIndex.drawer + 2 }}
         PaperProps={{
           sx: {
+            // The admin AppBar uses zIndex.drawer + 1, so go one higher or it
+            // covers this panel's header (SKU, prev/next, close button).
+            // Set on the Paper: a persistent drawer's Paper is the fixed
+            // element, so a z-index on the Drawer root has no effect.
+            zIndex: (theme) => theme.zIndex.drawer + 2,
             width: { xs: '100%', md: VERIFY_DRAWER_WIDTH },
             boxShadow: '-8px 0 24px rgba(15, 23, 42, 0.18)'
           }
@@ -1829,11 +2176,15 @@ export default function AmazonStockCheckPage() {
                 images={verifyImages}
                 endedItems={endedItems}
                 endingItemId={endingItemId}
-                onEndItem={handleEndItem}
+                // Verify rows don't carry a country field (it lives at the top
+                // level of the verify response) — patch it on so the end-item
+                // log stores the country instead of "unknown".
+                onEndItem={(row) => handleEndItem({ ...row, country: verifyData?.country || '' })}
                 revisedItems={revisedItems}
                 onReviseItem={(row) => openReviseDialog({ sku: verifyData.sku, asin: verifyData.asin }, row)}
                 selectedIds={selectedRows}
                 onToggleSelect={toggleSelect}
+                failedItems={failedItems}
               />
             </Stack>
           )}
@@ -1882,6 +2233,91 @@ export default function AmazonStockCheckPage() {
             startIcon={bulkEnding ? <CircularProgress size={16} color="inherit" /> : <CancelIcon />}
           >
             End {formatNumber(selectedRows.size)} listing(s)
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Live progress while a bulk end runs; stays open afterwards so the
+          per-item failure reasons can be reviewed (failed rows stay selected
+          for a retry via "End Selected"). */}
+      <Dialog
+        open={bulkEndProgressOpen}
+        onClose={() => { if (!bulkEnding) setBulkEndProgressOpen(false); }}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>
+          {bulkEnding ? 'Ending listings…' : 'End listings — result'}
+        </DialogTitle>
+        <DialogContent dividers sx={{ maxHeight: 460 }}>
+          {bulkEndProgress && (
+            <>
+              <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 1 }}>
+                <LinearProgress
+                  variant="determinate"
+                  value={bulkEndProgress.total > 0 ? (bulkEndProgress.done / bulkEndProgress.total) * 100 : 0}
+                  sx={{ flex: 1, height: 8, borderRadius: 4 }}
+                  color={bulkEndFailures.length ? 'warning' : 'primary'}
+                />
+                <Typography variant="body2" sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>
+                  {formatNumber(bulkEndProgress.done)} / {formatNumber(bulkEndProgress.total)}
+                </Typography>
+              </Stack>
+              <Stack direction="row" spacing={1} sx={{ mb: 1.5 }}>
+                <Chip size="small" color="success" label={`${formatNumber(bulkEndProgress.ok)} ended`} sx={{ fontWeight: 800 }} />
+                <Chip
+                  size="small"
+                  color={bulkEndFailures.length ? 'error' : 'default'}
+                  variant={bulkEndFailures.length ? 'filled' : 'outlined'}
+                  label={`${formatNumber(bulkEndFailures.length)} failed`}
+                  sx={{ fontWeight: 800 }}
+                />
+                {bulkEnding && endingItemId && (
+                  <Chip size="small" variant="outlined" label={`Ending ${endingItemId}…`} sx={{ fontWeight: 800, fontFamily: 'monospace' }} />
+                )}
+              </Stack>
+            </>
+          )}
+          {bulkEndFailures.length > 0 ? (
+            <>
+              <Typography variant="subtitle2" sx={{ fontWeight: 900, mb: 0.5 }}>
+                Failed items
+              </Typography>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Item ID</TableCell>
+                    <TableCell>SKU</TableCell>
+                    <TableCell>Reason</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {bulkEndFailures.map((f) => (
+                    <TableRow key={f.itemId}>
+                      <TableCell sx={{ fontFamily: 'monospace', whiteSpace: 'nowrap' }}>{f.itemId}</TableCell>
+                      <TableCell sx={{ fontFamily: 'monospace' }}>{f.sku || '-'}</TableCell>
+                      <TableCell sx={{ color: 'error.main' }}>{f.reason}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {!bulkEnding && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                  Failed items are still selected — fix the issue and use “End Selected” to retry just these.
+                </Typography>
+              )}
+            </>
+          ) : (
+            !bulkEnding && bulkEndProgress && (
+              <Typography variant="body2" color="text.secondary">
+                All {formatNumber(bulkEndProgress.ok)} listing(s) ended successfully.
+              </Typography>
+            )
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBulkEndProgressOpen(false)} disabled={bulkEnding}>
+            Close
           </Button>
         </DialogActions>
       </Dialog>

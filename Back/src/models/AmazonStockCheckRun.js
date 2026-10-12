@@ -12,9 +12,13 @@ const AmazonStockCheckRunSchema = new mongoose.Schema(
     },
     mode: {
       type: String,
-      enum: ['pilot_option_b', 'custom', 'full', 'seller'],
+      enum: ['pilot_option_b', 'custom', 'full', 'seller', 'brand_test'],
       default: 'custom'
     },
+    // brand_test runs only: how many SKUs (with an ASIN) to sample at random
+    // from the one selected country. Started from the Excluded Brands page to
+    // try the brand check on a small batch. null on every other mode.
+    skuLimit: { type: Number, default: null },
     // Optional seller scope: when set, only this seller's SKU index rows are checked.
     seller: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller', default: null, index: true },
     threshold: { type: Number, default: 5 },
