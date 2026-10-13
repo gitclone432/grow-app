@@ -2158,6 +2158,35 @@ function FulfillmentDashboard() {
     }
   };
 
+  // "Shipped" only: add expected delivery date (Arriving date + 1 day) to the message
+  const addShippedDeliveryDate = (text, remarkValue, order) => {
+    if (!text || String(remarkValue || '').trim().toLowerCase() !== 'shipped') return text;
+    const raw = String(order?.arrivingDate || '').trim();
+    let y;
+    let m;
+    let d;
+    let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      [, y, m, d] = match;
+    } else if ((match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) {
+      [, d, m, y] = match;
+    } else {
+      return text;
+    }
+    const date = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d) + 1));
+    if (Number.isNaN(date.getTime())) return text;
+    const formatted = date.toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'UTC'
+    });
+    return text.replace(
+      /Your order has been shipped\./i,
+      `Your order has been shipped and expected to be delivered by ${formatted}.`
+    );
+  };
+
   // Function to send auto-message based on remark
   const sendAutoMessageForRemark = async (order, remarkValue) => {
     // Get template for this remark
@@ -2168,7 +2197,7 @@ function FulfillmentDashboard() {
     }
 
     // Replace variables in template
-    const messageBody = replaceTemplateVariables(template, order);
+    const messageBody = addShippedDeliveryDate(replaceTemplateVariables(template, order), remarkValue, order);
 
     try {
       // Send message using the same endpoint as manual messages
@@ -2331,7 +2360,7 @@ function FulfillmentDashboard() {
     if (hasTemplate) {
       // Get the template text and pre-fill the editable message
       const templateText = findRemarkTemplateText(remarkTemplates, remarkValue);
-      const replacedText = replaceTemplateVariables(templateText, order);
+      const replacedText = addShippedDeliveryDate(replaceTemplateVariables(templateText, order), remarkValue, order);
       setPendingRemarkUpdate({ orderId, remarkValue, order });
       setEditableRemarkMessage(replacedText);
       setRemarkAttachments([]);
