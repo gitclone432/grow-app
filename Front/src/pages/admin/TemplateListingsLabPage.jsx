@@ -702,6 +702,25 @@ export default function TemplateListingsLabPage({ embedded = false }) {
     }
   }, [fetchListings]);
 
+  const handleBulkDeleteListings = useCallback(async () => {
+    const ids = [...selectedListings];
+    if (ids.length === 0) return;
+    if (!window.confirm(`Delete ${ids.length} selected listing${ids.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
+
+    try {
+      setLoading(true);
+      const { data } = await api.post('/template-listings/bulk-delete', { listingIds: ids });
+      setSelectedListings(new Set());
+      setSuccess(`${data?.deletedCount ?? ids.length} listing(s) deleted successfully!`);
+      fetchListings();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to delete selected listings');
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedListings, fetchListings]);
+
   const handleDuplicateListing = useCallback((listing) => {
     setEditingListing(null);
     setListingFormData({
@@ -1493,6 +1512,23 @@ export default function TemplateListingsLabPage({ embedded = false }) {
           {loading && <CircularProgress size={18} />}
         </Stack>
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          {selectedListings.size > 0 && (
+            <>
+              <Button
+                variant="contained"
+                color="error"
+                size="small"
+                startIcon={<DeleteIcon />}
+                onClick={handleBulkDeleteListings}
+                disabled={loading}
+              >
+                Delete Selected ({selectedListings.size})
+              </Button>
+              <Button size="small" onClick={() => setSelectedListings(new Set())}>
+                Clear selection
+              </Button>
+            </>
+          )}
           {fromAsinList && (
             <Button
               variant="contained"

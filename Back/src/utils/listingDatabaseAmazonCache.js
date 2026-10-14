@@ -87,6 +87,20 @@ export async function getAmazonDataFromListingsDatabase(asin, region = 'US') {
   );
   if (!restored) return null;
 
+  // A bad price saved in an older snapshot (e.g. 5378.00 instead of 29.97) must not
+  // override the price recorded when the listing was generated.
+  const snapshotPrice = parseFloat(String(restored.price || '').replace(/[^0-9.]/g, ''));
+  const recordedPrice = Number(listing.amazonScrapedPrice);
+  if (recordedPrice > 0 && Number.isFinite(snapshotPrice) && snapshotPrice > 0) {
+    const ratio = snapshotPrice / recordedPrice;
+    if (ratio > 3 || ratio < 1 / 3) {
+      console.warn(
+        `[fetchAmazonData] ⚠️ Snapshot price ${restored.price} for ${normalizedAsin} disagrees with recorded ${recordedPrice}; using recorded price`
+      );
+      restored.price = recordedPrice.toFixed(2);
+    }
+  }
+
   console.log(
     `[fetchAmazonData] 📚 Listings Database hit for ${normalizedAsin} (${normalizedRegion}) from listing ${listing._id}`
   );

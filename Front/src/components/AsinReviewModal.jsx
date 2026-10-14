@@ -1227,7 +1227,19 @@ export default function AsinReviewModal({
     return '';
   })();
   // Separate core fields and custom fields from template columns
-  const coreFieldColumns = templateColumns.filter(col => col.type === 'core');
+  const coreFieldColumns = templateColumns
+    .filter(col => col.type === 'core')
+    .sort((a, b) => {
+      const priority = {
+        customLabel: 1,
+        title: 2,
+        startPrice: 3,
+        description: 4,
+      };
+      const aPriority = priority[a.name] || 100;
+      const bPriority = priority[b.name] || 100;
+      return aPriority - bPriority;
+    });
   const templateCustomFieldColumns = templateColumns.filter(col => col.type === 'custom');
   const customFieldColumns = (() => {
     if (templateCustomFieldColumns.length > 0) return templateCustomFieldColumns;
