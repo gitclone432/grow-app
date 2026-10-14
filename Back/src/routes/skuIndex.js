@@ -5,8 +5,12 @@ import { requireAuth } from '../middleware/auth.js';
 import Seller from '../models/Seller.js';
 import SellerSkuIndex from '../models/SellerSkuIndex.js';
 import SkuIndexSyncRun from '../models/SkuIndexSyncRun.js';
+import User from '../models/User.js';
+import CronJobConfig from '../models/CronJobConfig.js';
+import { ensureCronConfigDefaults, reloadScheduledJobs } from '../scheduledJobs.js';
 import { ensureValidToken } from './ebay.js';
 import {
+  RUNNER_ID,
   skuSyncStatus,
   skuSyncDismissed,
   getSkuSyncStatusSnapshot,
@@ -17,6 +21,12 @@ import {
 } from '../lib/skuIndexSync.js';
 
 const router = express.Router();
+const isSkuIndexAdmin = (role) => role === 'superadmin' || (typeof role === 'string' && role.endsWith('admin'));
+const requireSkuIndexAdmin = (req, res) => {
+  if (isSkuIndexAdmin(req.user?.role)) return true;
+  res.status(403).json({ error: 'Admin access required' });
+  return false;
+};
 
 // GET /ebay/sync-sku-index/stream?sellerId=...  — SSE: streams progress then done
 router.get('/sync-sku-index/stream', requireAuth, async (req, res) => {
@@ -36,25 +46,149 @@ router.get('/sync-sku-index/stream', requireAuth, async (req, res) => {
 
   const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
+  let manualRunId = null;
+  const finishManualRun = async (status, patch = {}) => {
+    if (!manualRunId) return;
+    const now = new Date();
+    await SkuIndexSyncRun.updateOne(
+      { _id: manualRunId },
+      {
+        $set: {
+          status: status === 'completed' ? 'completed' : status === 'dismissed' ? 'stopped' : 'failed',
+          completedAt: now,
+          sellersComplete: 1,
+          'sellers.0.status': status,
+          'sellers.0.completedAt': now,
+          ...(status === 'completed' ? { 'sellers.0.totalCount': patch.totalCount || 0 } : { error: patch.error || null, 'sellers.0.error': patch.error || null }),
+        },
+      }
+    ).catch(() => {});
+  };
+
   try {
     const seller = await Seller.findById(sellerId).populate('user', 'username');
     if (!seller) { send({ type: 'error', error: 'Seller not found' }); return res.end(); }
 
     const startedAt = new Date();
+    const actor = await User.findById(req.user?.userId).select('username').lean().catch(() => null);
+    const run = await SkuIndexSyncRun.create({
+      source: 'manual',
+      runnerId: RUNNER_ID,
+      triggeredByUserId: req.user?.userId || null,
+      triggeredByUsername: actor?.username || null,
+      status: 'running',
+      concurrency: 1,
+      sellersTotal: 1,
+      startedAt,
+      sellers: [{
+        seller: seller._id,
+        sellerName: seller.user?.username || String(seller._id),
+        status: 'running',
+        startedAt,
+      }],
+    });
+    manualRunId = run._id;
     skuSyncDismissed.delete(String(sellerId));
     skuSyncStatus.set(sellerId, { status: 'running', startedAt, totalCount: 0 });
 
     const { totalCount, syncedAt } = await runSkuIndexSync(seller, send);
 
     skuSyncStatus.set(sellerId, { status: 'completed', startedAt, totalCount, lastSyncAt: syncedAt });
+    await finishManualRun('completed', { totalCount });
     send({ type: 'done', totalCount, syncedAt });
   } catch (err) {
     console.error('[sync-sku-index/stream] Error:', err.message);
     const status = skuSyncDismissed.has(String(sellerId)) ? 'dismissed' : 'failed';
     skuSyncStatus.set(sellerId, { status, error: err.message });
+    await finishManualRun(status, { error: err.message });
     send({ type: 'error', error: err.message, status });
   } finally {
     res.end();
+  }
+});
+
+const SCHEDULE_JOB_KEY = 'skuIndexSyncAllSellers';
+
+// GET /ebay/sync-sku-index/settings — daily schedule + excluded sellers
+router.get('/sync-sku-index/settings', requireAuth, async (req, res) => {
+  try {
+    if (!requireSkuIndexAdmin(req, res)) return;
+    await ensureCronConfigDefaults();
+    const cfg = await CronJobConfig.findOne({ jobKey: SCHEDULE_JOB_KEY }).lean();
+    const parts = String(cfg?.cronExpr || '').trim().split(/\s+/);
+    const minute = Number(parts[0]);
+    const hour = Number(parts[1]);
+    const simpleDaily = parts.length === 5 && Number.isInteger(minute) && Number.isInteger(hour)
+      && parts.slice(2).every(p => p === '*');
+    const excluded = await Seller.find({ skuIndexSyncExcluded: true }).select('_id').lean();
+    return res.json({
+      enabled: cfg?.enabled !== false,
+      time: simpleDaily ? `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` : null,
+      cronExpr: cfg?.cronExpr || '',
+      timezone: cfg?.timezone || 'Asia/Kolkata',
+      excludedSellerIds: excluded.map(s => String(s._id)),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to load settings', details: error.message });
+  }
+});
+
+// PUT /ebay/sync-sku-index/settings { time: 'HH:MM', enabled }
+router.put('/sync-sku-index/settings', requireAuth, async (req, res) => {
+  try {
+    if (!requireSkuIndexAdmin(req, res)) return;
+    await ensureCronConfigDefaults();
+    const match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(String(req.body?.time || '').trim());
+    if (!match) return res.status(400).json({ error: 'time must be HH:MM (24h)' });
+    const cronExpr = `${Number(match[2])} ${Number(match[1])} * * *`;
+    const cfg = await CronJobConfig.findOneAndUpdate(
+      { jobKey: SCHEDULE_JOB_KEY },
+      { $set: { cronExpr, enabled: Boolean(req.body?.enabled) } },
+      { new: true }
+    ).lean();
+    if (!cfg) return res.status(404).json({ error: 'Schedule not found' });
+    await reloadScheduledJobs();
+    return res.json({ ok: true, cronExpr, enabled: cfg.enabled });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to save settings', details: error.message });
+  }
+});
+
+// PUT /ebay/sync-sku-index/exclusion/:sellerId { excluded }
+router.put('/sync-sku-index/exclusion/:sellerId', requireAuth, async (req, res) => {
+  try {
+    if (!requireSkuIndexAdmin(req, res)) return;
+    const seller = await Seller.findByIdAndUpdate(
+      req.params.sellerId,
+      { $set: { skuIndexSyncExcluded: Boolean(req.body?.excluded) } },
+      { new: true }
+    ).select('skuIndexSyncExcluded').lean();
+    if (!seller) return res.status(404).json({ error: 'Seller not found' });
+    return res.json({ excluded: seller.skuIndexSyncExcluded });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to update exclusion', details: error.message });
+  }
+});
+
+// GET /ebay/sync-sku-index/logs?from=YYYY-MM-DD&to=YYYY-MM-DD&source=cron|manual
+router.get('/sync-sku-index/logs', requireAuth, async (req, res) => {
+  try {
+    const { from, to, source } = req.query;
+    const filter = {};
+    if (['cron', 'manual'].includes(source)) filter.source = source;
+    const range = {};
+    // Day boundaries use the IST offset to match the schedule timezone
+    if (from && /^\d{4}-\d{2}-\d{2}$/.test(from)) range.$gte = new Date(`${from}T00:00:00+05:30`);
+    if (to && /^\d{4}-\d{2}-\d{2}$/.test(to)) range.$lte = new Date(`${to}T23:59:59.999+05:30`);
+    if (Object.keys(range).length) filter.startedAt = range;
+    const runs = await SkuIndexSyncRun.find(filter)
+      .sort({ startedAt: -1 })
+      .limit(200)
+      .select('source runnerId triggeredByUsername status sellersTotal sellersComplete startedAt completedAt error sellers.sellerName sellers.status sellers.totalCount sellers.error')
+      .lean();
+    return res.json({ runs });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to fetch logs', details: error.message });
   }
 });
 

@@ -21,6 +21,8 @@ const SkuIndexSyncRunSellerSchema = new mongoose.Schema({
 const SkuIndexSyncRunSchema = new mongoose.Schema({
   source: { type: String, enum: ['cron', 'manual'], default: 'cron' },
   runnerId: { type: String, default: null },
+  triggeredByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  triggeredByUsername: { type: String, default: null },
   status: {
     type: String,
     enum: ['queued', 'running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'],
