@@ -23,6 +23,7 @@ import { getUsageStats, getFieldExtractionStats, getRecentErrors, checkQuotaStat
 import { getAsinCacheStats, clearAsinCache, invalidateAsinCache, getCachedAsinData } from '../utils/asinCache.js';
 import { amazonSourceSnapshotFields, buildListingReuseContext } from '../utils/listingDatabaseAmazonCache.js';
 import AsinDirectory from '../models/AsinDirectory.js';
+import { istScheduleToEbayUtc } from '../utils/scheduleTimeFormat.js';
 import User from '../models/User.js';
 import AsinSourcingBatch from '../models/AsinSourcingBatch.js';
 import { exportAndFeedUploadSavedRows } from '../lib/asinSourcingAutomation.js';
@@ -5084,7 +5085,7 @@ router.get('/export-csv/:templateId', requireAuth, async (req, res) => {
         listing.title || '',
         listing.relationship || '',
         listing.relationshipDetails || '',
-        listing.scheduleTime || '',
+        istScheduleToEbayUtc(listing.scheduleTime),
         listing.upc || '',
         listing.epid || '',
         listing.startPrice || '',
@@ -5322,7 +5323,7 @@ router.post('/export-csv-direct/:templateId', requireAuth, async (req, res) => {
       const coreValues = [
         listing.action || 'Add', listing.customLabel || '', listing.categoryId || '',
         categoryName, listing.title || '', listing.relationship || '',
-        listing.relationshipDetails || '', listing.scheduleTime || '',
+        listing.relationshipDetails || '', istScheduleToEbayUtc(listing.scheduleTime),
         listing.upc || '', listing.epid || '', listing.startPrice || '',
         listing.quantity || '', joinItemPhotoUrls(listing.itemPhotoUrl || ''), listing.videoId || '',
         listing.conditionId || '1000-New', listing.description || '',
@@ -5656,7 +5657,7 @@ router.get('/re-download-batch/:templateId/:batchId', requireAuth, async (req, r
         listing.title || '',
         listing.relationship || '',
         listing.relationshipDetails || '',
-        listing.scheduleTime || '',
+        istScheduleToEbayUtc(listing.scheduleTime),
         listing.upc || '',
         listing.epid || '',
         listing.startPrice || '',

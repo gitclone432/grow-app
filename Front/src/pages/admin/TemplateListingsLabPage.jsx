@@ -1740,7 +1740,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
             </Box>
             <Box>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.4, fontSize: 11 }}>
-                Start time (24h)
+                Start time (24h, IST)
               </Typography>
               <OutlinedInput
                 size="small"
@@ -2437,7 +2437,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
                   onChange={(e) => setListingFormData({ ...listingFormData, relationshipDetails: e.target.value })}
                 />
                 <TextField
-                  label="Schedule time (YYYY-MM-DD HH:MM:SS)"
+                  label="Schedule time (IST, YYYY-MM-DD HH:MM:SS)"
                   fullWidth
                   value={listingFormData.scheduleTime}
                   onChange={(e) => setListingFormData({ ...listingFormData, scheduleTime: e.target.value })}
@@ -2819,7 +2819,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
             </strong>{' '}in <strong>{template?.name}</strong>:
           </Typography>
           <Typography variant="body2" gutterBottom>
-            • Starting: <strong>{scheduleDate} {scheduleTimeFrom}:00</strong>
+            • Starting: <strong>{scheduleDate} {scheduleTimeFrom}:00 IST</strong>
           </Typography>
           <Typography variant="body2" gutterBottom>
             • Interval: <strong>{scheduleStep} minute{scheduleStep !== 1 ? 's' : ''}</strong> between each listing

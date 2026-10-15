@@ -1070,6 +1070,10 @@ function ComplianceBoardPage() {
       return filteredThreads.filter((thread) => getAlertThreadCategory(thread) === MESSAGE_CATEGORIES.INR);
     }
 
+    if (selectedCategory === 'issue_hub') {
+      return filteredThreads.filter((thread) => ISSUE_HUB_MESSAGE_COLUMNS.has(getAlertThreadCategory(thread)));
+    }
+
     return filteredThreads;
   };
 
@@ -1536,6 +1540,8 @@ function ComplianceBoardPage() {
         setPagination({ total: 0, page: 1, limit: 0, totalPages: 0 });
         // Store all messages for alert calculations
         setAllMessagesForAlerts(allThreads);
+        // Refresh with the fuller (commerce + legacy) source used by other boards.
+        fetchMessagesForAlerts();
       } catch (err) {
         console.error('Failed to load issue hub:', err);
         setError(err.response?.data?.error || 'Failed to load issue hub');
@@ -3613,9 +3619,17 @@ function ComplianceBoardPage() {
   const getVisibleMessageCount = (categoryId) => visibleMessageCounts[categoryId] ?? LOAD_MORE_STEP;
 
   const getIssueHubOption = (categoryId) => ISSUE_HUB_OPTIONS.find((option) => option.id === categoryId) || ISSUE_HUB_OPTIONS[0];
+  // Message cards disappear once the seller has replied or marked them attended;
+  // a newer buyer message brings them back (see isLastMessageFromSeller).
+  const isIssueHubMessageAttended = (item) => {
+    const attendedMs = parseTimeMs(item?.attendedAt || item?._conversationMeta?.attendedAt) || 0;
+    const buyerMs = parseTimeMs(item?.lastBuyerMessageAt) || 0;
+    if (attendedMs && attendedMs > buyerMs) return true;
+    return isLastMessageFromSeller(item) && (Number(item?.unreadCount) || 0) === 0;
+  };
   const getIssueHubItems = (categoryId) => (
     ISSUE_HUB_MESSAGE_COLUMNS.has(categoryId)
-      ? (messages[categoryId] || [])
+      ? (messages[categoryId] || []).filter((item) => !isIssueHubMessageAttended(item))
       : (orders[categoryId] || [])
   );
   const getMessageTagType = (item) => ((item?.actualMessageType || item?.messageType) === 'ORDER' ? 'order' : 'inquiry');
@@ -3767,7 +3781,7 @@ function ComplianceBoardPage() {
 
   const getOverdueMessages = () => {
     const nowMs = Date.now();
-    const allBoardMessages = selectedCategory === 'order_communication' || selectedCategory === 'issue_hub'
+    const allBoardMessages = selectedCategory === 'order_communication'
       ? Object.values(messages).flat()
       : getBoardAlertThreads();
 
@@ -4173,13 +4187,17 @@ function ComplianceBoardPage() {
     const alertDataPending = isAlertDataPending();
     
     if (selectedCategory === 'issue_hub') {
-      return ISSUE_HUB_OPTIONS.map((option) => ({
-        id: option.id,
-        label: option.label,
-        color: option.color,
-        count: getIssueHubItems(option.id).length,
-        type: 'stat',
-      }));
+      return [
+        ...ISSUE_HUB_OPTIONS.map((option) => ({
+          id: option.id,
+          label: option.label,
+          color: option.color,
+          count: getIssueHubItems(option.id).length,
+          type: 'stat',
+        })),
+        { id: UNREAD_MESSAGES_ALERT_ID, label: 'Unread Messages', color: '#7c3aed', count: getUnreadAlertCount(), type: 'alert', pending: alertDataPending },
+        { id: MESSAGE_OVERDUE_ALERT_ID, label: 'Overdue Replies (8h+)', color: '#dc2626', count: overdueMessages.length, type: 'alert', pending: alertDataPending },
+      ];
     }
 
     if (selectedCategory === 'order_communication') {
@@ -6247,7 +6265,11 @@ function ComplianceBoardPage() {
           </Stack>
         </Paper>
 
-        {renderAlertsTile(alerts, issueHubWorkspaceCategory, setIssueHubWorkspaceCategory)}
+        {renderAlertsTile(
+          alerts,
+          activeAlertPreviewId || issueHubWorkspaceCategory,
+          (alertId) => (isMessageAlert(alertId) ? handleAlertPreviewSelect(alertId) : setIssueHubWorkspaceCategory(alertId))
+        )}
       </Box>
     );
   };
@@ -8457,7 +8479,7 @@ function ComplianceBoardPage() {
         </DragDropContext>
       )}
 
-      {selectedCategory !== 'issue_hub' && renderAlertPreviewDialog(getAlertsForCurrentBoard())}
+      {renderAlertPreviewDialog(getAlertsForCurrentBoard())}
       {renderStatusOverviewDialog()}
 
       {/* Pagination */}
