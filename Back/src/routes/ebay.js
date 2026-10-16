@@ -4603,6 +4603,14 @@ router.get('/stored-orders', async (req, res) => {
       }
     }
 
+    // Ship By Date Range Filter (shipByStartDate/shipByEndDate, YYYY-MM-DD, Pacific Time days)
+    if (!req.query.shipByDate && (req.query.shipByStartDate || req.query.shipByEndDate)) {
+      const shipByRange = {};
+      if (req.query.shipByStartDate) shipByRange.$gte = getPTDayBoundsUTC(req.query.shipByStartDate).start;
+      if (req.query.shipByEndDate) shipByRange.$lte = getPTDayBoundsUTC(req.query.shipByEndDate).end;
+      query.shipByDate = shipByRange;
+    }
+
     // Date Sold Specific Day Filter (req.query.dateSold) - Pacific Time
     // This is different from startDate/endDate range, it targets a single specific day
     if (req.query.dateSold) {

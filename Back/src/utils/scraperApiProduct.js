@@ -150,14 +150,17 @@ function parseMoneyString(raw) {
   return Number.isFinite(num) ? num.toFixed(2) : '';
 }
 
-/** Prefer the provider's numeric extracted_price when the text price is wildly different (parse glitch). */
+/**
+ * Prefer the first money token of the text price. ScrapingDog's numeric
+ * extracted_price is the glitchy one: it glues digits together, turning
+ * "$24.75 with 20 percent savings" into 247520 and "$19.27" into 1927.
+ * Only fall back to it when the text price can't be parsed at all.
+ */
 function resolveScrapingDogPrice(priceText, extractedPrice) {
   const parsed = parseMoneyString(priceText);
+  if (parsed) return parsed;
   const extracted = Number(extractedPrice);
-  if (!(extracted > 0)) return parsed;
-  if (!parsed) return extracted.toFixed(2);
-  const ratio = Number(parsed) / extracted;
-  return ratio > 3 || ratio < 1 / 3 ? extracted.toFixed(2) : parsed;
+  return extracted > 0 ? extracted.toFixed(2) : '';
 }
 
 const MAX_CUSTOMER_REVIEWS_FOR_AI = Math.max(
