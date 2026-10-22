@@ -87,6 +87,31 @@ export async function getAmazonDataFromListingsDatabase(asin, region = 'US') {
   );
   if (!restored) return null;
 
+  // Older snapshots can hold a glued-digit price (e.g. 247520.00 instead of 24.75).
+  // The latest row's own amazonScrapedPrice may be poisoned by the same scrape, so
+  // check against every row for this ASIN, and against the eBay sell price (Amazon
+  // cost is never several times what we list for). On disagreement, skip reuse so
+  // a live scrape refreshes the snapshot on all rows.
+  const snapshotPrice = parseFloat(String(restored.price || '').replace(/[^0-9.]/g, ''));
+  if (Number.isFinite(snapshotPrice) && snapshotPrice > 0) {
+    const siblings = await TemplateListing.find({ _asinReference: normalizedAsin, deletedAt: null })
+      .select('amazonScrapedPrice startPrice')
+      .lean();
+    const recordedPrices = siblings.map((row) => Number(row.amazonScrapedPrice)).filter((v) => v > 0);
+    const startPrices = siblings.map((row) => Number(row.startPrice)).filter((v) => v > 0);
+    const minRecorded = recordedPrices.length ? Math.min(...recordedPrices) : null;
+    const maxStart = startPrices.length ? Math.max(...startPrices) : null;
+    const ratio = minRecorded ? snapshotPrice / minRecorded : 1;
+    const disagreesWithRecorded = ratio > 3 || ratio < 1 / 3;
+    const exceedsSellPrice = maxStart != null && snapshotPrice > maxStart * 3;
+    if (disagreesWithRecorded || exceedsSellPrice) {
+      console.warn(
+        `[fetchAmazonData] ⚠️ Snapshot price ${restored.price} for ${normalizedAsin} looks wrong (min recorded ${minRecorded}, max start ${maxStart}); skipping DB reuse`
+      );
+      return null;
+    }
+  }
+
   console.log(
     `[fetchAmazonData] 📚 Listings Database hit for ${normalizedAsin} (${normalizedRegion}) from listing ${listing._id}`
   );
@@ -169,7 +194,8 @@ const REUSE_CORE_FIELD_KEYS = [
   'scheduleTime',
   'upc',
   'epid',
-  'amazonScrapedPrice',
+  // 'amazonScrapedPrice' is deliberately excluded: it's product data and must come
+  // from the current scrape, not be carried forward (a bad value would propagate).
 ];
 
 function mapCustomFieldsToObject(customFields) {

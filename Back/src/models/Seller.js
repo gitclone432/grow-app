@@ -29,7 +29,10 @@ const SellerSchema = new mongoose.Schema(
     lastConnectedAt: { type: Date, default: null },
 
     // eBay UserID used in Message API sender/recipient (often differs from app username)
-    ebayUserId: { type: String, default: null, index: true }
+    ebayUserId: { type: String, default: null, index: true },
+
+    // Excluded sellers are skipped by the scheduled SKU index sync (manual sync still works)
+    skuIndexSyncExcluded: { type: Boolean, default: false },
 
   },
   { timestamps: true }

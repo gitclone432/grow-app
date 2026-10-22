@@ -133,11 +133,34 @@ function regionToScrapingDogCountry(region) {
   return 'us';
 }
 
+/**
+ * Parse only the FIRST money token of a price string. Stripping every
+ * non-digit and gluing the rest together turned text like "$53,78" or
+ * "$29.97 with 15 percent savings" into 5378 / 29.9715.
+ */
 function parseMoneyString(raw) {
   if (raw == null || raw === '') return '';
-  const cleaned = String(raw).replace(/[^\d.,]/g, '').replace(/,/g, '');
-  const num = parseFloat(cleaned);
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw.toFixed(2) : '';
+  const match = String(raw).match(/\d[\d,]*(?:\.\d+)?/);
+  if (!match) return '';
+  let token = match[0];
+  // "53,78" (comma followed by exactly 2 digits, no dot) is a decimal comma, not a thousands separator
+  if (/^\d+,\d{2}$/.test(token)) token = token.replace(',', '.');
+  const num = parseFloat(token.replace(/,/g, ''));
   return Number.isFinite(num) ? num.toFixed(2) : '';
+}
+
+/**
+ * Prefer the first money token of the text price. ScrapingDog's numeric
+ * extracted_price is the glitchy one: it glues digits together, turning
+ * "$24.75 with 20 percent savings" into 247520 and "$19.27" into 1927.
+ * Only fall back to it when the text price can't be parsed at all.
+ */
+function resolveScrapingDogPrice(priceText, extractedPrice) {
+  const parsed = parseMoneyString(priceText);
+  if (parsed) return parsed;
+  const extracted = Number(extractedPrice);
+  return extracted > 0 ? extracted.toFixed(2) : '';
 }
 
 const MAX_CUSTOMER_REVIEWS_FOR_AI = Math.max(
@@ -251,7 +274,7 @@ export function countCustomerReviews(data) {
 
 /** Map ScrapingDog product JSON → shape expected by existing extractors (ScraperAPI-like). */
 function normalizeScrapingDogProduct(sd) {
-  const price = parseMoneyString(sd?.price);
+  const price = resolveScrapingDogPrice(sd?.price, sd?.extracted_price);
   const listPrice = parseMoneyString(sd?.list_price);
   return {
     ...sd,

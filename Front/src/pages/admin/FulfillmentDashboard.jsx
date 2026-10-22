@@ -1189,7 +1189,17 @@ const FulfillmentOrderRow = memo(function FulfillmentOrderRow({
 
 const getSupplierLink = (order) => String(order?.supplierLink || order?.affiliateLink || '').trim();
 
-const createEmptyDateFilter = () => ({ mode: 'none', single: '', from: '', to: '' });
+const createEmptyDateFilter = () => ({
+  mode: 'none', single: '', from: '', to: '',
+  shipByMode: 'none', shipBySingle: '', shipByFrom: '', shipByTo: '',
+});
+
+const pickShipByFields = (f) => ({
+  shipByMode: f?.shipByMode || 'none',
+  shipBySingle: f?.shipBySingle || '',
+  shipByFrom: f?.shipByFrom || '',
+  shipByTo: f?.shipByTo || '',
+});
 
 const DATE_PRESET_MODES = new Set([
   'last90',
@@ -1259,6 +1269,14 @@ const normalizeDateFilter = (value) => {
 };
 
 const applyDateFilterParams = (params, dateFilter) => {
+  if (dateFilter?.shipByMode === 'single' && dateFilter.shipBySingle) {
+    params.shipByStartDate = dateFilter.shipBySingle;
+    params.shipByEndDate = dateFilter.shipBySingle;
+  } else if (dateFilter?.shipByMode === 'range') {
+    if (dateFilter.shipByFrom) params.shipByStartDate = dateFilter.shipByFrom;
+    if (dateFilter.shipByTo) params.shipByEndDate = dateFilter.shipByTo;
+  }
+
   if (!dateFilter || dateFilter.mode === 'none') return;
 
   if (dateFilter.mode === 'single' && dateFilter.single) {
@@ -1342,12 +1360,12 @@ const DateModeSearchBar = memo(function DateModeSearchBar({
           onChange={(e) => {
             const mode = e.target.value;
             if (mode === 'none') {
-              setDraftDateFilter(createEmptyDateFilter());
+              setDraftDateFilter((prev) => ({ ...createEmptyDateFilter(), ...pickShipByFields(prev) }));
               return;
             }
             const preset = getPresetDateRange(mode);
             if (preset) {
-              setDraftDateFilter({ mode, single: '', from: preset.from, to: preset.to });
+              setDraftDateFilter((prev) => ({ ...pickShipByFields(prev), mode, single: '', from: preset.from, to: preset.to }));
               return;
             }
             setDraftDateFilter((prev) => ({
@@ -1401,6 +1419,64 @@ const DateModeSearchBar = memo(function DateModeSearchBar({
             onChange={(e) => setDraftDateFilter((prev) => ({ ...prev, to: e.target.value }))}
             InputLabelProps={{ shrink: true }}
             sx={{ width: { xs: '50%', sm: 150 } }}
+          />
+        </Stack>
+      )}
+
+      <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 150 } }}>
+        <InputLabel id="ship-by-mode-label">Ship By</InputLabel>
+        <Select
+          labelId="ship-by-mode-label"
+          value={draftDateFilter.shipByMode || 'none'}
+          label="Ship By"
+          onChange={(e) => {
+            const shipByMode = e.target.value;
+            setDraftDateFilter((prev) => ({
+              ...prev,
+              shipByMode,
+              shipBySingle: '',
+              shipByFrom: '',
+              shipByTo: '',
+            }));
+          }}
+        >
+          <MenuItem value="none">None</MenuItem>
+          <MenuItem value="single">Single Day</MenuItem>
+          <MenuItem value="range">Date Range</MenuItem>
+        </Select>
+      </FormControl>
+
+      {draftDateFilter.shipByMode === 'single' && (
+        <TextField
+          size="small"
+          label="Ship By Date"
+          type="date"
+          value={draftDateFilter.shipBySingle || ''}
+          onChange={(e) => setDraftDateFilter((prev) => ({ ...prev, shipBySingle: e.target.value }))}
+          InputLabelProps={{ shrink: true }}
+          sx={{ width: { xs: '100%', sm: 160 } }}
+        />
+      )}
+
+      {draftDateFilter.shipByMode === 'range' && (
+        <Stack direction="row" spacing={1} sx={{ flex: { xs: 1, sm: 'none' } }}>
+          <TextField
+            size="small"
+            label="Ship By From"
+            type="date"
+            value={draftDateFilter.shipByFrom || ''}
+            onChange={(e) => setDraftDateFilter((prev) => ({ ...prev, shipByFrom: e.target.value }))}
+            InputLabelProps={{ shrink: true }}
+            sx={{ width: { xs: '50%', sm: 160 } }}
+          />
+          <TextField
+            size="small"
+            label="Ship By To"
+            type="date"
+            value={draftDateFilter.shipByTo || ''}
+            onChange={(e) => setDraftDateFilter((prev) => ({ ...prev, shipByTo: e.target.value }))}
+            InputLabelProps={{ shrink: true }}
+            sx={{ width: { xs: '50%', sm: 160 } }}
           />
         </Stack>
       )}
@@ -2158,6 +2234,35 @@ function FulfillmentDashboard() {
     }
   };
 
+  // "Shipped" only: add expected delivery date (Arriving date + 1 day) to the message
+  const addShippedDeliveryDate = (text, remarkValue, order) => {
+    if (!text || String(remarkValue || '').trim().toLowerCase() !== 'shipped') return text;
+    const raw = String(order?.arrivingDate || '').trim();
+    let y;
+    let m;
+    let d;
+    let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      [, y, m, d] = match;
+    } else if ((match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) {
+      [, d, m, y] = match;
+    } else {
+      return text;
+    }
+    const date = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d) + 1));
+    if (Number.isNaN(date.getTime())) return text;
+    const formatted = date.toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'UTC'
+    });
+    return text.replace(
+      /Your order has been shipped\./i,
+      `Your order has been shipped and expected to be delivered by ${formatted}.`
+    );
+  };
+
   // Function to send auto-message based on remark
   const sendAutoMessageForRemark = async (order, remarkValue) => {
     // Get template for this remark
@@ -2168,7 +2273,7 @@ function FulfillmentDashboard() {
     }
 
     // Replace variables in template
-    const messageBody = replaceTemplateVariables(template, order);
+    const messageBody = addShippedDeliveryDate(replaceTemplateVariables(template, order), remarkValue, order);
 
     try {
       // Send message using the same endpoint as manual messages
@@ -2331,7 +2436,7 @@ function FulfillmentDashboard() {
     if (hasTemplate) {
       // Get the template text and pre-fill the editable message
       const templateText = findRemarkTemplateText(remarkTemplates, remarkValue);
-      const replacedText = replaceTemplateVariables(templateText, order);
+      const replacedText = addShippedDeliveryDate(replaceTemplateVariables(templateText, order), remarkValue, order);
       setPendingRemarkUpdate({ orderId, remarkValue, order });
       setEditableRemarkMessage(replacedText);
       setRemarkAttachments([]);

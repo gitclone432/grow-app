@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Fragment, useMemo } from 'react';
 import {
     Box, Typography, Container, Paper, CircularProgress, Alert,
     Chip, Button, LinearProgress, Table, TableBody, TableCell,
-    TableContainer, TableHead, TableRow, Tooltip, IconButton,
+    TableContainer, TableHead, TableRow, Tooltip, IconButton, Switch, TextField,
+    MenuItem,
 } from '@mui/material';
 import SyncIcon from '@mui/icons-material/Sync';
 import CancelIcon from '@mui/icons-material/Cancel';
@@ -14,12 +15,66 @@ import api, { getAuthToken } from '../../lib/api';
 // progress shape: { page, totalPages, totalEntries, count }
 
 export default function SkuIndexSyncPage() {
+    const currentUser = useMemo(() => {
+        try {
+            return JSON.parse(localStorage.getItem('user') || 'null');
+        } catch {
+            return null;
+        }
+    }, []);
+    const canManageAutoSync = currentUser?.role === 'superadmin' || currentUser?.role?.endsWith('admin');
     const [sellers, setSellers] = useState([]);
     const [sellerState, setSellerState] = useState({}); // sellerId → state
     const [loadingInitial, setLoadingInitial] = useState(true);
     const [error, setError] = useState(null);
     const [runStatus, setRunStatus] = useState(null);
     const [stoppingRun, setStoppingRun] = useState(false);
+    const [excludedSellerIds, setExcludedSellerIds] = useState([]);
+    const [logs, setLogs] = useState([]);
+    const [logDate, setLogDate] = useState('');
+    const [logSource, setLogSource] = useState('');
+    const [expandedRun, setExpandedRun] = useState(null);
+
+    const loadSettings = async () => {
+        try {
+            const { data } = await api.get('/ebay/sync-sku-index/settings');
+            setExcludedSellerIds(data.excludedSellerIds || []);
+        } catch {
+            // non-fatal
+        }
+    };
+
+    const loadLogs = async (date = logDate, source = logSource) => {
+        if (!date) {
+            setLogs([]);
+            setExpandedRun(null);
+            return;
+        }
+        try {
+            const { data } = await api.get('/ebay/sync-sku-index/logs', { params: { from: date, to: date, source } });
+            setLogs(data.runs || []);
+            setExpandedRun(null);
+        } catch {
+            setError('Failed to load sync logs.');
+        }
+    };
+
+    const toggleExclusion = async (sellerId, excluded) => {
+        try {
+            await api.put(`/ebay/sync-sku-index/exclusion/${sellerId}`, { excluded });
+            setExcludedSellerIds(prev => (
+                excluded
+                    ? [...new Set([...prev, sellerId])]
+                    : prev.filter(id => id !== sellerId)
+            ));
+        } catch (err) {
+            setError(err.response?.data?.error || 'Failed to update exclusion.');
+        }
+    };
+
+    useEffect(() => {
+        if (canManageAutoSync) loadSettings();
+    }, [canManageAutoSync]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const readerRefs = useRef({}); // sellerId → ReadableStreamDefaultReader (for cleanup)
 
@@ -162,6 +217,7 @@ export default function SkuIndexSyncPage() {
             }));
         } finally {
             delete readerRefs.current[sellerId];
+            loadLogs();
         }
     };
 
@@ -215,6 +271,66 @@ export default function SkuIndexSyncPage() {
 
             {error && <Alert severity="error" sx={{ mb: 3 }}>{error}</Alert>}
 
+            <Paper elevation={1} sx={{ mb: 2, borderRadius: 2, border: '1px solid #e0e0e0', overflow: 'hidden' }}>
+                <Box p={2} display="flex" alignItems="center" gap={2} flexWrap="wrap">
+                    <Typography variant="subtitle1" fontWeight={700} sx={{ mr: 'auto' }}>Sync Logs</Typography>
+                    <TextField type="date" size="small" label="Date" value={logDate} onChange={e => setLogDate(e.target.value)} InputLabelProps={{ shrink: true }} />
+                    <TextField select size="small" label="Type" value={logSource} onChange={e => setLogSource(e.target.value)} sx={{ minWidth: 130 }}>
+                        <MenuItem value="">All</MenuItem>
+                        <MenuItem value="cron">Automatic</MenuItem>
+                        <MenuItem value="manual">Manual</MenuItem>
+                    </TextField>
+                    <Button variant="outlined" size="small" onClick={() => loadLogs()} disabled={!logDate}>Apply</Button>
+                    <Button size="small" onClick={() => { setLogDate(''); setLogSource(''); setLogs([]); setExpandedRun(null); }}>Clear</Button>
+                </Box>
+                <TableContainer>
+                    <Table size="small">
+                        <TableHead>
+                            <TableRow sx={{ bgcolor: '#f5f5f5' }}>
+                                <TableCell sx={{ fontWeight: 700 }}>Date</TableCell>
+                                <TableCell sx={{ fontWeight: 700 }}>Triggered By</TableCell>
+                                <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
+                                <TableCell sx={{ fontWeight: 700 }}>Sellers</TableCell>
+                                <TableCell sx={{ fontWeight: 700 }}>Completed</TableCell>
+                            </TableRow>
+                        </TableHead>
+                        <TableBody>
+                            {!logDate ? (
+                                <TableRow><TableCell colSpan={5} align="center" sx={{ py: 3 }}>Select a date to view sync logs</TableCell></TableRow>
+                            ) : logs.length === 0 ? (
+                                <TableRow><TableCell colSpan={5} align="center" sx={{ py: 3 }}>No sync logs found</TableCell></TableRow>
+                            ) : logs.map(run => (
+                                <Fragment key={run._id}>
+                                    <TableRow hover sx={{ cursor: 'pointer' }} onClick={() => setExpandedRun(expandedRun === run._id ? null : run._id)}>
+                                        <TableCell>{formatDate(run.startedAt)}</TableCell>
+                                        <TableCell>
+                                            {run.source === 'manual'
+                                                ? <Chip size="small" color="primary" variant="outlined" label={`Manual · ${run.triggeredByUsername || 'unknown'}`} />
+                                                : <Chip size="small" variant="outlined" label="Automatic" />}
+                                        </TableCell>
+                                        <TableCell>{run.status}</TableCell>
+                                        <TableCell>{run.sellersComplete || 0} / {run.sellersTotal || 0}</TableCell>
+                                        <TableCell>{formatDate(run.completedAt)}</TableCell>
+                                    </TableRow>
+                                    {expandedRun === run._id && (
+                                        <TableRow>
+                                            <TableCell colSpan={5} sx={{ bgcolor: '#fafafa' }}>
+                                                {(run.sellers || []).map((s, i) => (
+                                                    <Typography key={i} variant="body2">
+                                                        {s.sellerName}: {s.status}
+                                                        {s.totalCount ? ` · ${s.totalCount.toLocaleString()} listings` : ''}
+                                                        {s.error ? ` · ${s.error}` : ''}
+                                                    </Typography>
+                                                ))}
+                                            </TableCell>
+                                        </TableRow>
+                                    )}
+                                </Fragment>
+                            ))}
+                        </TableBody>
+                    </Table>
+                </TableContainer>
+            </Paper>
             {runStatus && (
                 <Paper elevation={0} sx={{ mb: 2, p: 2, borderRadius: 2, border: '1px solid #e0e0e0' }}>
                     <Box display="flex" alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={2} flexDirection={{ xs: 'column', sm: 'row' }}>
@@ -262,20 +378,23 @@ export default function SkuIndexSyncPage() {
                                 <TableCell align="center" sx={{ fontWeight: 700 }}>Last Synced</TableCell>
                                 <TableCell align="center" sx={{ fontWeight: 700 }}>Completed At</TableCell>
                                 <TableCell align="center" sx={{ fontWeight: 700 }}>Status</TableCell>
+                                {canManageAutoSync && (
+                                    <TableCell align="center" sx={{ fontWeight: 700 }}>Auto Sync</TableCell>
+                                )}
                                 <TableCell align="center" sx={{ fontWeight: 700 }}>Action</TableCell>
                             </TableRow>
                         </TableHead>
                         <TableBody>
                             {loadingInitial ? (
                                 <TableRow>
-                                    <TableCell colSpan={6} align="center" sx={{ py: 5 }}>
+                                    <TableCell colSpan={canManageAutoSync ? 7 : 6} align="center" sx={{ py: 5 }}>
                                         <CircularProgress size={28} />
                                         <Typography variant="body2" sx={{ mt: 1 }}>Loading sellers…</Typography>
                                     </TableCell>
                                 </TableRow>
                             ) : sellers.length === 0 ? (
                                 <TableRow>
-                                    <TableCell colSpan={6} align="center" sx={{ py: 5 }}>No sellers found</TableCell>
+                                    <TableCell colSpan={canManageAutoSync ? 7 : 6} align="center" sx={{ py: 5 }}>No sellers found</TableCell>
                                 </TableRow>
                             ) : (
                                 sellers.map(seller => {
@@ -362,6 +481,18 @@ export default function SkuIndexSyncPage() {
                                                 )}
                                             </TableCell>
 
+                                            {canManageAutoSync && (
+                                                <TableCell align="center">
+                                                    <Tooltip title={excludedSellerIds.includes(sid) ? 'Excluded from automatic sync' : 'Included in automatic sync'}>
+                                                        <Switch
+                                                            size="small"
+                                                            checked={!excludedSellerIds.includes(sid)}
+                                                            onChange={e => toggleExclusion(sid, !e.target.checked)}
+                                                        />
+                                                    </Tooltip>
+                                                </TableCell>
+                                            )}
+
                                             <TableCell align="center">
                                                 <Box display="flex" alignItems="center" justifyContent="center" gap={0.5}>
                                                 <Button
@@ -391,6 +522,7 @@ export default function SkuIndexSyncPage() {
                     </Table>
                 </TableContainer>
             </Paper>
+
         </Container>
     );
 }

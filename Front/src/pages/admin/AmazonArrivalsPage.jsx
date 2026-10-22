@@ -93,7 +93,7 @@ function getBuyerSlaLabel(order, nowMs) {
 const REMARK_COUNT_CARDS = [
   { key: 'Processing', label: 'Processing', color: '#2563eb' },
   { key: 'Shipped', label: 'Shipped', color: '#059669' },
-  { key: 'Late Message', label: 'Late Message', color: '#d97706' },
+  { key: 'Not yet shipped', label: 'Not Yet Shipped', color: '#d97706' },
   { key: 'Delayed', label: 'Delayed', color: '#dc2626' },
   { key: 'Delivered', label: 'Delivered', color: '#7c3aed' }
 ];

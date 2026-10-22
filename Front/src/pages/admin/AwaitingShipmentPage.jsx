@@ -1009,6 +1009,35 @@ export default function AwaitingShipmentPage() {
       .replace(/\{\{order_id\}\}/g, order?.orderId || '');
   };
 
+  // "Shipped" only: add expected delivery date (Arriving date + 1 day) to the message
+  const addShippedDeliveryDate = (text, remarkValue, order) => {
+    if (!text || String(remarkValue || '').trim().toLowerCase() !== 'shipped') return text;
+    const raw = String(order?.arrivingDate || '').trim();
+    let y;
+    let m;
+    let d;
+    let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      [, y, m, d] = match;
+    } else if ((match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) {
+      [, d, m, y] = match;
+    } else {
+      return text;
+    }
+    const date = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d) + 1));
+    if (Number.isNaN(date.getTime())) return text;
+    const formatted = date.toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'UTC'
+    });
+    return text.replace(
+      /Your order has been shipped\./i,
+      `Your order has been shipped and expected to be delivered by ${formatted}.`
+    );
+  };
+
   const applyRemarkUpdateOnly = async (orderId, remarkValue) => {
     try {
       const normalizedRemark = remarkValue && String(remarkValue).trim().toLowerCase() !== 'select'
@@ -1027,7 +1056,7 @@ export default function AwaitingShipmentPage() {
     const template = findRemarkTemplateText(remarkTemplates, remarkValue);
     if (!template) return false;
 
-    const messageBody = replaceTemplateVariables(template, order);
+    const messageBody = addShippedDeliveryDate(replaceTemplateVariables(template, order), remarkValue, order);
     await api.post('/ebay/send-message', {
       orderId: order.orderId,
       buyerUsername: order.buyer?.username || order.buyerUsername,
@@ -1127,7 +1156,7 @@ export default function AwaitingShipmentPage() {
     const hasTemplate = findRemarkTemplateText(remarkTemplates, remarkValue);
     if (order && hasTemplate) {
       const templateText = findRemarkTemplateText(remarkTemplates, remarkValue);
-      const replacedText = replaceTemplateVariables(templateText, order);
+      const replacedText = addShippedDeliveryDate(replaceTemplateVariables(templateText, order), remarkValue, order);
       setPendingRemarkUpdate({ orderId, remarkValue, order });
       setEditableRemarkMessage(replacedText);
       setRemarkAttachments([]);

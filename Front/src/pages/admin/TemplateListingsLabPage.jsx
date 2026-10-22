@@ -702,6 +702,25 @@ export default function TemplateListingsLabPage({ embedded = false }) {
     }
   }, [fetchListings]);
 
+  const handleBulkDeleteListings = useCallback(async () => {
+    const ids = [...selectedListings];
+    if (ids.length === 0) return;
+    if (!window.confirm(`Delete ${ids.length} selected listing${ids.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
+
+    try {
+      setLoading(true);
+      const { data } = await api.post('/template-listings/bulk-delete', { listingIds: ids });
+      setSelectedListings(new Set());
+      setSuccess(`${data?.deletedCount ?? ids.length} listing(s) deleted successfully!`);
+      fetchListings();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to delete selected listings');
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedListings, fetchListings]);
+
   const handleDuplicateListing = useCallback((listing) => {
     setEditingListing(null);
     setListingFormData({
@@ -1493,6 +1512,23 @@ export default function TemplateListingsLabPage({ embedded = false }) {
           {loading && <CircularProgress size={18} />}
         </Stack>
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          {selectedListings.size > 0 && (
+            <>
+              <Button
+                variant="contained"
+                color="error"
+                size="small"
+                startIcon={<DeleteIcon />}
+                onClick={handleBulkDeleteListings}
+                disabled={loading}
+              >
+                Delete Selected ({selectedListings.size})
+              </Button>
+              <Button size="small" onClick={() => setSelectedListings(new Set())}>
+                Clear selection
+              </Button>
+            </>
+          )}
           {fromAsinList && (
             <Button
               variant="contained"
@@ -1704,7 +1740,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
             </Box>
             <Box>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.4, fontSize: 11 }}>
-                Start time (24h)
+                Start time (24h, IST)
               </Typography>
               <OutlinedInput
                 size="small"
@@ -2401,7 +2437,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
                   onChange={(e) => setListingFormData({ ...listingFormData, relationshipDetails: e.target.value })}
                 />
                 <TextField
-                  label="Schedule time (YYYY-MM-DD HH:MM:SS)"
+                  label="Schedule time (IST, YYYY-MM-DD HH:MM:SS)"
                   fullWidth
                   value={listingFormData.scheduleTime}
                   onChange={(e) => setListingFormData({ ...listingFormData, scheduleTime: e.target.value })}
@@ -2783,7 +2819,7 @@ export default function TemplateListingsLabPage({ embedded = false }) {
             </strong>{' '}in <strong>{template?.name}</strong>:
           </Typography>
           <Typography variant="body2" gutterBottom>
-            • Starting: <strong>{scheduleDate} {scheduleTimeFrom}:00</strong>
+            • Starting: <strong>{scheduleDate} {scheduleTimeFrom}:00 IST</strong>
           </Typography>
           <Typography variant="body2" gutterBottom>
             • Interval: <strong>{scheduleStep} minute{scheduleStep !== 1 ? 's' : ''}</strong> between each listing

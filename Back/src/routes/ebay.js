@@ -216,7 +216,13 @@ async function findOrderIdsForSoldDateRange(soldDateFrom, soldDateTo) {
   if (!dateSoldRange) return null;
 
   const orders = await Order.find(
-    { dateSold: dateSoldRange },
+    {
+      $or: [
+        { dateSold: dateSoldRange },
+        { dateSold: null, creationDate: dateSoldRange },
+        { dateSold: { $exists: false }, creationDate: dateSoldRange },
+      ],
+    },
     { orderId: 1, legacyOrderId: 1 }
   ).lean();
 
@@ -4595,6 +4601,14 @@ router.get('/stored-orders', async (req, res) => {
 
         query.shipByDate = { $gte: startOfDay, $lte: endOfDay };
       }
+    }
+
+    // Ship By Date Range Filter (shipByStartDate/shipByEndDate, YYYY-MM-DD, Pacific Time days)
+    if (!req.query.shipByDate && (req.query.shipByStartDate || req.query.shipByEndDate)) {
+      const shipByRange = {};
+      if (req.query.shipByStartDate) shipByRange.$gte = getPTDayBoundsUTC(req.query.shipByStartDate).start;
+      if (req.query.shipByEndDate) shipByRange.$lte = getPTDayBoundsUTC(req.query.shipByEndDate).end;
+      query.shipByDate = shipByRange;
     }
 
     // Date Sold Specific Day Filter (req.query.dateSold) - Pacific Time
@@ -11896,7 +11910,7 @@ router.patch('/cancellations/:cancelId/remark', requireAuth, requirePageAccess('
 
 router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), async (req, res) => {
   try {
-    const { sellerId, status, state, orderId, startDate, endDate, shipByDate, sortBy, sortDir } = req.query;
+    const { sellerId, status, state, orderId, startDate, endDate, soldDateFrom, soldDateTo, shipByDate, sortBy, sortDir } = req.query;
     const query = {};
     const andClauses = [];
 
@@ -11920,6 +11934,15 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
       query.cancelRequestDate = {};
       if (startDate) query.cancelRequestDate.$gte = getPTDayBoundsUTC(startDate).start;
       if (endDate) query.cancelRequestDate.$lte = getPTDayBoundsUTC(endDate).end;
+    }
+
+    if (soldDateFrom || soldDateTo) {
+      const soldDateOrderIds = await findOrderIdsForSoldDateRange(soldDateFrom, soldDateTo);
+      andClauses.push(
+        soldDateOrderIds?.length
+          ? { $or: [{ orderId: { $in: soldDateOrderIds } }, { legacyOrderId: { $in: soldDateOrderIds } }] }
+          : { _id: null }
+      );
     }
 
     // Ship By filter — Order.shipByDate lives on the Order, not the Cancellation,

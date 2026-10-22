@@ -119,6 +119,34 @@ Grow-Cursor-Backend/
 - **MongoDB** instance (Atlas or local)
 - API keys for external services (see [Environment Variables](#environment-variables))
 
+### OpenAI model configuration
+
+Set the model in [Back/.env](.env) and restart the backend:
+
+```dotenv
+OPENAI_FIELD_MODEL=gpt-6-luna
+```
+
+This controls OpenAI template field generation, precheck AI, and fitment calls.
+Change this value to switch models without editing source code. The model must
+be available to your API key and support Chat Completions.
+
+Selection priority is `OPENAI_FIELD_MODEL`, then the legacy `OPENAI_MODEL`.
+Blank values are ignored. There is no hard-coded model fallback: AI requests
+fail with a configuration error if neither is set. Explicit per-call model
+overrides still take priority.
+
+GPT-6 requests use `max_completion_tokens` and `reasoning_effort=none` to
+preserve the small output budgets used for listing fields. Existing GPT-5,
+o-series, and older chat-model parameter handling is unchanged. Cached or
+previously saved AI content is not regenerated automatically when the model changes.
+
+Run the model configuration regression tests from the backend directory:
+
+```bash
+node --test test/openaiModel.test.js
+```
+
 <!-- ### Installation
 
 ```bash

@@ -134,6 +134,17 @@ function matchesRegionFilter(order, regionFilter) {
   return String(order.region || '').trim().toUpperCase() === regionFilter.toUpperCase();
 }
 
+function matchesBuyerNameFilter(order, query) {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return true;
+  // Buyer name is the first non-empty line of the shipping address.
+  const buyerName = String(order?.address || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || '';
+  return buyerName.toLowerCase().includes(needle);
+}
+
 function matchesValueFilter(order, field, expectedValue) {
   if (!field || !expectedValue) return true;
   return String(order?.[field] || '').trim() === expectedValue;
@@ -376,6 +387,7 @@ export default function EtsyOrderFulfilmentPage({
   const [secondaryDateTo, setSecondaryDateTo] = useState('');
   const [selectedRegion, setSelectedRegion] = useState('');
   const [selectedRemark, setSelectedRemark] = useState('');
+  const [buyerNameSearch, setBuyerNameSearch] = useState('');
   const [error, setError] = useState('');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
   const [savingCells, setSavingCells] = useState({});
@@ -573,9 +585,11 @@ export default function EtsyOrderFulfilmentPage({
       }))
       && (!showRegionFilter || matchesRegionFilter(order, selectedRegion))
       && (!showRemarkFilter || matchesValueFilter(order, remarkFilterField, selectedRemark))
+      && matchesBuyerNameFilter(order, buyerNameSearch)
     )),
     [
       orders,
+      buyerNameSearch,
       dateFilterField,
       dateFilterMode,
       dateFrom,
@@ -656,6 +670,7 @@ export default function EtsyOrderFulfilmentPage({
     secondaryDateTo,
     selectedRegion,
     selectedRemark,
+    buyerNameSearch,
   ]);
 
   const totalPages = Math.max(1, Math.ceil(sortedOrders.length / ROWS_PER_PAGE));
@@ -854,9 +869,11 @@ export default function EtsyOrderFulfilmentPage({
   const hasActiveFilters = hasActiveDateFilter
     || hasActiveSecondaryDateFilter
     || (showRegionFilter && Boolean(selectedRegion))
-    || (showRemarkFilter && Boolean(selectedRemark));
+    || (showRemarkFilter && Boolean(selectedRemark))
+    || Boolean(buyerNameSearch.trim());
 
   const handleClearFilters = () => {
+    setBuyerNameSearch('');
     setDateFrom('');
     setDateTo('');
     setSelectedDate('');
@@ -1133,6 +1150,16 @@ export default function EtsyOrderFulfilmentPage({
                 </Select>
               </FormControl>
             )}
+
+            <TextField
+              size="small"
+              label="Buyer name"
+              placeholder="Search buyer name"
+              value={buyerNameSearch}
+              onChange={(e) => setBuyerNameSearch(e.target.value)}
+              disabled={!selectedStoreId}
+              sx={{ minWidth: { xs: '100%', sm: 190 } }}
+            />
 
             {hasActiveFilters && (
               <Button

@@ -579,7 +579,10 @@ export async function scheduledSkuIndexSyncAllSellers() {
     return [];
   }
 
-  const allSellers = await Seller.find({ 'ebayTokens.access_token': { $exists: true } })
+  const allSellers = await Seller.find({
+    'ebayTokens.access_token': { $exists: true },
+    skuIndexSyncExcluded: { $ne: true },
+  })
     .populate('user', 'username email');
 
   const sellers = allSellers.filter(seller => {
