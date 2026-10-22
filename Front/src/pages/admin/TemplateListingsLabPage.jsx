@@ -147,9 +147,10 @@ const LabListingRow = memo(function LabListingRow({
           key={col.key}
           sx={
             col.key === 'customLabel'
-              ? { position: 'sticky', left: 48, bgcolor: 'background.paper', zIndex: 1, fontWeight: 600, maxWidth: col.width }
-              : { maxWidth: col.width, whiteSpace: 'nowrap' }
+              ? { position: 'sticky', left: 48, bgcolor: 'background.paper', zIndex: 1, fontWeight: 600, minWidth: col.width, maxWidth: col.width, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+              : { minWidth: col.width, maxWidth: col.width, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
           }
+          title={col.key === 'title' || col.key === 'description' ? String(formatListingCell(listing, col.key) ?? '') : undefined}
         >
           {col.key === 'itemPhotoUrl' || col.key === 'description' ? (
             <Typography variant="caption" color={col.key === 'itemPhotoUrl' ? 'primary' : 'text.secondary'} noWrap component="span">
@@ -161,7 +162,7 @@ const LabListingRow = memo(function LabListingRow({
         </TableCell>
       ))}
       {customColumns.map((col) => (
-        <TableCell key={col.name} sx={{ maxWidth: 140, whiteSpace: 'nowrap' }}>
+        <TableCell key={col.name} sx={{ minWidth: 120, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {listing.customFields?.[col.name] || '-'}
         </TableCell>
       ))}
