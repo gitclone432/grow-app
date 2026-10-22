@@ -21,7 +21,7 @@ function getOpenAIClient(apiKey) {
 }
 
 /**
- * Generate content using the OpenAI API (model from OPENAI_MODEL)
+ * Generate content using the OpenAI API (model from OPENAI_FIELD_MODEL, with OPENAI_MODEL fallback)
  * @param {string} prompt - The prompt to send to OpenAI
  * @param {Object} options - Generation options
  * @param {number} options.maxTokens - Maximum tokens to generate (default: 150)
