@@ -870,7 +870,7 @@ export default function InternalMessagesPage() {
             )}
 
             {/* Messages Area */}
-            <Box onScroll={handleMessagesScroll} sx={{ flex: 1, p: 2, overflowY: 'auto', bgcolor: '#f0f2f5' }}>
+            <Box onScroll={handleMessagesScroll} sx={{ flex: 1, minWidth: 0, p: 2, overflowY: 'auto', overflowX: 'hidden', bgcolor: '#f0f2f5' }}>
               {loadingMessages ? (
                 <Box display="flex" justifyContent="center" mt={4}>
                   <CircularProgress />
@@ -917,12 +917,12 @@ export default function InternalMessagesPage() {
                               <Typography variant="caption" sx={{ display: 'block', fontWeight: 700, color: isMe ? 'rgba(255,255,255,0.92)' : 'primary.main' }}>
                                 Replying to {msg.replyTo.sender?.username || 'Former user'}
                               </Typography>
-                              <Typography variant="caption" sx={{ display: 'block', color: isMe ? 'rgba(255,255,255,0.82)' : 'text.secondary' }}>
+                              <Typography variant="caption" sx={{ display: 'block', overflowWrap: 'anywhere', color: isMe ? 'rgba(255,255,255,0.82)' : 'text.secondary' }}>
                                 {summarizeReplyBody(msg.replyTo.body)}
                               </Typography>
                             </Box>
                           )}
-                          <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
+                          <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                             {renderBodyWithMentions(msg.body, selectedConversation.participants)}
                           </Typography>
 
