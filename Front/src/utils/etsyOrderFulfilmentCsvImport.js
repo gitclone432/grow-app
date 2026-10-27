@@ -14,6 +14,7 @@ export const ETSY_FULFILMENT_SHEET_HEADERS = [
   { header: 'Estimate ETSY Delivery', key: 'estimateEtsyDelivery' },
   { header: 'Product Name', key: 'productName' },
   { header: 'SKU', key: 'sku' },
+  { header: 'Order ID', key: 'etsyOrderId' },
   { header: 'Address', key: 'address' },
   { header: 'Zip Code', key: 'zipCode' },
   { header: 'Qty', key: 'qty' },
@@ -108,6 +109,9 @@ const COLUMN_ALIASES = {
   itemnumber: 'sku',
   itemno: 'sku',
   listingid: 'sku',
+  orderid: 'etsyOrderId',
+  etsyorderid: 'etsyOrderId',
+  ordernumber: 'etsyOrderId',
 
   address: 'address',
   shippingaddress: 'address',

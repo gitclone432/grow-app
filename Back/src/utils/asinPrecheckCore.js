@@ -205,10 +205,17 @@ function getMarketplaceLocalDateParts(date, timezone) {
   };
 }
 
-function toDeliveryResult(year, month, day, scrapedLocal) {
+// Amazon never quotes more than a few weeks ahead; only a Dec -> Jan wrap
+// (delivery months "behind" the scrape date) legitimately crosses into next year.
+const YEAR_WRAP_MIN_GAP_DAYS = 180;
+
+function toDeliveryResult(year, month, day, scrapedLocal, yearExplicit = true) {
   let deliveryUtc = Date.UTC(year, month, day);
   const scrapedUtc = Date.UTC(scrapedLocal.year, scrapedLocal.month, scrapedLocal.day);
-  if (deliveryUtc < scrapedUtc) {
+  if (!yearExplicit && deliveryUtc < scrapedUtc) {
+    const gapDays = (scrapedUtc - deliveryUtc) / 86400000;
+    // A slightly-past date means the delivery text is stale, not "next year".
+    if (gapDays < YEAR_WRAP_MIN_GAP_DAYS) return { deliveryDate: null, deliveryDays: null };
     year += 1;
     deliveryUtc = Date.UTC(year, month, day);
   }
@@ -244,7 +251,7 @@ function parseShippingDate(shippingValue, scrapedAt, timezone) {
     const day = Number(monthFirst[2]);
     const year = monthFirst[3] ? Number(monthFirst[3]) : scrapedLocal.year;
     if (month != null && Number.isFinite(day)) {
-      return toDeliveryResult(year, month, day, scrapedLocal);
+      return toDeliveryResult(year, month, day, scrapedLocal, Boolean(monthFirst[3]));
     }
   }
 
@@ -254,7 +261,7 @@ function parseShippingDate(shippingValue, scrapedAt, timezone) {
     const month = MONTH_INDEX[dayFirst[2].toLowerCase()];
     const year = dayFirst[3] ? Number(dayFirst[3]) : scrapedLocal.year;
     if (month != null && Number.isFinite(day)) {
-      return toDeliveryResult(year, month, day, scrapedLocal);
+      return toDeliveryResult(year, month, day, scrapedLocal, Boolean(dayFirst[3]));
     }
   }
 

@@ -71,7 +71,8 @@ export const ETSY_ORDER_FULFILMENT_COLUMNS = [
   { key: 'estimateEtsyDelivery', label: 'Estimate ETSY Delivery', minWidth: 148, align: 'center', section: 'etsy', inputType: 'date' },
   { key: 'productName', label: 'Product Name', minWidth: 200, section: 'etsy', inputType: 'text', multiline: true },
   { key: 'sku', label: 'SKU', minWidth: 96, section: 'etsy', inputType: 'text' },
-  { key: 'address', label: 'Address', minWidth: 280, section: 'etsy', inputType: 'text', multiline: true },
+    { key: 'etsyOrderId', label: 'Order ID', minWidth: 130, section: 'etsy', inputType: 'text', copyable: true },
+    { key: 'address', label: 'Address', minWidth: 280, section: 'etsy', inputType: 'text', multiline: true },
   { key: 'zipCode', label: 'Zip Code', minWidth: 112, section: 'etsy', computed: true, copyable: true },
   { key: 'region', label: 'Region', minWidth: 96, align: 'center', section: 'etsy', inputType: 'select', options: ['', ...ETSY_REGION_OPTIONS] },
   { key: 'qty', label: 'Qty', minWidth: 72, align: 'center', section: 'etsy', inputType: 'number' },
@@ -201,7 +202,7 @@ export function buildVisibleEtsySectionHeaders(visibleColumns) {
 
 export const ETSY_SECTION_HEADERS = [
   { id: 'index', label: '', colspan: 2, bgcolor: '#e3f2fd' },
-  { id: 'etsy', label: 'Etsy', colspan: 25, bgcolor: '#fff3e0' },
+  { id: 'etsy', label: 'Etsy', colspan: 26, bgcolor: '#fff3e0' },
   { id: 'amazon', label: 'Amazon', colspan: 13, bgcolor: '#e8f5e9' },
   { id: 'fulfilment', label: 'Fulfilment', colspan: 7, bgcolor: '#fce4ec' },
 ];
@@ -214,6 +215,7 @@ export function createEmptyEtsyOrderRow() {
     estimateEtsyDelivery: '',
     productName: '',
     sku: '',
+    etsyOrderId: '',
     address: '',
     zipCode: '',
     region: '',

@@ -218,6 +218,15 @@ function amazonDataHasDelivery(data = {}) {
   return Boolean(collectAmazonDeliveryText(data));
 }
 
+// The precheck needs stock text AND a delivery line; either one missing shows
+// "Unknown" / a blank delivery, so such cached data must be re-fetched live.
+function amazonDataHasStockAndDelivery(data = {}) {
+  const stockText = collectAmazonStockText(data).toLowerCase();
+  if (!stockText) return false;
+  if (stockText.includes('unavailable') || stockText.includes('out of stock')) return true;
+  return amazonDataHasDelivery(data);
+}
+
 function amazonDataHasAvailability(data = {}) {
   const stockText = collectAmazonStockText(data).toLowerCase();
   const outOfStock = stockText.includes('unavailable') || stockText.includes('out of stock');
@@ -281,7 +290,7 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
     if (!forceRefresh) {
       const cached = getCachedAsinData(asin, region);
       const cachedUsable = cached && (
-        requireDelivery ? amazonDataHasDelivery(cached) : amazonDataHasAvailability(cached)
+        requireDelivery ? amazonDataHasStockAndDelivery(cached) : amazonDataHasAvailability(cached)
       );
       if (cachedUsable) {
         const cacheTime = Date.now() - startTime;
@@ -298,10 +307,10 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
       }
 
       // Reuse Amazon scrape saved on any Listings Database row for this ASIN
-      const fromListingsDb = await getAmazonDataFromListingsDatabase(asin, region);
-      const dbUsable = fromListingsDb && (
-        requireDelivery ? amazonDataHasDelivery(fromListingsDb) : amazonDataHasAvailability(fromListingsDb)
-      );
+      // Listings DB snapshots carry no scrape timestamp, so their delivery date
+      // can be weeks old; delivery-sensitive callers (precheck) must go live.
+      const fromListingsDb = requireDelivery ? null : await getAmazonDataFromListingsDatabase(asin, region);
+      const dbUsable = fromListingsDb && amazonDataHasAvailability(fromListingsDb);
       if (dbUsable) {
         const reused = attachAvailabilityFields({ ...fromListingsDb, availabilityRetry: null });
         setCachedAsinData(asin, reused, region);

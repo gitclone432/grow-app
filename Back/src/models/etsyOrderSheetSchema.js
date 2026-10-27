@@ -10,6 +10,7 @@ export function createEtsyOrderSheetSchema() {
     estimateEtsyDelivery: { type: String, default: '' },
     productName: { type: String, default: '' },
     sku: { type: String, default: '' },
+    etsyOrderId: { type: String, default: '' },
     address: { type: String, default: '' },
     zipCode: { type: String, default: '' },
     region: { type: String, default: '' },
