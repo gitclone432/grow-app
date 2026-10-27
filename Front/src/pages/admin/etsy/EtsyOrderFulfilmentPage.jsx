@@ -145,6 +145,12 @@ function matchesBuyerNameFilter(order, query) {
   return buyerName.toLowerCase().includes(needle);
 }
 
+function matchesOrderIdFilter(order, query) {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return true;
+  return String(order?.etsyOrderId || '').toLowerCase().includes(needle);
+}
+
 function matchesValueFilter(order, field, expectedValue) {
   if (!field || !expectedValue) return true;
   return String(order?.[field] || '').trim() === expectedValue;
@@ -388,6 +394,7 @@ export default function EtsyOrderFulfilmentPage({
   const [selectedRegion, setSelectedRegion] = useState('');
   const [selectedRemark, setSelectedRemark] = useState('');
   const [buyerNameSearch, setBuyerNameSearch] = useState('');
+  const [orderIdSearch, setOrderIdSearch] = useState('');
   const [error, setError] = useState('');
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
   const [savingCells, setSavingCells] = useState({});
@@ -586,10 +593,12 @@ export default function EtsyOrderFulfilmentPage({
       && (!showRegionFilter || matchesRegionFilter(order, selectedRegion))
       && (!showRemarkFilter || matchesValueFilter(order, remarkFilterField, selectedRemark))
       && matchesBuyerNameFilter(order, buyerNameSearch)
+      && matchesOrderIdFilter(order, orderIdSearch)
     )),
     [
       orders,
       buyerNameSearch,
+      orderIdSearch,
       dateFilterField,
       dateFilterMode,
       dateFrom,
@@ -671,6 +680,7 @@ export default function EtsyOrderFulfilmentPage({
     selectedRegion,
     selectedRemark,
     buyerNameSearch,
+    orderIdSearch,
   ]);
 
   const totalPages = Math.max(1, Math.ceil(sortedOrders.length / ROWS_PER_PAGE));
@@ -870,10 +880,12 @@ export default function EtsyOrderFulfilmentPage({
     || hasActiveSecondaryDateFilter
     || (showRegionFilter && Boolean(selectedRegion))
     || (showRemarkFilter && Boolean(selectedRemark))
-    || Boolean(buyerNameSearch.trim());
+    || Boolean(buyerNameSearch.trim())
+    || Boolean(orderIdSearch.trim());
 
   const handleClearFilters = () => {
     setBuyerNameSearch('');
+    setOrderIdSearch('');
     setDateFrom('');
     setDateTo('');
     setSelectedDate('');
@@ -1157,6 +1169,16 @@ export default function EtsyOrderFulfilmentPage({
               placeholder="Search buyer name"
               value={buyerNameSearch}
               onChange={(e) => setBuyerNameSearch(e.target.value)}
+              disabled={!selectedStoreId}
+              sx={{ minWidth: { xs: '100%', sm: 190 } }}
+            />
+
+            <TextField
+              size="small"
+              label="Order ID"
+              placeholder="Search order ID"
+              value={orderIdSearch}
+              onChange={(e) => setOrderIdSearch(e.target.value)}
               disabled={!selectedStoreId}
               sx={{ minWidth: { xs: '100%', sm: 190 } }}
             />
