@@ -1390,6 +1390,61 @@ router.get('/analytics', requireAuth, async (req, res) => {
 });
 
 // Bulk preview with SSE streaming (real-time updates) - MUST be before /:id route
+// Regenerate title, description and photos for one reviewed ASIN: forces a live
+// Amazon scrape (fresh images) and runs the template's AI fields from scratch
+// (no Listings Database reuse). The client keeps every other edited field.
+router.post('/regenerate-preview', requireAuth, async (req, res) => {
+  try {
+    const { templateId, sellerId, region = 'US' } = req.body || {};
+    const asin = String(req.body?.asin || '').trim().toUpperCase();
+
+    if (!templateId || !sellerId || !asin) {
+      return res.status(400).json({ error: 'Template ID, Seller ID, and ASIN are required' });
+    }
+
+    const [seller, template] = await Promise.all([
+      Seller.findById(sellerId),
+      getEffectiveTemplate(templateId, sellerId),
+    ]);
+    if (!seller || !template) {
+      return res.status(404).json({ error: 'Seller or template not found' });
+    }
+
+    const fieldConfigs = resolveAutofillFieldConfigs(template);
+    let pricingConfig = template.pricingConfig;
+    const sellerConfig = await SellerPricingConfig.findOne({ sellerId, templateId });
+    if (sellerConfig) {
+      pricingConfig = sellerConfig.pricingConfig;
+    }
+
+    const amazonData = await fetchAmazonData(asin, region, {
+      ...getTemplateOverlayFetchOptions(template),
+      forceRefresh: true,
+    });
+    const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, null);
+    const { coreFields, customFields, mergedCoreFields } = autofill;
+
+    if (!mergedCoreFields.title) {
+      return res.status(422).json({ error: 'Title generation failed' });
+    }
+
+    res.json({
+      asin,
+      scrapeSource: amazonData?.scrapeSource || null,
+      aiDescription: getConfiguredAiDescription(fieldConfigs, coreFields, customFields),
+      sourceData: buildSourceDataFromAmazon(amazonData),
+      generatedListing: {
+        title: mergedCoreFields.title,
+        description: mergedCoreFields.description,
+        itemPhotoUrl: mergedCoreFields.itemPhotoUrl,
+      },
+    });
+  } catch (error) {
+    console.error('Regenerate preview error:', error);
+    res.status(500).json({ error: error.message || 'Failed to regenerate listing' });
+  }
+});
+
 router.get('/bulk-preview-stream', requireAuthSSE, async (req, res) => {
   try {
     const { templateId, sellerId, asins: asinsParam, region = 'US' } = req.query;

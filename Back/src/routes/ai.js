@@ -6,6 +6,7 @@ import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import AiFitmentUsage from '../models/AiFitmentUsage.js';
 import User from '../models/User.js';
 import { buildChatParams, getFitmentApiKey } from '../utils/openaiModel.js';
+import { stripBrandNames, titleContainsBrand } from '../utils/listingTextGuards.js';
 
 const router = express.Router();
 
@@ -199,38 +200,50 @@ router.post('/track-save-next', requireAuth, async (req, res) => {
 // ============================================
 router.post('/rephrase-title', requireAuth, async (req, res) => {
     try {
-        const { currentTitle = '', sourceTitle = '', brand = '', color = '', compatibility = '' } = req.body;
+        const { currentTitle = '', sourceTitle = '', brand = '', color = '', compatibility = '', manufacturer = '' } = req.body;
 
         if (!currentTitle) {
             return res.status(400).json({ error: 'currentTitle is required' });
         }
 
-        const prompt = `You are an eBay listing SEO expert.
+        const brandNames = [brand, manufacturer];
+        const brandList = brandNames.map((name) => String(name || '').trim()).filter(Boolean).join(', ');
+
+        // The brand is deliberately NOT given as product context: listing titles
+        // must not contain it, and naming it invites the model to put it back.
+        const buildPrompt = (extraRule = '') => `You are an eBay listing SEO expert.
 Rephrase the following eBay product title. The rephrased title must:
 - Convey the same product and key attributes
 - Use different word order or synonyms compared to the original
 - Be strictly under 80 characters
+- NEVER include any brand name, manufacturer name, or store name${brandList ? ` (in particular never: ${brandList})` : ''}
 - Contain no markdown, quotes, or extra commentary — return only the plain title text
-
-Amazon product title (context only): ${sourceTitle}
-Brand: ${brand}
+${extraRule}
+Amazon product title (context only, may contain a brand that must NOT be copied): ${sourceTitle}
 Color: ${color}
 Compatibility: ${compatibility}
 
 eBay title to rephrase: ${currentTitle}`;
 
-        const completion = await getOpenAI().chat.completions.create(buildChatParams({
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.7,
-            maxTokens: 60,
-        }));
+        const generate = async (prompt) => {
+            const completion = await getOpenAI().chat.completions.create(buildChatParams({
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.7,
+                maxTokens: 60,
+            }));
+            // Strip any surrounding quotes the model may add
+            return (completion.choices[0]?.message?.content?.trim() || '').replace(/^["']|["']$/g, '').trim();
+        };
 
-        let rephrasedTitle = completion.choices[0]?.message?.content?.trim() || '';
-        // Strip any surrounding quotes the model may add
-        rephrasedTitle = rephrasedTitle.replace(/^["']|["']$/g, '').trim();
+        let rephrasedTitle = await generate(buildPrompt());
+        if (titleContainsBrand(rephrasedTitle, brandNames)) {
+            rephrasedTitle = await generate(buildPrompt('- Your previous attempt contained the brand name; remove it completely.\n'));
+        }
+        // Final guarantee, even if the model ignored the rule twice
+        rephrasedTitle = stripBrandNames(rephrasedTitle, brandNames) || currentTitle;
         // Hard safety truncation to 80 chars
         if (rephrasedTitle.length > 80) {
-            rephrasedTitle = rephrasedTitle.substring(0, 80);
+            rephrasedTitle = rephrasedTitle.substring(0, 80).trim();
         }
 
         res.json({ rephrasedTitle });

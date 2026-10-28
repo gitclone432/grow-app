@@ -2789,6 +2789,25 @@ export default function TemplateListingsLabPage({ embedded = false }) {
               setLoadingBulk(false);
             }}
             previewItems={previewItems}
+            onRegenerate={async (item) => {
+              const { data } = await api.post('/template-listings/regenerate-preview', {
+                templateId,
+                sellerId,
+                asin: item.asin,
+                region
+              });
+              setPreviewItems((prev) => prev.map((row) => (
+                row.id === item.id
+                  ? {
+                      ...row,
+                      sourceData: data.sourceData || row.sourceData,
+                      aiDescription: data.aiDescription ?? row.aiDescription,
+                      scrapeSource: data.scrapeSource || row.scrapeSource
+                    }
+                  : row
+              )));
+              return data;
+            }}
             onSave={handleSaveFromReview}
             templateColumns={[
               ...(template?.customColumns?.map(col => ({ ...col, type: 'custom' })) || []),

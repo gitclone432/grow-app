@@ -39,6 +39,14 @@ import {
   Undo as UndoIcon
 } from '@mui/icons-material';
 import api from '../lib/api.js';
+import {
+  collectBrandNames,
+  stripBrandFromHtml,
+  stripBrandFromText,
+  stripBrandNames,
+  stripWarrantyFromHtml,
+  stripWarrantyFromText
+} from '../utils/listingTextGuards.js';
 import { calcInrProfitFromPricingCalculator } from '../utils/pricingProfitPreview.js';
 
 const MARKETPLACE_DOMAINS = {
@@ -57,6 +65,13 @@ const SCRAPE_SOURCE_META = {
 
 function getScrapeSourceMeta(source) {
   return SCRAPE_SOURCE_META[source] || null;
+}
+
+function getSourceManufacturer(sourceData) {
+  const info = sourceData?.productInformation;
+  if (!info || typeof info !== 'object') return '';
+  const key = Object.keys(info).find((k) => /^(manufacturer|brand name)$/i.test(k.trim()));
+  return key ? String(info[key] || '') : '';
 }
 
 function normalizeComparableTitle(value) {
@@ -381,9 +396,11 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
   let composed = String(templateHtml || '');
   if (!composed.trim()) return '';
 
-  const explicitAiDescription = String(aiDescriptionRaw || '').trim();
-  const generatedDescription = String(generatedListing?.description || '').trim();
-  const scrapedDescription = String(sourceData?.description || '').trim();
+  const brandNames = collectBrandNames(sourceData);
+  const explicitAiDescription = stripBrandFromHtml(stripWarrantyFromHtml(String(aiDescriptionRaw || '').trim()), brandNames);
+  const generatedDescription = stripBrandFromHtml(stripWarrantyFromHtml(String(generatedListing?.description || '').trim()), brandNames);
+  // Scraped Amazon text is the fallback bullet source and often carries a warranty line / brand
+  const scrapedDescription = stripBrandFromText(stripWarrantyFromText(String(sourceData?.description || '').trim()), brandNames);
   // Prefer explicit AI text. Ignore listing-shell / unsubstituted HTML that was copied into
   // description as the store template default — that must not block title/image substitution.
   const usableGeneratedDescription =
@@ -398,12 +415,13 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
     buildFallbackFeatureBullets(scrapedDescription);
 
   // Never inject raw AI prose into the template — always styled <li> bullets.
-  const sanitizedDescriptionPlaceholder =
+  const sanitizedDescriptionPlaceholder = stripBrandFromHtml(stripWarrantyFromHtml(
     resolvedBullets
     || buildFallbackFeatureBullets(scrapedDescription)
-    || bulletsFromPlainLines(stripHtmlTagsToPlain(aiDescription), 8);
+    || bulletsFromPlainLines(stripHtmlTagsToPlain(aiDescription), 8)
+  ), brandNames);
 
-  const titleClean = String(sourceData?.title || generatedListing?.title || '').trim();
+  const titleClean = stripBrandNames(String(sourceData?.title || generatedListing?.title || '').trim(), brandNames);
   const images = resolveListingImageUrls(sourceData, generatedListing);
 
   const placeholderMap = {
@@ -491,7 +509,9 @@ export default function AsinReviewModal({
   sellerId = '',
   storeTemplateHtml = '',
   /** When set, fills missing rates on older pricingCalculation.breakdown rows */
-  pricingConfig = null
+  pricingConfig = null,
+  /** async (item) => { generatedListing, sourceData, aiDescription } — enables the Regenerate button */
+  onRegenerate = null
 }) {
   const DESCRIPTION_TEMPLATE_STORAGE_KEY = 'description-templates.gallery.v1';
   const STORE_TEMPLATE_MAP_KEY = 'store-description-template-map.v1';
@@ -507,6 +527,7 @@ export default function AsinReviewModal({
   const [amazonWindowRef, setAmazonWindowRef] = useState(null);
   const [showAmazonPreview, setShowAmazonPreview] = useState(false);
   const [rephrasing, setRephrasing] = useState({}); // { [itemId]: true|false }
+  const [regenerating, setRegenerating] = useState({}); // { [itemId]: true|false }
   const [startPriceEditMode, setStartPriceEditMode] = useState({}); // { [itemId]: true|false }
   const [skuToast, setSkuToast] = useState({ open: false, message: '' });
   const [skuStatus, setSkuStatus] = useState({}); // { [itemId]: { status: 'loading'|'active'|'inactive'|null, count: number } }
@@ -775,6 +796,7 @@ export default function AsinReviewModal({
           currentTitle: job.title,
           sourceTitle: job.sourceTitle,
           brand: job.brand,
+          manufacturer: job.manufacturer,
           color: job.color,
           compatibility: job.compatibility
         });
@@ -821,6 +843,7 @@ export default function AsinReviewModal({
         title: listingData.title,
         sourceTitle: item.sourceData?.title || '',
         brand: item.sourceData?.brand || '',
+        manufacturer: getSourceManufacturer(item.sourceData),
         color: item.sourceData?.color || '',
         compatibility: item.sourceData?.compatibility || ''
       });
@@ -1025,6 +1048,7 @@ export default function AsinReviewModal({
         currentTitle: itemData.title,
         sourceTitle: currentItem.sourceData?.title || '',
         brand: currentItem.sourceData?.brand || '',
+        manufacturer: getSourceManufacturer(currentItem.sourceData),
         color: currentItem.sourceData?.color || '',
         compatibility: currentItem.sourceData?.compatibility || ''
       });
@@ -1033,6 +1057,34 @@ export default function AsinReviewModal({
       console.error('[Rephrase Title] Error:', error);
     } finally {
       setRephrasing(prev => ({ ...prev, [currentItem.id]: false }));
+    }
+  };
+
+  const handleRegenerate = async () => {
+    if (!currentItem || !onRegenerate) return;
+    const itemId = currentItem.id;
+    setRegenerating(prev => ({ ...prev, [itemId]: true }));
+    setSaveError('');
+    try {
+      const result = await onRegenerate(currentItem);
+      const fresh = result?.generatedListing;
+      if (fresh) {
+        setEditedItems(prev => ({
+          ...prev,
+          [itemId]: {
+            ...(prev[itemId] || currentItem.generatedListing || {}),
+            title: fresh.title,
+            description: fresh.description,
+            itemPhotoUrl: fresh.itemPhotoUrl
+          }
+        }));
+        setHasUnsavedChanges(true);
+      }
+    } catch (error) {
+      console.error('[Regenerate Listing] Error:', error);
+      setSaveError(error.response?.data?.error || error.message || 'Failed to regenerate listing');
+    } finally {
+      setRegenerating(prev => ({ ...prev, [itemId]: false }));
     }
   };
 
@@ -1416,6 +1468,24 @@ export default function AsinReviewModal({
                 }}
               >
                 ↗ Amazon
+              </Button>
+            )}
+
+            {onRegenerate && (
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={regenerating[currentItem?.id] ? <CircularProgress size={14} /> : <AutorenewIcon />}
+                onClick={handleRegenerate}
+                disabled={
+                  !currentItem
+                  || regenerating[currentItem.id]
+                  || ['loading', 'error', 'blocked'].includes(currentItem.status)
+                }
+                title="Regenerate title, description and photos from a fresh Amazon scrape"
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                {regenerating[currentItem?.id] ? 'Regenerating…' : 'Regenerate'}
               </Button>
             )}
 
