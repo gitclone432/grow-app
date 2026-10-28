@@ -2311,7 +2311,7 @@ export default function AutoCompatibilityPage() {
                 {filteredItems.map((item, idx) => {
                   const cfg = STATUS_CONFIG[item.status] || {};
                   return (
-                    <TableRow key={item.itemId || idx} sx={{ bgcolor: cfg.bg || 'inherit' }} hover>
+                    <TableRow key={item._id || `${item.itemId || 'row'}-${idx}`} sx={{ bgcolor: cfg.bg || 'inherit' }} hover>
                       <TableCell>{idx + 1}</TableCell>
                       <TableCell>
                         <Chip
