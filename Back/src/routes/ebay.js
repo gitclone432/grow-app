@@ -19,6 +19,7 @@ import { sellerMatchesBankSellersField } from '../utils/bankAccountSellerMatch.j
 import { applyActiveSellerScope } from '../utils/activeSellerScope.js';
 import { buildRefreshTokenParams } from '../utils/ebayOAuthRefresh.js';
 import { postEbayTradingApi } from '../utils/ebayTradingApi.js';
+import { uploadImageToEps } from '../utils/ebayMediaApi.js';
 import { buildChatParams, getFitmentApiKey } from '../utils/openaiModel.js';
 import Order from '../models/Order.js';
 import { FINAL_CANCELLED_STATES } from '../constants/cancelStates.js';
@@ -15187,61 +15188,14 @@ async function uploadImageToEbay(token, filePath) {
 
     const fileName = path.basename(filePath).replace(/\.[^/.]+$/, '.jpg');
 
-    // Step 3: Use multipart/form-data (eBay's recommended method)
-    const form = new FormData();
-
-    // Add XML payload as first part
-    const xmlPayload = `<?xml version="1.0" encoding="utf-8"?>
-<UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <RequesterCredentials>
-    <eBayAuthToken>${token}</eBayAuthToken>
-  </RequesterCredentials>
-  <PictureName>${fileName}</PictureName>
-  <PictureSet>Standard</PictureSet>
-</UploadSiteHostedPicturesRequest>`;
-
-    form.append('XML Payload', xmlPayload, {
-      contentType: 'text/xml; charset=utf-8'
-    });
-
-    // Add binary image as second part
-    form.append(fileName, processedBuffer, {
-      filename: fileName,
-      contentType: 'image/jpeg'
-    });
-
-    // Step 4: Upload to eBay Picture Services
-    const response = await axios.post('https://api.ebay.com/ws/api.dll', form, {
-      headers: {
-        ...form.getHeaders(),
-        'X-EBAY-API-SITEID': '0',
-        'X-EBAY-API-COMPATIBILITY-LEVEL': '1423',
-        'X-EBAY-API-CALL-NAME': 'UploadSiteHostedPictures'
-      },
-      timeout: 30000,
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity
-    });
-
-    const result = await parseStringPromise(response.data);
-    const ack = result.UploadSiteHostedPicturesResponse.Ack[0];
-
-    if (ack === 'Success' || ack === 'Warning') {
-      const fullUrl = result.UploadSiteHostedPicturesResponse.SiteHostedPictureDetails[0].FullURL[0];
-      console.log('[eBay Upload] ✅ Success:', fullUrl);
-      return fullUrl;
-    } else {
-      const errors = result.UploadSiteHostedPicturesResponse.Errors;
-      const errorMsg = errors[0].LongMessage[0];
-      const errorCode = errors[0].ErrorCode?.[0];
-      console.error('[eBay Upload] ❌ Failed:', errorCode, errorMsg);
-      throw new Error(`eBay Upload Failed: ${errorMsg}`);
-    }
+    // Step 3: Upload via the eBay Media API. The Trading API's
+    // UploadSiteHostedPictures was decommissioned on 2026-09-30 and now
+    // answers 404 "Resource not found".
+    const { imageUrl } = await uploadImageToEps(token, processedBuffer, fileName);
+    console.log('[eBay Upload] ✅ Success:', imageUrl);
+    return imageUrl;
   } catch (error) {
     console.error('[eBay Upload] Error:', error.message);
-    if (error.response?.data) {
-      console.error('[eBay Upload] Response:', error.response.data.substring(0, 500));
-    }
     throw error;
   }
 }
@@ -15333,6 +15287,7 @@ router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'D
     const token = await ensureValidToken(seller);
 
     let finalMediaUrls = [];
+    const failedImages = [];
     if (mediaUrls && mediaUrls.length > 0) {
       for (const url of mediaUrls) {
         try {
@@ -15344,11 +15299,22 @@ router.post('/send-message', requireAuth, requirePageAccess(['BuyerMessages', 'D
             finalMediaUrls.push(ebayUrl);
           } else {
             console.warn(`[Send Message] Local upload file not found: ${filePath}`);
+            failedImages.push(`${filename}: file not found on server`);
           }
         } catch (err) {
           console.error(`[Send Message] Failed to upload image: ${err.message}`);
+          failedImages.push(err.message);
         }
       }
+    }
+
+    // Never send a text-only message when the user attached images — they would
+    // think the pictures went through.
+    if (failedImages.length > 0) {
+      return res.status(502).json({
+        error: `Image upload to eBay failed, message not sent: ${failedImages[0]}`,
+        failedImages
+      });
     }
 
     // Commerce Message API attaches real images via messageMedia (requires mediaName).
