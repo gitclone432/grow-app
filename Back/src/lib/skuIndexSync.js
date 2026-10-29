@@ -187,6 +187,7 @@ export async function runSkuIndexSync(seller, send = null, options = {}) {
   <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
   <ErrorLanguage>en_US</ErrorLanguage>
   <WarningLevel>High</WarningLevel>
+  <GranularityLevel>Coarse</GranularityLevel>
   <EndTimeFrom>${endTimeFrom}</EndTimeFrom>
   <EndTimeTo>${endTimeTo}</EndTimeTo>
   <Pagination>
