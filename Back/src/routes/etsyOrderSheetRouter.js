@@ -14,6 +14,7 @@ export const ETSY_ORDER_FULFILMENT_FIELDS = [
   'estimateEtsyDelivery',
   'productName',
   'sku',
+  'etsyOrderId',
   'address',
   'zipCode',
   'region',

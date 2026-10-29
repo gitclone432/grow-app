@@ -1,3 +1,12 @@
+import {
+  collectBrandNames,
+  stripBrandFromHtml,
+  stripBrandFromText,
+  stripBrandNames,
+  stripWarrantyFromHtml,
+  stripWarrantyFromText,
+} from './listingTextGuards.js';
+
 function formatBulletLi(text, isLast = false) {
   let cleaned = String(text || '').replace(/\s+/g, ' ').trim();
   if (!cleaned) return '';
@@ -233,9 +242,11 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
   let composed = String(templateHtml || '');
   if (!composed.trim()) return '';
 
-  const explicitAiDescription = String(aiDescriptionRaw || '').trim();
-  const generatedDescription = String(generatedListing?.description || '').trim();
-  const scrapedDescription = String(sourceData?.description || '').trim();
+  const brandNames = collectBrandNames(sourceData);
+  const explicitAiDescription = stripBrandFromHtml(stripWarrantyFromHtml(String(aiDescriptionRaw || '').trim()), brandNames);
+  const generatedDescription = stripBrandFromHtml(stripWarrantyFromHtml(String(generatedListing?.description || '').trim()), brandNames);
+  // Scraped Amazon text is the fallback bullet source and often carries a warranty line / brand
+  const scrapedDescription = stripBrandFromText(stripWarrantyFromText(String(sourceData?.description || '').trim()), brandNames);
   const usableGeneratedDescription =
     generatedDescription
     && !looksLikeListingShellEcho(generatedDescription)
@@ -248,12 +259,13 @@ function applyStoreTemplatePlaceholders(templateHtml = '', generatedListing = {}
     buildFallbackFeatureBullets(scrapedDescription);
 
   // Never inject raw AI prose into the template — always styled <li> bullets.
-  const sanitizedDescriptionPlaceholder =
+  const sanitizedDescriptionPlaceholder = stripBrandFromHtml(stripWarrantyFromHtml(
     resolvedBullets
     || buildFallbackFeatureBullets(scrapedDescription)
-    || bulletsFromPlainLines(stripHtmlTagsToPlain(aiDescription), 8);
+    || bulletsFromPlainLines(stripHtmlTagsToPlain(aiDescription), 8)
+  ), brandNames);
 
-  const titleClean = String(sourceData?.title || generatedListing?.title || '').trim();
+  const titleClean = stripBrandNames(String(sourceData?.title || generatedListing?.title || '').trim(), brandNames);
   const images = resolveListingImageUrls(sourceData, generatedListing);
 
   const placeholderMap = {

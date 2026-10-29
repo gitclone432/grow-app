@@ -24,6 +24,18 @@ import {
 import { createEbayImageWithOverlay, createEbayImageWithTextOverlay } from './imageProcessor.js';
 import { getImageOverlayRuntimeConfig } from './overlaySettings.js';
 import { joinItemPhotoUrls } from './itemPhotoUrls.js';
+import {
+  NO_BRAND_PROMPT_RULE,
+  NO_WARRANTY_PROMPT_RULE,
+  collectBrandNames,
+  stripBrandFromHtml,
+  stripBrandFromProductInfo,
+  stripBrandFromText,
+  stripBrandNames,
+  stripWarrantyFromHtml,
+  stripWarrantyFromProductInfo,
+  stripWarrantyFromText,
+} from './listingTextGuards.js';
 
 /** Long Amazon descriptions can break or silently fail LLM calls; truncate only inside AI prompts */
 const AI_PROMPT_DESCRIPTION_MAX_CHARS = Math.max(
@@ -218,6 +230,15 @@ function amazonDataHasDelivery(data = {}) {
   return Boolean(collectAmazonDeliveryText(data));
 }
 
+// The precheck needs stock text AND a delivery line; either one missing shows
+// "Unknown" / a blank delivery, so such cached data must be re-fetched live.
+function amazonDataHasStockAndDelivery(data = {}) {
+  const stockText = collectAmazonStockText(data).toLowerCase();
+  if (!stockText) return false;
+  if (stockText.includes('unavailable') || stockText.includes('out of stock')) return true;
+  return amazonDataHasDelivery(data);
+}
+
 function amazonDataHasAvailability(data = {}) {
   const stockText = collectAmazonStockText(data).toLowerCase();
   const outOfStock = stockText.includes('unavailable') || stockText.includes('out of stock');
@@ -281,7 +302,7 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
     if (!forceRefresh) {
       const cached = getCachedAsinData(asin, region);
       const cachedUsable = cached && (
-        requireDelivery ? amazonDataHasDelivery(cached) : amazonDataHasAvailability(cached)
+        requireDelivery ? amazonDataHasStockAndDelivery(cached) : amazonDataHasAvailability(cached)
       );
       if (cachedUsable) {
         const cacheTime = Date.now() - startTime;
@@ -298,10 +319,10 @@ export async function fetchAmazonData(asin, region = 'US', options = {}) {
       }
 
       // Reuse Amazon scrape saved on any Listings Database row for this ASIN
-      const fromListingsDb = await getAmazonDataFromListingsDatabase(asin, region);
-      const dbUsable = fromListingsDb && (
-        requireDelivery ? amazonDataHasDelivery(fromListingsDb) : amazonDataHasAvailability(fromListingsDb)
-      );
+      // Listings DB snapshots carry no scrape timestamp, so their delivery date
+      // can be weeks old; delivery-sensitive callers (precheck) must go live.
+      const fromListingsDb = requireDelivery ? null : await getAmazonDataFromListingsDatabase(asin, region);
+      const dbUsable = fromListingsDb && amazonDataHasAvailability(fromListingsDb);
       if (dbUsable) {
         const reused = attachAvailabilityFields({ ...fromListingsDb, availabilityRetry: null });
         setCachedAsinData(asin, reused, region);
@@ -522,7 +543,13 @@ export async function applyFieldConfigs(
   
   // Placeholder data for AI prompts ({key} tokens in replacePlaceholders)
   const imagesJoined = Array.isArray(amazonDataForMapping.images) ? amazonDataForMapping.images.join(' | ') : '';
-  const pi = amazonDataForMapping.productInformation;
+  const pi = stripWarrantyFromProductInfo(amazonDataForMapping.productInformation);
+  const brandNames = collectBrandNames(amazonDataForMapping);
+  const piNoBrand = stripBrandFromProductInfo(pi);
+  const productInformationNoBrandStr =
+    piNoBrand && typeof piNoBrand === 'object' && Object.keys(piNoBrand).length > 0
+      ? JSON.stringify(piNoBrand, null, 2)
+      : '';
   const productInformationStr =
     pi && typeof pi === 'object' && !Array.isArray(pi) && Object.keys(pi).length > 0
       ? JSON.stringify(pi, null, 2)
@@ -530,8 +557,7 @@ export async function applyFieldConfigs(
   const placeholderData = {
     title: amazonDataForMapping.title || '',
     brand: amazonDataForMapping.brand || '',
-    description: amazonDataForMapping.description || '',
-    price: amazonDataForMapping.price || '',
+    description: stripWarrantyFromText(amazonDataForMapping.description || ''),
     asin: amazonDataForMapping.asin || '',
     images: imagesJoined,
     color: amazonDataForMapping.color || '',
@@ -552,8 +578,8 @@ export async function applyFieldConfigs(
     availabilityStatus: amazonDataForMapping.availabilityStatus || '',
     soldBy: amazonDataForMapping.soldBy || '',
     bestSellersRank: amazonDataForMapping.bestSellersRank || '',
-    review: amazonDataForMapping.review || '',
-    customerReviews: amazonDataForMapping.review || '',
+    review: stripWarrantyFromText(amazonDataForMapping.review || ''),
+    customerReviews: stripWarrantyFromText(amazonDataForMapping.review || ''),
     productInformation: productInformationStr
   };
   for (const col of piSourceColumns) {
@@ -641,7 +667,7 @@ export async function applyFieldConfigs(
 
         // Apply image placeholder replacement for description field
         if (config.ebayField === 'description' && typeof value === 'string') {
-          value = processImagePlaceholders(value, imagesArray);
+          value = processImagePlaceholders(stripBrandFromHtml(stripWarrantyFromHtml(value), brandNames), imagesArray);
         }
 
         targetObject[config.ebayField] = value;
@@ -695,9 +721,13 @@ export async function applyFieldConfigs(
           && /model|year|compat|series|size|fit|watch/i.test(String(config.ebayField || ''));
         let aiPlaceholderData = placeholderData;
         if (fieldKeyLower === 'description' || fieldKeyLower.includes('description')) {
+          // Hide the brand from description prompts so the model has nothing to copy
           aiPlaceholderData = {
             ...placeholderData,
-            description: truncateForAiPrompt(placeholderData.description),
+            title: stripBrandNames(placeholderData.title, brandNames),
+            brand: '',
+            description: truncateForAiPrompt(stripBrandFromText(placeholderData.description, brandNames)),
+            productInformation: productInformationNoBrandStr,
           };
         } else if (
           fieldKeyLower === 'review'
@@ -801,6 +831,12 @@ export async function applyFieldConfigs(
           console.log('    ⚠️ Empty description AI prompt — using built-in default.');
         }
 
+        const isDescriptionField = config.ebayField === 'description'
+          || String(config.ebayField || '').toLowerCase().includes('description');
+        if (isDescriptionField) {
+          processedPrompt = `${processedPrompt}\n\n${NO_WARRANTY_PROMPT_RULE}\n${NO_BRAND_PROMPT_RULE}`;
+        }
+
         console.log(`    ✏️  Processed prompt (after placeholders): "${processedPrompt.substring(0, 500)}${processedPrompt.length > 500 ? '…' : ''}"`);
         
         // Use higher token limit for description field to avoid truncation
@@ -837,6 +873,10 @@ export async function applyFieldConfigs(
           console.log(`    ✂️  Truncated field: ${originalLength} → 60 chars`);
         }
         
+        if (isDescriptionField && typeof generatedValue === 'string') {
+          generatedValue = stripBrandFromHtml(stripWarrantyFromHtml(generatedValue), brandNames);
+        }
+
         // Apply image placeholder replacement for description field and description-like custom fields
         if ((config.ebayField === 'description' || config.ebayField.toLowerCase().includes('description')) && typeof generatedValue === 'string') {
           generatedValue = processImagePlaceholders(generatedValue, imagesArray);

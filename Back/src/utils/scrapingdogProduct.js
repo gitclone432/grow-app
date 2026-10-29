@@ -28,6 +28,7 @@ console.log(`[Scrapingdog] 🚀 Initialized with ${CONCURRENT_REQUESTS} concurre
 // render before the page is captured — same phenomenon as the stock check's
 // unknown_stock_text case, where one delayed retry usually resolves it).
 const AVAILABILITY_RETRY_DELAY_MS = Math.max(500, parseInt(process.env.SCRAPINGDOG_AVAILABILITY_RETRY_DELAY_MS) || 5000);
+const AVAILABILITY_MAX_RETRIES = Math.max(1, parseInt(process.env.SCRAPINGDOG_AVAILABILITY_MAX_RETRIES) || 2);
 
 // Scrapingdog keys requests by domain + country (not tld). Credits mirror the
 // per-country cost table used by amazonStockChecks.js.
@@ -425,7 +426,7 @@ export async function scrapeAmazonProductWithScrapingdog(asin, region = 'US', re
     // One-shot fresh re-fetch when stock/delivery info is missing — tracked
     // outside the loop so it can only ever fire once per ASIN.
     let availabilityRetryAttempted = false;
-    let availabilityRetryBilled = false;
+    let availabilityRetryBilledCount = 0;
     let availabilityRetrySucceeded = false;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -463,30 +464,32 @@ export async function scrapeAmazonProductWithScrapingdog(asin, region = 'US', re
             && !hasAvailabilitySignals(data)
             && (data.price || data.purchase_options?.single_offer?.price)) {
           availabilityRetryAttempted = true;
-          console.log(`[Scrapingdog] 🔄 Missing stock and/or delivery info for ${asin} — refetching once after ${AVAILABILITY_RETRY_DELAY_MS}ms...`);
-          await new Promise(resolve => setTimeout(resolve, AVAILABILITY_RETRY_DELAY_MS));
-          try {
-            const retryResponse = await axios.get(SCRAPINGDOG_PRODUCT_BASE, {
-              params: {
-                api_key: apiKey,
-                domain: regionConfig.domain,
-                country: regionConfig.country,
-                asin: asin
-              },
-              timeout
-            });
-            if (retryResponse.status === 200) {
-              availabilityRetryBilled = true;
-              if (hasAvailabilitySignals(retryResponse.data)) {
-                data = retryResponse.data;
-                availabilityRetrySucceeded = true;
-                console.log(`[Scrapingdog] ✅ Stock/delivery info found for ${asin} on retry`);
-              } else {
-                console.warn(`[Scrapingdog] ⚠️ Still no stock/delivery info for ${asin} after retry — keeping first response`);
+          for (let retryNum = 1; retryNum <= AVAILABILITY_MAX_RETRIES; retryNum++) {
+            console.log(`[Scrapingdog] 🔄 Missing stock and/or delivery info for ${asin} — refetch ${retryNum}/${AVAILABILITY_MAX_RETRIES} after ${AVAILABILITY_RETRY_DELAY_MS}ms...`);
+            await new Promise(resolve => setTimeout(resolve, AVAILABILITY_RETRY_DELAY_MS));
+            try {
+              const retryResponse = await axios.get(SCRAPINGDOG_PRODUCT_BASE, {
+                params: {
+                  api_key: apiKey,
+                  domain: regionConfig.domain,
+                  country: regionConfig.country,
+                  asin: asin
+                },
+                timeout
+              });
+              if (retryResponse.status === 200) {
+                availabilityRetryBilledCount += 1;
+                if (hasAvailabilitySignals(retryResponse.data)) {
+                  data = retryResponse.data;
+                  availabilityRetrySucceeded = true;
+                  console.log(`[Scrapingdog] ✅ Stock/delivery info found for ${asin} on retry ${retryNum}`);
+                  break;
+                }
+                console.warn(`[Scrapingdog] ⚠️ Still no stock/delivery info for ${asin} after retry ${retryNum}`);
               }
+            } catch (retryError) {
+              console.warn(`[Scrapingdog] ⚠️ Availability retry ${retryNum} failed for ${asin}: ${retryError.message}`);
             }
-          } catch (retryError) {
-            console.warn(`[Scrapingdog] ⚠️ Availability retry failed for ${asin}: ${retryError.message} — keeping first response`);
           }
         }
 
@@ -558,7 +561,7 @@ export async function scrapeAmazonProductWithScrapingdog(asin, region = 'US', re
         trackApiUsage({
           service: 'Scrapingdog',
           asin,
-          creditsUsed: regionConfig.credits * (availabilityRetryBilled ? 2 : 1),
+          creditsUsed: regionConfig.credits * (1 + availabilityRetryBilledCount),
           success: true,
           responseTime,
           extractedFields
