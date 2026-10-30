@@ -144,6 +144,7 @@ export const PAGE_DEFAULT_ROLES = {
   'SkuIndexSync': ['superadmin', 'listingadmin'],
   'DuplicateSkus': ['superadmin', 'listingadmin'],
   'SkuIndexDashboard': ['superadmin', 'listingadmin'],
+  'SkuListingManager': ['superadmin', 'listingadmin'],
   'AmazonStockCheck': ['superadmin', 'listingadmin'],
   'SellerSkuStockCheck': ['superadmin', 'listingadmin'],
   'AmazonStockCheckExcludedBrands': ['superadmin', 'listingadmin'],
