@@ -187,7 +187,7 @@ export async function runSkuIndexSync(seller, send = null, options = {}) {
   <RequesterCredentials><eBayAuthToken>${token}</eBayAuthToken></RequesterCredentials>
   <ErrorLanguage>en_US</ErrorLanguage>
   <WarningLevel>High</WarningLevel>
-  <GranularityLevel>Coarse</GranularityLevel>
+  <DetailLevel>ItemReturnDescription</DetailLevel>
   <EndTimeFrom>${endTimeFrom}</EndTimeFrom>
   <EndTimeTo>${endTimeTo}</EndTimeTo>
   <Pagination>
@@ -198,6 +198,7 @@ export async function runSkuIndexSync(seller, send = null, options = {}) {
   <OutputSelector>ItemArray.Item.SKU</OutputSelector>
   <OutputSelector>ItemArray.Item.Title</OutputSelector>
   <OutputSelector>ItemArray.Item.SellingStatus.CurrentPrice</OutputSelector>
+  <OutputSelector>ItemArray.Item.PictureDetails</OutputSelector>
   <OutputSelector>PaginationResult</OutputSelector>
 </GetSellerListRequest>`;
 
@@ -247,11 +248,16 @@ export async function runSkuIndexSync(seller, send = null, options = {}) {
       const currentPrice = item.SellingStatus?.[0]?.CurrentPrice?.[0];
       const price = currentPrice?._ != null ? Number.parseFloat(currentPrice._) : null;
       const currency = currentPrice?.$?.currencyID || '';
+      // The whole PictureDetails node is requested because eBay returns nothing
+      // for the narrower PictureDetails.GalleryURL selector. GalleryURL first
+      // (small thumbnail), falling back to the first full-size picture.
+      const pictures = item.PictureDetails?.[0];
+      const imageUrl = pictures?.GalleryURL?.[0] || pictures?.PictureURL?.[0] || '';
       if (sku) skuPresentCount++; else skuBlankCount++;
       ops.push({
         updateOne: {
           filter: { seller: seller._id, itemId },
-          update: { $set: { sku, baseSku: extractBaseSku(sku), title: item.Title?.[0] || '', price, currency, syncedAt: syncStart } },
+          update: { $set: { sku, baseSku: extractBaseSku(sku), title: item.Title?.[0] || '', price, currency, imageUrl, syncedAt: syncStart } },
           upsert: true,
         },
       });

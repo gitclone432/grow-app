@@ -53,6 +53,7 @@ export const GetOrdersApiPage = lazy(() => import('../pages/admin/GetOrdersApiPa
 export const SkuIndexSyncPage = lazy(() => import('../pages/admin/SkuIndexSyncPage.jsx'));
 export const DuplicateSkusPage = lazy(() => import('../pages/admin/DuplicateSkusPage.jsx'));
 export const SkuIndexDashboardPage = lazy(() => import('../pages/admin/SkuIndexDashboardPage.jsx'));
+export const SkuListingManagerPage = lazy(() => import('../pages/admin/SkuListingManagerPage.jsx'));
 export const AmazonStockCheckPage = lazy(() => import('../pages/admin/AmazonStockCheckPage.jsx'));
 export const SellerSkuStockCheckPage = lazy(() => import('../pages/admin/SellerSkuStockCheckPage.jsx'));
 export const StockCheckExcludedBrandsPage = lazy(() => import('../pages/admin/StockCheckExcludedBrandsPage.jsx'));

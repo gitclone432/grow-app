@@ -18,7 +18,7 @@ function getOpenAI() {
         if (!apiKey) {
             throw new Error('OpenAI API key is not configured. Set OPENAI_FITMENT_API_KEY or OPENAI_API_KEY.');
         }
-        _openai = new OpenAI({ apiKey });
+        _openai = new OpenAI({ apiKey, maxRetries: 4 });
     }
     return _openai;
 }
@@ -200,11 +200,16 @@ router.post('/track-save-next', requireAuth, async (req, res) => {
 // ============================================
 router.post('/rephrase-title', requireAuth, async (req, res) => {
     try {
-        const { currentTitle = '', sourceTitle = '', brand = '', color = '', compatibility = '', manufacturer = '' } = req.body;
+        const { currentTitle = '', sourceTitle = '', brand = '', color = '', compatibility = '', manufacturer = '', avoidTitles = [] } = req.body;
 
         if (!currentTitle) {
             return res.status(400).json({ error: 'currentTitle is required' });
         }
+
+        const normalize = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+        const blockedTitles = new Set(
+            [currentTitle, ...(Array.isArray(avoidTitles) ? avoidTitles : [])].map(normalize).filter(Boolean)
+        );
 
         const brandNames = [brand, manufacturer];
         const brandList = brandNames.map((name) => String(name || '').trim()).filter(Boolean).join(', ');
@@ -235,15 +240,32 @@ eBay title to rephrase: ${currentTitle}`;
             return (completion.choices[0]?.message?.content?.trim() || '').replace(/^["']|["']$/g, '').trim();
         };
 
+        const finalize = (title) => {
+            let cleaned = stripBrandNames(title, brandNames) || '';
+            // Hard safety truncation to 80 chars
+            if (cleaned.length > 80) cleaned = cleaned.substring(0, 80).trim();
+            return cleaned;
+        };
+        const isUsable = (title) => Boolean(title) && !blockedTitles.has(normalize(title));
+
         let rephrasedTitle = await generate(buildPrompt());
         if (titleContainsBrand(rephrasedTitle, brandNames)) {
             rephrasedTitle = await generate(buildPrompt('- Your previous attempt contained the brand name; remove it completely.\n'));
         }
         // Final guarantee, even if the model ignored the rule twice
-        rephrasedTitle = stripBrandNames(rephrasedTitle, brandNames) || currentTitle;
-        // Hard safety truncation to 80 chars
-        if (rephrasedTitle.length > 80) {
-            rephrasedTitle = rephrasedTitle.substring(0, 80).trim();
+        rephrasedTitle = finalize(rephrasedTitle);
+
+        // Empty output, or a title identical to the current/already-listed one,
+        // does not resolve the duplicate — try once more with an explicit rule.
+        if (!isUsable(rephrasedTitle)) {
+            rephrasedTitle = finalize(await generate(buildPrompt(
+                '- Your previous attempt was empty or identical to an existing listing title. Produce a clearly different wording.\n'
+            )));
+        }
+
+        if (!isUsable(rephrasedTitle)) {
+            // Signal failure so the client retries instead of treating it as done.
+            return res.status(502).json({ error: 'AI did not produce a distinct title' });
         }
 
         res.json({ rephrasedTitle });
