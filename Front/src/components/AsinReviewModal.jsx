@@ -74,6 +74,8 @@ function getSourceManufacturer(sourceData) {
   return key ? String(info[key] || '') : '';
 }
 
+const MAX_AUTO_REPHRASE_ATTEMPTS = 3;
+
 function normalizeComparableTitle(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
@@ -534,9 +536,13 @@ export default function AsinReviewModal({
   const [autoPriceAdjustments, setAutoPriceAdjustments] = useState({}); // { [itemId]: { from, to } }
   const [autoRephrasingIds, setAutoRephrasingIds] = useState(new Set()); // items currently mid auto-rephrase call
   const [autoRephraseQueueSize, setAutoRephraseQueueSize] = useState(0); // remaining items waiting their turn
-  const autoRephraseAttemptedRef = useRef(new Set()); // item IDs already auto-rephrased (or attempted) this run
+  const autoRephraseAttemptsRef = useRef({}); // { [itemId]: number } auto-rephrase calls made this run
+  const autoRephraseQueuedIdsRef = useRef(new Set()); // item IDs queued or in flight
   const autoRephraseQueueRef = useRef([]);
   const autoRephraseProcessingRef = useRef(false);
+  const autoRephraseRunRef = useRef(0); // bumped on modal open so stale loops stop
+  // { [itemId]: { listing, templateHtml } } — source the edited copy was built from
+  const initializedListingRef = useRef({});
 
   // Filter out dismissed items
   const dismissedItemsSet = new Set(dismissedItems);
@@ -626,9 +632,19 @@ export default function AsinReviewModal({
       const directTemplateHtml = String(storeTemplateHtml || '').trim();
       const resolvedTemplateHtml = directTemplateHtml || String(selectedStoreTemplate?.html || '').trim();
 
-      const initial = {};
+      const builtListings = {};
+      const resetItemIds = [];
       previewItems.forEach(item => {
         if (item.generatedListing) {
+          // Keep existing edits (auto-rephrased titles, price bumps, manual changes)
+          // unless this item's generated listing or template actually changed.
+          // Rebuilding every item on each SSE patch silently reverted them.
+          const source = initializedListingRef.current[item.id];
+          if (source && source.listing === item.generatedListing && source.templateHtml === resolvedTemplateHtml) {
+            return;
+          }
+          if (source) resetItemIds.push(item.id);
+          initializedListingRef.current[item.id] = { listing: item.generatedListing, templateHtml: resolvedTemplateHtml };
           const nextListing = { ...item.generatedListing };
           const isExistingListingEdit = Boolean(nextListing?._existingListingId);
           if (!isExistingListingEdit) {
@@ -654,11 +670,26 @@ export default function AsinReviewModal({
               );
             }
           }
-          initial[item.id] = nextListing;
+          builtListings[item.id] = nextListing;
         }
       });
-      setEditedItems(initial);
-      setStartPriceEditMode({});
+      // A regenerated listing gets a fresh set of auto-rephrase attempts.
+      resetItemIds.forEach(id => { delete autoRephraseAttemptsRef.current[id]; });
+      setEditedItems(prev => {
+        const next = {};
+        previewItems.forEach(item => {
+          if (builtListings[item.id]) next[item.id] = builtListings[item.id];
+          else if (prev[item.id]) next[item.id] = prev[item.id];
+        });
+        return next;
+      });
+      if (resetItemIds.length > 0) {
+        setStartPriceEditMode(prev => {
+          const next = { ...prev };
+          resetItemIds.forEach(id => { delete next[id]; });
+          return next;
+        });
+      }
     }
   }, [previewItems, sellerId, storeTemplateHtml]);
 
@@ -676,9 +707,11 @@ export default function AsinReviewModal({
     setSkuStatus({});
     setAutoPriceAdjustments({});
     checkedSkuIdsRef.current = new Set();
-    autoRephraseAttemptedRef.current = new Set();
+    autoRephraseAttemptsRef.current = {};
+    autoRephraseQueuedIdsRef.current = new Set();
     autoRephraseQueueRef.current = [];
     autoRephraseProcessingRef.current = false;
+    autoRephraseRunRef.current += 1;
     setAutoRephrasingIds(new Set());
     setAutoRephraseQueueSize(0);
   }, [open]);
@@ -780,16 +813,21 @@ export default function AsinReviewModal({
   // Auto-rephrase the title, one item at a time, for any ASIN whose title matches
   // an already-synced listing (same SKU) elsewhere — this is what "Title matches"
   // on the cross-seller banner flags. Runs quietly in the background across the
-  // whole batch as SKU checks land; once every flagged item has been attempted
-  // it stops on its own so the user can review + Save All manually.
+  // whole batch as SKU checks land. Failed calls (rate limits, timeouts) are
+  // retried with backoff, and an item whose title still matches after a
+  // rephrase is re-queued, up to MAX_AUTO_REPHRASE_ATTEMPTS per item.
   const processAutoRephraseQueue = async () => {
     if (autoRephraseProcessingRef.current) return;
     autoRephraseProcessingRef.current = true;
+    const runId = autoRephraseRunRef.current;
 
-    while (autoRephraseQueueRef.current.length > 0) {
+    while (autoRephraseQueueRef.current.length > 0 && autoRephraseRunRef.current === runId) {
       const job = autoRephraseQueueRef.current.shift();
       setAutoRephraseQueueSize(autoRephraseQueueRef.current.length);
       setAutoRephrasingIds(prev => new Set(prev).add(job.itemId));
+      const attempt = (autoRephraseAttemptsRef.current[job.itemId] || 0) + 1;
+      autoRephraseAttemptsRef.current[job.itemId] = attempt;
+      let requeued = false;
 
       try {
         const { data } = await api.post('/ai/rephrase-title', {
@@ -798,18 +836,35 @@ export default function AsinReviewModal({
           brand: job.brand,
           manufacturer: job.manufacturer,
           color: job.color,
-          compatibility: job.compatibility
+          compatibility: job.compatibility,
+          avoidTitles: job.avoidTitles
         });
+        if (autoRephraseRunRef.current !== runId) break;
         if (data?.rephrasedTitle) {
-          setEditedItems(prev => ({
-            ...prev,
-            [job.itemId]: { ...(prev[job.itemId] || job.listingData), title: data.rephrasedTitle }
-          }));
+          setEditedItems(prev => {
+            const current = prev[job.itemId] || job.listingData;
+            // Don't clobber a title the user changed while this call was in flight.
+            if (normalizeComparableTitle(current?.title) !== normalizeComparableTitle(job.title)) return prev;
+            return { ...prev, [job.itemId]: { ...current, title: data.rephrasedTitle } };
+          });
           setHasUnsavedChanges(true);
         }
       } catch (error) {
-        console.error('[Auto Rephrase Title] Error for item', job.itemId, error);
+        console.error(`[Auto Rephrase Title] Attempt ${attempt} failed for item`, job.itemId, error);
+        if (attempt < MAX_AUTO_REPHRASE_ATTEMPTS && autoRephraseRunRef.current === runId) {
+          const retryAfterSec = Number(error?.response?.headers?.['retry-after']);
+          const delayMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+            ? Math.min(retryAfterSec * 1000, 30000)
+            : 2000 * attempt;
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          if (autoRephraseRunRef.current === runId) {
+            autoRephraseQueueRef.current.push(job);
+            setAutoRephraseQueueSize(autoRephraseQueueRef.current.length);
+            requeued = true;
+          }
+        }
       } finally {
+        if (!requeued) autoRephraseQueuedIdsRef.current.delete(job.itemId);
         setAutoRephrasingIds(prev => {
           const next = new Set(prev);
           next.delete(job.itemId);
@@ -818,14 +873,17 @@ export default function AsinReviewModal({
       }
     }
 
-    autoRephraseProcessingRef.current = false;
+    if (autoRephraseRunRef.current === runId) {
+      autoRephraseProcessingRef.current = false;
+    }
   };
 
   useEffect(() => {
     if (!open) return;
 
     previewItems.forEach(item => {
-      if (autoRephraseAttemptedRef.current.has(item.id)) return;
+      if (autoRephraseQueuedIdsRef.current.has(item.id)) return;
+      if ((autoRephraseAttemptsRef.current[item.id] || 0) >= MAX_AUTO_REPHRASE_ATTEMPTS) return;
 
       const status = skuStatus[item.id];
       if (!status || status.status === 'loading') return; // wait for this item's SKU check to finish
@@ -836,7 +894,7 @@ export default function AsinReviewModal({
       const summary = getCrossSellerMatchSummary(status, listingData);
       if (!summary.hasTitleMatch) return;
 
-      autoRephraseAttemptedRef.current.add(item.id);
+      autoRephraseQueuedIdsRef.current.add(item.id);
       autoRephraseQueueRef.current.push({
         itemId: item.id,
         listingData,
@@ -845,12 +903,13 @@ export default function AsinReviewModal({
         brand: item.sourceData?.brand || '',
         manufacturer: getSourceManufacturer(item.sourceData),
         color: item.sourceData?.color || '',
-        compatibility: item.sourceData?.compatibility || ''
+        compatibility: item.sourceData?.compatibility || '',
+        avoidTitles: summary.records.map(record => record.title).filter(Boolean)
       });
     });
 
     setAutoRephraseQueueSize(autoRephraseQueueRef.current.length);
-    processAutoRephraseQueue();
+    if (autoRephraseQueueRef.current.length > 0) processAutoRephraseQueue();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, previewItems, skuStatus, editedItems]);
 
