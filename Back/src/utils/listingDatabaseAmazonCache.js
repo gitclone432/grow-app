@@ -158,6 +158,8 @@ export function amazonSourceSnapshotFields(amazonData, region = 'US') {
   };
 }
 
+// 'scheduleTime' is deliberately excluded: it is a one-off, per-save value and a reused
+// one is usually in the past (it would silently appear on new listings).
 // 'action' is deliberately excluded: it's listing-lifecycle metadata (Add vs
 // Draft), not product data, and must never be silently reused from a prior
 // save of the same ASIN — a listing saved as Active must export Action=Add
@@ -191,7 +193,6 @@ const REUSE_CORE_FIELD_KEYS = [
   'returnShippingCostPaidBy',
   'relationship',
   'relationshipDetails',
-  'scheduleTime',
   'upc',
   'epid',
   // 'amazonScrapedPrice' is deliberately excluded: it's product data and must come
