@@ -2,6 +2,7 @@ import { Router } from 'express';
 import mongoose from 'mongoose';
 import { requireAuth, requirePageAccess } from '../middleware/auth.js';
 import EtsyOrderFulfilment from '../models/EtsyOrderFulfilment.js';
+import EtsyReturnLabel from '../models/EtsyReturnLabel.js';
 import { normalizeEtsyRegion } from '../utils/etsyAddressZip.js';
 import {
   createEtsyOrderSheetRouter,
@@ -96,6 +97,10 @@ router.use(createEtsyOrderSheetRouter({
   Model: EtsyOrderFulfilment,
   pages: 'EtsyOrderFulfilment',
   logLabel: 'Etsy Order Fulfilment',
+  onRowUpdated: (order, update) => EtsyReturnLabel.updateMany(
+    { sourceOrder: order._id },
+    { $set: update }
+  ),
 }));
 
 export default router;

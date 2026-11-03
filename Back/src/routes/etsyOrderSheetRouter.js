@@ -174,7 +174,7 @@ function assignImportRowOrders(rows, { mode, maxRowOrder = -1 }) {
  * Builds the CRUD + import router for one Etsy order sheet.
  * Order Fulfilment and Profit Sheet each own a separate collection.
  */
-export function createEtsyOrderSheetRouter({ Model, pages, logLabel }) {
+export function createEtsyOrderSheetRouter({ Model, pages, logLabel, onRowUpdated = null }) {
   const router = Router();
   const access = requirePageAccess(pages);
 
@@ -321,6 +321,11 @@ export function createEtsyOrderSheetRouter({ Model, pages, logLabel }) {
 
       if (!order) {
         return res.status(404).json({ error: 'Order not found' });
+      }
+
+      if (onRowUpdated) {
+        // Mirror the edit into linked rows on other sheets (e.g. Return Labels).
+        await onRowUpdated(order, update);
       }
 
       res.json({ order: normalizeOrderRow(order) });

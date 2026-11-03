@@ -75,6 +75,9 @@ const EtsyOrderFulfilmentImportDialog = lazy(
 
 const ROWS_PER_PAGE = 25;
 const ALL_STORES_VALUE = '__all__';
+const RETURN_LABELS_API_PATH = '/etsy/return-labels';
+const RETURN_LABELS_PAGE_PATH = '/admin/etsy/return-labels';
+const ROW_NUM_WIDTH_WITH_RETURN = 160;
 
 function parseSortableDate(value) {
   const text = String(value || '').trim();
@@ -368,6 +371,9 @@ export default function EtsyOrderFulfilmentPage({
   secondaryDateFromLabel = 'Date from',
   secondaryDateToLabel = 'Date to',
   columnBehaviorOverrides = {},
+  emptyStoreDescription: emptyStoreDescriptionOverride = '',
+  // Only the main Order Fulfilment sheet can send rows to Return Labels.
+  returnLabelsApiPath = columnSelectorPage === 'etsy-order-fulfilment' ? RETURN_LABELS_API_PATH : null,
 } = {}) {
   const theme = useTheme();
   const isSmallMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -400,6 +406,9 @@ export default function EtsyOrderFulfilmentPage({
   const [savingCells, setSavingCells] = useState({});
   const [deletingIds, setDeletingIds] = useState({});
   const [supplierAccounts, setSupplierAccounts] = useState([]);
+  const [returnedOrderIds, setReturnedOrderIds] = useState(() => new Set());
+  const [returningIds, setReturningIds] = useState({});
+  const [returnFilter, setReturnFilter] = useState('');
   const hiddenKeys = useMemo(
     () => (hiddenColumnKeys instanceof Set ? hiddenColumnKeys : new Set(hiddenColumnKeys || [])),
     [hiddenColumnKeys]
@@ -448,12 +457,14 @@ export default function EtsyOrderFulfilmentPage({
           : column;
         const withOptions = labeled.key === 'amazonAccount'
           ? { ...labeled, options: ['', ...supplierAccountNames] }
-          : labeled;
+          : labeled.key === 'rowNum' && returnLabelsApiPath
+            ? { ...labeled, minWidth: ROW_NUM_WIDTH_WITH_RETURN }
+            : labeled;
         return columnBehaviorOverrides[withOptions.key]
           ? { ...withOptions, ...columnBehaviorOverrides[withOptions.key] }
           : withOptions;
       }),
-    [supplierAccountNames, hiddenKeys, columnLabelOverrides, columnBehaviorOverrides]
+    [supplierAccountNames, hiddenKeys, columnLabelOverrides, columnBehaviorOverrides, returnLabelsApiPath]
   );
 
   const visibleColumnsSet = useMemo(() => new Set(effectiveVisibleColumns), [effectiveVisibleColumns]);
@@ -557,6 +568,20 @@ export default function EtsyOrderFulfilmentPage({
     };
   }, []);
 
+  const loadReturnedOrderIds = useCallback(async () => {
+    if (!returnLabelsApiPath) return;
+    try {
+      const { data } = await api.get(`${returnLabelsApiPath}/source-ids`);
+      setReturnedOrderIds(new Set(Array.isArray(data.sourceOrderIds) ? data.sourceOrderIds : []));
+    } catch {
+      setReturnedOrderIds(new Set());
+    }
+  }, [returnLabelsApiPath]);
+
+  useEffect(() => {
+    loadReturnedOrderIds();
+  }, [loadReturnedOrderIds]);
+
   useEffect(() => {
     setPage(1);
     loadOrders(selectedStoreId);
@@ -594,9 +619,14 @@ export default function EtsyOrderFulfilmentPage({
       && (!showRemarkFilter || matchesValueFilter(order, remarkFilterField, selectedRemark))
       && matchesBuyerNameFilter(order, buyerNameSearch)
       && matchesOrderIdFilter(order, orderIdSearch)
+      && (!returnLabelsApiPath || !returnFilter
+        || (returnFilter === 'returned') === returnedOrderIds.has(String(order._id)))
     )),
     [
       orders,
+      returnLabelsApiPath,
+      returnFilter,
+      returnedOrderIds,
       buyerNameSearch,
       orderIdSearch,
       dateFilterField,
@@ -681,6 +711,7 @@ export default function EtsyOrderFulfilmentPage({
     selectedRemark,
     buyerNameSearch,
     orderIdSearch,
+    returnFilter,
   ]);
 
   const totalPages = Math.max(1, Math.ceil(sortedOrders.length / ROWS_PER_PAGE));
@@ -709,7 +740,33 @@ export default function EtsyOrderFulfilmentPage({
   const handleRefresh = useCallback(async () => {
     await loadStores();
     await loadOrders(selectedStoreId);
-  }, [loadStores, loadOrders, selectedStoreId]);
+    await loadReturnedOrderIds();
+  }, [loadStores, loadOrders, loadReturnedOrderIds, selectedStoreId]);
+
+  const handleCreateReturnLabel = async (orderId) => {
+    if (!returnLabelsApiPath) return;
+    setReturningIds((prev) => ({ ...prev, [orderId]: true }));
+    try {
+      await api.post(`${returnLabelsApiPath}/from-fulfilment/${orderId}`);
+      setReturnedOrderIds((prev) => new Set(prev).add(String(orderId)));
+      setSnackbar({ open: true, message: 'Row added to Return Labels', severity: 'success' });
+    } catch (err) {
+      if (err.response?.status === 409) {
+        setReturnedOrderIds((prev) => new Set(prev).add(String(orderId)));
+      }
+      setSnackbar({
+        open: true,
+        message: err.response?.data?.error || 'Failed to create return label',
+        severity: err.response?.status === 409 ? 'info' : 'error',
+      });
+    } finally {
+      setReturningIds((prev) => {
+        const next = { ...prev };
+        delete next[orderId];
+        return next;
+      });
+    }
+  };
 
   const createOrderRow = async (storeId) => {
     if (!storeId || storeId === ALL_STORES_VALUE) {
@@ -881,7 +938,8 @@ export default function EtsyOrderFulfilmentPage({
     || (showRegionFilter && Boolean(selectedRegion))
     || (showRemarkFilter && Boolean(selectedRemark))
     || Boolean(buyerNameSearch.trim())
-    || Boolean(orderIdSearch.trim());
+    || Boolean(orderIdSearch.trim())
+    || (Boolean(returnLabelsApiPath) && Boolean(returnFilter));
 
   const handleClearFilters = () => {
     setBuyerNameSearch('');
@@ -894,15 +952,16 @@ export default function EtsyOrderFulfilmentPage({
     setSecondaryDateTo('');
     setSelectedRegion('');
     setSelectedRemark('');
+    setReturnFilter('');
   };
 
   const selectStorePrompt = allowImport || allowCreate
     ? 'Select an Etsy store to view or import orders.'
     : 'Select an Etsy store to view orders.';
 
-  const emptyStoreDescription = allowImport || allowCreate
+  const emptyStoreDescription = emptyStoreDescriptionOverride || (allowImport || allowCreate
     ? 'Import a CSV from your spreadsheet or add rows manually.'
-    : 'Orders will appear here once matching rows exist in Order Fulfilment.';
+    : 'Orders will appear here once matching rows exist in Order Fulfilment.');
 
   return (
     <Box
@@ -1163,6 +1222,23 @@ export default function EtsyOrderFulfilmentPage({
               </FormControl>
             )}
 
+            {returnLabelsApiPath && (
+              <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 160 } }}>
+                <InputLabel id="etsy-return-filter-label">Return</InputLabel>
+                <Select
+                  labelId="etsy-return-filter-label"
+                  value={returnFilter}
+                  label="Return"
+                  onChange={(e) => setReturnFilter(e.target.value)}
+                  disabled={!selectedStoreId}
+                >
+                  <MenuItem value="">All Rows</MenuItem>
+                  <MenuItem value="returned">Return only</MenuItem>
+                  <MenuItem value="notReturned">Not returned</MenuItem>
+                </Select>
+              </FormControl>
+            )}
+
             <TextField
               size="small"
               label="Buyer name"
@@ -1399,6 +1475,40 @@ export default function EtsyOrderFulfilmentPage({
                               deleting={rowDeleting}
                               inlineActions
                               onDelete={allowDelete ? () => handleDeleteRow(row._id) : undefined}
+                              extraActions={returnLabelsApiPath ? (
+                                returnedOrderIds.has(String(row._id)) ? (
+                                  <Chip
+                                    label="Return"
+                                    size="small"
+                                    color="warning"
+                                    clickable
+                                    component={RouterLink}
+                                    to={RETURN_LABELS_PAGE_PATH}
+                                    sx={{ height: 20, fontSize: '0.6875rem', fontWeight: 600 }}
+                                  />
+                                ) : (
+                                  <Typography
+                                    component="button"
+                                    type="button"
+                                    variant="caption"
+                                    disabled={Boolean(returningIds[row._id]) || rowDeleting}
+                                    onClick={() => handleCreateReturnLabel(row._id)}
+                                    sx={{
+                                      border: 'none',
+                                      background: 'none',
+                                      color: 'warning.dark',
+                                      cursor: returningIds[row._id] ? 'default' : 'pointer',
+                                      p: 0,
+                                      fontSize: '0.75rem',
+                                      lineHeight: 1.43,
+                                      textDecoration: 'underline',
+                                      textTransform: 'lowercase',
+                                    }}
+                                  >
+                                    {returningIds[row._id] ? '...' : 'return'}
+                                  </Typography>
+                                )
+                              ) : null}
                             />
                           ) : column.key === 'storeName' ? (
                             <Typography variant="body2" fontWeight="medium" noWrap>

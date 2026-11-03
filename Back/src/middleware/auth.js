@@ -195,6 +195,7 @@ export const PAGE_DEFAULT_ROLES = {
   'EtsyTracking': ['superadmin', 'listingadmin'],
   'EtsyOrderAnalytics': ['superadmin', 'listingadmin'],
   'EtsyProfitSheet': ['superadmin', 'listingadmin'],
+  'EtsyReturnLabels': ['superadmin', 'listingadmin'],
   'EtsyDashboard': ['superadmin', 'listingadmin'],
 
   // eBay Buying
