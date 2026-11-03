@@ -529,6 +529,7 @@ export function EtsyRowNumberCell({
   deleting = false,
   compact = false,
   inlineActions = false,
+  extraActions = null,
 }) {
   const removeButton = onDelete ? (
     <Typography
@@ -594,6 +595,7 @@ export function EtsyRowNumberCell({
             Calc
           </Typography>
         )}
+        {extraActions}
         {removeButton}
       </Box>
     );
