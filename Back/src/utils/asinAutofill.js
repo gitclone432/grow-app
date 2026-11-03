@@ -490,6 +490,21 @@ function promoteMisroutedCustomFields(coreFields, customFields) {
   }
 }
 
+/**
+ * First money token of an Amazon price string → number.
+ * Stripping every non-digit glues multiple prices together
+ * ("$12.99 - $24.99" → 12.9924, "53,78" → 5378), which skews the start price.
+ */
+function parseAmazonCost(raw) {
+  if (typeof raw === 'number') return raw;
+  const match = String(raw ?? '').match(/\d[\d,]*(?:\.\d+)?/);
+  if (!match) return NaN;
+  let token = match[0];
+  // "53,78" (comma + exactly 2 digits, no dot) is a decimal comma, not a thousands separator
+  if (/^\d+,\d{2}$/.test(token)) token = token.replace(',', '.');
+  return parseFloat(token.replace(/,/g, ''));
+}
+
 export async function applyFieldConfigs(
   amazonData,
   fieldConfigs,
@@ -951,11 +966,17 @@ export async function applyFieldConfigs(
     }
   }
   
-  // PRIORITY: If pricing config enabled, calculate startPrice (overrides field config)
-  if (pricingConfig?.enabled && !reuseMode) {
+  // PRIORITY: If pricing config enabled, calculate startPrice (overrides field config).
+  // Runs in reuse mode too: the reused startPrice belongs to whichever seller/template
+  // last listed this ASIN, at that time's Amazon cost, so it must not be kept as-is.
+  if (pricingConfig?.enabled) {
     console.log(`[Pricing Calculator] Enabled, Amazon price: "${amazonData.price}"`);
-    
-    if (!amazonData.price || amazonData.price.trim() === '') {
+
+    if (reuseMode) {
+      delete coreFields.startPrice;
+    }
+
+    if (!amazonData.price || String(amazonData.price).trim() === '') {
       console.warn(`[ASIN: ${amazonData.asin}] ⚠️ Amazon price not available - cannot calculate startPrice`);
       pricingCalculation = {
         enabled: true,
@@ -964,7 +985,7 @@ export async function applyFieldConfigs(
     } else {
       try {
         // Extract numeric cost from Amazon price string (e.g., "$49.99" -> 49.99)
-        const amazonCost = parseFloat(amazonData.price.replace(/[^0-9.]/g, ''));
+        const amazonCost = parseAmazonCost(amazonData.price);
         
         console.log(`[Pricing Calculator] Extracted numeric cost: ${amazonCost}`);
         
