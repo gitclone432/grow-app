@@ -39,15 +39,18 @@ function getApplicableProfit(amazonCost, pricingConfig) {
   const tiers = pricingConfig.profitTiers.tiers;
 
   for (const tier of tiers) {
-    const meetsMin = amazonCost >= tier.minCost;
-    const meetsMax = tier.maxCost === null || amazonCost < tier.maxCost;
-
-    if (meetsMin && meetsMax) {
-      return tier.profit;
+    if (costInTier(amazonCost, tier)) {
+      return Number(tier.profit);
     }
   }
 
   return pricingConfig.desiredProfit;
+}
+
+/** null, undefined or '' maxCost means "no upper limit" (validation already treats them alike). */
+function costInTier(cost, tier) {
+  const unlimited = tier.maxCost === null || tier.maxCost === undefined || tier.maxCost === '';
+  return cost >= Number(tier.minCost) && (unlimited || cost < Number(tier.maxCost));
 }
 
 /**
@@ -116,7 +119,8 @@ export function calculateStartPrice(pricingConfig, amazonCost) {
     throw new Error('Calculated price is invalid. Please check your pricing configuration.');
   }
 
-  const roundedPrice = Math.round(rawPrice * 100) / 100;
+  // Round up to the cent so the implied profit never lands below the target.
+  const roundedPrice = Math.ceil(rawPrice * 100 - 1e-9) / 100;
 
   const sold = roundedPrice;
   const A = sold * sellFeeBaseMult;
@@ -174,11 +178,8 @@ export function calculateStartPrice(pricingConfig, amazonCost) {
 
 function getCostRangeForProfit(cost, tiers) {
   for (const tier of tiers) {
-    const meetsMin = cost >= tier.minCost;
-    const meetsMax = tier.maxCost === null || cost < tier.maxCost;
-
-    if (meetsMin && meetsMax) {
-      const max = tier.maxCost === null ? '∞' : `$${tier.maxCost}`;
+    if (costInTier(cost, tier)) {
+      const max = tier.maxCost === null || tier.maxCost === undefined || tier.maxCost === '' ? '∞' : `$${tier.maxCost}`;
       return `$${tier.minCost} - ${max}`;
     }
   }
