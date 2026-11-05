@@ -295,7 +295,11 @@ function ManualTrackingCell({ order, onSaved, onCopy, onNotify }) {
           shippingCarrier: carrier
         });
 
-        if (data?.success) {
+        if (data?.success && data?.alreadyShipped) {
+          onSaved(data.trackingNumber || value.trim());
+          handleClose();
+          onNotify?.('warning', data.message || 'Order was already shipped on eBay');
+        } else if (data?.success) {
           onSaved(value.trim());
           handleClose();
           onNotify?.('success', `✅ Tracking uploaded via ${carrier}!`);
@@ -816,12 +820,15 @@ export default function AwaitingShipmentPage() {
       let successCount = 0;
       let failedCount = 0;
       let duplicateCount = 0;
+      let alreadyShippedCount = 0;
       const nextTrackingErrors = {};
 
       results.forEach((result, index) => {
         const { order, trackingIdValue } = readyOrders[index];
         if (result.status === 'fulfilled' && result.value?.data?.success) {
-          nextUploadedTracking.set(order._id, trackingIdValue);
+          const data = result.value.data;
+          nextUploadedTracking.set(order._id, (data.alreadyShipped && data.trackingNumber) || trackingIdValue);
+          if (data.alreadyShipped) alreadyShippedCount += 1;
           successCount += 1;
         } else {
           failedCount += 1;
@@ -860,7 +867,8 @@ export default function AwaitingShipmentPage() {
 
       if (successCount > 0 && failedCount === 0) {
         const skippedSuffix = skippedCount > 0 ? `, ${skippedCount} skipped` : '';
-        showSnack('success', `Tracking uploaded to eBay for ${successCount} row(s)${skippedSuffix}`);
+        const alreadySuffix = alreadyShippedCount > 0 ? ` (${alreadyShippedCount} already shipped on eBay, synced existing tracking)` : '';
+        showSnack(alreadyShippedCount > 0 ? 'warning' : 'success', `Tracking uploaded to eBay for ${successCount} row(s)${alreadySuffix}${skippedSuffix}`);
         return;
       }
 

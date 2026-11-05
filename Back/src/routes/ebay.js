@@ -6753,6 +6753,45 @@ router.post('/orders/:orderId/upload-tracking', async (req, res) => {
       return res.status(400).json({ error: 'Order missing line item ID' });
     }
 
+    // PRE-CHECK: if eBay already has a tracking number on this order, never add a second
+    // shipment. Sync the existing number into our DB instead.
+    try {
+      const existingRes = await axios.get(
+        `https://api.ebay.com/sell/fulfillment/v1/order/${ebayOrderId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${order.seller.ebayTokens.access_token}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        }
+      );
+      const existingOrder = existingRes.data;
+      if (existingOrder?.fulfillmentHrefs?.length > 0) {
+        const existingTracking = await extractTrackingNumber(existingOrder.fulfillmentHrefs, order.seller.ebayTokens.access_token);
+        if (existingTracking) {
+          await persistTrackingUploadResult(order, {
+            trackingNumber: existingTracking,
+            verifiedOrder: existingOrder,
+          });
+          const isSame = String(existingTracking).trim() === trackingNumber.trim();
+          console.log(`[Upload Tracking] ⏭️ Order ${ebayOrderId} already has tracking ${existingTracking} on eBay; synced without uploading`);
+          return res.json({
+            success: true,
+            alreadyShipped: true,
+            trackingNumber: String(existingTracking).trim(),
+            message: isSame
+              ? `Tracking ${existingTracking} was already on eBay. Order synced as shipped.`
+              : `Already shipped on eBay with tracking ${existingTracking}. Did not upload ${trackingNumber.trim()}; synced the existing number instead.`,
+            order,
+          });
+        }
+      }
+    } catch (precheckErr) {
+      // Don't block uploads on a transient lookup failure; post-upload verification still applies.
+      console.warn(`[Upload Tracking] Pre-check of existing tracking failed for ${ebayOrderId}: ${precheckErr.message}`);
+    }
+
     // Prepare the fulfillment payload
     const fulfillmentPayload = {
       lineItems: [
