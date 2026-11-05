@@ -1134,9 +1134,13 @@ export default function AsinReviewModal({
             ...(prev[itemId] || currentItem.generatedListing || {}),
             title: fresh.title,
             description: fresh.description,
-            itemPhotoUrl: fresh.itemPhotoUrl
+            itemPhotoUrl: fresh.itemPhotoUrl,
+            // Only overwrite price when the pricing calculator produced one
+            ...(fresh.startPrice != null && fresh.startPrice !== '' ? { startPrice: fresh.startPrice } : {}),
+            ...(fresh.amazonScrapedPrice != null ? { amazonScrapedPrice: fresh.amazonScrapedPrice } : {})
           }
         }));
+        setStartPriceEditMode(prev => ({ ...prev, [itemId]: false }));
         setHasUnsavedChanges(true);
       }
     } catch (error) {
@@ -1541,7 +1545,7 @@ export default function AsinReviewModal({
                   || regenerating[currentItem.id]
                   || ['loading', 'error', 'blocked'].includes(currentItem.status)
                 }
-                title="Regenerate title, description and photos from a fresh Amazon scrape"
+                title="Regenerate title, description, photos and start price from a fresh Amazon scrape"
                 sx={{ whiteSpace: 'nowrap' }}
               >
                 {regenerating[currentItem?.id] ? 'Regenerating…' : 'Regenerate'}

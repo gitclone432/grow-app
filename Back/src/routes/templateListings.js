@@ -1422,7 +1422,7 @@ router.post('/regenerate-preview', requireAuth, async (req, res) => {
       forceRefresh: true,
     });
     const autofill = await runTemplateAutofill(template, amazonData, fieldConfigs, pricingConfig, null);
-    const { coreFields, customFields, mergedCoreFields } = autofill;
+    const { coreFields, customFields, mergedCoreFields, pricingCalculation } = autofill;
 
     if (!mergedCoreFields.title) {
       return res.status(422).json({ error: 'Title generation failed' });
@@ -1433,11 +1433,13 @@ router.post('/regenerate-preview', requireAuth, async (req, res) => {
       scrapeSource: amazonData?.scrapeSource || null,
       aiDescription: getConfiguredAiDescription(fieldConfigs, coreFields, customFields),
       sourceData: buildSourceDataFromAmazon(amazonData),
-      generatedListing: {
+      pricingCalculation,
+      generatedListing: attachAmazonScrapedPrice({
         title: mergedCoreFields.title,
         description: mergedCoreFields.description,
         itemPhotoUrl: mergedCoreFields.itemPhotoUrl,
-      },
+        startPrice: mergedCoreFields.startPrice,
+      }, amazonData),
     });
   } catch (error) {
     console.error('Regenerate preview error:', error);
