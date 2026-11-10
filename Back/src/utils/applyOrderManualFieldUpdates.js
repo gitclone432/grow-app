@@ -3,7 +3,7 @@ import { calculateOrderAmazonFinancials } from './exchangeRateUtils.js';
 
 export const MANUAL_FULFILLMENT_ALLOWED_FIELDS = [
   'amazonAccount', 'arrivingDate', 'beforeTax', 'estimatedTax', 'azOrderId',
-  'amazonRefund', 'cardName', 'resolution', 'remark', 'alreadyInUse', 'remarkMessageSent',
+  'amazonRefund', 'cardName', 'resolution', 'remark', 'issueReason', 'alreadyInUse', 'remarkMessageSent',
   'fulfillmentNotes', 'trackingNumber', 'manualTrackingNumber',
 ];
 
@@ -76,6 +76,11 @@ export function buildManualFieldUpdateData(updates = {}) {
       } else {
         updateData[key] = String(rawRemark).trim();
       }
+      return;
+    }
+
+    if (key === 'issueReason') {
+      updateData[key] = String(updates[key] ?? '').trim() || null;
       return;
     }
 

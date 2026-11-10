@@ -95,6 +95,11 @@ import {
   remarkOptionsFromTemplates,
   saveRemarkTemplates
 } from '../../constants/remarkTemplates';
+import {
+  ISSUE_REASON_OPTIONS_ENDPOINT,
+  loadIssueReasonOptions,
+  withCurrentIssueReason
+} from '../../constants/issueReasons';
 import ItemCategoryAssignDialog from '../../components/ItemCategoryAssignDialog.jsx';
 import FulfillmentSkeleton from '../../components/skeletons/FulfillmentSkeleton';
 import FulfillmentCsvImportDialog from '../../components/FulfillmentCsvImportDialog';
@@ -2032,6 +2037,9 @@ function FulfillmentDashboard() {
   const fileInputRefRemark = useRef(null);
   const [remarkTemplates, setRemarkTemplates] = useState([]);
   const [manageRemarkTemplatesOpen, setManageRemarkTemplatesOpen] = useState(false);
+  const [issueReasonOptions, setIssueReasonOptions] = useState([]);
+  const [manageIssueReasonsOpen, setManageIssueReasonsOpen] = useState(false);
+  const [pendingIssueReason, setPendingIssueReason] = useState('');
 
   const normalizeRemarkValue = useCallback((value) => {
     if (value === null || value === undefined) return null;
@@ -2082,7 +2090,7 @@ function FulfillmentDashboard() {
     'shipping', 'salesTax', 'discount', 'transactionFees',
     'adFeeGeneral', 'tds', 'cancelStatus', 'refunds', 'reviewedRefund', 'orderEarnings', 'trackingNumber',
     'amazonAccount', 'arriving', 'beforeTax', 'estimatedTax',
-    'azOrderId', 'amazonRefund', 'cardName', 'resolution', 'notes', 'messagingStatus', 'remark', 'issueFlags',
+    'azOrderId', 'amazonRefund', 'cardName', 'resolution', 'notes', 'messagingStatus', 'remark', 'issueReason', 'issueFlags',
     'convoCategory', 'convoCaseStatus'
   ];
 
@@ -2126,6 +2134,7 @@ function FulfillmentDashboard() {
     { id: 'notes', label: 'Notes' },
     { id: 'messagingStatus', label: 'Messaging' },
     { id: 'remark', label: 'Remark' },
+    { id: 'issueReason', label: 'Reason (Issue)' },
     { id: 'issueFlags', label: 'Issues' },
     { id: 'convoCategory', label: 'Case Category' },
     { id: 'convoCaseStatus', label: 'Case Status' }
@@ -2179,6 +2188,10 @@ function FulfillmentDashboard() {
     } catch (e) {
       console.error('Failed to load resolution options', e);
     }
+  }, []);
+
+  const reloadIssueReasonOptions = useCallback(async () => {
+    setIssueReasonOptions(await loadIssueReasonOptions());
   }, []);
 
 
@@ -2303,12 +2316,12 @@ function FulfillmentDashboard() {
 
     try {
       // First update the remark field and mark that message was sent
-      const { data } = await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemarkValue, remarkMessageSent: true });
+      const { data } = await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemarkValue, remarkMessageSent: true, issueReason: pendingIssueReason || null });
 
       // Update local state
       setOrders(prev => prev.map(o => {
         if (o._id === orderId) {
-          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: true };
+          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: true, issueReason: pendingIssueReason || null };
         }
         return o;
       }));
@@ -2358,12 +2371,12 @@ function FulfillmentDashboard() {
 
     try {
       // Just update the remark without sending message
-      await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemarkValue, remarkMessageSent: false });
+      await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemarkValue, remarkMessageSent: false, issueReason: pendingIssueReason || null });
 
       // Update local state
       setOrders(prev => prev.map(o => {
         if (o._id === orderId) {
-          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: false };
+          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: false, issueReason: pendingIssueReason || null };
         }
         return o;
       }));
@@ -2440,6 +2453,7 @@ function FulfillmentDashboard() {
       setPendingRemarkUpdate({ orderId, remarkValue, order });
       setEditableRemarkMessage(replacedText);
       setRemarkAttachments([]);
+      setPendingIssueReason(order.issueReason || '');
       setRemarkConfirmOpen(true);
     } else {
       // No template, update remark and reset remarkMessageSent flag
@@ -2564,6 +2578,7 @@ function FulfillmentDashboard() {
         api.get('/amazon-accounts').then(({ data }) => setAmazonAccounts(data || [])).catch(console.error);
         api.get('/credit-card-names').then(({ data }) => setCreditCards(data || [])).catch(console.error);
         loadResolutionOptions();
+        reloadIssueReasonOptions();
       };
       if (typeof requestIdleCallback === 'function') {
         requestIdleCallback(loadSecondaryData, { timeout: 2500 });
@@ -2571,7 +2586,7 @@ function FulfillmentDashboard() {
         setTimeout(loadSecondaryData, 150);
       }
     }
-  }, [loadResolutionOptions]);
+  }, [loadResolutionOptions, reloadIssueReasonOptions]);
 
   // Issues index is heavy — load well after the table has painted (Grow does not load this at all)
   useEffect(() => {
@@ -4375,6 +4390,7 @@ function FulfillmentDashboard() {
         notes: { header: 'Notes', accessor: 'fulfillmentNotes' },
         messagingStatus: { header: 'Messaging', accessor: 'messagingStatus' },
         remark: { header: 'Remark', accessor: 'remark' },
+        issueReason: { header: 'Reason (Issue)', accessor: 'issueReason' },
         issueFlags: {
           header: 'Issues',
           accessor: (o) => {
@@ -5164,6 +5180,7 @@ function FulfillmentDashboard() {
                       {visibleColumnsSet.has('notes') && <TableCell sx={HEADER_CELL_SX}>Notes</TableCell>}
                       {visibleColumnsSet.has('messagingStatus') && <TableCell sx={HEADER_CELL_SX}>Messaging</TableCell>}
                       {visibleColumnsSet.has('remark') && <TableCell sx={HEADER_CELL_SX}>Remark</TableCell>}
+                      {visibleColumnsSet.has('issueReason') && <TableCell sx={HEADER_CELL_SX}>Reason (Issue)</TableCell>}
                       {visibleColumnsSet.has('issueFlags') && <TableCell sx={HEADER_CELL_SX}>Issues</TableCell>}
                       {visibleColumnsSet.has('convoCategory') && <TableCell sx={HEADER_CELL_SX}>Case Category</TableCell>}
                       {visibleColumnsSet.has('convoCaseStatus') && <TableCell sx={HEADER_CELL_SX}>Case Status</TableCell>}
@@ -6090,6 +6107,17 @@ function FulfillmentDashboard() {
                               />
                             </TableCell>
                           )}
+                          {visibleColumnsSet.has('issueReason') && (
+                            <TableCell>
+                              <AutoSaveSelect
+                                value={order.issueReason || ''}
+                                options={withCurrentIssueReason(issueReasonOptions, order.issueReason)}
+                                onSave={(val) => updateManualField(order._id, 'issueReason', val || null)}
+                                onManage={() => setManageIssueReasonsOpen(true)}
+                                manageLabel="Manage Reasons"
+                              />
+                            </TableCell>
+                          )}
                           {visibleColumnsSet.has('issueFlags') && (() => {
                             const issues = issuesIndex[order.orderId] || issuesIndex[order.legacyOrderId] || [];
                             if (issues.length === 0) return <TableCell><Typography variant="body2" color="text.disabled">-</Typography></TableCell>;
@@ -6265,6 +6293,31 @@ function FulfillmentDashboard() {
               <Alert severity="info" icon={<InfoIcon />}>
                 You're updating the remark to <strong>"{pendingRemarkUpdate?.remarkValue}"</strong>
               </Alert>
+              <TextField
+                select
+                label="Reason (Issue)"
+                size="small"
+                value={pendingIssueReason}
+                onChange={(e) => {
+                  if (e.target.value === '__manage_reasons__') {
+                    setManageIssueReasonsOpen(true);
+                    return;
+                  }
+                  setPendingIssueReason(e.target.value);
+                }}
+                disabled={sendingRemarkMessage}
+                sx={{ maxWidth: 320 }}
+              >
+                <MenuItem value="">- Select -</MenuItem>
+                {withCurrentIssueReason(issueReasonOptions, pendingIssueReason).map((option) => (
+                  <MenuItem key={option._id} value={option.name}>
+                    {option.name}
+                  </MenuItem>
+                ))}
+                <MenuItem value="__manage_reasons__" sx={{ borderTop: '1px solid', borderColor: 'divider', mt: 0.5 }}>
+                  Manage Reasons
+                </MenuItem>
+              </TextField>
               <Typography variant="body2" sx={{ fontWeight: 500 }}>
                 Message Preview (Edit as needed):
               </Typography>
@@ -6333,6 +6386,15 @@ function FulfillmentDashboard() {
           onClose={() => setManageRemarkTemplatesOpen(false)}
           templates={remarkTemplates}
           onSaveTemplates={handleSaveRemarkTemplates}
+        />
+
+        <ResolutionOptionsModal
+          open={manageIssueReasonsOpen}
+          onClose={() => setManageIssueReasonsOpen(false)}
+          options={issueReasonOptions}
+          onReload={reloadIssueReasonOptions}
+          endpoint={ISSUE_REASON_OPTIONS_ENDPOINT}
+          title="Manage Reasons"
         />
 
         <ResolutionOptionsModal
