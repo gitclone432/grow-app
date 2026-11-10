@@ -111,6 +111,7 @@ const OrderSchema = new mongoose.Schema(
       type: String,
       default: null
     },
+    issueReason: { type: String, default: null },
     allOrdersUsdRemark: {
       type: String,
       default: ''
