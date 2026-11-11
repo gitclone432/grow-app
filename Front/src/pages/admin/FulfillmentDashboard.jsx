@@ -1520,6 +1520,8 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
   searchIssueType, setSearchIssueType,
   searchCaseCategory, setSearchCaseCategory,
   searchCaseStatus, setSearchCaseStatus,
+  searchIssueReason, setSearchIssueReason,
+  issueReasonOptions,
   searchRemark, setSearchRemark,
   draftSelectedSeller, setDraftSelectedSeller, setSelectedSeller,
   draftDateFilter, setDraftDateFilter,
@@ -1557,6 +1559,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
   const [localIssueType, setLocalIssueType] = useState(searchIssueType);
   const [localCaseCategory, setLocalCaseCategory] = useState(searchCaseCategory);
   const [localCaseStatus, setLocalCaseStatus] = useState(searchCaseStatus);
+  const [localIssueReason, setLocalIssueReason] = useState(searchIssueReason);
   const [localRemark, setLocalRemark] = useState(searchRemark);
 
   // Keep local drafts in sync when parent clears / applies externally.
@@ -1571,6 +1574,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
   useEffect(() => { setLocalIssueType(searchIssueType); }, [searchIssueType]);
   useEffect(() => { setLocalCaseCategory(searchCaseCategory); }, [searchCaseCategory]);
   useEffect(() => { setLocalCaseStatus(searchCaseStatus); }, [searchCaseStatus]);
+  useEffect(() => { setLocalIssueReason(searchIssueReason); }, [searchIssueReason]);
   useEffect(() => { setLocalRemark(searchRemark); }, [searchRemark]);
 
   // Commit drafts → parent (seller/date + search filters), then force a fetch.
@@ -1586,6 +1590,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     setSearchIssueType(localIssueType);
     setSearchCaseCategory(localCaseCategory);
     setSearchCaseStatus(localCaseStatus);
+    setSearchIssueReason(localIssueReason);
     setSearchRemark(localRemark);
     setSelectedSeller(draftSelectedSeller);
     setDateFilter(normalizeDateFilter(draftDateFilter));
@@ -1603,14 +1608,15 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
       searchIssueType: localIssueType,
       searchCaseCategory: localCaseCategory,
       searchCaseStatus: localCaseStatus,
+      searchIssueReason: localIssueReason,
       searchRemark: localRemark,
     });
   }, [
     localOrderId, localAzOrderId, localBuyerName, localItemId, localSku, localProductName,
-    localPaymentStatus, localCancelStatus, localIssueType, localCaseCategory, localCaseStatus, localRemark,
+    localPaymentStatus, localCancelStatus, localIssueType, localCaseCategory, localCaseStatus, localIssueReason, localRemark,
     draftSelectedSeller, draftDateFilter,
     setSearchOrderId, setSearchAzOrderId, setSearchBuyerName, setSearchItemId, setSearchSku, setSearchProductName,
-    setSearchPaymentStatus, setSearchCancelStatus, setSearchIssueType, setSearchCaseCategory, setSearchCaseStatus, setSearchRemark,
+    setSearchPaymentStatus, setSearchCancelStatus, setSearchIssueType, setSearchCaseCategory, setSearchCaseStatus, setSearchIssueReason, setSearchRemark,
     setSelectedSeller, setDateFilter, onApplyFilters,
   ]);
 
@@ -1628,6 +1634,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     setLocalIssueType('');
     setLocalCaseCategory('');
     setLocalCaseStatus('');
+    setLocalIssueReason('');
     setLocalRemark('');
     setDraftSelectedSeller('');
     setDraftDateFilter(clearedDateFilter);
@@ -1643,6 +1650,7 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
     setSearchIssueType('');
     setSearchCaseCategory('');
     setSearchCaseStatus('');
+    setSearchIssueReason('');
     setSearchRemark('');
     setSelectedSeller('');
     setDateFilter(clearedDateFilter);
@@ -1660,12 +1668,13 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
       searchIssueType: '',
       searchCaseCategory: '',
       searchCaseStatus: '',
+      searchIssueReason: '',
       searchRemark: '',
     });
   }, [
     setDraftSelectedSeller, setDraftDateFilter,
     setSearchOrderId, setSearchAzOrderId, setSearchBuyerName, setSearchItemId, setSearchSku, setSearchProductName,
-    setSearchPaymentStatus, setSearchCancelStatus, setSearchIssueType, setSearchCaseCategory, setSearchCaseStatus,
+    setSearchPaymentStatus, setSearchCancelStatus, setSearchIssueType, setSearchCaseCategory, setSearchCaseStatus, setSearchIssueReason,
     setSelectedSeller,
     setDateFilter,
     onApplyFilters,
@@ -1873,6 +1882,32 @@ const SearchFiltersPanel = memo(forwardRef(function SearchFiltersPanel({
                 <MenuItem value="Case Not Opened">Case Not Opened</MenuItem>
               </Select>
             </FormControl>
+            <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 180 }, maxWidth: { sm: 220 } }}>
+              <InputLabel id="issue-reason-filter-label">Reason (Issue)</InputLabel>
+              <Select
+                labelId="issue-reason-filter-label"
+                value={localIssueReason}
+                label="Reason (Issue)"
+                onChange={(e) => setLocalIssueReason(e.target.value)}
+              >
+                <MenuItem value="">
+                  <em>All</em>
+                </MenuItem>
+                <MenuItem value="__NO_REASON__">
+                  <em>No Reason</em>
+                </MenuItem>
+                {(issueReasonOptions || []).map((option) => {
+                  const value = typeof option === 'string' ? option : (option?.value ?? option?.label ?? option?.name);
+                  const label = typeof option === 'string' ? option : (option?.label ?? option?.name ?? option?.value);
+                  if (!value) return null;
+                  return <MenuItem key={value} value={value}>{label}</MenuItem>;
+                })}
+                {localIssueReason && localIssueReason !== '__NO_REASON__'
+                  && !(issueReasonOptions || []).some((o) => (typeof o === 'string' ? o : (o?.value ?? o?.label ?? o?.name)) === localIssueReason) && (
+                  <MenuItem value={localIssueReason}>{localIssueReason}</MenuItem>
+                )}
+              </Select>
+            </FormControl>
           </Stack>
         </Stack>
       </Collapse>
@@ -1947,6 +1982,7 @@ function FulfillmentDashboard() {
   const [searchIssueType, setSearchIssueType] = useState(() => getInitialState('searchIssueType', ''));
   const [searchCaseCategory, setSearchCaseCategory] = useState(() => getInitialState('searchCaseCategory', ''));
   const [searchCaseStatus, setSearchCaseStatus] = useState(() => getInitialState('searchCaseStatus', ''));
+  const [searchIssueReason, setSearchIssueReason] = useState(() => getInitialState('searchIssueReason', ''));
   const [searchRemark, setSearchRemark] = useState(() => getInitialState('searchRemark', ''));
   const [excludeClient, setExcludeClient] = useState(() => getInitialState('excludeClient', true));
   const [excludeLowValue, setExcludeLowValue] = useState(() => getInitialState('excludeLowValue', true));
@@ -2565,6 +2601,7 @@ function FulfillmentDashboard() {
     searchIssueType,
     searchCaseCategory,
     searchCaseStatus,
+    searchIssueReason,
     excludeClient,
     excludeLowValue,
     missingAmazonAccount,
@@ -2652,6 +2689,7 @@ function FulfillmentDashboard() {
       prev.searchIssueType !== searchIssueType ||
       prev.searchCaseCategory !== searchCaseCategory ||
       prev.searchCaseStatus !== searchCaseStatus ||
+      prev.searchIssueReason !== searchIssueReason ||
       prev.excludeClient !== excludeClient ||
       prev.excludeLowValue !== excludeLowValue ||
       prev.missingAmazonAccount !== missingAmazonAccount ||
@@ -2673,6 +2711,7 @@ function FulfillmentDashboard() {
       searchIssueType,
       searchCaseCategory,
       searchCaseStatus,
+      searchIssueReason,
       searchRemark,
       excludeClient,
       excludeLowValue,
@@ -2691,7 +2730,7 @@ function FulfillmentDashboard() {
       setCurrentPage(1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchProductName, searchMarketplace, searchAmazonAccount, searchPaymentStatus, searchCancelStatus, searchIssueType, searchCaseCategory, searchCaseStatus, searchRemark, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
+  }, [selectedSeller, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchProductName, searchMarketplace, searchAmazonAccount, searchPaymentStatus, searchCancelStatus, searchIssueType, searchCaseCategory, searchCaseStatus, searchIssueReason, searchRemark, excludeClient, excludeLowValue, missingAmazonAccount, dateFilter]);
 
   // orderEarnings is now read-only (auto-calculated server-side)
   // No manual editing handlers needed
@@ -2712,6 +2751,7 @@ function FulfillmentDashboard() {
     const activeIssueType = overrides.searchIssueType !== undefined ? overrides.searchIssueType : searchIssueType;
     const activeCaseCategory = overrides.searchCaseCategory !== undefined ? overrides.searchCaseCategory : searchCaseCategory;
     const activeCaseStatus = overrides.searchCaseStatus !== undefined ? overrides.searchCaseStatus : searchCaseStatus;
+    const activeIssueReason = overrides.searchIssueReason !== undefined ? overrides.searchIssueReason : searchIssueReason;
     const activeRemark = overrides.searchRemark !== undefined ? overrides.searchRemark : searchRemark;
 
     const params = {};
@@ -2735,6 +2775,7 @@ function FulfillmentDashboard() {
     if (activeIssueType) params.issueType = activeIssueType;
     if (activeCaseCategory) params.caseCategory = activeCaseCategory;
     if (activeCaseStatus) params.caseStatus = activeCaseStatus;
+    if (activeIssueReason) params.issueReason = activeIssueReason;
     params.excludeClient = excludeClient ? 'true' : 'false';
     params.excludeLowValue = excludeLowValue ? 'true' : 'false';
     params.missingAmazonAccount = missingAmazonAccount ? 'true' : 'false';
@@ -2762,6 +2803,7 @@ function FulfillmentDashboard() {
       searchIssueType: draft.searchIssueType ?? '',
       searchCaseCategory: draft.searchCaseCategory ?? '',
       searchCaseStatus: draft.searchCaseStatus ?? '',
+      searchIssueReason: draft.searchIssueReason ?? '',
       searchRemark: draft.searchRemark ?? '',
       excludeClient,
       excludeLowValue,
@@ -2789,6 +2831,7 @@ function FulfillmentDashboard() {
       searchIssueType: draft.searchIssueType ?? '',
       searchCaseCategory: draft.searchCaseCategory ?? '',
       searchCaseStatus: draft.searchCaseStatus ?? '',
+      searchIssueReason: draft.searchIssueReason ?? '',
       searchRemark: draft.searchRemark ?? '',
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5047,6 +5090,9 @@ function FulfillmentDashboard() {
             setSearchCaseCategory={setSearchCaseCategory}
             searchCaseStatus={searchCaseStatus}
             setSearchCaseStatus={setSearchCaseStatus}
+            searchIssueReason={searchIssueReason}
+            setSearchIssueReason={setSearchIssueReason}
+            issueReasonOptions={issueReasonOptions}
             searchRemark={searchRemark}
             setSearchRemark={setSearchRemark}
             draftSelectedSeller={draftSelectedSeller}
