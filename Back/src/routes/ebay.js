@@ -4266,7 +4266,7 @@ async function loadItemImageMap(orders) {
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, cancelStatus, issueType, caseCategory, caseStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, sortBy, sortDir, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient, remark } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, cancelStatus, issueType, caseCategory, caseStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, sortBy, sortDir, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient, remark, issueReason } = req.query;
 
   try {
     let query = {};
@@ -4376,6 +4376,16 @@ router.get('/stored-orders', async (req, res) => {
         }
       } else {
         query.remark = remark;
+      }
+    }
+
+    // Reason (Issue) filter
+    if (issueReason && issueReason !== '') {
+      if (issueReason === '__NO_REASON__') {
+        if (!query.$and) query.$and = [];
+        query.$and.push({ $or: [{ issueReason: { $exists: false } }, { issueReason: null }, { issueReason: '' }] });
+      } else {
+        query.issueReason = issueReason;
       }
     }
 
