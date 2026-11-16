@@ -2047,6 +2047,15 @@ function FulfillmentDashboard() {
   // Resync window state
   const [resyncDays, setResyncDays] = useState(7);
   const [moreActionsAnchor, setMoreActionsAnchor] = useState(null);
+  const [refundMenu, setRefundMenu] = useState({ anchorEl: null, order: null });
+  const [canAddRefund, setCanAddRefund] = useState(isSuperAdmin);
+
+  useEffect(() => {
+    if (isSuperAdmin) return;
+    api.get('/feature-permissions/refunds.addFromFulfillment/check')
+      .then(({ data }) => setCanAddRefund(Boolean(data?.allowed)))
+      .catch(() => setCanAddRefund(false));
+  }, [isSuperAdmin]);
 
   // PT (Pacific Time) refresh state — refreshes existing orders created on a specific PT date/range
   const todayUTC = new Date().toISOString().slice(0, 10);
@@ -3634,6 +3643,27 @@ function FulfillmentDashboard() {
       setTimeout(() => setCopiedText(''), 1200);
     }
   }, []);
+
+  const handleAddToRefund = async (type) => {
+    const order = refundMenu.order;
+    setRefundMenu({ anchorEl: null, order: null });
+    if (!order?._id) return;
+    const label = type === 'inr' ? 'INR' : 'Return';
+    try {
+      const { data } = await api.post('/refunds', { orderId: order._id, type });
+      setSnackbarOrderIds([]);
+      setSnackbarSeverity(data.created ? 'success' : 'info');
+      setSnackbarMsg(data.created
+        ? `Order ${order.orderId} added to Refunds (${label})`
+        : `Order ${order.orderId} is already in Refunds (${label})`);
+      setSnackbarOpen(true);
+    } catch (err) {
+      setSnackbarOrderIds([]);
+      setSnackbarSeverity('error');
+      setSnackbarMsg(err?.response?.data?.error || 'Failed to add order to Refunds');
+      setSnackbarOpen(true);
+    }
+  };
 
   // Handle Amazon refund received - zero out Amazon costs
   const handleAmazonRefundReceived = async (order) => {
@@ -6221,7 +6251,19 @@ function FulfillmentDashboard() {
                               )}
                             </TableCell>
                           )}
-
+                          <TableCell sx={{ textAlign: 'center' }}>
+                            {canAddRefund && (
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                endIcon={<ExpandMoreIcon />}
+                                onClick={(e) => setRefundMenu({ anchorEl: e.currentTarget, order })}
+                                sx={{ fontSize: '0.7rem', py: 0.25, whiteSpace: 'nowrap' }}
+                              >
+                                Refund
+                              </Button>
+                            )}
+                          </TableCell>
 
                         </TableRow>
                     ))}
@@ -6791,6 +6833,15 @@ function FulfillmentDashboard() {
         </Dialog>
 
         {/* Snackbar for polling results */}
+        <Menu
+          anchorEl={refundMenu.anchorEl}
+          open={Boolean(refundMenu.anchorEl)}
+          onClose={() => setRefundMenu({ anchorEl: null, order: null })}
+        >
+          <MenuItem onClick={() => handleAddToRefund('return')}>Return</MenuItem>
+          <MenuItem onClick={() => handleAddToRefund('inr')}>INR</MenuItem>
+        </Menu>
+
         <Snackbar
           open={snackbarOpen}
           autoHideDuration={10000}

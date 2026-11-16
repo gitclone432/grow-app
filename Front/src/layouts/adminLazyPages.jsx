@@ -112,6 +112,7 @@ export const EtsyProfitSheetPage = lazy(() => import('../pages/admin/etsy/EtsyPr
 export const EtsyReturnLabelsPage = lazy(() => import('../pages/admin/etsy/EtsyReturnLabelsPage.jsx'));
 export const AmazonPiSourceColumnsPage = lazy(() => import('../pages/admin/AmazonPiSourceColumnsPage.jsx'));
 export const AffiliateOrdersPage = lazy(() => import('../pages/admin/AffiliateOrdersPage.jsx'));
+export const RefundsPage = lazy(() => import('../pages/admin/RefundsPage.jsx'));
 export const IdeasPage = lazy(() => import('../pages/IdeasPage.jsx'));
 export const OrderAnalyticsPage = lazy(() => import('../pages/admin/OrderAnalyticsPage.jsx'));
 export const MicroOrdersPage = lazy(() => import('../pages/admin/MicroOrdersPage.jsx'));
