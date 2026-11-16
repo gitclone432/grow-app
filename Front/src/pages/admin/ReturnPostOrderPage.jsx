@@ -34,6 +34,7 @@ import {
   Divider,
   Tabs,
   Tab,
+  Autocomplete,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import AssignmentReturnIcon from '@mui/icons-material/AssignmentReturn';
@@ -56,6 +57,8 @@ import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import { fetchAllPages } from '../../lib/fetchAllPages';
 import ColumnSelector from '../../components/ColumnSelector';
 import ChatModal from '../../components/ChatModal';
+import ResolutionOptionsModal from '../../components/ResolutionOptionsModal';
+import EditIcon from '@mui/icons-material/Edit';
 import { yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 import { sortSellersByName } from '../../lib/sellersSort.js';
 
@@ -366,6 +369,188 @@ const VerdictCell = React.memo(function VerdictCell({ row, onSave, onNotify }) {
   );
 });
 
+const RETURN_ISSUE_OPTIONS_ENDPOINT = '/return-issue-options';
+
+const ACCOUNTABLE_CHIP_COLORS = {
+  buyer: { bg: '#7b3f00', color: '#fff' },
+  lister: { bg: '#5e35b1', color: '#fff' },
+  compliance: { bg: '#1b7a4b', color: '#fff' },
+  affiliate: { bg: '#1565c0', color: '#fff' },
+  amazon: { bg: '#c62828', color: '#fff' },
+  bot: { bg: '#ffcdd2', color: '#b71c1c' },
+};
+const DEFAULT_CHIP_COLORS = { bg: '#e0e0e0', color: 'rgba(0,0,0,0.87)' };
+
+function getIssueOptionChipColors(field, value) {
+  if (field !== 'accountable') return DEFAULT_CHIP_COLORS;
+  return ACCOUNTABLE_CHIP_COLORS[String(value || '').trim().toLowerCase()] || DEFAULT_CHIP_COLORS;
+}
+
+function IssueOptionChip({ field, value }) {
+  const { bg, color } = getIssueOptionChipColors(field, value);
+  return (
+    <Chip
+      label={value}
+      size="small"
+      sx={{ bgcolor: bg, color, fontWeight: 500, maxWidth: 170, height: 22, fontSize: '0.75rem' }}
+    />
+  );
+}
+
+// --- ACCOUNTABLE / PRODUCT CELL (searchable dropdown backed by managed options) ---
+const IssueOptionSelectCell = React.memo(function IssueOptionSelectCell({
+  row, field, label, options, onSave, onNotify,
+}) {
+  const [isSaving, setIsSaving] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+  const currentValue = row[field] || '';
+  const showChip = Boolean(currentValue) && !open;
+
+  // A row can hold a value that was later renamed or deleted; keep it selectable so it still displays.
+  const optionNames = React.useMemo(() => {
+    const names = (options || []).map((o) => o.name).filter(Boolean);
+    return currentValue && !names.includes(currentValue) ? [...names, currentValue] : names;
+  }, [options, currentValue]);
+
+  const handleChange = async (_event, newValue) => {
+    const next = newValue || '';
+    if (next === currentValue) return;
+    setIsSaving(true);
+    try {
+      await onSave(row.returnId, { [field]: next });
+      onNotify('success', `${label} saved`);
+    } catch (e) {
+      onNotify('error', `Failed to save ${label.toLowerCase()}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <Box onClick={(e) => e.stopPropagation()} sx={{ minWidth: 190 }}>
+      <Autocomplete
+        size="small"
+        options={optionNames}
+        value={currentValue || null}
+        onChange={handleChange}
+        open={open}
+        onOpen={() => setOpen(true)}
+        onClose={() => setOpen(false)}
+        disabled={isSaving}
+        autoHighlight
+        renderOption={(props, option) => (
+          <li {...props} key={option}>
+            <IssueOptionChip field={field} value={option} />
+          </li>
+        )}
+        renderInput={(params) => (
+          <TextField
+            {...params}
+            variant="standard"
+            placeholder={`Select ${label.toLowerCase()}`}
+            InputProps={{
+              ...params.InputProps,
+              disableUnderline: true,
+              startAdornment: showChip ? <IssueOptionChip field={field} value={currentValue} /> : null,
+              sx: {
+                fontSize: '0.8rem',
+                // While closed, the chip represents the value; the raw text is only shown for searching.
+                '& input': showChip ? { width: '0 !important', minWidth: '0 !important', p: '0 !important' } : {},
+              },
+            }}
+          />
+        )}
+      />
+    </Box>
+  );
+});
+
+// --- EXPLANATION CELL (Inline Editable) ---
+const ExplanationCell = React.memo(function ExplanationCell({ row, onSave, onNotify }) {
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [tempValue, setTempValue] = React.useState(row.explanation || '');
+  const [isSaving, setIsSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isEditing) {
+      setTempValue(row.explanation || '');
+    }
+  }, [row.explanation, isEditing]);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await onSave(row.returnId, { explanation: tempValue });
+      setIsEditing(false);
+      onNotify('success', 'Explanation saved');
+    } catch (e) {
+      onNotify('error', 'Failed to save explanation');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    setTempValue(row.explanation || '');
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <Box
+        onClick={(e) => e.stopPropagation()}
+        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 220 }}
+      >
+        <TextField
+          fullWidth
+          multiline
+          minRows={2}
+          size="small"
+          value={tempValue}
+          onChange={(e) => setTempValue(e.target.value)}
+          placeholder="Enter explanation..."
+          autoFocus
+        />
+        <Stack direction="row" spacing={1}>
+          <Button variant="contained" size="small" onClick={handleSave} disabled={isSaving} sx={{ fontSize: '0.7rem', py: 0.5 }}>
+            {isSaving ? 'Saving...' : 'Save'}
+          </Button>
+          <Button variant="outlined" size="small" onClick={handleCancel} disabled={isSaving} sx={{ fontSize: '0.7rem', py: 0.5 }}>
+            Cancel
+          </Button>
+        </Stack>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      onClick={(e) => {
+        e.stopPropagation();
+        setIsEditing(true);
+      }}
+      sx={{
+        cursor: 'pointer',
+        minHeight: 30,
+        minWidth: 180,
+        display: 'flex',
+        alignItems: 'center',
+        '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1, px: 1 }
+      }}
+    >
+      {row.explanation ? (
+        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
+          {row.explanation}
+        </Typography>
+      ) : (
+        <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+          + Add Explanation
+        </Typography>
+      )}
+    </Box>
+  );
+});
+
 function formatEbayInstant(value) {
   if (!value) return '';
   const raw = typeof value === 'object' ? (value.value || value.formattedValue || '') : value;
@@ -422,6 +607,9 @@ const RETURN_EXPORT_COLUMNS = {
   notes: { header: 'notes', value: (row) => row.internalNotes || '' },
   internalReason: { header: 'Internal Reason', value: (row) => row.internalReason || '' },
   verdict: { header: 'Verdict', value: (row) => row.verdict || '' },
+  accountable: { header: 'Accountable', value: (row) => row.accountable || '' },
+  product: { header: 'Product', value: (row) => row.product || '' },
+  explanation: { header: 'Explanation', value: (row) => row.explanation || '' },
   refund: { header: 'refund', value: (row) => row.refundAmount?.value ? `${row.refundAmount.currency || 'USD'} ${row.refundAmount.value}` : '' },
   trackingNumber: { header: 'trackingNumber', value: (row) => row.trackingNumber || '' },
   carrierUsed: { header: 'carrierUsed', value: (row) => row.carrierUsed || '' },
@@ -722,6 +910,9 @@ export default function ReturnPostOrderPage({
     { id: 'notes', label: 'notes' },
     { id: 'internalReason', label: 'Internal Reason' },
     { id: 'verdict', label: 'Verdict' },
+    { id: 'accountable', label: 'Accountable' },
+    { id: 'product', label: 'Product' },
+    { id: 'explanation', label: 'Explanation' },
     { id: 'refund', label: 'refund' },
     { id: 'trackingNumber', label: 'trackingNumber' },
     { id: 'carrierUsed', label: 'carrierUsed' },
@@ -736,6 +927,22 @@ export default function ReturnPostOrderPage({
   ];
   const [visibleColumns, setVisibleColumns] = useState(ALL_COLUMNS.map((c) => c.id));
   const [selectedReturn, setSelectedReturn] = useState(null);
+  const [issueOptions, setIssueOptions] = useState({ accountable: [], product: [] });
+  const [manageIssueOptionType, setManageIssueOptionType] = useState(null);
+
+  async function loadIssueOptions(type) {
+    try {
+      const { data } = await api.get(`${RETURN_ISSUE_OPTIONS_ENDPOINT}/${type}`);
+      setIssueOptions((prev) => ({ ...prev, [type]: Array.isArray(data) ? data : [] }));
+    } catch (e) {
+      console.error(`Failed to load ${type} options`, e);
+    }
+  }
+
+  useEffect(() => {
+    loadIssueOptions('accountable');
+    loadIssueOptions('product');
+  }, []);
 
   const internalDateFilter = useMemo(
     () => ({ mode: 'all', single: '', from: '', to: '' }),
@@ -969,6 +1176,22 @@ export default function ReturnPostOrderPage({
     await api.patch(`/ebay/returns/${returnId}/verdict`, { verdict: verdictText });
     setRows(prev => prev.map(r => r.returnId === returnId ? { ...r, verdict: verdictText } : r));
   }
+
+  async function handleIssueFieldsSave(returnId, fields) {
+    await api.patch(`/ebay/returns/${returnId}/issue-fields`, fields);
+    setRows(prev => prev.map(r => r.returnId === returnId ? { ...r, ...fields } : r));
+  }
+
+  const renderManageableHeader = (label, type) => (
+    <Stack direction="row" alignItems="center" spacing={0.5}>
+      <span>{label}</span>
+      <Tooltip title={`Manage ${label} options`}>
+        <IconButton size="small" onClick={() => setManageIssueOptionType(type)} sx={{ color: 'inherit', p: 0.25 }}>
+          <EditIcon sx={{ fontSize: 16 }} />
+        </IconButton>
+      </Tooltip>
+    </Stack>
+  );
 
   const handleNotify = (severity, message) => {
     setSnackbar({ open: true, message, severity });
@@ -1634,6 +1857,9 @@ export default function ReturnPostOrderPage({
                 {visibleColumns.includes('notes') && <TableCell sx={headerSx}>notes</TableCell>}
                 {visibleColumns.includes('internalReason') && <TableCell sx={headerSx}>Internal Reason</TableCell>}
                 {visibleColumns.includes('verdict') && <TableCell sx={headerSx}>Verdict</TableCell>}
+                {visibleColumns.includes('accountable') && <TableCell sx={headerSx}>{renderManageableHeader('Accountable', 'accountable')}</TableCell>}
+                {visibleColumns.includes('product') && <TableCell sx={headerSx}>{renderManageableHeader('Product', 'product')}</TableCell>}
+                {visibleColumns.includes('explanation') && <TableCell sx={headerSx}>Explanation</TableCell>}
                 {visibleColumns.includes('refund') && <TableCell sx={headerSx}>refund</TableCell>}
                 {visibleColumns.includes('trackingNumber') && <TableCell sx={headerSx}>trackingNumber</TableCell>}
                 {visibleColumns.includes('carrierUsed') && <TableCell sx={headerSx}>carrierUsed</TableCell>}
@@ -1752,6 +1978,35 @@ export default function ReturnPostOrderPage({
                     {visibleColumns.includes('verdict') && (
                       <TableCell sx={{ maxWidth: 280 }}>
                         <VerdictCell row={row} onSave={handleVerdictSave} onNotify={handleNotify} />
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('accountable') && (
+                      <TableCell>
+                        <IssueOptionSelectCell
+                          row={row}
+                          field="accountable"
+                          label="Accountable"
+                          options={issueOptions.accountable}
+                          onSave={handleIssueFieldsSave}
+                          onNotify={handleNotify}
+                        />
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('product') && (
+                      <TableCell>
+                        <IssueOptionSelectCell
+                          row={row}
+                          field="product"
+                          label="Product"
+                          options={issueOptions.product}
+                          onSave={handleIssueFieldsSave}
+                          onNotify={handleNotify}
+                        />
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('explanation') && (
+                      <TableCell sx={{ maxWidth: 320 }}>
+                        <ExplanationCell row={row} onSave={handleIssueFieldsSave} onNotify={handleNotify} />
                       </TableCell>
                     )}
                     {visibleColumns.includes('refund') && (
@@ -2590,6 +2845,15 @@ export default function ReturnPostOrderPage({
           onMessageSent={clearBuyerMessageIndicator}
         />
       )}
+
+      <ResolutionOptionsModal
+        open={Boolean(manageIssueOptionType)}
+        onClose={() => setManageIssueOptionType(null)}
+        options={manageIssueOptionType ? issueOptions[manageIssueOptionType] : []}
+        onReload={() => manageIssueOptionType && loadIssueOptions(manageIssueOptionType)}
+        endpoint={`${RETURN_ISSUE_OPTIONS_ENDPOINT}/${manageIssueOptionType || 'accountable'}`}
+        title={manageIssueOptionType === 'product' ? 'Manage Product Options' : 'Manage Accountable Options'}
+      />
 
       <Snackbar
         open={snackbar.open}

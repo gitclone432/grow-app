@@ -25334,6 +25334,33 @@ router.patch('/returns/:returnId/verdict', requireAuth, async (req, res) => {
   }
 });
 
+// Update Accountable / Product / Explanation (only the fields sent are changed)
+router.patch('/returns/:returnId/issue-fields', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const update = {};
+    for (const field of ['accountable', 'product', 'explanation']) {
+      if (req.body?.[field] !== undefined) {
+        update[field] = String(req.body[field] ?? '').trim();
+      }
+    }
+    if (!Object.keys(update).length) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const returnDoc = await Return.findOneAndUpdate({ returnId }, { $set: update }, { new: true });
+
+    if (!returnDoc) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    res.json({ success: true, return: returnDoc });
+  } catch (err) {
+    console.error('Error updating return issue fields:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Mark / unmark a return as SNAD (manual BBE override)
 router.patch('/returns/:returnId/mark-snad', requireAuth, async (req, res) => {
   try {

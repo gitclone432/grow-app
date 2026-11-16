@@ -131,6 +131,7 @@ export const PAGE_DEFAULT_ROLES = {
   'CronJobs': ['superadmin'],
   'InfraUsage': ['superadmin'],
   'AffiliateOrders': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
+  'Refunds': ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'],
 
   // eBay Parameters
   'StoreOverview': ['superadmin', 'listingadmin'],

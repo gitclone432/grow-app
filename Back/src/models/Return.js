@@ -104,6 +104,11 @@ const ReturnSchema = new mongoose.Schema(
     // Verdict (manual entry field)
     verdict: { type: String, default: '' },
 
+    // Issues & Resolutions classification (options managed via ReturnIssueOption)
+    accountable: { type: String, default: '' },
+    product: { type: String, default: '' },
+    explanation: { type: String, default: '' },
+
     // Compliance board status for kanban board
     complianceBoardStatus: { type: String, default: 'case_opened' },
 
