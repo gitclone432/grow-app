@@ -114,6 +114,22 @@ function serializeEntry(entry) {
         dateSold: order?.dateSold || order?.creationDate || null,
         marketplace: order?.purchaseMarketplaceId || '',
         amazonAccount: order?.amazonAccount || '',
+        azOrderId: order?.azOrderId || '',
+        // Order data needed to build and send the remark message to the buyer.
+        orderInfo: order ? {
+            _id: order._id,
+            orderId: order.orderId,
+            sellerId: order.sellerId || '',
+            buyer: order.buyer || null,
+            shippingFullName: order.shippingFullName || '',
+            lineItems: order.lineItems || [],
+            itemNumber: order.itemNumber || '',
+            productName: order.productName || '',
+            trackingNumber: order.trackingNumber || '',
+            shippingCarrier: order.shippingCarrier || '',
+            arrivingDate: order.arrivingDate || '',
+            issueReason: order.issueReason || ''
+        } : null,
         seller: entry.seller || null,
         refundDate: entry.refundDate,
         refundAmount: entry.refundAmount,
@@ -128,7 +144,9 @@ function serializeEntry(entry) {
     };
 }
 
-const ORDER_FIELDS = 'orderId dateSold creationDate purchaseMarketplaceId amazonAccount remark issueReason';
+const ORDER_FIELDS = 'orderId dateSold creationDate purchaseMarketplaceId amazonAccount azOrderId remark issueReason '
+    + 'sellerId buyer.username buyer.buyerRegistrationAddress.fullName shippingFullName lineItems.title lineItems.legacyItemId '
+    + 'itemNumber productName trackingNumber shippingCarrier arrivingDate';
 
 const SELLER_POPULATE = { path: 'seller', select: 'user', populate: { path: 'user', select: 'username' } };
 
