@@ -137,14 +137,14 @@ function serializeEntry(entry) {
         // Category is the order's remark; Reason is the order's issue reason.
         category: order?.remark || '',
         reason: order?.issueReason || '',
-        notes: entry.notes || '',
+        notes: order?.fulfillmentNotes || entry.notes || '',
         amazonRefundAmount: entry.amazonRefundAmount,
         amazonNotes: entry.amazonNotes || '',
         createdAt: entry.createdAt
     };
 }
 
-const ORDER_FIELDS = 'orderId dateSold creationDate purchaseMarketplaceId amazonAccount azOrderId remark issueReason '
+const ORDER_FIELDS = 'orderId dateSold creationDate purchaseMarketplaceId amazonAccount azOrderId remark issueReason fulfillmentNotes '
     + 'sellerId buyer.username buyer.buyerRegistrationAddress.fullName shippingFullName lineItems.title lineItems.legacyItemId '
     + 'itemNumber productName trackingNumber shippingCarrier arrivingDate';
 
@@ -327,7 +327,7 @@ router.get('/', requireAuth, requirePageAccess('Refunds'), async (req, res) => {
     }
 });
 
-const TEXT_FIELDS = ['status', 'notes', 'amazonNotes'];
+const TEXT_FIELDS = ['status', 'amazonNotes'];
 const AMOUNT_FIELDS = ['refundAmount', 'amazonRefundAmount'];
 
 router.patch('/:id', requireAuth, requirePageAccess('Refunds'), async (req, res) => {
@@ -338,6 +338,11 @@ router.patch('/:id', requireAuth, requirePageAccess('Refunds'), async (req, res)
         for (const field of TEXT_FIELDS) {
             if (body[field] !== undefined) update[field] = String(body[field] ?? '').trim();
         }
+
+        // Notes are the order's fulfillment notes, shared with the Fulfillment dashboard.
+        const notesProvided = body.notes !== undefined;
+        // Drop any older notes stored on the entry itself so they cannot reappear after the note is cleared.
+        if (notesProvided) update.notes = '';
 
         for (const field of AMOUNT_FIELDS) {
             if (body[field] === undefined) continue;
@@ -364,13 +369,25 @@ router.patch('/:id', requireAuth, requirePageAccess('Refunds'), async (req, res)
             }
         }
 
-        if (!Object.keys(update).length) {
+        if (!Object.keys(update).length && !notesProvided) {
             return res.status(400).json({ error: 'No fields to update' });
         }
 
-        const entry = await RefundEntry.findByIdAndUpdate(req.params.id, { $set: update }, { new: true })
-            .populate(ENTRY_POPULATE)
-            .lean();
+        if (notesProvided) {
+            const existing = await RefundEntry.findById(req.params.id).select('order').lean();
+            if (!existing) {
+                return res.status(404).json({ error: 'Refund entry not found' });
+            }
+            await Order.updateOne(
+                { _id: existing.order },
+                { $set: { fulfillmentNotes: String(body.notes ?? '').trim() } }
+            );
+        }
+
+        const query = Object.keys(update).length
+            ? RefundEntry.findByIdAndUpdate(req.params.id, { $set: update }, { new: true })
+            : RefundEntry.findById(req.params.id);
+        const entry = await query.populate(ENTRY_POPULATE).lean();
         if (!entry) {
             return res.status(404).json({ error: 'Refund entry not found' });
         }
