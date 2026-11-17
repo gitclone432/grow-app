@@ -4266,7 +4266,7 @@ async function loadItemImageMap(orders) {
 
 // Get stored orders from database with pagination support
 router.get('/stored-orders', async (req, res) => {
-  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, cancelStatus, issueType, caseCategory, caseStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, sortBy, sortDir, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient, remark } = req.query;
+  const { sellerId, page = 1, limit = 50, searchOrderId, searchAzOrderId, searchBuyerName, searchItemId, searchSku, searchMarketplace, paymentStatus, cancelStatus, issueType, caseCategory, caseStatus, startDate, endDate, awaitingShipment, hasFulfillmentNotes, amazonArriving, arrivalSort, sortBy, sortDir, amazonAccount, arrivalStartDate, arrivalEndDate, arrivalDateFrom, arrivalDateTo, productName, excludeClient, remark, issueReason } = req.query;
 
   try {
     let query = {};
@@ -4376,6 +4376,16 @@ router.get('/stored-orders', async (req, res) => {
         }
       } else {
         query.remark = remark;
+      }
+    }
+
+    // Reason (Issue) filter
+    if (issueReason && issueReason !== '') {
+      if (issueReason === '__NO_REASON__') {
+        if (!query.$and) query.$and = [];
+        query.$and.push({ $or: [{ issueReason: { $exists: false } }, { issueReason: null }, { issueReason: '' }] });
+      } else {
+        query.issueReason = issueReason;
       }
     }
 
@@ -12049,6 +12059,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
           shipByDate: 1,
           purchaseMarketplaceId: 1,
           remark: 1,
+          issueReason: 1,
           fulfillmentNotes: 1,
           amazonAccount: 1,
           azOrderId: 1,
@@ -12084,6 +12095,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         shipByDate: o.shipByDate || null, // Ship By date from Order (same field as FulfillmentDashboard)
         purchaseMarketplaceId: o.purchaseMarketplaceId,
         remark: o.remark || '', // Get remark from Order (same field as FulfillmentDashboard)
+        issueReason: o.issueReason || '',
         notes: o.fulfillmentNotes || '', // Get notes from Order (same field as FulfillmentDashboard)
         amazonAccount: o.amazonAccount || null,
         amazonOrderId: o.azOrderId || '',
@@ -12121,6 +12133,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         shipByDate: orderMap[key]?.shipByDate || null, // Ship By date from Order (same field as FulfillmentDashboard)
         purchaseMarketplaceId: orderMap[key]?.purchaseMarketplaceId || c.marketplaceId || 'EBAY_US',
         remark: orderMap[key]?.remark || '', // Use remark from Order (same field as FulfillmentDashboard)
+        issueReason: orderMap[key]?.issueReason || '',
         notes: orderMap[key]?.notes || '', // Use notes from Order (same field as FulfillmentDashboard)
         amazonAccount: orderMap[key]?.amazonAccount || null,
         amazonOrderId: orderMap[key]?.amazonOrderId || '',
@@ -25320,6 +25333,33 @@ router.patch('/returns/:returnId/verdict', requireAuth, async (req, res) => {
     res.json({ success: true, return: returnDoc });
   } catch (err) {
     console.error('Error updating return verdict:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update Accountable / Product / Explanation (only the fields sent are changed)
+router.patch('/returns/:returnId/issue-fields', requireAuth, async (req, res) => {
+  try {
+    const { returnId } = req.params;
+    const update = {};
+    for (const field of ['accountable', 'product', 'explanation']) {
+      if (req.body?.[field] !== undefined) {
+        update[field] = String(req.body[field] ?? '').trim();
+      }
+    }
+    if (!Object.keys(update).length) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const returnDoc = await Return.findOneAndUpdate({ returnId }, { $set: update }, { new: true });
+
+    if (!returnDoc) {
+      return res.status(404).json({ error: 'Return not found' });
+    }
+
+    res.json({ success: true, return: returnDoc });
+  } catch (err) {
+    console.error('Error updating return issue fields:', err);
     res.status(500).json({ error: err.message });
   }
 });

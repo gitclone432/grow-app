@@ -16,7 +16,14 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import api from '../lib/api';
 
-export default function ResolutionOptionsModal({ open, onClose, options = [], onReload }) {
+export default function ResolutionOptionsModal({
+    open,
+    onClose,
+    options = [],
+    onReload,
+    endpoint = '/resolution-options',
+    title = 'Manage Resolution Options'
+}) {
     const [name, setName] = useState('');
     const [editingId, setEditingId] = useState(null);
     const [saving, setSaving] = useState(false);
@@ -54,9 +61,9 @@ export default function ResolutionOptionsModal({ open, onClose, options = [], on
         setError('');
         try {
             if (editingId) {
-                await api.patch(`/resolution-options/${editingId}`, { name: trimmedName });
+                await api.patch(`${endpoint}/${editingId}`, { name: trimmedName });
             } else {
-                await api.post('/resolution-options', { name: trimmedName });
+                await api.post(endpoint, { name: trimmedName });
             }
             setName('');
             setEditingId(null);
@@ -78,7 +85,7 @@ export default function ResolutionOptionsModal({ open, onClose, options = [], on
         setSaving(true);
         setError('');
         try {
-            await api.delete(`/resolution-options/${optionId}`);
+            await api.delete(`${endpoint}/${optionId}`);
             if (editingId === optionId) {
                 setEditingId(null);
                 setName('');
@@ -93,7 +100,7 @@ export default function ResolutionOptionsModal({ open, onClose, options = [], on
 
     return (
         <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
-            <DialogTitle>Manage Resolution Options</DialogTitle>
+            <DialogTitle>{title}</DialogTitle>
             <DialogContent dividers>
                 <Stack spacing={2}>
                     <TextField

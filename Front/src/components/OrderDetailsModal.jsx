@@ -33,6 +33,7 @@ import {
   loadRemarkTemplates,
   remarkOptionsFromTemplates
 } from '../constants/remarkTemplates';
+import { loadIssueReasonOptions, withCurrentIssueReason } from '../constants/issueReasons';
 
 const formatDate = (dateStr) => {
   if (!dateStr) return '-';
@@ -402,6 +403,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
   });
   const [amazonAccounts, setAmazonAccounts] = useState([]);
   const [remarkOptions, setRemarkOptions] = useState([]);
+  const [issueReasonOptions, setIssueReasonOptions] = useState([]);
   const [savingField, setSavingField] = useState('');
   const [saveError, setSaveError] = useState('');
   const [savedField, setSavedField] = useState('');
@@ -461,6 +463,17 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!editable) return undefined;
+    let mounted = true;
+    loadIssueReasonOptions().then((options) => {
+      if (mounted) setIssueReasonOptions(options);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [editable]);
+
   const normalizeValue = (field, value) => {
     if (field === 'beforeTax' || field === 'estimatedTax') return parseCurrencyInput(value);
     if (field === 'arrivingDate') return value || null;
@@ -472,7 +485,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
   };
 
   // Batch save all dirty fields when remark is updated
-  const batchSaveAllFields = async (remarkValue) => {
+  const batchSaveAllFields = async (remarkValue, issueReason) => {
     if (!editable) return false;
 
     if (!orderMongoId) {
@@ -496,6 +509,11 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
         hasChanges = true;
       }
     });
+
+    if (issueReason !== undefined && issueReason !== (order.issueReason || '')) {
+      payload.issueReason = issueReason || null;
+      hasChanges = true;
+    }
 
     if (!hasChanges && remarkValue === (order.remark || '')) {
       // No changes to save
@@ -593,7 +611,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
     handleLocalChange('remark', remarkValue);
     const template = findRemarkTemplateText(remarkTemplates, remarkValue);
     if (template) {
-      setPendingRemarkUpdate({ remarkValue, order });
+      setPendingRemarkUpdate({ remarkValue, order, issueReason: order.issueReason || '' });
       return;
     }
     // Trigger batch save of all fields when remark is updated
@@ -603,7 +621,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
   const handleSkipRemarkMessage = async () => {
     if (!pendingRemarkUpdate) return;
     // Trigger batch save with the remark value
-    const saved = await batchSaveAllFields(pendingRemarkUpdate.remarkValue);
+    const saved = await batchSaveAllFields(pendingRemarkUpdate.remarkValue, pendingRemarkUpdate.issueReason);
     if (saved) setPendingRemarkUpdate(null);
   };
 
@@ -612,7 +630,7 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
     setSendingRemarkMessage(true);
     try {
       // Trigger batch save with the remark value
-      const saved = await batchSaveAllFields(pendingRemarkUpdate.remarkValue);
+      const saved = await batchSaveAllFields(pendingRemarkUpdate.remarkValue, pendingRemarkUpdate.issueReason);
       if (!saved) return;
       await sendAutoMessageForRemark(pendingRemarkUpdate.remarkValue);
       setPendingRemarkUpdate(null);
@@ -792,6 +810,25 @@ function EditableFulfillmentFields({ order, onOrderUpdate, editable = false }) {
             <Alert severity="info" icon={<InfoIcon />}>
               You're updating the remark to <strong>"{pendingRemarkUpdate?.remarkValue}"</strong>
             </Alert>
+            <TextField
+              select
+              label="Reason (Issue)"
+              size="small"
+              value={pendingRemarkUpdate?.issueReason || ''}
+              onChange={(event) => {
+                const issueReason = event.target.value;
+                setPendingRemarkUpdate((prev) => (prev ? { ...prev, issueReason } : prev));
+              }}
+              disabled={sendingRemarkMessage}
+              sx={{ maxWidth: 320 }}
+            >
+              <MenuItem value="">- Select -</MenuItem>
+              {withCurrentIssueReason(issueReasonOptions, pendingRemarkUpdate?.issueReason).map((option) => (
+                <MenuItem key={option._id} value={option.name}>
+                  {option.name}
+                </MenuItem>
+              ))}
+            </TextField>
             <Box>
               <Typography variant="body2" color="text.secondary" gutterBottom>
                 Would you like to automatically send this message to the buyer?

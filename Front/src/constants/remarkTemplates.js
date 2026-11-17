@@ -130,3 +130,55 @@ export function remarkOptionsFromTemplates(templates) {
     name: template.name
   }));
 }
+
+// Fills the {{variables}} of a remark template from an order (same rules as the Fulfillment dashboard).
+export function fillRemarkTemplate(template, order, remarkValue) {
+  if (!template || !order) return template;
+  const buyerFullName = order.buyer?.buyerRegistrationAddress?.fullName || order.shippingFullName || 'Buyer';
+  const buyerFirstName = buyerFullName.split(' ')[0];
+  const itemTitle = order.lineItems?.[0]?.title || order.productName || `Item ${order.itemNumber || ''}`.trim() || 'item';
+  const trackingNumber = order.trackingNumber || '[tracking number]';
+  const shippingCarrier = order.shippingCarrier || 'the shipping carrier';
+  const hasBuyerNameToken = /\{\{\s*buyer_(first_)?name\s*\}\}|\{BUYER_NAME\}/i.test(template);
+
+  let text = template
+    .replace(/\{\{buyer_first_name\}\}/g, buyerFirstName)
+    .replace(/\{\{buyer_name\}\}/gi, buyerFirstName)
+    .replace(/\{BUYER_NAME\}/g, buyerFirstName)
+    .replace(/\{\{item_title\}\}/g, itemTitle)
+    .replace(/\{\{tracking_number\}\}/g, trackingNumber)
+    .replace(/\{\{shipping_carrier\}\}/g, shippingCarrier);
+
+  if (!hasBuyerNameToken) {
+    text = text.replace(
+      /^(\s*["'“”‘’]?\s*)(hi|hello|hey)([!,.:;]?)(\s*)/i,
+      (match, prefix, greeting, punctuation, spaceAfter) =>
+        `${prefix}${greeting} ${buyerFirstName}${punctuation || ','}${spaceAfter || ' '}`
+    );
+  }
+
+  // "Shipped" only: add the expected delivery date (arriving date + 1 day)
+  if (String(remarkValue || '').trim().toLowerCase() === 'shipped') {
+    const raw = String(order.arrivingDate || '').trim();
+    let y;
+    let m;
+    let d;
+    let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      [, y, m, d] = match;
+    } else if ((match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) {
+      [, d, m, y] = match;
+    } else {
+      return text;
+    }
+    const date = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d) + 1));
+    if (Number.isNaN(date.getTime())) return text;
+    const formatted = date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+    text = text.replace(
+      /Your order has been shipped\./i,
+      `Your order has been shipped and expected to be delivered by ${formatted}.`
+    );
+  }
+
+  return text;
+}

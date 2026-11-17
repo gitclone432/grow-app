@@ -142,6 +142,7 @@ export const PAGE_REGISTRY = [
   { id: 'GmailTester', name: 'Gmail Tester', path: '/gmail-tester', category: 'settingsSection', defaultRoles: ['superadmin'] },
   { id: 'Authenticator', name: 'Authenticator', path: '/authenticator', category: 'settingsSection', defaultRoles: ['superadmin', 'listingadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
   { id: 'AffiliateOrders', name: 'Affiliate Orders', path: '/affiliate-orders', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
+  { id: 'Refunds', name: 'Refunds', path: '/refunds', category: 'compliance', defaultRoles: ['superadmin', 'fulfillmentadmin', 'hoc', 'compliancemanager'] },
 
   // ====== EBAY PARAMETERS ======
   { id: 'StoreOverview', name: 'Store Limits', path: '/store-overview', category: 'ebayParams', defaultRoles: ['superadmin', 'listingadmin'] },
