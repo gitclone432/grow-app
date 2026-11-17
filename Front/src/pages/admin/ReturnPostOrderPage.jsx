@@ -559,6 +559,37 @@ export default function ReturnPostOrderPage({
   hideDateFilter = false,
   embedded = false,
 }) {
+  const [canAddRefund, setCanAddRefund] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('user') || '{}').role === 'superadmin';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (canAddRefund) return;
+    api.get('/feature-permissions/refunds.addFromFulfillment/check')
+      .then(({ data }) => setCanAddRefund(Boolean(data?.allowed)))
+      .catch(() => setCanAddRefund(false));
+  }, [canAddRefund]);
+
+  const handleAddToRefunds = async (row) => {
+    const ebayOrderId = row.orderId || row.legacyOrderId;
+    if (!ebayOrderId) return;
+    try {
+      const { data } = await api.post('/refunds', { ebayOrderId, type: 'return' });
+      setSnackbar({
+        open: true,
+        message: data.created
+          ? `Order ${ebayOrderId} added to Refunds (Return)`
+          : `Order ${ebayOrderId} is already in Refunds (Return)`,
+        severity: data.created ? 'success' : 'info',
+      });
+    } catch (e) {
+      setSnackbar({ open: true, message: e?.response?.data?.error || 'Failed to add to Refunds', severity: 'error' });
+    }
+  };
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
@@ -1823,6 +1854,16 @@ export default function ReturnPostOrderPage({
                               sx={{ textTransform: 'none', fontSize: '0.7rem', py: 0.25, minWidth: 0 }}
                             >
                               Refund
+                            </Button>
+                          )}
+                          {canAddRefund && (
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              onClick={() => handleAddToRefunds(row)}
+                              sx={{ textTransform: 'none', fontSize: '0.7rem', py: 0.25, minWidth: 0, whiteSpace: 'nowrap' }}
+                            >
+                              Add to Refunds
                             </Button>
                           )}
                           <Tooltip title="All Return Post-Order APIs">

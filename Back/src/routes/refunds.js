@@ -179,15 +179,22 @@ const DATE_PARAM = /^\d{4}-\d{2}-\d{2}$/;
 // Called from the Fulfillment dashboard: add an order to the Return or INR refund list.
 router.post('/', requireAuth, requireFeatureAccess(REFUND_ADD_FEATURE_ID), async (req, res) => {
     try {
-        const { orderId, type } = req.body || {};
+        const { orderId, ebayOrderId, type } = req.body || {};
         if (!REFUND_TYPES.includes(type)) {
             return res.status(400).json({ error: 'Type must be "return" or "inr"' });
         }
-        if (!mongoose.Types.ObjectId.isValid(orderId)) {
-            return res.status(400).json({ error: 'Invalid order' });
-        }
 
-        const order = await Order.findById(orderId).select('orderId seller').lean();
+        // The Return API page only knows the eBay order number, not the database id.
+        let order;
+        if (ebayOrderId) {
+            const number = String(ebayOrderId).trim();
+            order = await Order.findOne({ $or: [{ orderId: number }, { legacyOrderId: number }] }).select('orderId seller').lean();
+        } else {
+            if (!mongoose.Types.ObjectId.isValid(orderId)) {
+                return res.status(400).json({ error: 'Invalid order' });
+            }
+            order = await Order.findById(orderId).select('orderId seller').lean();
+        }
         if (!order) {
             return res.status(404).json({ error: 'Order not found' });
         }

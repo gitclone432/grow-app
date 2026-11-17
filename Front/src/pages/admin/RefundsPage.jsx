@@ -31,6 +31,8 @@ import {
   Typography,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
+import DownloadIcon from '@mui/icons-material/Download';
+import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import api from '../../lib/api';
 import ResolutionOptionsModal from '../../components/ResolutionOptionsModal';
@@ -138,6 +140,7 @@ const OptionSelect = React.memo(function OptionSelect({ value, options, onSave, 
 
 function RefundTable({ type, sellers, statusOptions, onManageStatus, notify, remarkTemplates, onManageTemplates }) {
   const [remarkDialog, setRemarkDialog] = useState(null); // { entry, remark, message }
+  const [csvDialog, setCsvDialog] = useState({ open: false, mode: 'single', from: '', to: '', busy: false, error: '' });
   const [remarkBusy, setRemarkBusy] = useState(false);
   const remarkOptions = useMemo(() => remarkOptionsFromTemplates(remarkTemplates), [remarkTemplates]);
   const [entries, setEntries] = useState([]);
@@ -301,6 +304,78 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify, rem
     }
   }, [notify, type]);
 
+  const openCsvDialog = () => {
+    setCsvDialog({
+      open: true,
+      mode: dateMode === 'range' ? 'range' : 'single',
+      from: dateFrom,
+      to: dateMode === 'range' ? dateTo : '',
+      busy: false,
+      error: '',
+    });
+  };
+
+  // Exports every matching refund (all pages) for the chosen date(s), honouring the other filters.
+  const downloadCsv = async () => {
+    const { mode, from, to } = csvDialog;
+    if (!from || (mode === 'range' && !to)) {
+      setCsvDialog((prev) => ({ ...prev, error: mode === 'range' ? 'Pick both From and To dates' : 'Pick a date' }));
+      return;
+    }
+    setCsvDialog((prev) => ({ ...prev, busy: true, error: '' }));
+    try {
+      const all = [];
+      let currentPage = 1;
+      let pages = 1;
+      do {
+        const { data } = await api.get('/refunds', {
+          params: {
+            type,
+            page: currentPage,
+            limit: 200,
+            ...(sellerFilter ? { sellerId: sellerFilter } : {}),
+            ...(statusFilter ? { status: statusFilter } : {}),
+            ...(categoryFilter ? { category: categoryFilter } : {}),
+            ...(reasonFilter ? { reason: reasonFilter } : {}),
+            ...(marketplaceFilter ? { marketplace: marketplaceFilter } : {}),
+            ...(search ? { search } : {}),
+            dateFrom: from,
+            dateTo: mode === 'range' ? to : from,
+          },
+        });
+        all.push(...(data.entries || []));
+        pages = data.pagination?.totalPages || 1;
+        currentPage += 1;
+      } while (currentPage <= pages);
+
+      if (!all.length) {
+        setCsvDialog((prev) => ({ ...prev, busy: false, error: 'No refunds found for these dates' }));
+        return;
+      }
+
+      const rows = prepareCSVData(all, {
+        'Date of Sold': (e) => formatDateSold(e.dateSold),
+        'Order ID': 'orderId',
+        Seller: (e) => e.seller?.user?.username || '',
+        Marketplace: (e) => e.marketplace?.replace('EBAY_', '') || '',
+        'Refund Date': (e) => toDateInputValue(e.refundDate),
+        'Refund Amt': (e) => e.refundAmount ?? '',
+        Status: 'status',
+        Remark: 'category',
+        Reason: 'reason',
+        Notes: 'notes',
+        'Amazon Acc': 'amazonAccount',
+        'Amazon Order ID': 'azOrderId',
+        'Amazon Refund Amount': (e) => e.amazonRefundAmount ?? '',
+        'Amazon Notes': 'amazonNotes',
+      });
+      downloadCSV(rows, `Refunds_${type === 'inr' ? 'INR' : 'Return'}_${from}${mode === 'range' ? `_to_${to}` : ''}`);
+      setCsvDialog((prev) => ({ ...prev, open: false, busy: false }));
+    } catch (err) {
+      setCsvDialog((prev) => ({ ...prev, busy: false, error: err?.response?.data?.error || 'Failed to download CSV' }));
+    }
+  };
+
   const clearFilters = () => {
     setSellerFilter('');
     setStatusFilter('');
@@ -378,6 +453,9 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify, rem
         <Button size="small" onClick={clearFilters}>Clear filters</Button>
         <Button size="small" startIcon={<RefreshIcon />} onClick={() => setReloadKey((k) => k + 1)} disabled={loading}>
           Refresh
+        </Button>
+        <Button size="small" startIcon={<DownloadIcon />} onClick={openCsvDialog}>
+          Download CSV
         </Button>
         <Typography variant="body2" color="text.secondary" sx={{ ml: { md: 'auto' } }}>
           {totalEntries} {totalEntries === 1 ? 'order' : 'orders'}
@@ -515,6 +593,56 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify, rem
           <Pagination count={totalPages} page={page} onChange={(_e, value) => setPage(value)} color="primary" />
         </Box>
       )}
+
+      <Dialog open={csvDialog.open} onClose={() => !csvDialog.busy && setCsvDialog((p) => ({ ...p, open: false }))} maxWidth="xs" fullWidth>
+        <DialogTitle>Download CSV (by date sold)</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <FormControl size="small">
+              <InputLabel>Date option</InputLabel>
+              <Select
+                value={csvDialog.mode}
+                label="Date option"
+                onChange={(e) => setCsvDialog((p) => ({ ...p, mode: e.target.value, to: '', error: '' }))}
+              >
+                <MenuItem value="single">Single date</MenuItem>
+                <MenuItem value="range">Date range</MenuItem>
+              </Select>
+            </FormControl>
+            <TextField
+              size="small"
+              type="date"
+              label={csvDialog.mode === 'range' ? 'From' : 'Date'}
+              value={csvDialog.from}
+              onChange={(e) => setCsvDialog((p) => ({ ...p, from: e.target.value, error: '' }))}
+              InputLabelProps={{ shrink: true }}
+            />
+            {csvDialog.mode === 'range' && (
+              <TextField
+                size="small"
+                type="date"
+                label="To"
+                value={csvDialog.to}
+                onChange={(e) => setCsvDialog((p) => ({ ...p, to: e.target.value, error: '' }))}
+                InputLabelProps={{ shrink: true }}
+                inputProps={{ min: csvDialog.from || undefined }}
+              />
+            )}
+            {csvDialog.error && <Alert severity="warning">{csvDialog.error}</Alert>}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCsvDialog((p) => ({ ...p, open: false }))} disabled={csvDialog.busy}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={downloadCsv}
+            disabled={csvDialog.busy}
+            startIcon={csvDialog.busy ? <CircularProgress size={18} /> : <DownloadIcon />}
+          >
+            {csvDialog.busy ? 'Preparing...' : 'Download'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog open={Boolean(remarkDialog)} onClose={closeRemarkDialog} maxWidth="md" fullWidth>
         <DialogTitle>Send Message to Buyer - Edit & Preview</DialogTitle>
