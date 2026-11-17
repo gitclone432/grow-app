@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 
-export const RETURN_ISSUE_OPTION_TYPES = ['accountable', 'product'];
+export const RETURN_ISSUE_OPTION_TYPES = ['accountable', 'product', 'explanation'];
 
 const ReturnIssueOptionSchema = new mongoose.Schema(
     {

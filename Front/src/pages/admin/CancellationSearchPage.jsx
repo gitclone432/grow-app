@@ -63,6 +63,12 @@ import {
   saveRemarkTemplates
 } from '../../constants/remarkTemplates';
 import { yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
+import ResolutionOptionsModal from '../../components/ResolutionOptionsModal';
+import {
+  ISSUE_REASON_OPTIONS_ENDPOINT,
+  loadIssueReasonOptions,
+  withCurrentIssueReason
+} from '../../constants/issueReasons';
 
 /**
  * AutoSaveSelect component for remark dropdown
@@ -666,6 +672,33 @@ export default function CancellationSearchPage({
   const [rejectDialog, setRejectDialog] = useState({ open: false, row: null });
   const [savingRemarks, setSavingRemarks] = useState({}); // { cancelId: boolean }
   const [remarkTemplates, setRemarkTemplates] = useState([]);
+  const [issueReasonOptions, setIssueReasonOptions] = useState([]);
+  const [manageIssueReasonsOpen, setManageIssueReasonsOpen] = useState(false);
+
+  const reloadIssueReasonOptions = useCallback(async () => {
+    setIssueReasonOptions(await loadIssueReasonOptions());
+  }, []);
+
+  useEffect(() => {
+    reloadIssueReasonOptions();
+  }, [reloadIssueReasonOptions]);
+
+  const updateIssueReason = async (row, value) => {
+    if (!row.orderDbId) {
+      setSnackbar({ open: true, severity: 'error', message: 'Order not found for this cancellation' });
+      return;
+    }
+    try {
+      await api.patch(`/ebay/orders/${row.orderDbId}/manual-fields`, { issueReason: value || null });
+      setRows((prev) => prev.map((r) => (r.cancelId === row.cancelId ? { ...r, issueReason: value || '' } : r)));
+    } catch (err) {
+      setSnackbar({
+        open: true,
+        severity: 'error',
+        message: 'Failed to save reason: ' + (err.response?.data?.error || err.message)
+      });
+    }
+  };
   const [manageRemarkTemplatesOpen, setManageRemarkTemplatesOpen] = useState(false);
   const [remarkConfirmOpen, setRemarkConfirmOpen] = useState(false);
   const [pendingRemarkUpdate, setPendingRemarkUpdate] = useState(null);
@@ -727,6 +760,7 @@ export default function CancellationSearchPage({
     { id: 'requestDate', label: 'Request Date' },
     { id: 'sellerDue', label: 'Seller Response Due' },
     { id: 'remark', label: 'Remark' },
+    { id: 'issueReason', label: 'Reason(Issue)' },
     { id: 'notes', label: 'Notes' },
     { id: 'worksheetStatus', label: 'Worksheet Status' },
     { id: 'action', label: 'Action' },
@@ -1802,6 +1836,7 @@ export default function CancellationSearchPage({
                 )}
                 {visibleColumns.includes('sellerDue') && <TableCell sx={headerSx}>Seller Response Due</TableCell>}
                 {visibleColumns.includes('remark') && <TableCell sx={headerSx}>Remark</TableCell>}
+                {visibleColumns.includes('issueReason') && <TableCell sx={headerSx}>Reason(Issue)</TableCell>}
                 {visibleColumns.includes('notes') && <TableCell sx={headerSx}>Notes</TableCell>}
                 {visibleColumns.includes('worksheetStatus') && <TableCell sx={headerSx}>Worksheet Status</TableCell>}
                 {visibleColumns.includes('action') && <TableCell sx={headerSx} align="center">Action</TableCell>}
@@ -1944,6 +1979,17 @@ export default function CancellationSearchPage({
                           onSave={(val) => handleRemarkUpdate(row.cancelId, val)}
                           onManage={() => setManageRemarkTemplatesOpen(true)}
                           manageLabel="Manage Templates"
+                        />
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('issueReason') && (
+                      <TableCell>
+                        <AutoSaveSelect
+                          value={row.issueReason || ''}
+                          options={withCurrentIssueReason(issueReasonOptions, row.issueReason)}
+                          onSave={(val) => updateIssueReason(row, val)}
+                          onManage={() => setManageIssueReasonsOpen(true)}
+                          manageLabel="Manage Reasons"
                         />
                       </TableCell>
                     )}
@@ -2171,6 +2217,14 @@ export default function CancellationSearchPage({
       </Dialog>
 
       {/* Manage remark templates modal */}
+      <ResolutionOptionsModal
+        open={manageIssueReasonsOpen}
+        onClose={() => setManageIssueReasonsOpen(false)}
+        options={issueReasonOptions}
+        onReload={reloadIssueReasonOptions}
+        endpoint={ISSUE_REASON_OPTIONS_ENDPOINT}
+        title="Manage Reasons"
+      />
       <RemarkTemplateManagerModal
         open={manageRemarkTemplatesOpen}
         onClose={() => setManageRemarkTemplatesOpen(false)}

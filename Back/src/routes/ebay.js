@@ -12059,6 +12059,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
           shipByDate: 1,
           purchaseMarketplaceId: 1,
           remark: 1,
+          issueReason: 1,
           fulfillmentNotes: 1,
           amazonAccount: 1,
           azOrderId: 1,
@@ -12094,6 +12095,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         shipByDate: o.shipByDate || null, // Ship By date from Order (same field as FulfillmentDashboard)
         purchaseMarketplaceId: o.purchaseMarketplaceId,
         remark: o.remark || '', // Get remark from Order (same field as FulfillmentDashboard)
+        issueReason: o.issueReason || '',
         notes: o.fulfillmentNotes || '', // Get notes from Order (same field as FulfillmentDashboard)
         amazonAccount: o.amazonAccount || null,
         amazonOrderId: o.azOrderId || '',
@@ -12131,6 +12133,7 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         shipByDate: orderMap[key]?.shipByDate || null, // Ship By date from Order (same field as FulfillmentDashboard)
         purchaseMarketplaceId: orderMap[key]?.purchaseMarketplaceId || c.marketplaceId || 'EBAY_US',
         remark: orderMap[key]?.remark || '', // Use remark from Order (same field as FulfillmentDashboard)
+        issueReason: orderMap[key]?.issueReason || '',
         notes: orderMap[key]?.notes || '', // Use notes from Order (same field as FulfillmentDashboard)
         amazonAccount: orderMap[key]?.amazonAccount || null,
         amazonOrderId: orderMap[key]?.amazonOrderId || '',

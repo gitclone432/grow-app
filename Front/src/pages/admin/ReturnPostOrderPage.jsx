@@ -173,202 +173,6 @@ const NotesCell = React.memo(function NotesCell({ row, onSave, onNotify }) {
   );
 });
 
-// --- INTERNAL REASON CELL COMPONENT (Inline Editable) ---
-const InternalReasonCell = React.memo(function InternalReasonCell({ row, onSave, onNotify }) {
-  const [isEditing, setIsEditing] = React.useState(false);
-  const [tempValue, setTempValue] = React.useState(row.internalReason || '');
-  const [isSaving, setIsSaving] = React.useState(false);
-
-  React.useEffect(() => {
-    if (!isEditing) {
-      setTempValue(row.internalReason || '');
-    }
-  }, [row.internalReason, isEditing]);
-
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      await onSave(row.returnId, tempValue);
-      setIsEditing(false);
-      onNotify('success', 'Internal reason saved successfully');
-    } catch (e) {
-      onNotify('error', 'Failed to save internal reason');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleCancel = () => {
-    setTempValue(row.internalReason || '');
-    setIsEditing(false);
-  };
-
-  if (isEditing) {
-    return (
-      <Box
-        onClick={(e) => e.stopPropagation()}
-        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 200 }}
-      >
-        <TextField
-          fullWidth
-          multiline
-          minRows={2}
-          size="small"
-          value={tempValue}
-          onChange={(e) => setTempValue(e.target.value)}
-          placeholder="Enter internal reason..."
-          autoFocus
-        />
-        <Stack direction="row" spacing={1}>
-          <Button
-            variant="contained"
-            size="small"
-            onClick={handleSave}
-            disabled={isSaving}
-            sx={{ fontSize: '0.7rem', py: 0.5 }}
-          >
-            {isSaving ? 'Saving...' : 'Save'}
-          </Button>
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={handleCancel}
-            disabled={isSaving}
-            sx={{ fontSize: '0.7rem', py: 0.5 }}
-          >
-            Cancel
-          </Button>
-        </Stack>
-      </Box>
-    );
-  }
-
-  return (
-    <Box
-      onClick={(e) => {
-        e.stopPropagation();
-        setIsEditing(true);
-      }}
-      sx={{
-        cursor: 'pointer',
-        minHeight: 30,
-        minWidth: 150,
-        display: 'flex',
-        alignItems: 'center',
-        '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1, px: 1 }
-      }}
-    >
-      {row.internalReason ? (
-        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
-          {row.internalReason}
-        </Typography>
-      ) : (
-        <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
-          + Add Reason
-        </Typography>
-      )}
-    </Box>
-  );
-});
-
-// --- VERDICT CELL COMPONENT (Inline Editable) ---
-const VerdictCell = React.memo(function VerdictCell({ row, onSave, onNotify }) {
-  const [isEditing, setIsEditing] = React.useState(false);
-  const [tempValue, setTempValue] = React.useState(row.verdict || '');
-  const [isSaving, setIsSaving] = React.useState(false);
-
-  React.useEffect(() => {
-    if (!isEditing) {
-      setTempValue(row.verdict || '');
-    }
-  }, [row.verdict, isEditing]);
-
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      await onSave(row.returnId, tempValue);
-      setIsEditing(false);
-      onNotify('success', 'Verdict saved successfully');
-    } catch (e) {
-      onNotify('error', 'Failed to save verdict');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleCancel = () => {
-    setTempValue(row.verdict || '');
-    setIsEditing(false);
-  };
-
-  if (isEditing) {
-    return (
-      <Box
-        onClick={(e) => e.stopPropagation()}
-        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 200 }}
-      >
-        <TextField
-          fullWidth
-          multiline
-          minRows={2}
-          size="small"
-          value={tempValue}
-          onChange={(e) => setTempValue(e.target.value)}
-          placeholder="Enter verdict..."
-          autoFocus
-        />
-        <Stack direction="row" spacing={1}>
-          <Button
-            variant="contained"
-            size="small"
-            onClick={handleSave}
-            disabled={isSaving}
-            sx={{ fontSize: '0.7rem', py: 0.5 }}
-          >
-            {isSaving ? 'Saving...' : 'Save'}
-          </Button>
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={handleCancel}
-            disabled={isSaving}
-            sx={{ fontSize: '0.7rem', py: 0.5 }}
-          >
-            Cancel
-          </Button>
-        </Stack>
-      </Box>
-    );
-  }
-
-  return (
-    <Box
-      onClick={(e) => {
-        e.stopPropagation();
-        setIsEditing(true);
-      }}
-      sx={{
-        cursor: 'pointer',
-        minHeight: 30,
-        minWidth: 150,
-        display: 'flex',
-        alignItems: 'center',
-        '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1, px: 1 }
-      }}
-    >
-      {row.verdict ? (
-        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
-          {row.verdict}
-        </Typography>
-      ) : (
-        <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
-          + Add Verdict
-        </Typography>
-      )}
-    </Box>
-  );
-});
-
 const RETURN_ISSUE_OPTIONS_ENDPOINT = '/return-issue-options';
 
 const ACCOUNTABLE_CHIP_COLORS = {
@@ -447,106 +251,21 @@ const IssueOptionSelectCell = React.memo(function IssueOptionSelectCell({
           <TextField
             {...params}
             variant="standard"
-            placeholder={`Select ${label.toLowerCase()}`}
+            placeholder={showChip ? '' : `Select ${label.toLowerCase()}`}
+            inputProps={{
+              ...params.inputProps,
+              // While closed, the chip represents the value; the raw text only shows while searching.
+              style: showChip ? { width: 0, minWidth: 0, padding: 0, opacity: 0 } : undefined,
+            }}
             InputProps={{
               ...params.InputProps,
               disableUnderline: true,
               startAdornment: showChip ? <IssueOptionChip field={field} value={currentValue} /> : null,
-              sx: {
-                fontSize: '0.8rem',
-                // While closed, the chip represents the value; the raw text is only shown for searching.
-                '& input': showChip ? { width: '0 !important', minWidth: '0 !important', p: '0 !important' } : {},
-              },
+              sx: { fontSize: '0.8rem' },
             }}
           />
         )}
       />
-    </Box>
-  );
-});
-
-// --- EXPLANATION CELL (Inline Editable) ---
-const ExplanationCell = React.memo(function ExplanationCell({ row, onSave, onNotify }) {
-  const [isEditing, setIsEditing] = React.useState(false);
-  const [tempValue, setTempValue] = React.useState(row.explanation || '');
-  const [isSaving, setIsSaving] = React.useState(false);
-
-  React.useEffect(() => {
-    if (!isEditing) {
-      setTempValue(row.explanation || '');
-    }
-  }, [row.explanation, isEditing]);
-
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      await onSave(row.returnId, { explanation: tempValue });
-      setIsEditing(false);
-      onNotify('success', 'Explanation saved');
-    } catch (e) {
-      onNotify('error', 'Failed to save explanation');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleCancel = () => {
-    setTempValue(row.explanation || '');
-    setIsEditing(false);
-  };
-
-  if (isEditing) {
-    return (
-      <Box
-        onClick={(e) => e.stopPropagation()}
-        sx={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 220 }}
-      >
-        <TextField
-          fullWidth
-          multiline
-          minRows={2}
-          size="small"
-          value={tempValue}
-          onChange={(e) => setTempValue(e.target.value)}
-          placeholder="Enter explanation..."
-          autoFocus
-        />
-        <Stack direction="row" spacing={1}>
-          <Button variant="contained" size="small" onClick={handleSave} disabled={isSaving} sx={{ fontSize: '0.7rem', py: 0.5 }}>
-            {isSaving ? 'Saving...' : 'Save'}
-          </Button>
-          <Button variant="outlined" size="small" onClick={handleCancel} disabled={isSaving} sx={{ fontSize: '0.7rem', py: 0.5 }}>
-            Cancel
-          </Button>
-        </Stack>
-      </Box>
-    );
-  }
-
-  return (
-    <Box
-      onClick={(e) => {
-        e.stopPropagation();
-        setIsEditing(true);
-      }}
-      sx={{
-        cursor: 'pointer',
-        minHeight: 30,
-        minWidth: 180,
-        display: 'flex',
-        alignItems: 'center',
-        '&:hover': { backgroundColor: 'rgba(0,0,0,0.04)', borderRadius: 1, px: 1 }
-      }}
-    >
-      {row.explanation ? (
-        <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', fontSize: '0.85rem' }}>
-          {row.explanation}
-        </Typography>
-      ) : (
-        <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
-          + Add Explanation
-        </Typography>
-      )}
     </Box>
   );
 });
@@ -605,10 +324,7 @@ const RETURN_EXPORT_COLUMNS = {
   reasonType: { header: 'reasonType', value: (row) => row.reasonType || '' },
   returnCloseReason: { header: 'returnCloseReason', value: (row) => (row.returnCloseReason || '').toString().replace(/_/g, ' ') },
   notes: { header: 'notes', value: (row) => row.internalNotes || '' },
-  internalReason: { header: 'Internal Reason', value: (row) => row.internalReason || '' },
-  verdict: { header: 'Verdict', value: (row) => row.verdict || '' },
-  accountable: { header: 'Accountable', value: (row) => row.accountable || '' },
-  product: { header: 'Product', value: (row) => row.product || '' },
+  accountable: { header: 'Accountable', value: (row) => row.accountable || '' },  product: { header: 'Product', value: (row) => row.product || '' },
   explanation: { header: 'Explanation', value: (row) => row.explanation || '' },
   refund: { header: 'refund', value: (row) => row.refundAmount?.value ? `${row.refundAmount.currency || 'USD'} ${row.refundAmount.value}` : '' },
   trackingNumber: { header: 'trackingNumber', value: (row) => row.trackingNumber || '' },
@@ -908,8 +624,6 @@ export default function ReturnPostOrderPage({
     { id: 'reasonType', label: 'reasonType' },
     { id: 'returnCloseReason', label: 'returnCloseReason' },
     { id: 'notes', label: 'notes' },
-    { id: 'internalReason', label: 'Internal Reason' },
-    { id: 'verdict', label: 'Verdict' },
     { id: 'accountable', label: 'Accountable' },
     { id: 'product', label: 'Product' },
     { id: 'explanation', label: 'Explanation' },
@@ -927,7 +641,7 @@ export default function ReturnPostOrderPage({
   ];
   const [visibleColumns, setVisibleColumns] = useState(ALL_COLUMNS.map((c) => c.id));
   const [selectedReturn, setSelectedReturn] = useState(null);
-  const [issueOptions, setIssueOptions] = useState({ accountable: [], product: [] });
+  const [issueOptions, setIssueOptions] = useState({ accountable: [], product: [], explanation: [] });
   const [manageIssueOptionType, setManageIssueOptionType] = useState(null);
 
   async function loadIssueOptions(type) {
@@ -942,6 +656,7 @@ export default function ReturnPostOrderPage({
   useEffect(() => {
     loadIssueOptions('accountable');
     loadIssueOptions('product');
+    loadIssueOptions('explanation');
   }, []);
 
   const internalDateFilter = useMemo(
@@ -1165,16 +880,6 @@ export default function ReturnPostOrderPage({
   async function handleNotesSave(returnId, notesText) {
     await api.patch(`/ebay/returns/${returnId}/notes`, { notes: notesText });
     setRows(prev => prev.map(r => r.returnId === returnId ? { ...r, internalNotes: notesText } : r));
-  }
-
-  async function handleInternalReasonSave(returnId, internalReasonText) {
-    await api.patch(`/ebay/returns/${returnId}/internal-reason`, { internalReason: internalReasonText });
-    setRows(prev => prev.map(r => r.returnId === returnId ? { ...r, internalReason: internalReasonText } : r));
-  }
-
-  async function handleVerdictSave(returnId, verdictText) {
-    await api.patch(`/ebay/returns/${returnId}/verdict`, { verdict: verdictText });
-    setRows(prev => prev.map(r => r.returnId === returnId ? { ...r, verdict: verdictText } : r));
   }
 
   async function handleIssueFieldsSave(returnId, fields) {
@@ -1855,11 +1560,9 @@ export default function ReturnPostOrderPage({
                 {visibleColumns.includes('reasonType') && <TableCell sx={headerSx}>reasonType</TableCell>}
                 {visibleColumns.includes('returnCloseReason') && <TableCell sx={headerSx}>returnCloseReason</TableCell>}
                 {visibleColumns.includes('notes') && <TableCell sx={headerSx}>notes</TableCell>}
-                {visibleColumns.includes('internalReason') && <TableCell sx={headerSx}>Internal Reason</TableCell>}
-                {visibleColumns.includes('verdict') && <TableCell sx={headerSx}>Verdict</TableCell>}
                 {visibleColumns.includes('accountable') && <TableCell sx={headerSx}>{renderManageableHeader('Accountable', 'accountable')}</TableCell>}
                 {visibleColumns.includes('product') && <TableCell sx={headerSx}>{renderManageableHeader('Product', 'product')}</TableCell>}
-                {visibleColumns.includes('explanation') && <TableCell sx={headerSx}>Explanation</TableCell>}
+                {visibleColumns.includes('explanation') && <TableCell sx={headerSx}>{renderManageableHeader('Explanation', 'explanation')}</TableCell>}
                 {visibleColumns.includes('refund') && <TableCell sx={headerSx}>refund</TableCell>}
                 {visibleColumns.includes('trackingNumber') && <TableCell sx={headerSx}>trackingNumber</TableCell>}
                 {visibleColumns.includes('carrierUsed') && <TableCell sx={headerSx}>carrierUsed</TableCell>}
@@ -1970,16 +1673,6 @@ export default function ReturnPostOrderPage({
                         <NotesCell row={row} onSave={handleNotesSave} onNotify={handleNotify} />
                       </TableCell>
                     )}
-                    {visibleColumns.includes('internalReason') && (
-                      <TableCell sx={{ maxWidth: 280 }}>
-                        <InternalReasonCell row={row} onSave={handleInternalReasonSave} onNotify={handleNotify} />
-                      </TableCell>
-                    )}
-                    {visibleColumns.includes('verdict') && (
-                      <TableCell sx={{ maxWidth: 280 }}>
-                        <VerdictCell row={row} onSave={handleVerdictSave} onNotify={handleNotify} />
-                      </TableCell>
-                    )}
                     {visibleColumns.includes('accountable') && (
                       <TableCell>
                         <IssueOptionSelectCell
@@ -2005,8 +1698,15 @@ export default function ReturnPostOrderPage({
                       </TableCell>
                     )}
                     {visibleColumns.includes('explanation') && (
-                      <TableCell sx={{ maxWidth: 320 }}>
-                        <ExplanationCell row={row} onSave={handleIssueFieldsSave} onNotify={handleNotify} />
+                      <TableCell>
+                        <IssueOptionSelectCell
+                          row={row}
+                          field="explanation"
+                          label="Explanation"
+                          options={issueOptions.explanation}
+                          onSave={handleIssueFieldsSave}
+                          onNotify={handleNotify}
+                        />
                       </TableCell>
                     )}
                     {visibleColumns.includes('refund') && (
@@ -2852,7 +2552,7 @@ export default function ReturnPostOrderPage({
         options={manageIssueOptionType ? issueOptions[manageIssueOptionType] : []}
         onReload={() => manageIssueOptionType && loadIssueOptions(manageIssueOptionType)}
         endpoint={`${RETURN_ISSUE_OPTIONS_ENDPOINT}/${manageIssueOptionType || 'accountable'}`}
-        title={manageIssueOptionType === 'product' ? 'Manage Product Options' : 'Manage Accountable Options'}
+        title={`Manage ${{ product: 'Product', explanation: 'Explanation' }[manageIssueOptionType] || 'Accountable'} Options`}
       />
 
       <Snackbar

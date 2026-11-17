@@ -34,6 +34,14 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import api from '../../lib/api';
 import ResolutionOptionsModal from '../../components/ResolutionOptionsModal';
+import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
+import {
+  fillRemarkTemplate,
+  findRemarkTemplateText,
+  loadRemarkTemplates,
+  remarkOptionsFromTemplates,
+  saveRemarkTemplates,
+} from '../../constants/remarkTemplates';
 import { sortSellersByName } from '../../lib/sellersSort.js';
 
 const PAGE_SIZE = 50;
@@ -128,7 +136,10 @@ const OptionSelect = React.memo(function OptionSelect({ value, options, onSave, 
   );
 });
 
-function RefundTable({ type, sellers, statusOptions, onManageStatus, notify }) {
+function RefundTable({ type, sellers, statusOptions, onManageStatus, notify, remarkTemplates, onManageTemplates }) {
+  const [remarkDialog, setRemarkDialog] = useState(null); // { entry, remark, message }
+  const [remarkBusy, setRemarkBusy] = useState(false);
+  const remarkOptions = useMemo(() => remarkOptionsFromTemplates(remarkTemplates), [remarkTemplates]);
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -225,6 +236,60 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify }) {
     }
   }, [notify]);
 
+  const updateRemark = useCallback(async (entry, remark, messageSent) => {
+    await api.patch(`/ebay/orders/${entry.orderMongoId}/manual-fields`, {
+      remark: remark || null,
+      remarkMessageSent: messageSent,
+    });
+    setEntries((prev) => prev.map((e) => (e._id === entry._id ? { ...e, category: remark || '' } : e)));
+  }, []);
+
+  // Picking a remark with a template opens a preview so the message can be edited before it is sent.
+  const handleRemarkSelect = useCallback(async (entry, remark) => {
+    const templateText = findRemarkTemplateText(remarkTemplates, remark);
+    if (remark && templateText && entry.orderInfo) {
+      setRemarkDialog({ entry, remark, message: fillRemarkTemplate(templateText, entry.orderInfo, remark) });
+      return;
+    }
+    try {
+      await updateRemark(entry, remark, false);
+    } catch (err) {
+      notify('error', err?.response?.data?.error || 'Failed to update remark');
+    }
+  }, [remarkTemplates, updateRemark, notify]);
+
+  const closeRemarkDialog = () => {
+    if (!remarkBusy) setRemarkDialog(null);
+  };
+
+  const submitRemark = async (sendMessage) => {
+    const { entry, remark, message } = remarkDialog;
+    const info = entry.orderInfo || {};
+    setRemarkBusy(true);
+    try {
+      await updateRemark(entry, remark, sendMessage);
+      if (sendMessage) {
+        await api.post('/ebay/send-message', {
+          orderId: info.orderId || entry.orderId,
+          buyerUsername: info.buyer?.username || 'eBay Buyer',
+          itemId: info.itemNumber || info.lineItems?.[0]?.legacyItemId,
+          sellerId: info.sellerId || entry.seller?._id,
+          conversationId: null,
+          body: message,
+          mediaUrls: [],
+        });
+        notify('success', `Remark updated to "${remark}" and message sent to buyer`);
+      } else {
+        notify('info', `Remark updated to "${remark}" (message not sent)`);
+      }
+      setRemarkDialog(null);
+    } catch (err) {
+      notify('error', err?.response?.data?.error || 'Failed to update remark or send message');
+    } finally {
+      setRemarkBusy(false);
+    }
+  };
+
   const removeEntry = useCallback(async (entry) => {
     if (!window.confirm(`Remove order ${entry.orderId || ''} from the ${type === 'inr' ? 'INR' : 'Return'} refund list?`)) return;
     try {
@@ -301,7 +366,7 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify }) {
         {filterSelect('Marketplace', marketplaceFilter, setMarketplaceFilter,
           filterValues.marketplaces.map((m) => ({ value: m, label: m.replace('EBAY_', '') })), 140)}
         {filterSelect('Status', statusFilter, setStatusFilter, asItems(statusOptions.map((o) => o.name)), 150)}
-        {filterSelect('Category', categoryFilter, setCategoryFilter, asItems(filterValues.categories), 150)}
+        {filterSelect('Remark', categoryFilter, setCategoryFilter, asItems(filterValues.categories), 150)}
         {filterSelect('Reason', reasonFilter, setReasonFilter, asItems(filterValues.reasons), 150)}
         <TextField
           size="small"
@@ -326,7 +391,7 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify }) {
           <TableHead>
             <TableRow>
               <TableCell colSpan={11} sx={EBAY_GROUP_SX}>eBay</TableCell>
-              <TableCell colSpan={3} sx={AMAZON_GROUP_SX}>Amazon</TableCell>
+              <TableCell colSpan={4} sx={AMAZON_GROUP_SX}>Amazon</TableCell>
             </TableRow>
             <TableRow>
               <TableCell sx={EBAY_HEADER_SX}>Date of Sold</TableCell>
@@ -336,11 +401,12 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify }) {
               <TableCell sx={EBAY_HEADER_SX}>Refund Date</TableCell>
               <TableCell sx={EBAY_HEADER_SX}>Refund Amt</TableCell>
               <TableCell sx={EBAY_HEADER_SX}>Status</TableCell>
-              <TableCell sx={EBAY_HEADER_SX}>Category</TableCell>
+              <TableCell sx={EBAY_HEADER_SX}>Remark</TableCell>
               <TableCell sx={EBAY_HEADER_SX}>Reason</TableCell>
               <TableCell sx={EBAY_HEADER_SX}>Notes</TableCell>
               <TableCell sx={EBAY_HEADER_SX} />
               <TableCell sx={AMAZON_HEADER_SX}>Amazon Acc</TableCell>
+              <TableCell sx={AMAZON_HEADER_SX}>Amazon Order ID</TableCell>
               <TableCell sx={AMAZON_HEADER_SX}>Refund Amount</TableCell>
               <TableCell sx={AMAZON_HEADER_SX}>Amazon Notes</TableCell>
             </TableRow>
@@ -348,11 +414,11 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify }) {
           <TableBody>
             {loading ? (
               <TableRow>
-                <TableCell colSpan={14} align="center"><CircularProgress size={28} /></TableCell>
+                <TableCell colSpan={15} align="center"><CircularProgress size={28} /></TableCell>
               </TableRow>
             ) : entries.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={14} align="center">
+                <TableCell colSpan={15} align="center">
                   <Typography variant="body2" color="text.secondary" sx={{ py: 3 }}>
                     No orders yet. Use the Refund button on the Fulfillment dashboard to add orders here.
                   </Typography>
@@ -391,7 +457,15 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify }) {
                       manageLabel="Manage Status"
                     />
                   </TableCell>
-                  <TableCell sx={{ whiteSpace: 'nowrap' }}>{entry.category || '-'}</TableCell>
+                  <TableCell>
+                    <OptionSelect
+                      value={entry.category}
+                      options={remarkOptions}
+                      onSave={(val) => handleRemarkSelect(entry, val)}
+                      onManage={onManageTemplates}
+                      manageLabel="Manage Templates"
+                    />
+                  </TableCell>
                   <TableCell sx={{ minWidth: 140 }}>{entry.reason || '-'}</TableCell>
                   <TableCell>
                     <InlineField
@@ -410,6 +484,7 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify }) {
                     </Tooltip>
                   </TableCell>
                   <TableCell sx={{ whiteSpace: 'nowrap' }}>{entry.amazonAccount || '-'}</TableCell>
+                  <TableCell sx={{ whiteSpace: 'nowrap' }}>{entry.azOrderId || '-'}</TableCell>
                   <TableCell>
                     <InlineField
                       type="number"
@@ -440,6 +515,38 @@ function RefundTable({ type, sellers, statusOptions, onManageStatus, notify }) {
           <Pagination count={totalPages} page={page} onChange={(_e, value) => setPage(value)} color="primary" />
         </Box>
       )}
+
+      <Dialog open={Boolean(remarkDialog)} onClose={closeRemarkDialog} maxWidth="md" fullWidth>
+        <DialogTitle>Send Message to Buyer - Edit & Preview</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Alert severity="info">
+              You're updating the remark to <strong>"{remarkDialog?.remark}"</strong>
+            </Alert>
+            <TextField
+              fullWidth
+              multiline
+              minRows={6}
+              maxRows={12}
+              value={remarkDialog?.message || ''}
+              onChange={(e) => setRemarkDialog((prev) => ({ ...prev, message: e.target.value }))}
+              placeholder="Enter your message to the buyer..."
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={closeRemarkDialog} disabled={remarkBusy} color="inherit">Cancel</Button>
+          <Button onClick={() => submitRemark(false)} disabled={remarkBusy} color="inherit">Just Update Remark</Button>
+          <Button
+            variant="contained"
+            onClick={() => submitRemark(true)}
+            disabled={remarkBusy || !remarkDialog?.message?.trim()}
+            startIcon={remarkBusy ? <CircularProgress size={20} /> : null}
+          >
+            {remarkBusy ? 'Sending...' : 'Send Message & Update Remark'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
@@ -484,6 +591,22 @@ export default function RefundsPage() {
   const notify = useCallback((severity, message) => {
     setSnackbar({ open: true, message, severity });
   }, []);
+
+  const [remarkTemplates, setRemarkTemplates] = useState([]);
+  const [manageTemplatesOpen, setManageTemplatesOpen] = useState(false);
+
+  useEffect(() => {
+    loadRemarkTemplates().then(setRemarkTemplates);
+  }, []);
+
+  const handleSaveTemplates = async (nextTemplates) => {
+    try {
+      setRemarkTemplates(await saveRemarkTemplates(nextTemplates));
+      notify('success', 'Remark templates saved');
+    } catch (err) {
+      notify('error', err?.response?.data?.error || 'Failed to save remark templates');
+    }
+  };
 
   const openAccessDialog = async () => {
     setAccessOpen(true);
@@ -544,6 +667,15 @@ export default function RefundsPage() {
         statusOptions={statusOptions}
         onManageStatus={() => setManageStatusOpen(true)}
         notify={notify}
+        remarkTemplates={remarkTemplates}
+        onManageTemplates={() => setManageTemplatesOpen(true)}
+      />
+
+      <RemarkTemplateManagerModal
+        open={manageTemplatesOpen}
+        onClose={() => setManageTemplatesOpen(false)}
+        templates={remarkTemplates}
+        onSaveTemplates={handleSaveTemplates}
       />
 
       <ResolutionOptionsModal
