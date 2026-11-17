@@ -31281,16 +31281,39 @@ async function fetchMarketingCampaignsForSeller(seller, query, { limitOverride, 
     };
   }
 
-  const perMarketplaceLimit = limitOverride ?? Math.min(200, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const limit = limitOverride ?? Math.min(500, Math.max(1, parseInt(query.limit || '50', 10) || 50));
+  const offset = offsetOverride ?? Math.max(0, parseInt(query.offset || '0', 10) || 0);
+  const bulkFetch = limitOverride != null && offsetOverride === 0;
+
+  // Rows from every marketplace are merged and sorted, then this page is cut
+  // out of the result, so each marketplace must supply at least
+  // offset + limit rows (in pages of up to 500), not just its first 200.
+  const needed = bulkFetch ? limitOverride : offset + limit;
   const pageResults = await Promise.all(marketplaceIds.map(async (marketplaceId) => {
+    const campaigns = [];
+    let exhausted = false;
     try {
-      return await fetchMarketingCampaignsPageForMarketplace(accessToken, marketplaceId, query, {
-        limitOverride: perMarketplaceLimit,
-        offsetOverride: 0,
-      });
+      while (campaigns.length < needed) {
+        const pageLimit = Math.min(500, needed - campaigns.length);
+        const page = await fetchMarketingCampaignsPageForMarketplace(accessToken, marketplaceId, query, {
+          limitOverride: pageLimit,
+          offsetOverride: campaigns.length,
+        });
+        campaigns.push(...page.campaigns);
+        const reportedTotal = Number(page.pagination?.total);
+        if (
+          page.campaigns.length < pageLimit
+          || (Number.isFinite(reportedTotal) && campaigns.length >= reportedTotal)
+        ) {
+          exhausted = true;
+          break;
+        }
+      }
     } catch {
-      return { marketplaceId, campaigns: [] };
+      // A marketplace the seller does not use (or a failed call) adds no rows
+      exhausted = true;
     }
+    return { marketplaceId, campaigns, exhausted };
   }));
 
   const merged = sortMergedMarketingRows(
@@ -31301,10 +31324,9 @@ async function fetchMarketingCampaignsForSeller(seller, query, { limitOverride, 
     query.sort,
     'campaignName',
   );
-
-  const limit = limitOverride ?? Math.min(500, Math.max(1, parseInt(query.limit || '50', 10) || 50));
-  const offset = offsetOverride ?? Math.max(0, parseInt(query.offset || '0', 10) || 0);
-  const bulkFetch = limitOverride != null && offsetOverride === 0;
+  // The total is only known once every marketplace has been read to the end;
+  // otherwise report none and let the client page by "got a full page".
+  const complete = pageResults.every((result) => result.exhausted);
 
   return {
     marketplaceId: 'ALL',
@@ -31313,7 +31335,7 @@ async function fetchMarketingCampaignsForSeller(seller, query, { limitOverride, 
     pagination: {
       limit: String(limit),
       offset: String(offset),
-      total: merged.length,
+      total: complete ? merged.length : null,
       href: null,
       next: null,
       prev: null,
@@ -31434,7 +31456,11 @@ function stableQueryString(query = {}) {
 
 function buildMarketingCacheKey(req, scope) {
   const userKey = String(req.user?.userId || 'anon');
-  return `mkt:${userKey}:${scope}:${stableQueryString(req.query || {})}`;
+  // `refresh` only says whether to bypass the cache. Keeping it out of the key
+  // means a refreshed result replaces the entry normal loads read, instead of
+  // being written beside it under a key nobody reads.
+  const { refresh, ...query } = req.query || {};
+  return `mkt:${userKey}:${scope}:${stableQueryString(query)}`;
 }
 
 async function readMarketingCache(cacheKey) {
@@ -31453,9 +31479,26 @@ async function writeMarketingCache(cacheKey, payload) {
   );
 }
 
-async function invalidateMarketingCacheForUser(userId) {
-  const prefix = `mkt:${String(userId)}:`;
-  await MarketingViewCache.deleteMany({ _id: { $regex: `^${prefix}` } });
+// After a campaign/promotion write (create, pause, resume, end, update,
+// delete), drop every cached view that can include that seller's rows:
+//  - the in-process per-seller cache that the "All Stores" endpoints read
+//    (10 min TTL), for this seller, or all of it when the seller is unknown;
+//  - the Mongo view cache for every user, since another user's All Stores
+//    view includes the same seller too. Writes are rare, and rebuilding the
+//    views is cheap because the other sellers stay in the memory cache.
+// Leaving either one stale made auto-extend see the old endDate and extend
+// the same campaign again on every reload.
+async function invalidateMarketingCaches({ sellerId } = {}) {
+  const sid = sellerId ? String(sellerId) : '';
+  if (!sid) {
+    marketingSellerMemoryCache.clear();
+  } else {
+    for (const key of marketingSellerMemoryCache.keys()) {
+      // keys look like `${kind}:${sellerId}:${query}`
+      if (key.split(':')[1] === sid) marketingSellerMemoryCache.delete(key);
+    }
+  }
+  await MarketingViewCache.deleteMany({ _id: { $regex: '^mkt:' } });
 }
 
 router.get('/marketing/campaigns/all', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), async (req, res) => {
@@ -31534,6 +31577,9 @@ router.get('/marketing/campaigns/all', requireAuth, requirePageAccess(['Marketin
 });
 
 router.get('/marketing/campaigns', requireAuth, requirePageAccess(['MarketingCampaigns', 'AdsAndMarketing']), async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(String(req.query.sellerId || ''))) {
+    return res.status(400).json({ success: false, error: 'A valid sellerId is required' });
+  }
   try {
     const refresh = String(req.query.refresh || '').toLowerCase();
     const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
@@ -31673,7 +31719,7 @@ router.post('/marketing/campaigns/create', requireAuth, requirePageAccess(['Mark
       return sendEbayMarketingCampaignError(res, response, data, 'Failed to create campaign');
     }
 
-    await invalidateMarketingCacheForUser(req.user?.userId);
+    await invalidateMarketingCaches({ sellerId: req.body?.sellerId || req.query?.sellerId });
     return res.status(201).json({
       success: true,
       docsUrl: CREATE_CAMPAIGN_DOCS,
@@ -31716,7 +31762,7 @@ async function handleCampaignLifecycleRoute(req, res, action, docsUrl) {
       return sendEbayMarketingCampaignError(res, response, data, `Failed to ${action} campaign`);
     }
 
-    await invalidateMarketingCacheForUser(req.user?.userId);
+    await invalidateMarketingCaches({ sellerId: req.body?.sellerId || req.query?.sellerId });
     return res.json({
       success: true,
       docsUrl,
@@ -31881,7 +31927,7 @@ router.post('/marketing/campaigns/update-identification', requireAuth, requirePa
       return sendEbayMarketingCampaignError(res, response, data, 'Failed to update campaign');
     }
 
-    await invalidateMarketingCacheForUser(req.user?.userId);
+    await invalidateMarketingCaches({ sellerId: req.body?.sellerId || req.query?.sellerId });
     return res.json({
       success: true,
       docsUrl: UPDATE_CAMPAIGN_IDENTIFICATION_DOCS,
@@ -32227,6 +32273,9 @@ router.get('/marketing/promotions/all', requireAuth, requirePageAccess(['Marketi
 });
 
 router.get('/marketing/promotions', requireAuth, requirePageAccess(['MarketingPromotions', 'AdsAndMarketing']), async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(String(req.query.sellerId || ''))) {
+    return res.status(400).json({ success: false, error: 'A valid sellerId is required' });
+  }
   try {
     const refresh = String(req.query.refresh || '').toLowerCase();
     const bypassCache = refresh === '1' || refresh === 'true' || refresh === 'yes';
@@ -32332,7 +32381,7 @@ router.post('/marketing/promotions/create', requireAuth, requirePageAccess(['Mar
         });
       }
 
-      await invalidateMarketingCacheForUser(req.user?.userId);
+      await invalidateMarketingCaches({ sellerId: req.body?.sellerId || req.query?.sellerId });
       return res.status(201).json({
         success: true,
         docsUrl: CREATE_ITEM_PRICE_MARKDOWN_DOCS,
@@ -32388,7 +32437,7 @@ router.post('/marketing/promotions/create', requireAuth, requirePageAccess(['Mar
       });
     }
 
-    await invalidateMarketingCacheForUser(req.user?.userId);
+    await invalidateMarketingCaches({ sellerId: req.body?.sellerId || req.query?.sellerId });
     return res.status(201).json({
       success: true,
       docsUrl: CREATE_ITEM_PROMOTION_DOCS,
@@ -32503,7 +32552,7 @@ router.put('/marketing/promotions/update', requireAuth, requirePageAccess(['Mark
       return sendEbayItemPromotionError(res, response, data, 'Failed to update promotion');
     }
 
-    await invalidateMarketingCacheForUser(req.user?.userId);
+    await invalidateMarketingCaches({ sellerId: req.body?.sellerId || req.query?.sellerId });
     return res.json({
       success: true,
       docsUrl: isMarkdown ? UPDATE_ITEM_PRICE_MARKDOWN_DOCS : UPDATE_ITEM_PROMOTION_DOCS,
@@ -32544,7 +32593,7 @@ async function handlePromotionLifecycleRoute(req, res, action) {
       return sendEbayItemPromotionError(res, response, data, `Failed to ${action} promotion`);
     }
 
-    await invalidateMarketingCacheForUser(req.user?.userId);
+    await invalidateMarketingCaches({ sellerId: req.body?.sellerId || req.query?.sellerId });
     return res.json({
       success: true,
       action,
@@ -32603,7 +32652,7 @@ router.delete('/marketing/promotions/delete', requireAuth, requirePageAccess(['M
       return sendEbayItemPromotionError(res, response, data, 'Failed to delete promotion');
     }
 
-    await invalidateMarketingCacheForUser(req.user?.userId);
+    await invalidateMarketingCaches({ sellerId: req.body?.sellerId || req.query?.sellerId });
     return res.json({
       success: true,
       docsUrl: isMarkdown ? DELETE_ITEM_PRICE_MARKDOWN_DOCS : DELETE_ITEM_PROMOTION_DOCS,

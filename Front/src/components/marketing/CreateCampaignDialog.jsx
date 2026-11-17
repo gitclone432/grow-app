@@ -347,7 +347,7 @@ export default function CreateCampaignDialog({
         </FormSection>
       </DialogContent>
       <DialogActions sx={{ px: 3, py: 2 }}>
-        <Button onClick={onClose} disabled={submitting}>Cancel</Button>
+        <Button onClick={onClose} disabled={submitting}>{success ? 'Close' : 'Cancel'}</Button>
         <Button
           variant="contained"
           onClick={() => void handleSubmit()}
