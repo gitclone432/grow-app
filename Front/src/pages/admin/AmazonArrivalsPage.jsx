@@ -48,6 +48,7 @@ import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerMo
 import SectionCard from '../../components/SectionCard.jsx';
 import { tableContainerSx, tableHeaderCellSx, tableBodyRowSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 import {
+  addShippedDeliveryDate,
   findRemarkTemplateText,
   loadRemarkTemplates,
   remarkOptionsFromTemplates,
@@ -492,13 +493,13 @@ export default function AmazonArrivalsPage() {
     setOrders(prev => prev.map(o => (o._id === orderId ? { ...o, fulfillmentNotes: value } : o)));
   };
 
-  const replaceTemplateVariables = (template, order) => {
+  const replaceTemplateVariables = (template, order, remarkValue) => {
     const buyerFullName = order?.buyer?.buyerRegistrationAddress?.fullName || order?.buyerUsername || 'Customer';
     const buyerFirstName = buyerFullName.split(' ')[0] || 'Customer';
-    return template
+    return addShippedDeliveryDate(template
       .replace(/\{\{buyer_first_name\}\}/g, buyerFirstName)
       .replace(/\{\{buyer_name\}\}/g, buyerFullName)
-      .replace(/\{\{order_id\}\}/g, order?.orderId || '');
+      .replace(/\{\{order_id\}\}/g, order?.orderId || ''), remarkValue, order);
   };
 
   const updateRemarkCountCards = (previousRemark, nextRemark) => {
@@ -538,7 +539,7 @@ export default function AmazonArrivalsPage() {
   const sendAutoMessageForRemark = async (order, remarkValue) => {
     const template = findRemarkTemplateText(remarkTemplates, remarkValue);
     if (!template) return false;
-    const messageBody = replaceTemplateVariables(template, order);
+    const messageBody = replaceTemplateVariables(template, order, remarkValue);
 
     await api.post('/ebay/send-message', {
       orderId: order.orderId,
@@ -646,7 +647,7 @@ export default function AmazonArrivalsPage() {
     const hasTemplate = findRemarkTemplateText(remarkTemplates, remarkValue);
     if (order && hasTemplate) {
       const templateText = findRemarkTemplateText(remarkTemplates, remarkValue);
-      const replacedText = replaceTemplateVariables(templateText, order);
+      const replacedText = replaceTemplateVariables(templateText, order, remarkValue);
       setPendingRemarkUpdate({ orderId, remarkValue, order });
       setEditableRemarkMessage(replacedText);
       setRemarkAttachments([]);
