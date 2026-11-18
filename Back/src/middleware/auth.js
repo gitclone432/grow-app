@@ -192,6 +192,7 @@ export const PAGE_DEFAULT_ROLES = {
   'UserPerformance': ['superadmin'],
   // Etsy
   'EtsyProducts': ['superadmin', 'listingadmin'],
+  'EtsyProductSheet': ['superadmin', 'listingadmin'],
   'EtsyOrderFulfilment': ['superadmin', 'listingadmin'],
   'EtsyTracking': ['superadmin', 'listingadmin'],
   'EtsyOrderAnalytics': ['superadmin', 'listingadmin'],

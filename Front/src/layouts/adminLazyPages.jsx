@@ -104,6 +104,7 @@ export const GmailTesterPage = lazy(() => import('../pages/admin/GmailTesterPage
 export const AuthenticatorPage = lazy(() => import('../pages/admin/AuthenticatorPage.jsx'));
 export const EtsyDashboardPage = lazy(() => import('../pages/admin/etsy/EtsyDashboardPage.jsx'));
 export const EtsyProductsPage = lazy(() => import('../pages/admin/etsy/EtsyProductsPage.jsx'));
+export const EtsyProductSheetPage = lazy(() => import('../pages/admin/etsy/EtsyProductSheetPage.jsx'));
 export const EtsyOrderFulfilmentPage = lazy(() => import('../pages/admin/etsy/EtsyOrderFulfilmentPage.jsx'));
 export const EtsyTrackingPage = lazy(() => import('../pages/admin/etsy/EtsyTrackingPage.jsx'));
 export const EtsyOrderAnalyticsPage = lazy(() => import('../pages/admin/etsy/EtsyOrderAnalyticsPage.jsx'));
