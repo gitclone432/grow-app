@@ -195,6 +195,7 @@ export const PAGE_REGISTRY = [
   // ====== ETSY ======
   { id: 'EtsyDashboard', name: 'Dashboard', path: '/etsy/dashboard', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyProducts', name: 'Products', path: '/etsy/products', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
+  { id: 'EtsyProductSheet', name: 'Product Sheet', path: '/etsy/product-sheet', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyOrderFulfilment', name: 'Order Fulfilment', path: '/etsy/order-fulfilment', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyTracking', name: 'Tracking', path: '/etsy/tracking', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
   { id: 'EtsyProfitSheet', name: 'Profit Sheet', path: '/etsy/profit-sheet', category: 'etsy', defaultRoles: ['superadmin', 'listingadmin'] },
