@@ -8,6 +8,7 @@ import {
   ETSY_PRODUCT_SHEET_SKU_PREFIX,
   formatSheetSku,
   getNextSheetSkuNumber,
+  getSheetSkuPrefix,
   getProductLinkKey,
   normalizeSheetCellValue,
 } from '../utils/etsyProductSheet.js';
@@ -18,7 +19,9 @@ const PAGE_ID = 'EtsyProductSheet';
 const MAX_ROWS_PER_SAVE = 2000;
 const MAX_ROWS_PER_INSERT = 500;
 const MAX_ROWS_PER_DELETE = 10000;
-const AUTO_SKU_QUERY = new RegExp(`^${ETSY_PRODUCT_SHEET_SKU_PREFIX}\\d+$`, 'i');
+function autoSkuQuery(prefix) {
+  return new RegExp(`^${prefix}\\d+$`, 'i');
+}
 
 // Writes run one at a time so concurrent saves cannot hand out the same SKU or row position.
 let writeChain = Promise.resolve();
@@ -130,14 +133,25 @@ async function saveRows(incoming) {
     return { item, existing, fields, merged };
   });
 
-  const needsSku = prepared.some((entry) => entry && entry.merged.productLink && !entry.merged.sku);
-  let nextSkuNumber = 0;
-  if (needsSku) {
-    const stored = await EtsyProductSheetRow.find({ sku: AUTO_SKU_QUERY }).select('sku').lean();
-    nextSkuNumber = getNextSheetSkuNumber([
-      ...stored.map((doc) => doc.sku),
-      ...prepared.filter(Boolean).map((entry) => entry.merged.sku),
-    ]);
+  // Each store's SKU prefix (NX…, TC…, or the default UKVLAU…) runs its own sequence.
+  const needingSku = prepared.filter((entry) => entry && entry.merged.productLink && !entry.merged.sku);
+  const nextSkuByPrefix = new Map();
+  if (needingSku.length > 0) {
+    const storeIds = [...new Set(needingSku.map((entry) => entry.merged.store).filter(isValidId))];
+    const storeDocs = storeIds.length
+      ? await EtsyStore.find({ _id: { $in: storeIds } }).select('name').lean()
+      : [];
+    const prefixByStore = new Map(storeDocs.map((doc) => [String(doc._id), getSheetSkuPrefix(doc.name)]));
+
+    needingSku.forEach((entry) => {
+      entry.skuPrefix = prefixByStore.get(entry.merged.store) || ETSY_PRODUCT_SHEET_SKU_PREFIX;
+    });
+
+    const batchSkus = prepared.filter(Boolean).map((entry) => entry.merged.sku);
+    for (const prefix of new Set(needingSku.map((entry) => entry.skuPrefix))) {
+      const stored = await EtsyProductSheetRow.find({ sku: autoSkuQuery(prefix) }).select('sku').lean();
+      nextSkuByPrefix.set(prefix, getNextSheetSkuNumber([...stored.map((doc) => doc.sku), ...batchSkus], prefix));
+    }
   }
 
   let nextRowOrder = (await getMaxRowOrder()) + 1;
@@ -149,9 +163,11 @@ async function saveRows(incoming) {
     const { item, existing, fields, merged } = entry;
 
     if (merged.productLink && !merged.sku) {
-      merged.sku = formatSheetSku(nextSkuNumber);
+      const prefix = entry.skuPrefix || ETSY_PRODUCT_SHEET_SKU_PREFIX;
+      const number = nextSkuByPrefix.get(prefix) || 1;
+      merged.sku = formatSheetSku(number, prefix);
       fields.sku = merged.sku;
-      nextSkuNumber += 1;
+      nextSkuByPrefix.set(prefix, number + 1);
     }
 
     const linkKey = getProductLinkKey(merged.productLink);
