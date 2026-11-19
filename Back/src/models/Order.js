@@ -111,6 +111,9 @@ const OrderSchema = new mongoose.Schema(
       type: String,
       default: null
     },
+    // Audit: who last changed `remark` and when (stored UTC; shown in IST on the UI)
+    remarkUpdatedBy: { type: String, default: null },
+    remarkUpdatedAt: { type: Date, default: null },
     issueReason: { type: String, default: null },
     allOrdersUsdRemark: {
       type: String,

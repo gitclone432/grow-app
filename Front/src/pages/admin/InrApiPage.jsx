@@ -67,6 +67,7 @@ import {
   remarkOptionsFromTemplates,
 } from '../../constants/remarkTemplates';
 import ChatModal from '../../components/ChatModal';
+import RemarkUpdatedInfo, { remarkAuditFrom } from '../../components/RemarkUpdatedInfo';
 
 const headerSx = {
   ...tableHeaderCellSx,
@@ -2415,15 +2416,15 @@ export default function InrApiPage({
     return rows.find((row) => String(row.caseId || row.paymentDisputeId || row._id || '') === String(entityId || ''));
   }
 
-  function updateRowRemarkState(orderId, remark) {
+  function updateRowRemarkState(orderId, remark, audit = {}) {
     setInquiries((prev) =>
-      prev.map((r) => (r.orderId === orderId ? { ...r, remark } : r))
+      prev.map((r) => (r.orderId === orderId ? { ...r, remark, ...audit } : r))
     );
     setCases((prev) =>
-      prev.map((r) => (r.orderId === orderId ? { ...r, remark } : r))
+      prev.map((r) => (r.orderId === orderId ? { ...r, remark, ...audit } : r))
     );
     setDisputes((prev) =>
-      prev.map((r) => (r.orderId === orderId ? { ...r, remark } : r))
+      prev.map((r) => (r.orderId === orderId ? { ...r, remark, ...audit } : r))
     );
   }
 
@@ -2436,9 +2437,9 @@ export default function InrApiPage({
       // This ensures remark is stored in the authoritative source (fulfillment dashboard)
       if (!row.orderId) throw new Error('Order ID not found');
 
-      await api.patch(`/ebay/orders/${row.orderId}/manual-fields`, { remark });
+      const { data } = await api.patch(`/ebay/orders/${row.orderId}/manual-fields`, { remark });
 
-      updateRowRemarkState(row.orderId, remark);
+      updateRowRemarkState(row.orderId, remark, remarkAuditFrom(data?.order));
 
       handleNotify('success', 'Remark saved successfully');
       return true;
@@ -3172,6 +3173,7 @@ export default function InrApiPage({
                       options={remarkOptionsFromTemplates(remarkTemplates)}
                       onSave={(val) => handleRemarkUpdate(row.caseId || row.paymentDisputeId, val)}
                     />
+                    <RemarkUpdatedInfo by={row.remarkUpdatedBy} at={row.remarkUpdatedAt} />
                   </TableCell>
                   <TableCell sx={actionCellSx} align="right">
                     <Stack direction="row" spacing={0} justifyContent="flex-end" sx={{ flexWrap: 'nowrap' }}>

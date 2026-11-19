@@ -104,7 +104,7 @@ export function mergeFulfillmentUpdates(order, incoming = {}, { fillEmptyOnly = 
   return merged;
 }
 
-export async function applyManualFieldUpdatesToOrder(order, updates = {}) {
+export async function applyManualFieldUpdatesToOrder(order, updates = {}, { updatedBy = null } = {}) {
   const updateData = buildManualFieldUpdateData(updates);
   if (!Object.keys(updateData).length) {
     return { changed: false, order, recalculated: false };
@@ -112,10 +112,19 @@ export async function applyManualFieldUpdatesToOrder(order, updates = {}) {
 
   const previousAmazonAccount = order.amazonAccount;
   const previousAmazonAccountAssignmentSource = order.amazonAccountAssignmentSource;
+  const previousRemark = order.remark ?? null;
 
   Object.keys(updateData).forEach((key) => {
     order[key] = updateData[key];
   });
+
+  if (
+    Object.prototype.hasOwnProperty.call(updateData, 'remark') &&
+    (updateData.remark ?? null) !== previousRemark
+  ) {
+    order.remarkUpdatedBy = updatedBy || null;
+    order.remarkUpdatedAt = new Date();
+  }
 
   if (Object.prototype.hasOwnProperty.call(updateData, 'amazonAccount')) {
     if (updateData.amazonAccount) {
@@ -229,7 +238,7 @@ export async function importFulfillmentRows(rows = [], { fillEmptyOnly = true } 
         continue;
       }
 
-      const result = await applyManualFieldUpdatesToOrder(order, merged);
+      const result = await applyManualFieldUpdatesToOrder(order, merged, { updatedBy: 'CSV Import' });
       if (result.changed) {
         summary.updated += 1;
       } else {

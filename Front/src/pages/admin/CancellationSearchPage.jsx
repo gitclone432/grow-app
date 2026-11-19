@@ -56,6 +56,7 @@ import ChatModal from '../../components/ChatModal';
 import ColumnSelector from '../../components/ColumnSelector';
 import { sellerDisplayName, sortSellersByName } from '../../lib/sellersSort.js';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
+import RemarkUpdatedInfo, { remarkAuditFrom } from '../../components/RemarkUpdatedInfo';
 import {
   findRemarkTemplateText,
   loadRemarkTemplates,
@@ -1331,7 +1332,7 @@ export default function CancellationSearchPage({
       // Update local state with the returned remark value
       setRows(prevRows =>
         prevRows.map(row =>
-          row.cancelId === cancelId ? { ...row, remark: data.order.remark } : row
+          row.cancelId === cancelId ? { ...row, remark: data.order.remark, ...remarkAuditFrom(data?.order) } : row
         )
       );
 
@@ -1980,6 +1981,7 @@ export default function CancellationSearchPage({
                           onManage={() => setManageRemarkTemplatesOpen(true)}
                           manageLabel="Manage Templates"
                         />
+                        <RemarkUpdatedInfo by={row.remarkUpdatedBy} at={row.remarkUpdatedAt} />
                       </TableCell>
                     )}
                     {visibleColumns.includes('issueReason') && (

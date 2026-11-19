@@ -45,6 +45,7 @@ import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicato
 import ChatModal from '../../components/ChatModal';
 import OrderDetailsModal from '../../components/OrderDetailsModal';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
+import RemarkUpdatedInfo, { remarkAuditFrom } from '../../components/RemarkUpdatedInfo';
 import SectionCard from '../../components/SectionCard.jsx';
 import { tableContainerSx, tableHeaderCellSx, tableBodyRowSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 import {
@@ -521,13 +522,13 @@ export default function AmazonArrivalsPage() {
         ? String(remarkValue).trim()
         : null;
       const previousRemark = orders.find(o => o._id === orderId)?.remark || null;
-      await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemark });
+      const { data } = await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemark });
       updateRemarkCountCards(previousRemark, normalizedRemark);
       if (normalizedRemark === 'Delivered') {
         // Remove the delivered order from the arrivals list
         setOrders(prev => prev.filter(o => o._id !== orderId));
       } else {
-        setOrders(prev => prev.map(o => (o._id === orderId ? { ...o, remark: normalizedRemark } : o)));
+        setOrders(prev => prev.map(o => (o._id === orderId ? { ...o, remark: normalizedRemark, ...remarkAuditFrom(data?.order) } : o)));
       }
       return true;
     } catch (err) {
@@ -1188,6 +1189,7 @@ export default function AmazonArrivalsPage() {
                               Manage Templates
                             </MenuItem>
                           </Select>
+                          <RemarkUpdatedInfo by={order.remarkUpdatedBy} at={order.remarkUpdatedAt} />
                         </FormControl>
                       </TableCell>
                       <TableCell align="center">

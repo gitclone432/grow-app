@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box,
   Table,
@@ -57,7 +57,11 @@ import { downloadCSV, prepareCSVData } from '../../utils/csvExport';
 import { fetchAllPages } from '../../lib/fetchAllPages';
 import ColumnSelector from '../../components/ColumnSelector';
 import ChatModal from '../../components/ChatModal';
+import { findRemarkTemplateText, loadRemarkTemplates, remarkOptionsFromTemplates } from '../../constants/remarkTemplates';
+import AttachFileIcon from '@mui/icons-material/AttachFile';
+import InfoIcon from '@mui/icons-material/Info';
 import ResolutionOptionsModal from '../../components/ResolutionOptionsModal';
+import RemarkUpdatedInfo, { remarkAuditFrom } from '../../components/RemarkUpdatedInfo';
 import EditIcon from '@mui/icons-material/Edit';
 import { yellowFilledButtonSx, yellowOutlinedButtonSx } from '../../theme/tableStyles.js';
 import { sortSellersByName } from '../../lib/sellersSort.js';
@@ -335,6 +339,7 @@ const RETURN_EXPORT_COLUMNS = {
   transactionDate: { header: 'transactionDate', value: (row) => formatReturnDisplayDate(row.transactionDate || row.dateSold) },
   created: { header: 'creationDate', value: (row) => formatReturnDisplayDate(row.creationDate) },
   responseDue: { header: 'Response Due (PST)', value: (row) => formatReturnDisplayDate(row.responseDate) },
+  remark: { header: 'Remark', value: (row) => row.remark || '' },
   worksheetStatus: { header: 'Worksheet Status', value: (row) => row.worksheetStatus || '' },
 };
 
@@ -667,10 +672,22 @@ export default function ReturnPostOrderPage({
     { id: 'transactionDate', label: 'transactionDate' },
     { id: 'created', label: 'creationDate' },
     { id: 'responseDue', label: 'Response Due (PST)' },
+    { id: 'remark', label: 'Remark' },
     { id: 'worksheetStatus', label: 'Worksheet Status' },
     { id: 'action', label: 'Action' },
   ];
   const [visibleColumns, setVisibleColumns] = useState(ALL_COLUMNS.map((c) => c.id));
+  const [remarkTemplates, setRemarkTemplates] = useState([]);
+  const [pendingRemarkUpdate, setPendingRemarkUpdate] = useState(null);
+  const [editableRemarkMessage, setEditableRemarkMessage] = useState('');
+  const [remarkAttachments, setRemarkAttachments] = useState([]);
+  const [sendingRemarkMessage, setSendingRemarkMessage] = useState(false);
+  const fileInputRefRemark = useRef(null);
+  useEffect(() => {
+    loadRemarkTemplates()
+      .then((templates) => setRemarkTemplates(templates))
+      .catch((err) => console.warn('Failed to load remark templates:', err));
+  }, []);
   const [selectedReturn, setSelectedReturn] = useState(null);
   const [issueOptions, setIssueOptions] = useState({ accountable: [], product: [], explanation: [] });
   const [manageIssueOptionType, setManageIssueOptionType] = useState(null);
@@ -994,6 +1011,102 @@ export default function ReturnPostOrderPage({
     } catch (err) {
       console.error('Failed to update worksheet status:', err);
       setSnackbar({ open: true, message: 'Failed to update worksheet status', severity: 'error' });
+    }
+  };
+
+  const saveRemarkValue = async (row, remark) => {
+    if (!row.orderId) {
+      setSnackbar({ open: true, message: 'Order ID not found', severity: 'error' });
+      return false;
+    }
+    try {
+      const { data } = await api.patch(`/ebay/orders/${row.orderId}/manual-fields`, { remark });
+      setRows(prevRows =>
+        prevRows.map(r => (r.orderId === row.orderId ? { ...r, remark, ...remarkAuditFrom(data?.order) } : r))
+      );
+      setSnackbar({ open: true, message: 'Remark saved successfully', severity: 'success' });
+      return true;
+    } catch (err) {
+      console.error('Failed to save remark:', err);
+      setSnackbar({ open: true, message: err.response?.data?.error || 'Failed to save remark', severity: 'error' });
+      return false;
+    }
+  };
+
+  const closeRemarkDialog = () => {
+    setPendingRemarkUpdate(null);
+    setEditableRemarkMessage('');
+    setRemarkAttachments([]);
+  };
+
+  const handleRemarkSave = (row, remark) => {
+    const templateText = findRemarkTemplateText(remarkTemplates, remark);
+    if (!templateText) {
+      saveRemarkValue(row, remark);
+      return;
+    }
+    const buyerFullName = row.buyerName || row.shippingFullName || row.buyerUsername || 'Customer';
+    const buyerFirstName = String(buyerFullName).trim().split(/\s+/)[0] || 'Customer';
+    setPendingRemarkUpdate({ row, remarkValue: remark });
+    setEditableRemarkMessage(
+      String(templateText)
+        .replace(/\{\{buyer_first_name\}\}/g, buyerFirstName)
+        .replace(/\{\{buyer_name\}\}/g, buyerFullName)
+        .replace(/\{\{order_id\}\}/g, row.orderId || '')
+        .replace(/\{\{item_title\}\}/g, row.itemTitle || row.productName || 'item')
+    );
+    setRemarkAttachments([]);
+  };
+
+  const handleRemarkFileSelect = async (event) => {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    try {
+      const { data } = await api.post('/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const uploaded = (data.urls || []).map((url, index) => ({ url, name: files[index]?.name || 'Attachment' }));
+      setRemarkAttachments((prev) => [...prev, ...uploaded]);
+    } catch (e) {
+      setSnackbar({ open: true, severity: 'error', message: e.response?.data?.error || e.message || 'Failed to upload attachment' });
+    } finally {
+      if (fileInputRefRemark.current) fileInputRefRemark.current.value = '';
+    }
+  };
+
+  const handleSkipRemarkMessage = async () => {
+    if (!pendingRemarkUpdate) return;
+    if (await saveRemarkValue(pendingRemarkUpdate.row, pendingRemarkUpdate.remarkValue)) closeRemarkDialog();
+  };
+
+  const handleConfirmRemarkMessage = async () => {
+    if (!pendingRemarkUpdate) return;
+    setSendingRemarkMessage(true);
+    try {
+      const { row, remarkValue } = pendingRemarkUpdate;
+      await api.post('/ebay/send-message', {
+        orderId: row.orderId,
+        buyerUsername: row.buyerUsername,
+        itemId: row.itemId,
+        sellerId: row.seller?._id || row.seller || undefined,
+        body: editableRemarkMessage,
+        subject: `Regarding Order #${row.orderId}`,
+        mediaUrls: remarkAttachments.map((a) => a.url),
+      });
+      clearBuyerMessageIndicator({
+        orderId: row.orderId,
+        buyerUsername: row.buyerUsername,
+        itemId: row.itemId,
+      });
+      if (!(await saveRemarkValue(row, remarkValue))) return;
+      closeRemarkDialog();
+      setSnackbar({ open: true, severity: 'success', message: `Message sent and remark updated to "${remarkValue}"` });
+    } catch (e) {
+      setSnackbar({ open: true, severity: 'error', message: e.response?.data?.error || e.message || 'Failed to send message' });
+    } finally {
+      setSendingRemarkMessage(false);
     }
   };
 
@@ -1603,6 +1716,7 @@ export default function ReturnPostOrderPage({
                 {visibleColumns.includes('transactionDate') && <TableCell sx={headerSx}>transactionDate</TableCell>}
                 {visibleColumns.includes('created') && <TableCell sx={headerSx}>creationDate</TableCell>}
                 {visibleColumns.includes('responseDue') && <TableCell sx={headerSx}>Response Due (PST)</TableCell>}
+                {visibleColumns.includes('remark') && <TableCell sx={headerSx}>Remark</TableCell>}
                 {visibleColumns.includes('worksheetStatus') && <TableCell sx={headerSx}>Worksheet Status</TableCell>}
                 {visibleColumns.includes('action') && <TableCell sx={headerSx} align="center">Action</TableCell>}
               </TableRow>
@@ -1812,6 +1926,25 @@ export default function ReturnPostOrderPage({
                             />
                           )}
                         </Stack>
+                      </TableCell>
+                    )}
+                    {visibleColumns.includes('remark') && (
+                      <TableCell sx={{ minWidth: 150 }}>
+                        <Select
+                          value={row.remark || ''}
+                          onChange={(e) => handleRemarkSave(row, e.target.value)}
+                          displayEmpty
+                          size="small"
+                          sx={{ backgroundColor: '#fff', minWidth: 130, height: 32, fontSize: '0.85rem', '& .MuiSelect-select': { py: 0.5, px: 1 } }}
+                        >
+                          <MenuItem value="">
+                            <em style={{ color: '#aaa' }}>- Select -</em>
+                          </MenuItem>
+                          {remarkOptionsFromTemplates(remarkTemplates).map((opt) => (
+                            <MenuItem key={opt._id || opt.name} value={opt.name}>{opt.name}</MenuItem>
+                          ))}
+                        </Select>
+                        <RemarkUpdatedInfo by={row.remarkUpdatedBy} at={row.remarkUpdatedAt} />
                       </TableCell>
                     )}
                     {visibleColumns.includes('worksheetStatus') && (
@@ -2595,6 +2728,90 @@ export default function ReturnPostOrderPage({
         endpoint={`${RETURN_ISSUE_OPTIONS_ENDPOINT}/${manageIssueOptionType || 'accountable'}`}
         title={`Manage ${{ product: 'Product', explanation: 'Explanation' }[manageIssueOptionType] || 'Accountable'} Options`}
       />
+
+      <Dialog
+        open={Boolean(pendingRemarkUpdate)}
+        onClose={() => { if (!sendingRemarkMessage) closeRemarkDialog(); }}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <ChatIcon color="primary" />
+            <Typography variant="h6">Send Message to Buyer - Edit & Preview</Typography>
+          </Stack>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Alert severity="info" icon={<InfoIcon />}>
+              You're updating the remark to <strong>"{pendingRemarkUpdate?.remarkValue}"</strong>
+            </Alert>
+            <Box>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                Message Preview (Edit as needed):
+              </Typography>
+              <TextField
+                fullWidth
+                multiline
+                minRows={6}
+                maxRows={12}
+                value={editableRemarkMessage}
+                onChange={(e) => setEditableRemarkMessage(e.target.value)}
+                placeholder="Message text..."
+                variant="outlined"
+                size="small"
+              />
+            </Box>
+            {remarkAttachments.length > 0 && (
+              <Box>
+                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                  Attachments ({remarkAttachments.length}):
+                </Typography>
+                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                  {remarkAttachments.map((attachment, index) => (
+                    <Chip
+                      key={`${attachment.url}-${index}`}
+                      label={attachment.name}
+                      onDelete={() => setRemarkAttachments((prev) => prev.filter((_, i) => i !== index))}
+                      size="small"
+                      variant="outlined"
+                      sx={{ maxWidth: 200 }}
+                    />
+                  ))}
+                </Box>
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ p: 2, gap: 1 }}>
+          <input ref={fileInputRefRemark} type="file" multiple accept="image/*" hidden onChange={handleRemarkFileSelect} />
+          <Tooltip title="Attach images">
+            <span>
+              <Button
+                size="small"
+                startIcon={<AttachFileIcon />}
+                onClick={() => fileInputRefRemark.current?.click()}
+                disabled={sendingRemarkMessage}
+                variant="outlined"
+              >
+                Add Attachment
+              </Button>
+            </span>
+          </Tooltip>
+          <Box sx={{ flex: 1 }} />
+          <Button onClick={handleSkipRemarkMessage} disabled={sendingRemarkMessage} variant="outlined">
+            Just Update Remark
+          </Button>
+          <Button
+            onClick={handleConfirmRemarkMessage}
+            disabled={sendingRemarkMessage || !editableRemarkMessage.trim()}
+            variant="contained"
+            startIcon={sendingRemarkMessage ? <CircularProgress size={18} color="inherit" /> : <SendIcon />}
+          >
+            {sendingRemarkMessage ? 'Sending...' : 'Send Message & Update Remark'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar
         open={snackbar.open}
