@@ -625,8 +625,17 @@ export default function EtsyProductSheetPage() {
     let skipped = false;
     let unknownStore = '';
 
+    // In a store-only view the grid ends with the sheet's trailing blank rows, so a paste that
+    // runs past the last visible row continues onto new rows appended to the end of the sheet
+    // (instead of silently dropping everything beyond the ~30 visible blanks).
+    const appendBase = rowsRef.current.length;
+    const canAppend = Boolean(viewIndex && rowFilter?.allowBlanks);
+
     for (const change of changes) {
-      const r = viewIndex ? viewIndex[change.r] : change.r;
+      let r = viewIndex ? viewIndex[change.r] : change.r;
+      if (r === undefined && canAppend && change.r >= viewIndex.length) {
+        r = appendBase + (change.r - viewIndex.length);
+      }
       if (r === undefined) {
         if (String(change.value ?? '').trim()) skipped = true;
         continue;
@@ -663,7 +672,7 @@ export default function EtsyProductSheetPage() {
       notify('Rows past the end of the filtered results were skipped — clear the filters to add new rows.', 'info');
     }
     if (mapped.length > 0) applyChanges(mapped);
-  }, [applyChanges, notify, storeIdByName, viewIndex]);
+  }, [applyChanges, notify, rowFilter, storeIdByName, viewIndex]);
 
   const replayHistory = useCallback((entry, direction) => {
     const indexByKey = new Map(rowsRef.current.map((row, index) => [row.key, index]));
