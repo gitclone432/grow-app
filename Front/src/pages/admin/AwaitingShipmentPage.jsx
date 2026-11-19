@@ -56,6 +56,7 @@ import ChatModal from '../../components/ChatModal';
 import SectionCard from '../../components/SectionCard.jsx';
 import { tableContainerSx, tableHeaderCellSx, tableBodyRowSx, yellowOutlinedButtonSx, yellowFilledButtonSx } from '../../theme/tableStyles.js';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
+import RemarkUpdatedInfo, { remarkAuditFrom } from '../../components/RemarkUpdatedInfo';
 import {
   findRemarkTemplateText,
   loadRemarkTemplates,
@@ -1051,8 +1052,8 @@ export default function AwaitingShipmentPage() {
       const normalizedRemark = remarkValue && String(remarkValue).trim().toLowerCase() !== 'select'
         ? String(remarkValue).trim()
         : null;
-      await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemark });
-      setOrders(prev => prev.map(o => (o._id === orderId ? { ...o, remark: normalizedRemark } : o)));
+      const { data } = await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemark });
+      setOrders(prev => prev.map(o => (o._id === orderId ? { ...o, remark: normalizedRemark, ...remarkAuditFrom(data?.order) } : o)));
       return true;
     } catch (err) {
       showSnack('error', err?.response?.data?.error || 'Failed to update remark');
@@ -1659,6 +1660,7 @@ export default function AwaitingShipmentPage() {
                 Manage Templates
               </MenuItem>
             </Select>
+            <RemarkUpdatedInfo by={order.remarkUpdatedBy} at={order.remarkUpdatedAt} />
           </FormControl>
         );
       case 'subtotal': return formatCurrency(order.subtotalUSD);

@@ -88,6 +88,7 @@ import { sortSellersByName } from '../../lib/sellersSort';
 import ChatModal from '../../components/ChatModal';
 import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
+import RemarkUpdatedInfo, { remarkAuditFrom } from '../../components/RemarkUpdatedInfo';
 import ResolutionOptionsModal from '../../components/ResolutionOptionsModal';
 import {
   findRemarkTemplateText,
@@ -2366,7 +2367,7 @@ function FulfillmentDashboard() {
       // Update local state
       setOrders(prev => prev.map(o => {
         if (o._id === orderId) {
-          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: true, issueReason: pendingIssueReason || null };
+          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: true, issueReason: pendingIssueReason || null, ...remarkAuditFrom(data?.order) };
         }
         return o;
       }));
@@ -2416,12 +2417,12 @@ function FulfillmentDashboard() {
 
     try {
       // Just update the remark without sending message
-      await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemarkValue, remarkMessageSent: false, issueReason: pendingIssueReason || null });
+      const { data } = await api.patch(`/ebay/orders/${orderId}/manual-fields`, { remark: normalizedRemarkValue, remarkMessageSent: false, issueReason: pendingIssueReason || null });
 
       // Update local state
       setOrders(prev => prev.map(o => {
         if (o._id === orderId) {
-          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: false, issueReason: pendingIssueReason || null };
+          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: false, issueReason: pendingIssueReason || null, ...remarkAuditFrom(data?.order) };
         }
         return o;
       }));
@@ -2520,7 +2521,7 @@ function FulfillmentDashboard() {
             return data.order; // Full order with recalculated amazonTotal, amazonTotalINR, marketplaceFee, igst, totalCC
           }
           // For other fields, just update that field (including any extraFields)
-          return { ...o, [field]: valueToSave, ...extraFields };
+          return { ...o, [field]: valueToSave, ...extraFields, ...(field === 'remark' ? remarkAuditFrom(data?.order) : {}) };
         }
         return o;
       }));
@@ -6181,6 +6182,7 @@ function FulfillmentDashboard() {
                                 onManage={() => setManageRemarkTemplatesOpen(true)}
                                 manageLabel="Manage Templates"
                               />
+                              <RemarkUpdatedInfo by={order.remarkUpdatedBy} at={order.remarkUpdatedAt} />
                             </TableCell>
                           )}
                           {visibleColumnsSet.has('issueReason') && (

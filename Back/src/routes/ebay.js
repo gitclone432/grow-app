@@ -159,7 +159,7 @@ async function enrichINRRowsWithOrderNotesAndRemark(rows = []) {
         { orderId: { $in: orderIds } },
         { legacyOrderId: { $in: orderIds } }
       ]},
-      { orderId: 1, legacyOrderId: 1, notes: 1, fulfillmentNotes: 1, remark: 1, dateSold: 1 }
+      { orderId: 1, legacyOrderId: 1, notes: 1, fulfillmentNotes: 1, remark: 1, remarkUpdatedBy: 1, remarkUpdatedAt: 1, dateSold: 1 }
     )
       .lean();
 
@@ -168,6 +168,8 @@ async function enrichINRRowsWithOrderNotesAndRemark(rows = []) {
       const orderNotesAndRemark = {
         fulfillmentNotes: order.fulfillmentNotes || order.notes || '',
         remark: order.remark || '',
+        remarkUpdatedBy: order.remarkUpdatedBy || null,
+        remarkUpdatedAt: order.remarkUpdatedAt || null,
         dateSold: order.dateSold || null,
       };
       // Map by orderId
@@ -190,6 +192,8 @@ async function enrichINRRowsWithOrderNotesAndRemark(rows = []) {
         // This ensures notes and remark are consistent and come from the authoritative source
         fulfillmentNotes: orderData.fulfillmentNotes || row.fulfillmentNotes,
         remark: orderData.remark || row.remark,
+        remarkUpdatedBy: orderData.remarkUpdatedBy,
+        remarkUpdatedAt: orderData.remarkUpdatedAt,
         dateSold: row.dateSold || orderData.dateSold,
       };
     });
@@ -12059,6 +12063,8 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
           shipByDate: 1,
           purchaseMarketplaceId: 1,
           remark: 1,
+          remarkUpdatedBy: 1,
+          remarkUpdatedAt: 1,
           issueReason: 1,
           fulfillmentNotes: 1,
           amazonAccount: 1,
@@ -12095,6 +12101,8 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         shipByDate: o.shipByDate || null, // Ship By date from Order (same field as FulfillmentDashboard)
         purchaseMarketplaceId: o.purchaseMarketplaceId,
         remark: o.remark || '', // Get remark from Order (same field as FulfillmentDashboard)
+        remarkUpdatedBy: o.remarkUpdatedBy || null,
+        remarkUpdatedAt: o.remarkUpdatedAt || null,
         issueReason: o.issueReason || '',
         notes: o.fulfillmentNotes || '', // Get notes from Order (same field as FulfillmentDashboard)
         amazonAccount: o.amazonAccount || null,
@@ -12133,6 +12141,8 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         shipByDate: orderMap[key]?.shipByDate || null, // Ship By date from Order (same field as FulfillmentDashboard)
         purchaseMarketplaceId: orderMap[key]?.purchaseMarketplaceId || c.marketplaceId || 'EBAY_US',
         remark: orderMap[key]?.remark || '', // Use remark from Order (same field as FulfillmentDashboard)
+        remarkUpdatedBy: orderMap[key]?.remarkUpdatedBy || null,
+        remarkUpdatedAt: orderMap[key]?.remarkUpdatedAt || null,
         issueReason: orderMap[key]?.issueReason || '',
         notes: orderMap[key]?.notes || '', // Use notes from Order (same field as FulfillmentDashboard)
         amazonAccount: orderMap[key]?.amazonAccount || null,
@@ -12253,7 +12263,7 @@ router.get('/stored-returns', async (req, res) => {
     // Lookup product names and order dates from Orders collection
     const orderIds = returns.map(r => r.orderId).filter(Boolean);
     const orders = orderIds.length
-      ? await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1, creationDate: 1, purchaseMarketplaceId: 1, sku: 1, lineItems: 1 }).lean()
+      ? await Order.find({ orderId: { $in: orderIds } }, { orderId: 1, productName: 1, creationDate: 1, purchaseMarketplaceId: 1, sku: 1, lineItems: 1, remark: 1, remarkUpdatedBy: 1, remarkUpdatedAt: 1 }).lean()
       : [];
     const orderMap = {};
     orders.forEach(o => {
@@ -12262,6 +12272,9 @@ router.get('/stored-returns', async (req, res) => {
         dateSold: o.creationDate,
         purchaseMarketplaceId: o.purchaseMarketplaceId,
         sku: extractOrderSku(o),
+        remark: o.remark || '',
+        remarkUpdatedBy: o.remarkUpdatedBy || null,
+        remarkUpdatedAt: o.remarkUpdatedAt || null,
       };
     });
 
@@ -12269,6 +12282,9 @@ router.get('/stored-returns', async (req, res) => {
     const returnsWithOrderData = returns.map(r => ({
       ...r,
       productName: orderMap[r.orderId]?.productName || null,
+      remark: orderMap[r.orderId]?.remark || '',
+      remarkUpdatedBy: orderMap[r.orderId]?.remarkUpdatedBy || null,
+      remarkUpdatedAt: orderMap[r.orderId]?.remarkUpdatedAt || null,
       sku: orderMap[r.orderId]?.sku || '',
       // Date Sold = Order's creation date (when order was placed)
       dateSold: orderMap[r.orderId]?.dateSold || r.transactionDate || null,
@@ -21863,7 +21879,13 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
     const order = await findOrderByIdOrOrderId(orderId);
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
-    const result = await applyManualFieldUpdatesToOrder(order, updates);
+    let updatedBy = null;
+    if (Object.prototype.hasOwnProperty.call(updates || {}, 'remark') && req.user?.userId) {
+      const u = await User.findById(req.user.userId).select('username').lean();
+      updatedBy = u?.username || null;
+    }
+
+    const result = await applyManualFieldUpdatesToOrder(order, updates, { updatedBy });
 
     await result.order.populate({
       path: 'seller',
