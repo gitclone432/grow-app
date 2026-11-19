@@ -1,8 +1,33 @@
 export const ETSY_PRODUCT_SHEET_SKU_PREFIX = 'UKVLAU';
 export const ETSY_PRODUCT_SHEET_FIELDS = ['date', 'productLink', 'sku', 'amazonPrice', 'etsyPrice', 'altLink'];
 
-const SKU_PATTERN = new RegExp(`^${ETSY_PRODUCT_SHEET_SKU_PREFIX}(\\d+)$`, 'i');
 const SKU_MIN_DIGITS = 3;
+
+/**
+ * Auto-SKU prefix per Etsy store, keyed by the store name lower-cased with spaces removed.
+ * Each prefix has its own sequence starting at 001. Any other store (TheVeloraCraftStore
+ * included) and rows without a store keep the original UKVLAU sequence.
+ */
+const STORE_SKU_PREFIXES = {
+  nexoncraftstudio: 'NX',
+  techvistacrafts: 'TC',
+};
+
+const skuPatternCache = new Map();
+
+function skuPattern(prefix) {
+  let pattern = skuPatternCache.get(prefix);
+  if (!pattern) {
+    pattern = new RegExp(`^${prefix}(\\d+)$`, 'i');
+    skuPatternCache.set(prefix, pattern);
+  }
+  return pattern;
+}
+
+export function getSheetSkuPrefix(storeName) {
+  const key = String(storeName ?? '').toLowerCase().replace(/\s+/g, '');
+  return STORE_SKU_PREFIXES[key] || ETSY_PRODUCT_SHEET_SKU_PREFIX;
+}
 
 const ASIN_PATH_PATTERN = /\/(?:dp|gp\/product|gp\/aw\/d|gp\/offer-listing|product|asin|exec\/obidos\/asin|o\/asin)\/([A-Z0-9]{10})(?=[/?#&]|$)/i;
 const ASIN_QUERY_PATTERN = /[?&](?:asin|pd_rd_i)=([A-Z0-9]{10})(?=[&#]|$)/i;
@@ -16,20 +41,20 @@ const MONTH_INDEX = {
 const FIELD_MAX_LENGTH = { productLink: 2000, altLink: 2000 };
 const DEFAULT_MAX_LENGTH = 200;
 
-export function parseSheetSkuNumber(sku) {
-  const match = String(sku ?? '').trim().match(SKU_PATTERN);
+export function parseSheetSkuNumber(sku, prefix = ETSY_PRODUCT_SHEET_SKU_PREFIX) {
+  const match = String(sku ?? '').trim().match(skuPattern(prefix));
   return match ? Number(match[1]) : 0;
 }
 
-export function formatSheetSku(number) {
-  return `${ETSY_PRODUCT_SHEET_SKU_PREFIX}${String(number).padStart(SKU_MIN_DIGITS, '0')}`;
+export function formatSheetSku(number, prefix = ETSY_PRODUCT_SHEET_SKU_PREFIX) {
+  return `${prefix}${String(number).padStart(SKU_MIN_DIGITS, '0')}`;
 }
 
-/** Next number in the UKVLAU001, UKVLAU002, ... sequence given the SKUs already in the sheet. */
-export function getNextSheetSkuNumber(skus = []) {
+/** Next number in the <prefix>001, <prefix>002, ... sequence given the SKUs already in the sheet. */
+export function getNextSheetSkuNumber(skus = [], prefix = ETSY_PRODUCT_SHEET_SKU_PREFIX) {
   let max = 0;
   for (const sku of skus) {
-    max = Math.max(max, parseSheetSkuNumber(sku));
+    max = Math.max(max, parseSheetSkuNumber(sku, prefix));
   }
   return max + 1;
 }

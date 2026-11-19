@@ -5,6 +5,7 @@ import {
   formatSheetSku,
   getNextSheetSkuNumber,
   getProductLinkKey,
+  getSheetSkuPrefix,
   normalizeSheetDate,
   normalizeSheetPrice,
 } from '../src/utils/etsyProductSheet.js';
@@ -55,6 +56,19 @@ test('SKU sequence starts at UKVLAU001 and continues from the highest existing n
   assert.equal(formatSheetSku(getNextSheetSkuNumber(['UKVLAU001', 'ukvlau007', 'UKVLAU003'])), 'UKVLAU008');
   assert.equal(formatSheetSku(getNextSheetSkuNumber(['UKVLAU999'])), 'UKVLAU1000');
   assert.equal(formatSheetSku(getNextSheetSkuNumber(['CUSTOM-42', 'UKVLAU12X', ''])), 'UKVLAU001');
+});
+
+test('each store prefix has its own SKU sequence starting at 001', () => {
+  assert.equal(getSheetSkuPrefix('NexonCraftStudio'), 'NX');
+  assert.equal(getSheetSkuPrefix('Nexon Craft Studio'), 'NX');
+  assert.equal(getSheetSkuPrefix('techvistacrafts'), 'TC');
+  assert.equal(getSheetSkuPrefix('TheVeloraCraftStore'), 'UKVLAU');
+  assert.equal(getSheetSkuPrefix(''), 'UKVLAU');
+
+  const existing = ['UKVLAU001', 'UKVLAU250', 'NX004'];
+  assert.equal(formatSheetSku(getNextSheetSkuNumber(existing, 'NX'), 'NX'), 'NX005');
+  assert.equal(formatSheetSku(getNextSheetSkuNumber(existing, 'TC'), 'TC'), 'TC001');
+  assert.equal(formatSheetSku(getNextSheetSkuNumber(existing)), 'UKVLAU251');
 });
 
 test('dates normalize to ISO, reading numeric dates day-first', () => {
