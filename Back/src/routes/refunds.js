@@ -4,6 +4,7 @@ import Order from '../models/Order.js';
 import RefundEntry, { REFUND_TYPES } from '../models/RefundEntry.js';
 import RefundOption, { REFUND_OPTION_TYPES } from '../models/RefundOption.js';
 import { requireAuth, requirePageAccess, requireFeatureAccess } from '../middleware/auth.js';
+import { autoAssignRefundedOrders, fillRefundAmounts } from '../lib/refundAutoAssign.js';
 
 export const REFUND_ADD_FEATURE_ID = 'refunds.addFromFulfillment';
 
@@ -199,6 +200,9 @@ router.post('/', requireAuth, requireFeatureAccess(REFUND_ADD_FEATURE_ID), async
             return res.status(404).json({ error: 'Order not found' });
         }
 
+        // Added by hand again: let auto-assign treat this list normally from now on.
+        await Order.updateOne({ _id: order._id }, { $pull: { refundAutoDismissed: type } });
+
         const existing = await RefundEntry.findOne({ order: order._id, type }).select('_id').lean();
         if (existing) {
             return res.json({ created: false, entryId: existing._id });
@@ -211,6 +215,10 @@ router.post('/', requireAuth, requireFeatureAccess(REFUND_ADD_FEATURE_ID), async
                 orderId: order.orderId || '',
                 seller: order.seller
             });
+            // Pre-fill Refund Amt + Status from order data (best effort).
+            await fillRefundAmounts({ entryIds: [entry._id] }).catch((err) =>
+                console.error('Refund Amt auto-fill failed:', err.message)
+            );
             return res.status(201).json({ created: true, entryId: entry._id });
         } catch (error) {
             // Double click: the unique index already holds the entry.
@@ -220,6 +228,20 @@ router.post('/', requireAuth, requireFeatureAccess(REFUND_ADD_FEATURE_ID), async
     } catch (error) {
         console.error('Error adding refund entry:', error);
         res.status(500).json({ error: 'Failed to add refund entry' });
+    }
+});
+
+// Run the refunded-orders auto-assign now (the same job also runs on a schedule).
+router.post('/auto-assign', requireAuth, requirePageAccess('Refunds'), async (req, res) => {
+    try {
+        const result = await autoAssignRefundedOrders();
+        if (result.skipped) {
+            return res.status(409).json({ error: 'Auto-assign is already running, try again shortly' });
+        }
+        res.json(result);
+    } catch (error) {
+        console.error('Error auto-assigning refunded orders:', error);
+        res.status(500).json({ error: 'Failed to auto-assign refunded orders' });
     }
 });
 
@@ -356,6 +378,8 @@ router.patch('/:id', requireAuth, requirePageAccess('Refunds'), async (req, res)
             }
             update[field] = amount;
         }
+        // Mark as user-entered; the next sync puts the Refunds column value back if the order has one.
+        if (update.refundAmount !== undefined) update.refundAmountAuto = false;
 
         if (body.refundDate !== undefined) {
             if (body.refundDate === null || body.refundDate === '') {
@@ -407,6 +431,8 @@ router.delete('/:id', requireAuth, requirePageAccess('Refunds'), async (req, res
         if (!entry) {
             return res.status(404).json({ error: 'Refund entry not found' });
         }
+        // Remember the removal so auto-assign does not put the order back on this list.
+        await Order.updateOne({ _id: entry.order }, { $addToSet: { refundAutoDismissed: entry.type } });
         res.json({ message: 'Refund entry removed' });
     } catch (error) {
         if (error.name === 'CastError') {

@@ -113,6 +113,7 @@ export async function applyManualFieldUpdatesToOrder(order, updates = {}, { upda
   const previousAmazonAccount = order.amazonAccount;
   const previousAmazonAccountAssignmentSource = order.amazonAccountAssignmentSource;
   const previousRemark = order.remark ?? null;
+  const previousIssueReason = order.issueReason ?? null;
 
   Object.keys(updateData).forEach((key) => {
     order[key] = updateData[key];
@@ -124,6 +125,14 @@ export async function applyManualFieldUpdatesToOrder(order, updates = {}, { upda
   ) {
     order.remarkUpdatedBy = updatedBy || null;
     order.remarkUpdatedAt = new Date();
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(updateData, 'issueReason') &&
+    (updateData.issueReason ?? null) !== previousIssueReason
+  ) {
+    order.issueReasonUpdatedBy = updatedBy || null;
+    order.issueReasonUpdatedAt = new Date();
   }
 
   if (Object.prototype.hasOwnProperty.call(updateData, 'amazonAccount')) {

@@ -185,6 +185,21 @@ export function computePartiallyRefundedOrderEarnings(order = {}) {
   return parseFloat((E0 - netRefund + adFeeCredit).toFixed(2));
 }
 
+/**
+ * Display-only amount for the "Partial" chip in the Refunds column:
+ *   Subtotal (converted to USD) − Earnings (USD).
+ * Does NOT touch order.refunds (earnings for partial refunds are derived from them).
+ */
+export function getPartialRefundDisplayAmount(order = {}) {
+  const subtotal = parseFloat(order?.subtotal);
+  if (!Number.isFinite(subtotal)) return null;
+  const rate = parseFloat(order?.conversionRate);
+  const subtotalUsd = subtotal * (Number.isFinite(rate) && rate > 0 ? rate : 1);
+  const earnings = parseFloat(getOrderEarnings(order));
+  if (!Number.isFinite(earnings)) return null;
+  return parseFloat((subtotalUsd - earnings).toFixed(2));
+}
+
 export function getOrderEarnings(order) {
   const status = String(
     order?.orderPaymentStatus

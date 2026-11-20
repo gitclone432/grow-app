@@ -772,15 +772,41 @@ export default function RefundsPage() {
 
   const refundType = tab === 0 ? 'return' : 'inr';
 
+  // Bumped after an auto-assign run so the table reloads.
+  const [tableReloadKey, setTableReloadKey] = useState(0);
+  const [autoAssigning, setAutoAssigning] = useState(false);
+
+  const runAutoAssign = async () => {
+    setAutoAssigning(true);
+    try {
+      const { data } = await api.post('/refunds/auto-assign');
+      notify(
+        'success',
+        `Refreshed ${data.ebayRefreshed || 0} order(s) from eBay${data.ebayFailed ? ` (${data.ebayFailed} failed)` : ''}. `
+        + `Checked ${data.checked} refunded order(s): added ${data.created} (Return ${data.return}, INR ${data.inr}), Refund Amt / Status updated on ${data.amountsFilled || 0} row(s)`
+      );
+      if (data.created > 0 || data.amountsFilled > 0) setTableReloadKey((k) => k + 1);
+    } catch (err) {
+      notify('error', err?.response?.data?.error || 'Failed to sync refunded orders');
+    } finally {
+      setAutoAssigning(false);
+    }
+  };
+
   return (
     <Box sx={{ p: { xs: 1, sm: 2 } }}>
       <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
         <Typography variant="h5" sx={{ fontWeight: 600 }}>Refunds</Typography>
-        {isSuperAdmin && (
-          <Button variant="outlined" size="small" onClick={openAccessDialog}>
-            Manage Refund Button Access
+        <Stack direction="row" spacing={1}>
+          <Button variant="contained" size="small" onClick={runAutoAssign} disabled={autoAssigning}>
+            {autoAssigning ? 'Syncing with eBay…' : 'Sync refunded orders'}
           </Button>
-        )}
+          {isSuperAdmin && (
+            <Button variant="outlined" size="small" onClick={openAccessDialog}>
+              Manage Refund Button Access
+            </Button>
+          )}
+        </Stack>
       </Stack>
 
       <Tabs value={tab} onChange={(_e, value) => setTab(value)} sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}>
@@ -789,7 +815,7 @@ export default function RefundsPage() {
       </Tabs>
 
       <RefundTable
-        key={refundType}
+        key={`${refundType}-${tableReloadKey}`}
         type={refundType}
         sellers={sellers}
         statusOptions={statusOptions}

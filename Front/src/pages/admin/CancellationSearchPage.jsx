@@ -56,7 +56,7 @@ import ChatModal from '../../components/ChatModal';
 import ColumnSelector from '../../components/ColumnSelector';
 import { sellerDisplayName, sortSellersByName } from '../../lib/sellersSort.js';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
-import RemarkUpdatedInfo, { remarkAuditFrom } from '../../components/RemarkUpdatedInfo';
+import RemarkUpdatedInfo, { remarkAuditFrom, issueReasonAuditFrom } from '../../components/RemarkUpdatedInfo';
 import {
   findRemarkTemplateText,
   loadRemarkTemplates,
@@ -690,8 +690,10 @@ export default function CancellationSearchPage({
       return;
     }
     try {
-      await api.patch(`/ebay/orders/${row.orderDbId}/manual-fields`, { issueReason: value || null });
-      setRows((prev) => prev.map((r) => (r.cancelId === row.cancelId ? { ...r, issueReason: value || '' } : r)));
+      const { data } = await api.patch(`/ebay/orders/${row.orderDbId}/manual-fields`, { issueReason: value || null });
+      setRows((prev) => prev.map((r) => (
+        r.cancelId === row.cancelId ? { ...r, issueReason: value || '', ...issueReasonAuditFrom(data?.order) } : r
+      )));
     } catch (err) {
       setSnackbar({
         open: true,
@@ -1993,6 +1995,7 @@ export default function CancellationSearchPage({
                           onManage={() => setManageIssueReasonsOpen(true)}
                           manageLabel="Manage Reasons"
                         />
+                        <RemarkUpdatedInfo label="Reason" by={row.issueReasonUpdatedBy} at={row.issueReasonUpdatedAt} />
                       </TableCell>
                     )}
                     {visibleColumns.includes('notes') && (

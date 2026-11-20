@@ -48,6 +48,7 @@ import { format, parseISO, isValid } from 'date-fns';
 import {
   computePartialRefundEnterAmount,
   getOrderEarnings,
+  getPartialRefundDisplayAmount,
   PARTIAL_REFUND_TARGET_EARNINGS,
   EBAY_PER_ORDER_FIXED_FEE
 } from '../../utils/partialRefundEarnings';
@@ -88,7 +89,7 @@ import { sortSellersByName } from '../../lib/sellersSort';
 import ChatModal from '../../components/ChatModal';
 import BuyerMessageSentIndicator from '../../components/BuyerMessageSentIndicator';
 import RemarkTemplateManagerModal from '../../components/RemarkTemplateManagerModal';
-import RemarkUpdatedInfo, { remarkAuditFrom } from '../../components/RemarkUpdatedInfo';
+import RemarkUpdatedInfo, { remarkAuditFrom, issueReasonAuditFrom } from '../../components/RemarkUpdatedInfo';
 import ResolutionOptionsModal from '../../components/ResolutionOptionsModal';
 import {
   findRemarkTemplateText,
@@ -2367,7 +2368,7 @@ function FulfillmentDashboard() {
       // Update local state
       setOrders(prev => prev.map(o => {
         if (o._id === orderId) {
-          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: true, issueReason: pendingIssueReason || null, ...remarkAuditFrom(data?.order) };
+          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: true, issueReason: pendingIssueReason || null, ...remarkAuditFrom(data?.order), ...issueReasonAuditFrom(data?.order) };
         }
         return o;
       }));
@@ -2422,7 +2423,7 @@ function FulfillmentDashboard() {
       // Update local state
       setOrders(prev => prev.map(o => {
         if (o._id === orderId) {
-          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: false, issueReason: pendingIssueReason || null, ...remarkAuditFrom(data?.order) };
+          return { ...o, remark: normalizedRemarkValue, remarkMessageSent: false, issueReason: pendingIssueReason || null, ...remarkAuditFrom(data?.order), ...issueReasonAuditFrom(data?.order) };
         }
         return o;
       }));
@@ -2521,7 +2522,13 @@ function FulfillmentDashboard() {
             return data.order; // Full order with recalculated amazonTotal, amazonTotalINR, marketplaceFee, igst, totalCC
           }
           // For other fields, just update that field (including any extraFields)
-          return { ...o, [field]: valueToSave, ...extraFields, ...(field === 'remark' ? remarkAuditFrom(data?.order) : {}) };
+          return {
+            ...o,
+            [field]: valueToSave,
+            ...extraFields,
+            ...(field === 'remark' ? remarkAuditFrom(data?.order) : {}),
+            ...(field === 'issueReason' ? issueReasonAuditFrom(data?.order) : {})
+          };
         }
         return o;
       }));
@@ -4426,7 +4433,14 @@ function FulfillmentDashboard() {
         cancelStatus: { header: 'Cancel Status', accessor: 'cancelState' },
         refunds: {
           header: 'Refunds',
-          accessor: (o) => o.refunds?.map((refund) => `${refund.orderPaymentStatus === 'FULLY_REFUNDED' ? 'Full' : 'Partial'}: $${(Number(refund.amount?.value || refund.refundAmount?.value || 0) * (o.conversionRate || 1)).toFixed(2)}`).join('; ') || ''
+          accessor: (o) => {
+            if (!o.refunds || o.refunds.length === 0) return '';
+            if (o.orderPaymentStatus !== 'FULLY_REFUNDED') {
+              const partialAmount = getPartialRefundDisplayAmount(o);
+              return partialAmount == null ? 'Partial: -' : `Partial: $${partialAmount.toFixed(2)}`;
+            }
+            return o.refunds.map((refund) => `Full: $${(Number(refund.amount?.value || refund.refundAmount?.value || 0) * (o.conversionRate || 1)).toFixed(2)}`).join('; ');
+          }
         },
         reviewedRefund: {
           header: 'Reviewed Refund',
@@ -5742,7 +5756,25 @@ function FulfillmentDashboard() {
                           {/* --- REPLACEMENT FOR REFUNDS CELL --- */}
                           {visibleColumnsSet.has('refunds') && (
                             <TableCell>
-                              {order.refunds && order.refunds.length > 0 ? (
+                              {order.refunds && order.refunds.length > 0 && order.orderPaymentStatus !== 'FULLY_REFUNDED' ? (
+                                // Partial: single chip = Subtotal (USD) − Earnings (display only)
+                                (() => {
+                                  const partialAmount = getPartialRefundDisplayAmount(order);
+                                  return (
+                                    <Chip
+                                      label={`Partial: ${partialAmount == null ? '-' : `$${partialAmount.toFixed(2)}`}`}
+                                      size="small"
+                                      color="warning"
+                                      variant="outlined"
+                                      sx={{
+                                        fontWeight: 'bold',
+                                        fontSize: '0.75rem',
+                                        height: 24
+                                      }}
+                                    />
+                                  );
+                                })()
+                              ) : order.refunds && order.refunds.length > 0 ? (
                                 <Stack spacing={0.5}>
                                   {order.refunds.map((refund, idx) => {
                                     // 1. Get Amount in USD (convert using order's conversion rate)
@@ -6194,6 +6226,7 @@ function FulfillmentDashboard() {
                                 onManage={() => setManageIssueReasonsOpen(true)}
                                 manageLabel="Manage Reasons"
                               />
+                              <RemarkUpdatedInfo label="Reason" by={order.issueReasonUpdatedBy} at={order.issueReasonUpdatedAt} />
                             </TableCell>
                           )}
                           {visibleColumnsSet.has('issueFlags') && (() => {
