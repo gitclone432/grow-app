@@ -64,6 +64,8 @@ const OrderSchema = new mongoose.Schema(
       default: 'open'
     }, // Manual status for worksheet tracking
     refunds: Array, // Array of refund objects from paymentSummary.refunds (for display only)
+    // Refund list types ('return' / 'inr') a user removed this order from, so auto-assign won't re-add it.
+    refundAutoDismissed: { type: [String], default: undefined },
     // Earnings: PAID from components (AU: totalDueSellerUSD − adFee);
     // FULLY_REFUNDED → $-0.40;
     // PARTIALLY_REFUNDED → preRefundEarnings − netRefund + adFeeCredit
@@ -115,6 +117,9 @@ const OrderSchema = new mongoose.Schema(
     remarkUpdatedBy: { type: String, default: null },
     remarkUpdatedAt: { type: Date, default: null },
     issueReason: { type: String, default: null },
+    // Audit: who last changed `issueReason` (Reason (Issue)) and when (stored UTC; shown in IST on the UI)
+    issueReasonUpdatedBy: { type: String, default: null },
+    issueReasonUpdatedAt: { type: Date, default: null },
     allOrdersUsdRemark: {
       type: String,
       default: ''

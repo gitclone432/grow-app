@@ -2083,7 +2083,8 @@ export default function InrApiPage({
     return (rows || []).map(row => ({
       ...row,
       // Prioritize fulfillmentNotes from Order model (fulfillment dashboard source)
-      notes: row.fulfillmentNotes || row.notes || '',
+      // Only the order's Fulfillment Notes; empty when none (no fallback to the case's own notes).
+      notes: row.fulfillmentNotes || '',
       // Use remark from Order model (fulfillment dashboard source)
       remark: row.remark || '',
     }));

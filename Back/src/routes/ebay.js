@@ -166,7 +166,8 @@ async function enrichINRRowsWithOrderNotesAndRemark(rows = []) {
     const orderDataByOrderId = new Map();
     orders.forEach((order) => {
       const orderNotesAndRemark = {
-        fulfillmentNotes: order.fulfillmentNotes || order.notes || '',
+        // Only the order's Fulfillment Notes — no fallback to `notes` (that is the Awaiting Shipment Tracking ID field).
+        fulfillmentNotes: order.fulfillmentNotes || '',
         remark: order.remark || '',
         remarkUpdatedBy: order.remarkUpdatedBy || null,
         remarkUpdatedAt: order.remarkUpdatedAt || null,
@@ -190,7 +191,7 @@ async function enrichINRRowsWithOrderNotesAndRemark(rows = []) {
         ...row,
         // Prioritize Order fulfillment data (from fulfillment dashboard) over Case/CaseManagement/PaymentDispute data
         // This ensures notes and remark are consistent and come from the authoritative source
-        fulfillmentNotes: orderData.fulfillmentNotes || row.fulfillmentNotes,
+        fulfillmentNotes: orderData.fulfillmentNotes,
         remark: orderData.remark || row.remark,
         remarkUpdatedBy: orderData.remarkUpdatedBy,
         remarkUpdatedAt: orderData.remarkUpdatedAt,
@@ -12066,6 +12067,8 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
           remarkUpdatedBy: 1,
           remarkUpdatedAt: 1,
           issueReason: 1,
+          issueReasonUpdatedBy: 1,
+          issueReasonUpdatedAt: 1,
           fulfillmentNotes: 1,
           amazonAccount: 1,
           azOrderId: 1,
@@ -12104,6 +12107,8 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         remarkUpdatedBy: o.remarkUpdatedBy || null,
         remarkUpdatedAt: o.remarkUpdatedAt || null,
         issueReason: o.issueReason || '',
+        issueReasonUpdatedBy: o.issueReasonUpdatedBy || null,
+        issueReasonUpdatedAt: o.issueReasonUpdatedAt || null,
         notes: o.fulfillmentNotes || '', // Get notes from Order (same field as FulfillmentDashboard)
         amazonAccount: o.amazonAccount || null,
         amazonOrderId: o.azOrderId || '',
@@ -12144,6 +12149,8 @@ router.get('/stored-cancellations', requireAuth, requirePageAccess('Disputes'), 
         remarkUpdatedBy: orderMap[key]?.remarkUpdatedBy || null,
         remarkUpdatedAt: orderMap[key]?.remarkUpdatedAt || null,
         issueReason: orderMap[key]?.issueReason || '',
+        issueReasonUpdatedBy: orderMap[key]?.issueReasonUpdatedBy || null,
+        issueReasonUpdatedAt: orderMap[key]?.issueReasonUpdatedAt || null,
         notes: orderMap[key]?.notes || '', // Use notes from Order (same field as FulfillmentDashboard)
         amazonAccount: orderMap[key]?.amazonAccount || null,
         amazonOrderId: orderMap[key]?.amazonOrderId || '',
@@ -21880,7 +21887,8 @@ router.patch('/orders/:orderId/manual-fields', requireAuth, async (req, res) => 
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
     let updatedBy = null;
-    if (Object.prototype.hasOwnProperty.call(updates || {}, 'remark') && req.user?.userId) {
+    const hasAuditedField = ['remark', 'issueReason'].some((f) => Object.prototype.hasOwnProperty.call(updates || {}, f));
+    if (hasAuditedField && req.user?.userId) {
       const u = await User.findById(req.user.userId).select('username').lean();
       updatedBy = u?.username || null;
     }

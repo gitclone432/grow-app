@@ -19,6 +19,7 @@ import { scheduledSkuIndexSyncAllSellers } from './lib/skuIndexSync.js';
 import { importTransactionsFromGmail } from './utils/gmailTransactionImporter.js';
 import { runScheduledDirectListJobs } from './lib/directListJobRunner.js';
 import { runAllDueSourcingRules, resetStuckSourcingRuns } from './lib/sourcingRuleRunQueue.js';
+import { autoAssignRefundedOrders } from './lib/refundAutoAssign.js';
 
 const scheduledTaskMap = new Map();
 
@@ -151,6 +152,14 @@ export const CRON_JOB_DEFINITIONS = [
     description: 'Same as Check New on Buyer Messages: pull latest eBay conversations for all connected sellers into Mongo (Commerce summary + background Trading crawl). Replaces the old per-browser Auto-sync timer. When disabled, only Sync Today+ / Check New buttons fetch from eBay. Throttled to every 30m to reduce Render egress.',
     cronExpr: '*/30 * * * *',
     timezone: 'America/Los_Angeles',
+    enabled: true,
+  },
+  {
+    jobKey: 'refundAutoAssign',
+    label: 'Refunds auto-assign (Return / INR)',
+    description: 'Add refunded, non-cancelled orders sold on/after 2026-11-01 to the Refunds page: eBay Return record → Return, eBay INR case → INR, otherwise by Case Category (Return / INR). Also syncs every row\'s Refund Amt (from the Refunds column) and Status (Case Opened if any eBay case or return exists, else Case Not Opened). First re-fetches refund-related orders from eBay (Fulfillment getOrder, max 400/run) so refunds and payment status are current.',
+    cronExpr: '*/30 * * * *',
+    timezone: 'Asia/Kolkata',
     enabled: true,
   },
 ];
@@ -356,7 +365,19 @@ async function runBuyerMessagesAutoSync() {
   );
 }
 
+async function runRefundAutoAssign() {
+  const result = await autoAssignRefundedOrders();
+  if (result?.skipped) {
+    console.log('[CRON] Refunds auto-assign skipped (already running)');
+    return;
+  }
+  console.log(
+    `[CRON] Refunds auto-assign: ebayRefreshed=${result.ebayRefreshed}, ebayFailed=${result.ebayFailed}, checked=${result.checked}, created=${result.created} (return=${result.return}, inr=${result.inr}), unmatched=${result.unmatched}, alreadyListed=${result.alreadyListed}, amountsFilled=${result.amountsFilled}`
+  );
+}
+
 const CRON_JOB_HANDLERS = {
+  refundAutoAssign: runRefundAutoAssign,
   dailyTimerAutoStop: runDailyTimerAutoStop,
   csvAutoUpload: runCsvAutoUpload,
   directListBulkJobs: runDirectListBulkJobs,

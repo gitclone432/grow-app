@@ -9,10 +9,15 @@ const RefundEntrySchema = new mongoose.Schema(
         order: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', required: true },
         orderId: { type: String, default: '', trim: true },
         seller: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
+        // 'manual' = added with the Refund button; 'auto' = added by the refunded-orders auto-assign job.
+        source: { type: String, enum: ['manual', 'auto'], default: 'manual' },
 
         // eBay side (filled in by the user). Category (order remark) and Reason (issue reason) are read from the order.
         refundDate: { type: Date, default: null },
         refundAmount: { type: Number, default: null },
+        // True when refundAmount came from the order's Refunds column. The sync always re-applies it
+        // (and Status), so a user edit only lasts until the next sync when the order has refund data.
+        refundAmountAuto: { type: Boolean, default: false },
         status: { type: String, default: '' },
         notes: { type: String, default: '' },
 

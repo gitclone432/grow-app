@@ -26,11 +26,20 @@ export function remarkAuditFrom(order) {
   };
 }
 
+/** Extract Reason (Issue) audit fields from a `/manual-fields` response order (empty object if absent). */
+export function issueReasonAuditFrom(order) {
+  if (!order || !Object.prototype.hasOwnProperty.call(order, 'issueReasonUpdatedAt')) return {};
+  return {
+    issueReasonUpdatedBy: order.issueReasonUpdatedBy ?? null,
+    issueReasonUpdatedAt: order.issueReasonUpdatedAt ?? null,
+  };
+}
+
 /**
- * Small caption under a Remark cell: "by <username> · 19 Nov 2026, 03:45 pm IST".
- * Renders nothing when the remark has never been stamped.
+ * Small caption under a Remark (or Reason) cell: "by <username> · 19 Nov 2026, 03:45 pm IST".
+ * Renders nothing when the field has never been stamped. `label` is used in the hover text.
  */
-export default function RemarkUpdatedInfo({ by, at, sx }) {
+export default function RemarkUpdatedInfo({ by, at, sx, label = 'Remark' }) {
   const when = formatRemarkUpdatedAtIST(at);
   if (!by && !when) return null;
   const text = [by ? `by ${by}` : null, when || null].filter(Boolean).join(' · ');
@@ -39,7 +48,7 @@ export default function RemarkUpdatedInfo({ by, at, sx }) {
       component="div"
       variant="caption"
       color="text.secondary"
-      title={`Remark last updated ${text}`}
+      title={`${label} last updated ${text}`}
       sx={{ display: 'block', fontSize: '0.68rem', lineHeight: 1.25, mt: 0.25, whiteSpace: 'normal', ...sx }}
     >
       {text}
