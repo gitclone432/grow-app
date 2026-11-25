@@ -650,10 +650,15 @@ function rowStatus(row) {
       || row.status
       || '';
   }
-  return row.rawData?.inquiryStatusEnum
+  const inquiryStatus = row.rawData?.inquiryStatusEnum
     || row.rawData?.inquiryDetails?.inquiryStatusEnum
     || row.status
     || '';
+  // eBay can leave inquiryStatusEnum open after support resolves the claim; `state` is then CLOSED.
+  if (String(row.rawData?.state || '').toUpperCase() === 'CLOSED' && !isClosedStatus(inquiryStatus)) {
+    return 'CLOSED';
+  }
+  return inquiryStatus;
 }
 
 function marketplaceShort(row) {

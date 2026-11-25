@@ -12373,9 +12373,14 @@ function asNonEmptyId(value) {
 
 function extractIssueStatus(source, prefer = '') {
   if (!source || typeof source !== 'object') return '';
-  const inquiry = asNonEmptyId(source.inquiryStatusEnum)
+  let inquiry = asNonEmptyId(source.inquiryStatusEnum)
     || asNonEmptyId(source.inquiryDetails?.inquiryStatusEnum)
     || asNonEmptyId(source.state);
+  // When eBay customer support resolves an inquiry, `state` becomes CLOSED but
+  // `inquiryStatusEnum` can stay WAITING_*_RESPONSE / OPEN — trust the closed state.
+  if (inquiry && String(source.state || '').toUpperCase() === 'CLOSED' && !/CLOSED|RESOLVED/i.test(inquiry)) {
+    inquiry = 'CLOSED';
+  }
   const cse = asNonEmptyId(source.caseStatusEnum)
     || asNonEmptyId(source.caseDetails?.caseStatusEnum);
   const dispute = asNonEmptyId(source.paymentDisputeStatus);
@@ -13954,7 +13959,7 @@ async function refreshStoredInquiryFromEbay(stored) {
   const detail = response.data || {};
   const tracking = parseShipmentTrackingDetails(detail);
   if (tracking) stored.shipmentTrackingDetails = tracking;
-  stored.status = detail.inquiryStatusEnum || detail.state || stored.status;
+  stored.status = extractIssueStatus(detail, 'inquiry') || stored.status;
   stored.rawData = { ...(stored.rawData || {}), ...detail };
   const due = extractSellerDueDate(stored.rawData, detail);
   if (due) stored.sellerResponseDueDate = due;
