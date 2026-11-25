@@ -445,7 +445,9 @@ export default forwardRef(function MarketingCampaignsPage({
     [marketplace, isAllMarketplaces],
   );
 
-  const loadAllStoresCampaigns = useCallback(async () => {
+  // `refresh: true` makes the server skip its caches (manual Refresh, and
+  // reloads after a change, which must show what eBay has now).
+  const loadAllStoresCampaigns = useCallback(async ({ refresh = false } = {}) => {
     setLoading(true);
     setError('');
     setStoreErrors([]);
@@ -454,6 +456,7 @@ export default forwardRef(function MarketingCampaignsPage({
         params: {
           ...sharedParams,
           perSellerLimit: ALL_STORES_PER_SELLER_LIMIT,
+          ...(refresh ? { refresh: 1 } : {}),
         },
       });
       const merged = Array.isArray(data?.campaigns) ? data.campaigns : [];
@@ -470,7 +473,7 @@ export default forwardRef(function MarketingCampaignsPage({
     }
   }, [sharedParams]);
 
-  const loadSingleSellerCampaigns = useCallback(async () => {
+  const loadSingleSellerCampaigns = useCallback(async ({ refresh = false } = {}) => {
     if (!sellerId) return;
     setLoading(true);
     setError('');
@@ -482,6 +485,7 @@ export default forwardRef(function MarketingCampaignsPage({
           sellerId,
           limit: pageSize,
           offset,
+          ...(refresh ? { refresh: 1 } : {}),
         },
       });
       const singleRows = Array.isArray(data?.campaigns) ? data.campaigns : [];
@@ -499,9 +503,9 @@ export default forwardRef(function MarketingCampaignsPage({
     }
   }, [sellerId, sharedParams, pageSize, offset]);
 
-  const loadCampaigns = useCallback(() => {
+  const loadCampaigns = useCallback((options) => {
     if (!sellerId) return Promise.resolve();
-    return isAllStores ? loadAllStoresCampaigns() : loadSingleSellerCampaigns();
+    return isAllStores ? loadAllStoresCampaigns(options) : loadSingleSellerCampaigns(options);
   }, [sellerId, isAllStores, loadAllStoresCampaigns, loadSingleSellerCampaigns]);
 
   const loadKpiCampaigns = useCallback(async ({ refresh = false } = {}) => {
@@ -523,6 +527,7 @@ export default forwardRef(function MarketingCampaignsPage({
           params: {
             ...kpiParams,
             perSellerLimit: KPI_FETCH_LIMIT,
+            ...(refresh ? { refresh: 1 } : {}),
           },
         });
         rows = Array.isArray(data?.campaigns) ? data.campaigns : [];
@@ -533,6 +538,7 @@ export default forwardRef(function MarketingCampaignsPage({
             sellerId,
             limit: KPI_FETCH_LIMIT,
             offset: 0,
+            ...(refresh ? { refresh: 1 } : {}),
           },
         });
         rows = Array.isArray(data?.campaigns) ? data.campaigns : [];
@@ -546,8 +552,9 @@ export default forwardRef(function MarketingCampaignsPage({
     }
   }, [sellerId, isAllStores, kpiParams, marketplace]);
 
+  // Always fresh from eBay: used by Refresh and after every change
   const refreshCampaigns = useCallback(({ refreshKpi = true } = {}) => {
-    const jobs = [loadCampaigns()];
+    const jobs = [loadCampaigns({ refresh: true })];
     if (refreshKpi) {
       jobs.push(loadKpiCampaigns({ refresh: true }));
       invalidateMarketingKpiCache('campaigns:');
@@ -592,12 +599,17 @@ export default forwardRef(function MarketingCampaignsPage({
     [isAllStores, allRows, rows],
   );
 
+  const handleAutoExtended = useCallback(
+    () => refreshCampaigns({ refreshKpi: true }),
+    [refreshCampaigns],
+  );
+
   const autoExtend = useMarketingAutoExtend({
     kind: 'campaign',
     rows: autoExtendSourceRows,
     active,
     pageSellerId,
-    onExtended: () => refreshCampaigns({ refreshKpi: true }),
+    onExtended: handleAutoExtended,
   });
 
   const handleSort = (column) => {
@@ -941,8 +953,9 @@ export default forwardRef(function MarketingCampaignsPage({
         sellers={sellers}
         defaultSellerId={isAllStores ? '' : sellerId}
         defaultMarketplace={isAllMarketplaces ? 'EBAY_US' : marketplace}
+        // The dialog stays open to show its "Campaign created" message; the
+        // user closes it. The table reloads behind it.
         onCreated={() => {
-          setCreateOpen(false);
           refreshCampaigns();
         }}
       />

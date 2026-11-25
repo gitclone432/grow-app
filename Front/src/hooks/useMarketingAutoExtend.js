@@ -17,6 +17,14 @@ export function useMarketingAutoExtend({ kind, rows, active, pageSellerId = '', 
   const [extendingKeys, setExtendingKeys] = useState(() => new Set());
   const inFlightRef = useRef(new Set());
   const failedRef = useRef(new Set());
+  // Keys extended in this session. One success is enough: if the reload after
+  // it still shows the old endDate (stale data), extending again would push
+  // the end date out by another month each time.
+  const extendedRef = useRef(new Set());
+  // Latest callback without making tryAutoExtendRow (and the effect below)
+  // change whenever the caller passes a new inline function.
+  const onExtendedRef = useRef(onExtended);
+  useEffect(() => { onExtendedRef.current = onExtended; }, [onExtended]);
 
   const buildKey = useCallback((row, pageSellerId) => {
     const sellerId = row.sellerId || pageSellerId;
@@ -91,7 +99,7 @@ export function useMarketingAutoExtend({ kind, rows, active, pageSellerId = '', 
     const key = buildKey(row, pageSellerId);
     if (!toggles[key]) return;
     if (!isEndingWithinDays(row.endDate)) return;
-    if (inFlightRef.current.has(key) || failedRef.current.has(key)) return;
+    if (inFlightRef.current.has(key) || failedRef.current.has(key) || extendedRef.current.has(key)) return;
 
     const eligible = kind === 'campaign' ? canAutoExtendCampaign(row) : canAutoExtendPromotion(row);
     if (!eligible) return;
@@ -102,7 +110,8 @@ export function useMarketingAutoExtend({ kind, rows, active, pageSellerId = '', 
       if (kind === 'campaign') await extendCampaign(row, sellerId);
       else await extendPromotion(row, sellerId);
       failedRef.current.delete(key);
-      onExtended?.();
+      extendedRef.current.add(key);
+      onExtendedRef.current?.();
     } catch (err) {
       failedRef.current.add(key);
       console.error('[Auto-extend]', parseApiError(err, 'Failed to auto-extend'));
@@ -116,7 +125,6 @@ export function useMarketingAutoExtend({ kind, rows, active, pageSellerId = '', 
     extendPromotion,
     kind,
     markExtending,
-    onExtended,
     toggles,
   ]);
 

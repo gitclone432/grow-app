@@ -68,21 +68,34 @@ export function defaultVisibleColumnIds(columns) {
   return columns.map((col) => col.id);
 }
 
+// `${storageKey}.known` remembers which columns existed when the page last
+// loaded, so a column added in a later release can be shown by default
+// without bringing back the columns the user chose to hide.
+const knownColumnsKey = (storageKey) => `${storageKey}.known`;
+
 export function loadMarketingVisibleColumns(storageKey, columns) {
   const defaults = defaultVisibleColumnIds(columns);
   try {
+    let known = defaults; // nothing recorded yet: treat every column as known
+    try {
+      const parsedKnown = JSON.parse(localStorage.getItem(knownColumnsKey(storageKey)) || 'null');
+      if (Array.isArray(parsedKnown)) known = parsedKnown;
+    } catch {
+      // unreadable: keep the defaults
+    }
+    localStorage.setItem(knownColumnsKey(storageKey), JSON.stringify(defaults));
+
     const raw = localStorage.getItem(storageKey);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return defaults;
     const valid = new Set(defaults);
-    const filtered = parsed.filter((id) => valid.has(id));
-    const base = filtered.length ? filtered : defaults;
-    const merged = [...base];
+    const visible = parsed.filter((id) => valid.has(id));
+    // Hidden columns stay hidden; only columns that are new since last time are added
     for (const id of defaults) {
-      if (!merged.includes(id)) merged.push(id);
+      if (!known.includes(id) && !visible.includes(id)) visible.push(id);
     }
-    return merged;
+    return visible.length ? visible : defaults;
   } catch {
     return defaults;
   }
