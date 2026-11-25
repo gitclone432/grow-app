@@ -55,6 +55,17 @@ function dateToIso(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
+const statChipSx = {
+  px: 1,
+  py: 0.25,
+  border: '1px solid',
+  borderColor: 'divider',
+  borderRadius: 1,
+  bgcolor: 'background.paper',
+  fontWeight: 600,
+  whiteSpace: 'nowrap',
+};
+
 function gridSx(theme) {
   const primary = theme.palette.primary;
   const line = theme.palette.divider;
@@ -232,6 +243,7 @@ const EtsyProductSheetGrid = forwardRef(function EtsyProductSheetGrid({
   onUndo,
   onRedo,
   onNotify,
+  footer,
 }, ref) {
   const containerRef = useRef(null);
   const bodyRef = useRef(null);
@@ -336,6 +348,27 @@ const EtsyProductSheetGrid = forwardRef(function EtsyProductSheetGrid({
     (r, key) => (getEditText ? getEditText(r, key) : getCellText(r, key)),
     [getEditText, getCellText]
   );
+
+  // Status-bar summary of the selection, like the Count / Sum shown by Google Sheets.
+  const selectionStats = useMemo(() => {
+    if (rowCount === 0) return null;
+    let count = 0;
+    let numbers = 0;
+    let sum = 0;
+    for (let r = range.r0; r <= range.r1; r += 1) {
+      for (let c = range.c0; c <= range.c1; c += 1) {
+        const text = String(getCellText(r, layout.cols[c].key) ?? '').trim();
+        if (!text) continue;
+        count += 1;
+        const numeric = text.replace(/[$₹,\s]/g, '');
+        if (/^-?\d+(?:\.\d+)?$/.test(numeric)) {
+          numbers += 1;
+          sum += Number(numeric);
+        }
+      }
+    }
+    return { count, numbers, sum: Math.round(sum * 100) / 100 };
+  }, [rowCount, range, layout, getCellText]);
 
   const startEdit = useCallback((cell, initialValue) => {
     const col = layout.cols[cell.c];
@@ -787,11 +820,16 @@ const EtsyProductSheetGrid = forwardRef(function EtsyProductSheetGrid({
   };
 
   useImperativeHandle(ref, () => ({
-    selectCell(r, c) {
+    selectCell(r, c, options = {}) {
       const cell = clampCell({ r, c });
       commitEdit();
       updateSel({ anchor: cell, focus: cell });
       ensureVisible(cell.r, cell.c);
+      const el = containerRef.current;
+      if (options.center && el) {
+        const visibleHeight = el.clientHeight - HEADER_HEIGHT;
+        el.scrollTop = Math.max(0, cell.r * ROW_HEIGHT - (visibleHeight - ROW_HEIGHT) / 2);
+      }
       focusGrid();
     },
     /** Back to the top-left cell without taking focus (e.g. while typing in a filter box). */
@@ -992,6 +1030,22 @@ const EtsyProductSheetGrid = forwardRef(function EtsyProductSheetGrid({
           )}
         </div>
       </Box>
+
+      <Stack direction="row" alignItems="flex-start" spacing={2} sx={{ mt: 0.75, flexShrink: 0 }}>
+        <Box sx={{ flex: 1, minWidth: 0 }}>{footer}</Box>
+        {selectionStats && (isMultiCell || selectionStats.numbers > 0) && (
+          <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }} aria-live="polite">
+            {selectionStats.numbers > 0 && (
+              <Typography variant="caption" sx={statChipSx}>
+                Sum: {selectionStats.sum.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              </Typography>
+            )}
+            <Typography variant="caption" sx={statChipSx}>
+              Count: {selectionStats.count.toLocaleString()}
+            </Typography>
+          </Stack>
+        )}
+      </Stack>
 
       <Menu
         open={Boolean(menu)}

@@ -8,6 +8,7 @@ import RedoIcon from '@mui/icons-material/Redo';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SearchIcon from '@mui/icons-material/Search';
 import UndoIcon from '@mui/icons-material/Undo';
+import VerticalAlignBottomIcon from '@mui/icons-material/VerticalAlignBottom';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import {
   Alert,
@@ -895,6 +896,26 @@ export default function EtsyProductSheetPage() {
     gridRef.current?.selectCell(targets[duplicateCursorRef.current], linkColumnIndex);
   };
 
+  // Grid row of the last product link in the current view (scoped to the selected store, if any).
+  const lastLinkGridRow = useMemo(() => {
+    const total = viewIndex ? viewIndex.length : rows.length;
+    for (let r = total - 1; r >= 0; r -= 1) {
+      const row = rows[viewIndex ? viewIndex[r] : r];
+      if (!row || !String(row.productLink || '').trim()) continue;
+      if (selectedStoreId && row.store !== selectedStoreId) continue;
+      return r;
+    }
+    return -1;
+  }, [rows, viewIndex, selectedStoreId]);
+
+  const jumpToLastLink = () => {
+    if (lastLinkGridRow < 0) {
+      notify(selectedStore ? `No product links in ${selectedStore.name} yet.` : 'No product links yet.', 'info');
+      return;
+    }
+    gridRef.current?.selectCell(lastLinkGridRow, linkColumnIndex, { center: true });
+  };
+
   const duplicateCount = derived.duplicateRows.length;
   const matchCount = viewIndex ? viewIndex.filter((index) => !isSheetRowEmpty(rows[index])).length : 0;
   const pluralProducts = derived.productCount === 1 ? 'product' : 'products';
@@ -1004,6 +1025,21 @@ export default function EtsyProductSheetPage() {
                 label="Not saved — click to retry"
                 onClick={saveNow}
               />
+            )}
+            {ready && (
+              <Tooltip title={`Scroll to the last pasted product link${selectedStore ? ` in ${selectedStore.name}` : ''}`}>
+                <span>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<VerticalAlignBottomIcon />}
+                    onClick={jumpToLastLink}
+                    disabled={lastLinkGridRow < 0}
+                  >
+                    Last Link
+                  </Button>
+                </span>
+              </Tooltip>
             )}
             <Tooltip title="Undo (Ctrl+Z)">
               <span>
@@ -1233,16 +1269,18 @@ export default function EtsyProductSheetPage() {
             onUndo={handleUndo}
             onRedo={handleRedo}
             onNotify={notify}
+            footer={(
+              <Typography variant="caption" color="text.secondary">
+                {viewIndex && rowFilter?.allowBlanks
+                  ? `Showing ${selectedStore?.name || 'the selected store'} — type or paste below the last product to add more. `
+                    + 'Row numbers are the rows in the full sheet.'
+                  : viewIndex
+                    ? 'Filtered view — row numbers are the rows in the full sheet. Clear the date / SKU filters to add new rows.'
+                    : 'Click a row number or column header to select it · Ctrl+C / Ctrl+X / Ctrl+V to copy, cut and paste · '
+                      + 'Calendar icon or Alt+↓ on a date to pick it · Right-click to insert or delete rows'}
+              </Typography>
+            )}
           />
-          <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, flexShrink: 0 }}>
-            {viewIndex && rowFilter?.allowBlanks
-              ? `Showing ${selectedStore?.name || 'the selected store'} — type or paste below the last product to add more. `
-                + 'Row numbers are the rows in the full sheet.'
-              : viewIndex
-                ? 'Filtered view — row numbers are the rows in the full sheet. Clear the date / SKU filters to add new rows.'
-                : 'Click a row number or column header to select it · Ctrl+C / Ctrl+X / Ctrl+V to copy, cut and paste · '
-                  + 'Calendar icon or Alt+↓ on a date to pick it · Right-click to insert or delete rows'}
-          </Typography>
         </>
       )}
 
