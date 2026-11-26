@@ -34,5 +34,7 @@ const ActiveListingSchema = new mongoose.Schema({
 ActiveListingSchema.index({ seller: 1, listingStatus: 1, startTime: -1 });
 ActiveListingSchema.index({ seller: 1, startTime: -1, listingStatus: 1 });
 ActiveListingSchema.index({ seller: 1, categoryId: 1 });
+// Store Limits (free-listing renew/ended) range queries on endTime
+ActiveListingSchema.index({ seller: 1, endTime: 1 });
 
 export default mongoose.model('ActiveListing', ActiveListingSchema);

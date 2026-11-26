@@ -36,5 +36,6 @@ ListingSchema.index({ seller: 1, listingStatus: 1, startTime: -1 });
 ListingSchema.index({ startTime: -1 }); // For listing stats date-range queries
 ListingSchema.index({ seller: 1, itemId: 1 }); // Supplier-link enrichment on Fulfillment
 ListingSchema.index({ seller: 1, sku: 1 }); // Compatibility dashboard SKU search
+ListingSchema.index({ seller: 1, endTime: 1 }); // Store Limits ended free-insert range queries
 
 export default mongoose.model('Listing', ListingSchema);
