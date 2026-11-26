@@ -25941,7 +25941,25 @@ router.get('/awaiting-sheet-summary', requireAuth, requirePageAccess('AwaitingSh
 
 const STORE_OVERVIEW_CACHE_TTL_MS = 10 * 60 * 1000;
 const STORE_OVERVIEW_SELLER_CONCURRENCY = 6;
+const STORE_OVERVIEW_USAGE_MAX_TIME_MS = 25 * 1000;
+const STORE_OVERVIEW_USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 const storeOverviewCache = new Map();
+let storeOverviewUsageCache = null; // { key, expiresAt, data }
+
+async function getCachedFreeListingUsageMaps(sellerIds, { forceRefresh = false } = {}) {
+  const key = sellerIds.map(String).sort().join(',');
+  if (
+    !forceRefresh
+    && storeOverviewUsageCache
+    && storeOverviewUsageCache.key === key
+    && Date.now() < storeOverviewUsageCache.expiresAt
+  ) {
+    return storeOverviewUsageCache.data;
+  }
+  const data = await buildFreeListingUsageMaps(sellerIds);
+  storeOverviewUsageCache = { key, expiresAt: Date.now() + STORE_OVERVIEW_USAGE_CACHE_TTL_MS, data };
+  return data;
+}
 
 function getStoreOverviewCacheEntry(sellerId) {
   const entry = storeOverviewCache.get(String(sellerId));
@@ -26118,17 +26136,22 @@ function buildEndedFreeInsertAggregateStages({
   statusMatch,
   groupItemIds = false,
 }) {
+  // Rooted $or so each branch can use its own index (seller+startTime / seller+endTime)
+  // instead of scanning every listing of the store behind a non-selective $nin.
   return [
     {
       $match: {
-        ...statusMatch,
-        seller: { $in: sellerInList },
-        startTime: { $type: 'date' },
         $or: [
-          { startTime: { $gte: monthStart, $lt: monthEnd } },
           {
-            startTime: { $lt: monthStart },
+            seller: { $in: sellerInList },
+            startTime: { $gte: monthStart, $lt: monthEnd },
+            ...statusMatch,
+          },
+          {
+            seller: { $in: sellerInList },
             endTime: { $gte: monthStart, $type: 'date' },
+            startTime: { $lt: monthStart, $type: 'date' },
+            ...statusMatch,
           },
         ],
       },
@@ -26229,11 +26252,12 @@ async function buildFreeListingUsageMaps(sellerIds) {
   const nonActiveStatuses = { $nin: ['Active', 'ACTIVE', 'active'] };
 
   const endedStatusMatch = { listingStatus: nonActiveStatuses };
+  const maxTimeMS = STORE_OVERVIEW_USAGE_MAX_TIME_MS;
   const [activeGroups, newGroups, renewGroups, endedFromActiveListing, endedFromListing] = await Promise.all([
     ActiveListing.aggregate([
       { $match: { ...activeListingStatusFilter(), seller: { $in: sellerInList } } },
       { $group: { _id: { $toString: { $ifNull: ['$seller', ''] } }, count: { $sum: 1 } } },
-    ]),
+    ]).option({ maxTimeMS }),
     ActiveListing.aggregate([
       {
         $match: {
@@ -26243,14 +26267,14 @@ async function buildFreeListingUsageMaps(sellerIds) {
         },
       },
       { $group: { _id: { $toString: { $ifNull: ['$seller', ''] } }, count: { $sum: 1 } } },
-    ]),
+    ]).option({ maxTimeMS }),
     ActiveListing.aggregate(
       buildCalendarMonthRenewAggregateStages({
         sellerInList,
         monthStart,
         monthEnd,
       })
-    ),
+    ).option({ maxTimeMS }),
     ActiveListing.aggregate(
       buildEndedFreeInsertAggregateStages({
         sellerInList,
@@ -26260,7 +26284,7 @@ async function buildFreeListingUsageMaps(sellerIds) {
         statusMatch: endedStatusMatch,
         groupItemIds: true,
       })
-    ),
+    ).option({ maxTimeMS }),
     Listing.aggregate(
       buildEndedFreeInsertAggregateStages({
         sellerInList,
@@ -26270,7 +26294,7 @@ async function buildFreeListingUsageMaps(sellerIds) {
         statusMatch: endedStatusMatch,
         groupItemIds: true,
       })
-    ),
+    ).option({ maxTimeMS }),
   ]);
 
   for (const g of activeGroups) {
@@ -26478,6 +26502,14 @@ router.get('/store-overview/all', requireAuth, requirePageAccess('StoreOverview'
 
     console.log(`[Store Overview] Loading ${sellers.length} stores (refresh=${forceRefresh})...`);
 
+    // Start DB usage aggregates alongside the eBay calls instead of after them.
+    const usagePromise = sellerIds.length
+      ? getCachedFreeListingUsageMaps(sellerIds, { forceRefresh }).catch((aggErr) => {
+          console.warn('[Store Overview] Free-listing usage aggregate failed:', aggErr.message);
+          return null;
+        })
+      : Promise.resolve(null);
+
     const runLimited = pLimit(STORE_OVERVIEW_SELLER_CONCURRENCY);
     const outcomes = await Promise.all(
       sellers.map((seller) => runLimited(() => fetchStoreOverviewForSeller(seller, { forceRefresh })))
@@ -26492,19 +26524,12 @@ router.get('/store-overview/all', requireAuth, requirePageAccess('StoreOverview'
     });
 
     // Free-listing usage: new + calendar renews already due + ended that started this month
-    let usageMaps = {
+    const usageMaps = (await usagePromise) || {
       monthStart: getEbayFreeListingMonthStart(),
       activeMap: new Map(),
       endedMonthMap: new Map(),
       usedEstMap: new Map(),
     };
-    if (sellerIds.length) {
-      try {
-        usageMaps = await buildFreeListingUsageMaps(sellerIds);
-      } catch (aggErr) {
-        console.warn('[Store Overview] Free-listing usage aggregate failed:', aggErr.message);
-      }
-    }
 
     const enrichedRows = rows.map((row) => {
       const sid = String(row.sellerId);

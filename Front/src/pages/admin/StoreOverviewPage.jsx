@@ -248,7 +248,15 @@ export default function StoreOverviewPage() {
       setRows(Array.isArray(data.rows) ? data.rows : []);
       setNotes(data.notes?.freeListingsEstimate || '');
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to load store overview');
+      const status = err.response?.status;
+      const apiError = typeof err.response?.data?.error === 'string' ? err.response.data.error : '';
+      let message = apiError || 'Failed to load store overview';
+      if (!apiError && (status === 502 || status === 504 || err.code === 'ECONNABORTED')) {
+        message = 'Store overview timed out on the server. Please try Refresh again in a minute.';
+      } else if (!apiError && status) {
+        message = `Failed to load store overview (HTTP ${status})`;
+      }
+      setError(message);
       setRows([]);
     } finally {
       setLoading(false);
